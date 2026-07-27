@@ -1,6 +1,8 @@
 import { EFFORTS, EFFORT_LABELS, MODELS, MODEL_LABELS, type SheetKind } from "../state.ts";
 import type { Store } from "../store.ts";
 import { abbreviatePath, formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { readRelayUrl } from "../relay/keys.ts";
+import { SettingsSheet } from "./settings.tsx";
 import { Sheet, SheetItem } from "./sheet.tsx";
 
 const SHEET_TITLES: Record<SheetKind, string> = {
@@ -114,8 +116,13 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
   );
 }
 
-export function SpawnScreen(props: { store: Store; view: ViewModel; now: number }): React.JSX.Element {
-  const { store, view, now } = props;
+export function SpawnScreen(props: {
+  store: Store;
+  view: ViewModel;
+  now: number;
+  onOpenSetup: () => void;
+}): React.JSX.Element {
+  const { store, view, now, onOpenSetup } = props;
   const state = store.getState();
   const offline = view.machine !== null && !view.machine.connected;
 
@@ -156,7 +163,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
             <button
               type="button"
               className={view.banner.tone === "err" ? "banner card banner-err" : "banner card"}
-              onClick={() => store.openSheet("settings")}
+              onClick={onOpenSetup}
             >
               <span className="banner-rule" />
               <span className="banner-text">
@@ -210,8 +217,19 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
         </button>
       </footer>
 
-      {state.sheet !== null && state.sheet !== "settings" && (
-        <ActiveSheet store={store} view={view} kind={state.sheet} now={now} />
+      {state.sheet === "settings" ? (
+        <SettingsSheet
+          relayUrl={readRelayUrl()}
+          relayStatus={state.relay.status}
+          onClose={() => store.dismissLayer()}
+          onOpenSetup={onOpenSetup}
+          onReconnect={() => {
+            store.dismissLayer();
+            store.reconnect();
+          }}
+        />
+      ) : (
+        state.sheet !== null && <ActiveSheet store={store} view={view} kind={state.sheet} now={now} />
       )}
     </>
   );

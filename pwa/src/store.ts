@@ -222,7 +222,11 @@ export class Store {
       const reply = await this.#client.request<SpawnResponse>(machine.deviceId, "spawn", request);
       this.#pending = null;
       if (reply.ok) {
+        // Cleared now rather than on "Start another": the success verdict never
+        // shows the prompt and that button clears it anyway, so this only stops a
+        // reload hours later from resurrecting a draft already acted on.
         this.#patch({
+          form: { ...this.#state.form, prompt: "" },
           sessions: { ...this.#state.sessions, [machine.deviceId]: { sessions: reply.sessions, at: Date.now() } },
         });
         this.#showVerdict({
