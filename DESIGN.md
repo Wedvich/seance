@@ -130,8 +130,18 @@ Séance's noise is cover for a real intruder.
    the blast radius off Cloudflare, so that choice is not free. The token also
    buys slightly more than stated: `register` overwrites by `deviceId`, so a
    holder can blank a real machine's entry until it re-registers (T1565.001),
-   and nothing caps registry growth (T1499.003). Bounded by entry caps, a
-   UUID check on `deviceId`, and a per-socket register rate limit in the DO.
+   and nothing caps registry growth (T1499.003). Bounded in the DO by a
+   32-entry cap that turns away only _unknown_ ids — so a full registry locks
+   out machines you have not added yet and never knocks a known one offline —
+   plus a per-socket register rate limit, which bounds write rate as the entry
+   cap does not: re-registering one id is otherwise unbounded puts and a
+   registry push to every app each time. Neither cap defends _against_ a token
+   holder; rotating the token does. They keep the cost finite. The rate limit
+   is per socket, so it bounds one connection's spend, not an attacker's total.
+   Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
+   ≤64 KiB, so a register can never reach the DO's 128 KiB value limit as an
+   unhandled throw. `deviceId` is not required to be a UUID — it is an
+   identifier, not a credential, so exact shape buys nothing the bounds don't.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted. One unstated dependency: the ±60s window
@@ -467,15 +477,12 @@ DO hibernation — decisions recorded in their sections above. Also resolved wit
 the PWA: `/app` close codes, PSK at rest, session fan-out, and lost-reply
 reconciliation.
 
-Built since the threat model (2026-07-27): spawn audit logging on both paths
-with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
+The threat model is fully built out as of 2026-07-27: spawn audit logging on
+both paths with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
 `seanced psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
-invariants.
-
-Still open from it: registry entry caps, UUID `deviceId` validation and
-register rate limiting in the DO (waiting on the PWA session to clear
-`relay/test/`). The PWA's non-extractable-key and CSP items are tracked in
-`HANDOFF-pwa-security.md`.
+invariants; registry entry cap, wire-level id and ciphertext bounds, and
+per-socket register rate limiting in the DO. The PWA's non-extractable-key and
+CSP items landed with the app (see the PWA section).
 
 - Log rotation now has two writers to reconcile — the daemon holds the file
   through launchd's redirect while the CLI opens it by path, so a
