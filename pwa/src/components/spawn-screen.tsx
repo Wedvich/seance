@@ -61,12 +61,15 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
 
   if (kind === "repo") {
     const paths = view.machine?.repos.map((repo) => repo.path) ?? [];
+    const items = (view.machine?.repos ?? [])
+      .map((repo) => ({ repo, label: abbreviatePath(repo.path, paths) }))
+      .toSorted((a, b) => a.label.localeCompare(b.label));
     return (
       <Sheet title={SHEET_TITLES.repo} onClose={close}>
-        {view.machine?.repos.map((repo) => (
+        {items.map(({ repo, label }) => (
           <SheetItem
             key={repo.name}
-            label={abbreviatePath(repo.path, paths)}
+            label={label}
             mono
             selected={repo.name === view.repo?.name}
             onClick={() => store.selectRepo(repo.name)}
