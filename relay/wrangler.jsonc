@@ -5,6 +5,9 @@
   "compatibility_date": "2026-07-27",
   // Daemons dial wss://seance-relay.<subdomain>.workers.dev/daemon, the app /app.
   "workers_dev": true,
+  // Off: a preview URL per uploaded version would keep superseded relays reachable
+  // under the same BEARER_TOKEN, widening the surface for nothing this repo uses.
+  "preview_urls": false,
   "observability": { "enabled": true },
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }],

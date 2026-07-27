@@ -5,6 +5,9 @@
   // Assets only, no "main": there is no server side. Headers come from dist/_headers,
   // which vite.config.ts generates so the CSP can carry the boot script's hash.
   "workers_dev": true,
+  // Off for the same reason as the relay: no per-version hostnames serving stale
+  // app builds (each carries its own CSP from that build's dist/_headers).
+  "preview_urls": false,
   "observability": { "enabled": true },
   "assets": {
     "directory": "./dist",
