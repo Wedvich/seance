@@ -4,7 +4,16 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
 import { toBase64 } from "@seance/shared";
-import { bearerTokenWarnings, configSkeleton, loadConfig, runnableProblems, type Config } from "./config.ts";
+import {
+  bearerTokenWarnings,
+  configSkeleton,
+  loadConfig,
+  loadPsk,
+  pskFingerprint,
+  runnableProblems,
+  type Config,
+} from "./config.ts";
+import { readKeychainPsk } from "./keychain.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
 
 const cleanups: string[] = [];
@@ -70,15 +79,54 @@ describe("runnableProblems", () => {
   const base: Config = { ...VALID, repoRoots: ["/tmp"] };
 
   test("valid config has no problems", () => {
-    expect(runnableProblems(base)).toEqual([]);
+    expect(runnableProblems(base, VALID.psk)).toEqual([]);
   });
 
-  test("empty psk, short psk, bad base64, bad url all reported", () => {
-    expect(runnableProblems({ ...base, psk: "" })).toHaveLength(1);
-    expect(runnableProblems({ ...base, psk: toBase64(new Uint8Array(16)) })[0]).toContain("16 bytes");
-    expect(runnableProblems({ ...base, psk: "!!!" })[0]).toContain("base64");
-    expect(runnableProblems({ ...base, relayUrl: "https://x" })[0]).toContain("ws://");
-    expect(runnableProblems({ ...base, bearerToken: "", psk: "" })).toHaveLength(2);
+  test("absent psk, short psk, bad base64, bad url all reported", () => {
+    expect(runnableProblems(base, null)).toHaveLength(1);
+    expect(runnableProblems(base, null)[0]).toContain("psk-import");
+    expect(runnableProblems(base, toBase64(new Uint8Array(16)))[0]).toContain("16 bytes");
+    expect(runnableProblems(base, "!!!")[0]).toContain("base64");
+    expect(runnableProblems({ ...base, relayUrl: "https://x" }, VALID.psk)[0]).toContain("ws://");
+    expect(runnableProblems({ ...base, bearerToken: "" }, null)).toHaveLength(2);
+  });
+
+  test("judges the resolved key, not the config field — an empty field with a keychain key is runnable", () => {
+    expect(runnableProblems({ ...base, psk: "" }, VALID.psk)).toEqual([]);
+  });
+});
+
+describe("psk resolution", () => {
+  const base: Config = { ...VALID, repoRoots: ["/tmp"] };
+
+  test("a non-empty config field wins — the only path WSL has", async () => {
+    expect(await loadPsk(base)).toEqual({ psk: VALID.psk, source: "config" });
+  });
+
+  test("a missing keychain item reads as null rather than throwing", async () => {
+    // The keychain *hit* path needs a real login keychain with an item in it,
+    // so it is verified by hand on a machine, not here.
+    expect(await readKeychainPsk("seance-psk-absent-in-tests")).toBeNull();
+  });
+
+  test("an empty field with nothing in the keychain resolves to null", async () => {
+    expect(await loadPsk({ ...base, psk: "" }, "seance-psk-absent-in-tests")).toBeNull();
+  });
+});
+
+const fingerprintOfKey = (fill: number): Promise<string> => pskFingerprint(toBase64(new Uint8Array(32).fill(fill)));
+
+describe("pskFingerprint", () => {
+  test("eight stable hex characters that differ between keys", async () => {
+    const a = await fingerprintOfKey(1);
+    expect(a).toMatch(/^[0-9a-f]{8}$/u);
+    expect(await fingerprintOfKey(1)).toBe(a);
+    expect(await fingerprintOfKey(2)).not.toBe(a);
+  });
+
+  test("reveals nothing of the key it summarises", async () => {
+    const psk = toBase64(new Uint8Array(32).fill(7));
+    expect(psk).not.toContain(await pskFingerprint(psk));
   });
 });
 

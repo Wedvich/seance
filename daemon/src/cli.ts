@@ -1,7 +1,15 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
-import { bearerTokenWarnings, configSkeleton, loadConfig, runnableProblems } from "./config.ts";
+import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
+import {
+  bearerTokenWarnings,
+  configSkeleton,
+  loadConfig,
+  loadPsk,
+  pskFingerprint,
+  runnableProblems,
+} from "./config.ts";
+import { importKeychainPsk, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
 import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { scanRepos } from "./scan.ts";
@@ -181,14 +189,26 @@ export async function cmdDoctor(): Promise<void> {
   try {
     config = await loadConfig();
     ok(`loads from ${configPath()}`);
-    for (const problem of runnableProblems(config)) fail(problem);
+    const resolved = await loadPsk(config);
+    const problems = runnableProblems(config, resolved?.psk ?? null);
+    for (const problem of problems) fail(problem);
     // Independent of those failures: a token can be shape-valid and still be one
     // the app cannot pass through `?t=` intact.
     const tokenWarnings = bearerTokenWarnings(config.bearerToken);
-    if (runnableProblems(config).length === 0) {
+    if (problems.length === 0) {
       ok(tokenWarnings.length === 0 ? "psk, bearerToken, relayUrl look valid" : "psk and relayUrl look valid");
       if (!config.relayUrl.endsWith(DAEMON_PATH)) {
         warn(`relayUrl does not end in ${DAEMON_PATH} — the relay rejects the upgrade and the daemon retries silently`);
+      }
+      if (resolved !== null) {
+        // Printed on every device so a mismatched paste is one glance away,
+        // rather than surfacing later as "nothing decrypts".
+        ok(`psk from ${resolved.source}, fingerprint ${await pskFingerprint(resolved.psk)} — same on every device`);
+        if (resolved.source === "config" && process.platform === "darwin") {
+          warn(
+            "psk sits in config.json, readable by anything running as you — `seanced psk-import` moves it to the keychain",
+          );
+        }
       }
     }
     for (const warning of tokenWarnings) warn(warning);
@@ -280,4 +300,38 @@ export async function cmdSessions(): Promise<void> {
     console.log(`${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
   }
   console.log(`\n${sessions.length} running claude session${sessions.length === 1 ? "" : "s"}`);
+}
+
+/**
+ * One-time setup, at the machine or over SSH: `security` prompts for the key on
+ * the terminal, so it lands in neither argv nor shell history.
+ */
+export async function cmdPskImport(): Promise<void> {
+  if (process.platform !== "darwin") {
+    console.error("keychain storage is macOS-only — keep the psk in config.json on this platform");
+    process.exit(1);
+  }
+  console.log(`storing the PSK as generic password "${PSK_SERVICE}" in the login keychain.`);
+  console.log("security will prompt below — paste the base64 value (it will not echo).\n");
+  await importKeychainPsk();
+
+  const stored = await readKeychainPsk();
+  if (stored === null) {
+    console.error(
+      `\nstored, but reading it back failed — check \`security find-generic-password -s ${PSK_SERVICE} -w\``,
+    );
+    process.exit(1);
+  }
+  try {
+    const bytes = fromBase64(stored);
+    if (bytes.byteLength !== 32) {
+      console.error(`\nstored value decodes to ${bytes.byteLength} bytes, need 32 — re-run with the right key`);
+      process.exit(1);
+    }
+  } catch {
+    console.error("\nstored value is not valid base64 — re-run with the right key");
+    process.exit(1);
+  }
+  console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads the keychain, then \`seanced restart\``);
 }

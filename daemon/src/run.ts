@@ -1,5 +1,5 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
-import { loadConfig, runnableProblems, type Config } from "./config.ts";
+import { loadConfig, loadPsk, runnableProblems, type Config } from "./config.ts";
 import { createHandler } from "./handlers.ts";
 import { log } from "./log.ts";
 import { RelayClient } from "./relay-client.ts";
@@ -25,14 +25,17 @@ export interface RunOpts {
 /** Wires config/state/scan/handlers into a running relay client. */
 export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const config = opts.config ?? (await loadConfig());
-  const problems = runnableProblems(config);
-  if (problems.length > 0) {
+  const resolved = await loadPsk(config);
+  const problems = runnableProblems(config, resolved?.psk ?? null);
+  // `resolved === null` is already in `problems`; naming it here narrows the
+  // type so the import below needs no assertion.
+  if (problems.length > 0 || resolved === null) {
     for (const problem of problems) log.error(`config: ${problem}`);
     throw new Error("config is not runnable — fix the problems above");
   }
 
   let state: State = await loadOrInitState();
-  const key = await importPsk(config.psk);
+  const key = await importPsk(resolved.psk);
   const startedAt = Date.now();
 
   const buildInfo = async (): Promise<Envelope> => {

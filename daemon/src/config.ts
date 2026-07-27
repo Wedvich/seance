@@ -1,10 +1,13 @@
 import { fromBase64 } from "@seance/shared";
+import { fingerprint } from "./hash.ts";
+import { readKeychainPsk } from "./keychain.ts";
 import { configPath, expandTilde } from "./paths.ts";
 
 export interface Config {
   readonly name: string;
   readonly relayUrl: string;
   readonly bearerToken: string;
+  /** Empty is legitimate on macOS: `loadPsk` then reads the login keychain. */
   readonly psk: string;
   /** Tilde-expanded parent roots scanned for repos at depth 2. */
   readonly repoRoots: readonly string[];
@@ -62,8 +65,40 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   };
 }
 
-/** Everything `seanced` (run) needs beyond shape. Returns problems instead of throwing so doctor can list them all. */
-export function runnableProblems(config: Config): readonly string[] {
+export type PskSource = "config" | "keychain";
+
+export interface ResolvedPsk {
+  readonly psk: string;
+  readonly source: PskSource;
+}
+
+/**
+ * The config field wins, so WSL — which has no keychain — keeps one code path;
+ * an empty field falls back to the macOS login keychain. Null when neither
+ * holds it, which `runnableProblems` reports rather than throwing.
+ * `keychainService` exists so tests can point at a name that cannot exist.
+ */
+export async function loadPsk(config: Config, keychainService?: string): Promise<ResolvedPsk | null> {
+  if (config.psk !== "") return { psk: config.psk, source: "config" };
+  const keychain = await readKeychainPsk(keychainService);
+  return keychain === null ? null : { psk: keychain, source: "keychain" };
+}
+
+/**
+ * SHA-256 prefix of the raw key. Rotation touches four devices by hand and
+ * there is no rollover window, so the cheap check that they agree is comparing
+ * eight hex characters instead of secrets. Throws on non-base64 input.
+ */
+export async function pskFingerprint(psk: string): Promise<string> {
+  return fingerprint(fromBase64(psk));
+}
+
+/**
+ * Everything `seanced` (run) needs beyond shape. Returns problems instead of
+ * throwing so doctor can list them all. `psk` is the *resolved* key from
+ * `loadPsk` — config field or keychain — not `config.psk`.
+ */
+export function runnableProblems(config: Config, psk: string | null): readonly string[] {
   const problems: string[] = [];
   if (!/^wss?:\/\/.+/u.test(config.relayUrl)) {
     problems.push(`relayUrl "${config.relayUrl}" is not a ws:// or wss:// URL`);
@@ -74,11 +109,11 @@ export function runnableProblems(config: Config): readonly string[] {
   if (config.name === "") {
     problems.push("name is empty");
   }
-  if (config.psk === "") {
-    problems.push("psk is empty — generate 32 random bytes: openssl rand -base64 32");
+  if (psk === null) {
+    problems.push("no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seanced psk-import`");
   } else {
     try {
-      const bytes = fromBase64(config.psk);
+      const bytes = fromBase64(psk);
       if (bytes.byteLength !== 32) {
         problems.push(`psk decodes to ${bytes.byteLength} bytes, need 32`);
       }
