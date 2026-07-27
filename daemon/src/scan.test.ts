@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
@@ -24,7 +24,8 @@ async function makeRepo(root: string, rel: string, defaultBranch?: string): Prom
     await mkdir(originDir, { recursive: true });
     await writeFile(join(originDir, "HEAD"), `ref: refs/remotes/origin/${defaultBranch}\n`);
   }
-  return repo;
+  // scan stores canonical paths (tmpdir is symlinked on macOS)
+  return realpath(repo);
 }
 
 describe("scanRepos", () => {

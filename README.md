@@ -23,4 +23,8 @@ its rationale.
 
 ## Status
 
-Pre-implementation. Design finalized 2026-07-26.
+Daemon (`seanced`) implemented for macOS: relay client with encrypted op
+dispatch, repo scanning, tmux spawning, launchd install, and a CLI
+(`init` / `install` / `doctor` / `status` / `scan` / `sessions` / `spawn`).
+Relay and PWA are next; WSL support deferred. Tests: `bun test` (uses a
+throwaway in-process relay, a private tmux server, and a stub claude).

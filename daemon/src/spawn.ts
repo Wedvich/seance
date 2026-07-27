@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -113,23 +113,35 @@ function prepareHere(repo: RepoEntry): Prepared {
   };
 }
 
+interface InnerCommand {
+  readonly command: string;
+  /** Temp dir holding the seed prompt; deleted by the caller after the alive check. */
+  readonly seedDir: string | null;
+}
+
 async function buildInnerCommand(
   prepared: Prepared,
   windowName: string,
   request: SpawnRequest,
-): Promise<string> {
+): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
+  // `exec` keeps the pane's process-group-leader pid on claude itself — a
+  // forked child under a compound command leaves pane_current_command as the
+  // shell, hiding the window from session detection.
   const base =
-    `${caffeinate}${claude} -n ${shq(windowName)} --permission-mode auto ` +
+    `exec ${caffeinate}${claude} -n ${shq(windowName)} --permission-mode auto ` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)} ` +
     `--remote-control${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
-  if (request.prompt === undefined || request.prompt === "") return base;
+  if (request.prompt === undefined || request.prompt === "") {
+    return { command: base, seedDir: null };
+  }
 
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
   await Bun.write(seedFile, `${prepared.preamble}\n\nTask: ${request.prompt}\n`);
-  return `${base} "$(cat ${shq(seedFile)})"; rm -rf ${shq(seedDir)}`;
+  // the substitution runs before exec, so the file is consumed at shell start
+  return { command: `${base} \"$(cat ${shq(seedFile)})\"`, seedDir };
 }
 
 /**
@@ -145,7 +157,8 @@ async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> 
     .split("\n")[0]
     ?.trim();
   if (dead === "1") {
-    const captured = (await tmux(["capture-pane", "-p", "-t", windowId])).stdout
+    // -S -/-E -: the death redraw scrolls the final output into history — the visible screen keeps only the dead-pane banner
+    const captured = (await tmux(["capture-pane", "-p", "-S", "-", "-E", "-", "-t", windowId])).stdout
       .split("\n")
       .filter((line) => line.trim() !== "")
       .slice(-20)
@@ -173,31 +186,35 @@ export async function spawnSession(
 
   const prepared =
     request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
-  const innerCommand = await buildInnerCommand(prepared, windowName, request);
+  const inner = await buildInnerCommand(prepared, windowName, request);
 
   const target = await resolveTargetSession(tmuxSessionGroup);
   let windowId: string;
   try {
-    windowId = (
-      await tmuxOk([
-        "new-window",
-        "-P",
-        "-F",
-        "#{window_id}",
-        "-t",
-        `${target}:`,
-        "-c",
-        prepared.launchDir,
-        "-n",
-        windowName,
-        innerCommand,
-      ])
-    ).trim();
-  } catch (err) {
-    throw new SpawnFailure("tmux_error", err instanceof TmuxError ? err.message : String(err));
-  }
+    try {
+      windowId = (
+        await tmuxOk([
+          "new-window",
+          "-P",
+          "-F",
+          "#{window_id}",
+          "-t",
+          `${target}:`,
+          "-c",
+          prepared.launchDir,
+          "-n",
+          windowName,
+          inner.command,
+        ])
+      ).trim();
+    } catch (err) {
+      throw new SpawnFailure("tmux_error", err instanceof TmuxError ? err.message : String(err));
+    }
 
-  await verifyPaneAlive(windowId, opts.waitMs ?? 3_000);
+    await verifyPaneAlive(windowId, opts.waitMs ?? 3_000);
+  } finally {
+    if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
+  }
 
   const outcome: SpawnOutcome = { window: windowName, path: prepared.resultPath };
   return prepared.note === undefined ? outcome : { ...outcome, note: prepared.note };

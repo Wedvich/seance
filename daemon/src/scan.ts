@@ -1,6 +1,7 @@
-import { access, readdir, stat } from "node:fs/promises";
+import { access, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { RepoEntry } from "@seance/shared";
+import { git } from "./exec.ts";
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -28,11 +29,22 @@ async function resolveGitDir(repoPath: string): Promise<string | null> {
 }
 
 /**
- * Local refs only — reads `origin/HEAD` from disk, never touches the
- * network. The network-touching `git remote set-head` belongs to the spawn
- * path, and only when this returns null.
+ * Local-only — never touches the network. Loose ref file first (free);
+ * reftable repos (git 2.46+, the default for newer clones) keep no loose
+ * ref files, so fall back to `git symbolic-ref`, which also only reads disk.
+ * The network-touching `git remote set-head` belongs to the spawn path, and
+ * only when this returns null.
  */
 export async function readDefaultBranch(repoPath: string): Promise<string | null> {
+  const fromFile = await readDefaultBranchFile(repoPath);
+  if (fromFile !== null) return fromFile;
+  const result = await git(repoPath, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 5_000);
+  if (result.exitCode !== 0) return null;
+  const match = result.stdout.trim().match(/^refs\/remotes\/origin\/(.+)$/);
+  return match?.[1] ?? null;
+}
+
+async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
   const gitDir = await resolveGitDir(repoPath);
   if (gitDir === null) return null;
   const headFile = Bun.file(join(gitDir, "refs", "remotes", "origin", "HEAD"));
@@ -52,20 +64,29 @@ async function listDirs(parent: string): Promise<readonly string[]> {
   }
 }
 
+/** tmux reports kernel-canonical pane paths (macOS: /var → /private/var) — store canonical paths so prefix mapping works. */
+async function canonical(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    return p;
+  }
+}
+
 async function discoverRepoPaths(roots: readonly string[]): Promise<readonly string[]> {
-  const found: string[] = [];
+  const found = new Set<string>();
   for (const root of roots) {
     for (const level1 of await listDirs(root)) {
       if (await exists(join(level1, ".git"))) {
-        found.push(level1);
+        found.add(await canonical(level1));
         continue;
       }
       for (const level2 of await listDirs(level1)) {
-        if (await exists(join(level2, ".git"))) found.push(level2);
+        if (await exists(join(level2, ".git"))) found.add(await canonical(level2));
       }
     }
   }
-  return found;
+  return [...found];
 }
 
 /** Basename, disambiguated with the parent dir on collision, full path as last resort. */

@@ -7,6 +7,10 @@
   "type": "module",
   "workspaces": ["daemon", "pwa", "relay", "shared"],
   "packageManager": "bun@1.3.14",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun run --filter '*' typecheck"
+  },
   "devDependencies": {
     "typescript": "^7.0.2"
   }
