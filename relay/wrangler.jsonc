@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "seance-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-27",
+  // Daemons dial wss://seance-relay.<subdomain>.workers.dev/daemon, the app /app.
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }],
+  },
+  // Free-tier Durable Objects must be SQLite-backed.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  // BEARER_TOKEN is deliberately absent: it is a secret, not a var.
+  //   deploy: bun run --cwd relay wrangler secret put BEARER_TOKEN
+  //   local:  echo 'BEARER_TOKEN=...' > relay/.dev.vars   (gitignored)
+}

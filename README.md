@@ -26,5 +26,24 @@ its rationale.
 Daemon (`seanced`) implemented for macOS: relay client with encrypted op
 dispatch, repo scanning, tmux spawning, launchd install, and a CLI
 (`init` / `install` / `doctor` / `status` / `scan` / `sessions` / `spawn`).
-Relay and PWA are next; WSL support deferred. Tests: `bun test` (uses a
-throwaway in-process relay, a private tmux server, and a stub claude).
+
+Relay implemented: Worker + hibernating Durable Object with path-based roles,
+bearer auth, the machine registry, envelope routing, and `undeliverable`
+notices. PWA is next; WSL support deferred.
+
+Tests: `bun test`. The daemon suite uses a throwaway in-process relay, a
+private tmux server, and a stub claude; the relay suite boots the real Worker
+and Durable Object under workerd via Miniflare.
+
+## Deploying the relay
+
+```sh
+cd relay
+bun run wrangler secret put BEARER_TOKEN   # same value as every daemon config + the app
+bun run deploy
+```
+
+Daemons then point `relayUrl` at
+`wss://seance-relay.<your-subdomain>.workers.dev/daemon`. For local runs, put
+`BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see `.dev.vars.example`)
+and use `bun run dev`.

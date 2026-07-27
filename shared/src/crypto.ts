@@ -29,8 +29,10 @@ export async function importPsk(pskBase64: string): Promise<CryptoKey> {
 
 // Both ends must produce identical AAD bytes or nothing decrypts — this
 // helper is the single source of that encoding.
+// The copy pins the buffer type: workerd types TextEncoder.encode as
+// ArrayBufferLike-backed, while WebCrypto's BufferSource demands an ArrayBuffer.
 function buildAad(v: number, to: string, from: string): Uint8Array<ArrayBuffer> {
-  return new TextEncoder().encode(`${v}|${to}|${from}`);
+  return new Uint8Array(new TextEncoder().encode(`${v}|${to}|${from}`));
 }
 
 export async function seal(

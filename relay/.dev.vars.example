@@ -1,0 +1,3 @@
+# Copy to .dev.vars (gitignored) for `wrangler dev`. Same value as every daemon's
+# config.json bearerToken and the app's stored token.
+BEARER_TOKEN=

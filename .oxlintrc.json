@@ -30,7 +30,7 @@
   },
   "overrides": [
     {
-      "files": ["**/*.test.ts", "daemon/test/**"],
+      "files": ["**/*.test.ts", "**/test/**"],
       "rules": {
         "no-await-in-loop": "off"
       }
