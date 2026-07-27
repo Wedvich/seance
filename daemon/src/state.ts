@@ -1,0 +1,74 @@
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import type { RepoEntry } from "@seance/shared";
+import { log } from "./log.ts";
+import { runtimePath, statePath } from "./paths.ts";
+
+export interface State {
+  readonly deviceId: string;
+  readonly repos: readonly RepoEntry[];
+  readonly scannedAt: number | null;
+}
+
+function freshState(): State {
+  return { deviceId: crypto.randomUUID(), repos: [], scannedAt: null };
+}
+
+function isState(raw: unknown): raw is State {
+  if (typeof raw !== "object" || raw === null) return false;
+  const obj = raw as Record<string, unknown>;
+  return typeof obj["deviceId"] === "string" && Array.isArray(obj["repos"]);
+}
+
+/**
+ * Loads state or initializes it (deviceId is generated exactly here, on first
+ * run). A corrupt file is replaced — losing deviceId only means the machine
+ * registers as a new entry; the stale one is forgettable from the PWA.
+ */
+export async function loadOrInitState(path: string = statePath()): Promise<State> {
+  const file = Bun.file(path);
+  if (await file.exists()) {
+    try {
+      const raw: unknown = await file.json();
+      if (isState(raw)) return raw;
+      log.warn(`state at ${path} has unexpected shape — reinitializing`);
+    } catch {
+      log.warn(`state at ${path} is not valid JSON — reinitializing`);
+    }
+  }
+  const state = freshState();
+  await saveState(state, path);
+  return state;
+}
+
+export async function saveState(state: State, path: string = statePath()): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await Bun.write(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** Written by the running daemon; read by `seanced status`. */
+export interface Runtime {
+  readonly pid: number;
+  readonly startedAt: number;
+  readonly connected: boolean;
+  readonly connectedSince: number | null;
+}
+
+export async function writeRuntime(runtime: Runtime, path: string = runtimePath()): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await Bun.write(path, `${JSON.stringify(runtime, null, 2)}\n`);
+}
+
+export async function readRuntime(path: string = runtimePath()): Promise<Runtime | null> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return null;
+  try {
+    const raw: unknown = await file.json();
+    if (typeof raw === "object" && raw !== null && typeof (raw as Record<string, unknown>)["pid"] === "number") {
+      return raw as Runtime;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

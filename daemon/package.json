@@ -8,6 +8,10 @@
   "bin": {
     "seanced": "./src/main.ts"
   },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@seance/shared": "workspace:*"
   },
