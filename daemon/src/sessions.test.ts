@@ -51,6 +51,11 @@ describe("parsePanes", () => {
     expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
   });
 
+  test("a separator inside the path keeps the line parseable", () => {
+    const raw = line("@6", "seance", "2.1.220", "/Users/m/repos/seance/a|b");
+    expect(parsePanes(raw, repos)[0]?.path).toBe("/Users/m/repos/seance/a|b");
+  });
+
   test("tolerates malformed lines and trailing newline", () => {
     expect(parsePanes("garbage\n\n", repos)).toEqual([]);
   });

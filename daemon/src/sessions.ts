@@ -1,5 +1,5 @@
 import type { RepoEntry, SessionEntry } from "@seance/shared";
-import { tmux } from "./tmux.ts";
+import { FIELD_SEP, tmux } from "./tmux.ts";
 
 // claude retitles its process to its bare version string (e.g. "2.1.220") —
 // undocumented, but the only mark it leaves on a pane. If a release changes
@@ -24,8 +24,10 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
   const seen = new Set<string>();
   const sessions: SessionEntry[] = [];
   for (const line of raw.split("\n")) {
-    const [windowId, windowName, command, panePath] = line.split("|");
-    if (windowId === undefined || windowName === undefined || command === undefined || panePath === undefined) {
+    // Path last and taken as the remainder: a separator inside it can't shift the fields.
+    const [windowId, windowName, command, ...rest] = line.split(FIELD_SEP);
+    const panePath = rest.join(FIELD_SEP);
+    if (windowId === undefined || windowName === undefined || command === undefined || panePath === "") {
       continue;
     }
     // Grouped sessions repeat every window; splits repeat the window id too.
@@ -38,15 +40,13 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
 }
 
 export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<readonly SessionEntry[]> {
-  // `|` rather than a tab: tmux 3.4 (Linux distros) mangles non-printables in
-  // format output (tab becomes `_`), while printable separators survive on
-  // every version. A `|` inside a window name or path misparses that line,
-  // exactly as a tab did before.
   const result = await tmux([
     "list-panes",
     "-a",
     "-F",
-    "#{window_id}|#{window_name}|#{pane_current_command}|#{pane_current_path}",
+    // Window names are unvalidated wire text (SpawnRequest.title), so tmux
+    // substitutes the separator out of them before the line reaches us.
+    `#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}#{pane_current_command}${FIELD_SEP}#{pane_current_path}`,
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running
   return parsePanes(result.stdout, repos);

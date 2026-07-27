@@ -68,13 +68,9 @@ export async function startRelay(token: string): Promise<TestRelay> {
     url,
     token,
     probe: (path, init) => mf.dispatchFetch(new URL(path, url).href, init) as unknown as Promise<Response>,
-    // Deliberately not mf.dispose(): disposing a Miniflare poisons every later
-    // boot in the same process — the next `await mf.ready` hangs forever
-    // (workerd exits with "Broken pipe; fd = 3"; observed on Linux, and how
-    // `bun test` flaked whenever the relay suite booted after the PWA suite's
-    // teardown). Overlapping instances coexist fine, so suites leak theirs and
-    // miniflare's own exit hook reaps the runtimes when the process ends.
-    dispose: () => Promise.resolve(),
+    // Must dispose: `bun test` fires no process exit hooks, so an undisposed
+    // Miniflare leaves its workerd running past the test process itself.
+    dispose: () => mf.dispose(),
   };
 }
 

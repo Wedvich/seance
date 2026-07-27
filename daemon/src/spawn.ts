@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnErrorCode, type SpawnRequest } from "@seance/shared";
 import { git } from "./exec.ts";
 import { readDefaultBranch } from "./scan.ts";
-import { resolveTargetSession, tmux, tmuxOk, TmuxError } from "./tmux.ts";
+import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 
 export class SpawnFailure extends Error {
   constructor(
@@ -171,7 +171,7 @@ export async function spawnSession(
 
   const slugSource = request.title ?? request.prompt ?? "session";
   const worktreeName = `${slugify(slugSource)}-${timestamp()}`;
-  const windowName = request.title ?? worktreeName;
+  const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
   const prepared = request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
   const inner = await buildInnerCommand(prepared, windowName, request);

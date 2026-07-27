@@ -73,6 +73,21 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     await tmux(["kill-window", "-t", "main:Fix Tests"]);
   });
 
+  test("a title carrying the format separator stays detectable", async () => {
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "fix | build" }, repos, "main", WAIT);
+    expect(outcome.window).toBe("fix - build");
+
+    const sessions = await listClaudeSessions(repos);
+    expect(sessions.find((s) => s.window === outcome.window)?.repo).toBe("myrepo");
+
+    // renamed outside séance, tmux substitutes the separator out of the format
+    await tmuxOk(["rename-window", "-t", `main:${outcome.window}`, "a | b"]);
+    const renamed = await listClaudeSessions(repos);
+    expect(renamed.find((s) => s.window === "a - b")?.repo).toBe("myrepo");
+
+    await tmux(["kill-window", "-t", "main:a - b"]);
+  });
+
   test("here mode: launches at the repo root, no git preparation", async () => {
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
