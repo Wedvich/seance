@@ -16,7 +16,7 @@ export async function cmdInit(): Promise<void> {
     console.log(`config already exists at ${path} — not touching it`);
   } else {
     await mkdir(configDir(), { recursive: true });
-    await Bun.write(path, configSkeleton(hostname().replace(/\.local$/, "")));
+    await Bun.write(path, configSkeleton(hostname().replace(/\.local$/u, "")));
     await chmod(path, 0o600);
     console.log(`wrote ${path} (0600)`);
   }
@@ -127,9 +127,13 @@ export async function cmdStatus(): Promise<void> {
     // dead or not ours
   }
   console.log(`daemon:    pid ${runtime.pid} ${alive ? "running" : "not running"}`);
-  console.log(`relay:     ${runtime.connected && alive ? `connected since ${new Date(runtime.connectedSince ?? 0).toISOString()}` : "disconnected"}`);
+  console.log(
+    `relay:     ${runtime.connected && alive ? `connected since ${new Date(runtime.connectedSince ?? 0).toISOString()}` : "disconnected"}`,
+  );
   const state = await loadOrInitState();
-  console.log(`repos:     ${state.repos.length}${state.scannedAt !== null ? ` (scanned ${new Date(state.scannedAt).toISOString()})` : ""}`);
+  console.log(
+    `repos:     ${state.repos.length}${state.scannedAt !== null ? ` (scanned ${new Date(state.scannedAt).toISOString()})` : ""}`,
+  );
   console.log(`defaults:  model=${DEFAULT_MODEL} effort=${DEFAULT_EFFORT}`);
 }
 
@@ -158,10 +162,11 @@ async function checkRelayReachable(url: string, bearerToken: string): Promise<st
   });
 }
 
+const ok = (msg: string): void => console.log(`  ok    ${msg}`);
+const warn = (msg: string): void => console.log(`  warn  ${msg}`);
+
 export async function cmdDoctor(): Promise<void> {
   let failed = false;
-  const ok = (msg: string): void => console.log(`  ok    ${msg}`);
-  const warn = (msg: string): void => console.log(`  warn  ${msg}`);
   const fail = (msg: string): void => {
     failed = true;
     console.log(`  FAIL  ${msg}`);
@@ -189,6 +194,7 @@ export async function cmdDoctor(): Promise<void> {
     console.log("repo roots");
     for (const root of config.repoRoots) {
       try {
+        // oxlint-disable-next-line no-await-in-loop -- one stat per configured root, printed in order as it goes
         const info = await stat(root);
         if (info.isDirectory()) ok(root);
         else fail(`${root} is not a directory`);
@@ -206,7 +212,7 @@ export async function cmdDoctor(): Promise<void> {
     }
 
     console.log("relay");
-    if (/^wss?:\/\/.+/.test(config.relayUrl)) {
+    if (/^wss?:\/\/.+/u.test(config.relayUrl)) {
       const problem = await checkRelayReachable(config.relayUrl, config.bearerToken);
       if (problem === null) ok(`reachable at ${config.relayUrl}`);
       else warn(`${config.relayUrl}: ${problem} (not deployed yet?)`);
@@ -222,7 +228,8 @@ export async function cmdDoctor(): Promise<void> {
   const logFile = Bun.file(logPath());
   if (await logFile.exists()) {
     const size = logFile.size;
-    if (size > 10 * 1024 * 1024) warn(`log is ${Math.round(size / 1024 / 1024)}MB — consider truncating (${logPath()})`);
+    if (size > 10 * 1024 * 1024)
+      warn(`log is ${Math.round(size / 1024 / 1024)}MB — consider truncating (${logPath()})`);
     else ok(`log ${Math.round(size / 1024)}KB (${logPath()})`);
   }
 

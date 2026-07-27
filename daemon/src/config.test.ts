@@ -95,7 +95,7 @@ describe("state", () => {
     const dir = await tempDir();
     const path = join(dir, "state.json");
     const first = await loadOrInitState(path);
-    expect(first.deviceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(first.deviceId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(first.repos).toEqual([]);
     const second = await loadOrInitState(path);
     expect(second.deviceId).toBe(first.deviceId);
@@ -106,7 +106,7 @@ describe("state", () => {
     const path = join(dir, "state.json");
     await writeFile(path, "not json");
     const state = await loadOrInitState(path);
-    expect(state.deviceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(state.deviceId).toMatch(/^[0-9a-f-]{36}$/u);
   });
 
   test("saveState roundtrips repos", async () => {

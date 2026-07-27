@@ -148,16 +148,16 @@ together (re-sends registry data on every poll, useless offline).
   when idle; untestable blind from a Mac). `install` exits with a clear
   message on non-macOS. Rejected: daemon-inside-tmux (reboot silently takes
   the machine offline — recreates the god-session fragility).
-- **tmux**: spawns a window into the **`main` session group** (`tmux
-  new-window -t main:`) — terminals auto-attach to that group via zshrc, so
-  daemon-spawned windows appear in every attached terminal instantly. Cold
-  boot with no session: create it detached (`tmux new-session -d -s main`);
-  the next terminal attaches to it seamlessly. If only a grouped sibling
-  (e.g. `main-1`) survives, target any session whose `session_group` is
-  `main`. Configurable as `tmuxSession`, default `"main"`. Rejected:
-  separate named `claude` session (as originally written here — orphans
-  spawned windows outside the one-window-per-task workflow), daemon child
-  processes without tmux (loses walk-up-and-attach).
+- **tmux**: spawns a window into the **`main` session group**
+  (`tmux new-window -t main:`) — terminals auto-attach to that group via
+  zshrc, so daemon-spawned windows appear in every attached terminal
+  instantly. Cold boot with no session: create it detached
+  (`tmux new-session -d -s main`); the next terminal attaches to it
+  seamlessly. If only a grouped sibling (e.g. `main-1`) survives, target any
+  session whose `session_group` is `main`. Configurable as `tmuxSession`,
+  default `"main"`. Rejected: separate named `claude` session (as originally
+  written here — orphans spawned windows outside the one-window-per-task
+  workflow), daemon child processes without tmux (loses walk-up-and-attach).
 - **Spawn logic is reimplemented natively** in the daemon (structured
   errors, no shell-script templating). The `/spawn` slash command stays
   as-is for in-terminal use; drift between the two implementations is an

@@ -4,7 +4,7 @@ import { tmux } from "./tmux.ts";
 // claude retitles its process to its bare version string (e.g. "2.1.220") —
 // undocumented, but the only mark it leaves on a pane. If a release changes
 // the convention the session list goes visibly empty and this is the fix.
-const CLAUDE_TITLE = /^\d+\.\d+\.\d+$/;
+const CLAUDE_TITLE = /^\d+\.\d+\.\d+$/u;
 
 const WORKTREE_MARKER = "/.claude/worktrees/";
 

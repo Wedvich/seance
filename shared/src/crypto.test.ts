@@ -1,13 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  fromBase64,
-  importPsk,
-  open,
-  ReplayError,
-  ReplayGuard,
-  seal,
-  toBase64,
-} from "./crypto.ts";
+import { fromBase64, importPsk, open, ReplayError, ReplayGuard, seal, toBase64 } from "./crypto.ts";
 import { PROTOCOL_VERSION, type Envelope, type Plain } from "./types.ts";
 
 const PSK_A = toBase64(new Uint8Array(32).fill(7));

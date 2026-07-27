@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error",
+    "pedantic": "warn"
+  },
+  "env": {
+    "builtin": true,
+    "es2024": true
+  },
+  "ignorePatterns": ["node_modules", "dist"],
+  "rules": {
+    "max-classes-per-file": "off",
+    "max-lines": "off",
+    "max-lines-per-function": "off",
+    "no-inline-comments": "off",
+    "no-negated-condition": "off",
+    "require-await": "off",
+    "import/max-dependencies": "off",
+    "promise/no-multiple-resolved": "off",
+    "promise/always-return": ["error", { "ignoreLastCallback": true }],
+    "unicorn/no-array-callback-reference": "off",
+    "unicorn/no-negated-condition": "off",
+    "unicorn/no-useless-undefined": "off",
+    "unicorn/no-useless-spread": "off",
+    "unicorn/prefer-code-point": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "daemon/test/**"],
+      "rules": {
+        "no-await-in-loop": "off"
+      }
+    }
+  ]
+}

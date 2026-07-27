@@ -27,7 +27,7 @@ export function configSkeleton(machineName: string): string {
 function requireString(raw: Record<string, unknown>, key: string, path: string): string {
   const value = raw[key];
   if (typeof value !== "string") {
-    throw new Error(`config at ${path}: "${key}" must be a string`);
+    throw new TypeError(`config at ${path}: "${key}" must be a string`);
   }
   return value;
 }
@@ -45,12 +45,12 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
     throw new Error(`config at ${path} is not valid JSON`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(`config at ${path} must be a JSON object`);
+    throw new TypeError(`config at ${path} must be a JSON object`);
   }
   const obj = raw as Record<string, unknown>;
   const roots = obj["repoRoots"];
   if (!Array.isArray(roots) || roots.length === 0 || roots.some((r) => typeof r !== "string")) {
-    throw new Error(`config at ${path}: "repoRoots" must be a non-empty array of strings`);
+    throw new TypeError(`config at ${path}: "repoRoots" must be a non-empty array of strings`);
   }
   return {
     name: requireString(obj, "name", path),
@@ -65,7 +65,7 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
 /** Everything `seanced` (run) needs beyond shape. Returns problems instead of throwing so doctor can list them all. */
 export function runnableProblems(config: Config): readonly string[] {
   const problems: string[] = [];
-  if (!/^wss?:\/\/.+/.test(config.relayUrl)) {
+  if (!/^wss?:\/\/.+/u.test(config.relayUrl)) {
     problems.push(`relayUrl "${config.relayUrl}" is not a ws:// or wss:// URL`);
   }
   if (config.bearerToken === "") {

@@ -34,7 +34,9 @@ export interface RelayClientOpts {
  * exponential backoff.
  */
 export class RelayClient {
-  readonly #opts: Required<Pick<RelayClientOpts, "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs">> &
+  readonly #opts: Required<
+    Pick<RelayClientOpts, "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs">
+  > &
     RelayClientOpts;
   readonly #guard = new ReplayGuard();
   #ws: WebSocket | null = null;

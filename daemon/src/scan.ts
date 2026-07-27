@@ -3,6 +3,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { git } from "./exec.ts";
 
+const SCAN_CONCURRENCY = 16;
+
 async function exists(p: string): Promise<boolean> {
   try {
     await access(p);
@@ -19,7 +21,7 @@ async function resolveGitDir(repoPath: string): Promise<string | null> {
     const info = await stat(dotGit);
     if (info.isDirectory()) return dotGit;
     const content = await Bun.file(dotGit).text();
-    const match = content.match(/^gitdir:\s*(.+)\s*$/m);
+    const match = content.match(/^gitdir:\s*(.+)\s*$/mu);
     if (!match?.[1]) return null;
     const target = match[1].trim();
     return isAbsolute(target) ? target : resolve(repoPath, target);
@@ -40,7 +42,7 @@ export async function readDefaultBranch(repoPath: string): Promise<string | null
   if (fromFile !== null) return fromFile;
   const result = await git(repoPath, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], 5_000);
   if (result.exitCode !== 0) return null;
-  const match = result.stdout.trim().match(/^refs\/remotes\/origin\/(.+)$/);
+  const match = result.stdout.trim().match(/^refs\/remotes\/origin\/(.+)$/u);
   return match?.[1] ?? null;
 }
 
@@ -49,7 +51,7 @@ async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
   if (gitDir === null) return null;
   const headFile = Bun.file(join(gitDir, "refs", "remotes", "origin", "HEAD"));
   if (!(await headFile.exists())) return null;
-  const match = (await headFile.text()).match(/^ref: refs\/remotes\/origin\/(.+)$/m);
+  const match = (await headFile.text()).match(/^ref: refs\/remotes\/origin\/(.+)$/mu);
   return match?.[1]?.trim() ?? null;
 }
 
@@ -73,19 +75,38 @@ async function canonical(p: string): Promise<string> {
   }
 }
 
+/**
+ * Bounded so a root holding thousands of entries can't put every `readdir`/
+ * `stat` in flight at once and hit the fd ceiling. Results keep input order.
+ */
+async function mapLimit<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const queue = items.entries();
+  const results: R[] = [];
+  const worker = async (): Promise<void> => {
+    // oxlint-disable-next-line no-await-in-loop -- sequential inside one worker is the point; the fan-out is the worker pool
+    for (const [index, item] of queue) results[index] = await fn(item);
+  };
+  await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, items.length) }, worker));
+  return results;
+}
+
 async function discoverRepoPaths(roots: readonly string[]): Promise<readonly string[]> {
   const found = new Set<string>();
-  for (const root of roots) {
-    for (const level1 of await listDirs(root)) {
-      if (await exists(join(level1, ".git"))) {
-        found.add(await canonical(level1));
-        continue;
-      }
-      for (const level2 of await listDirs(level1)) {
-        if (await exists(join(level2, ".git"))) found.add(await canonical(level2));
-      }
-    }
-  }
+  const collect = async (dir: string): Promise<boolean> => {
+    if (!(await exists(join(dir, ".git")))) return false;
+    found.add(await canonical(dir));
+    return true;
+  };
+
+  const level1 = (await mapLimit(roots, listDirs)).flat();
+  const missed = await mapLimit(level1, collect);
+  const level2 = (
+    await mapLimit(
+      level1.filter((_, i) => missed[i] === false),
+      listDirs,
+    )
+  ).flat();
+  await mapLimit(level2, collect);
   return [...found];
 }
 

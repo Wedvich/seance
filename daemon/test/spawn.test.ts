@@ -74,12 +74,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   });
 
   test("here mode: launches at the repo root, no git preparation", async () => {
-    const outcome = await spawnSession(
-      { repo: "myrepo", mode: "here", title: "Here Now" },
-      repos,
-      "main",
-      WAIT,
-    );
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
     await tmux(["kill-window", "-t", "main:Here Now"]);
   });
@@ -87,12 +82,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("dirty checkout: spawn proceeds with a note", async () => {
     await Bun.write(join(fixture.repoPath, "README.md"), "# dirtied\n");
     try {
-      const outcome = await spawnSession(
-        { repo: "myrepo", mode: "worktree", title: "Dirty" },
-        repos,
-        "main",
-        WAIT,
-      );
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Dirty" }, repos, "main", WAIT);
       expect(outcome.note).toContain("not on a clean main");
       await tmux(["kill-window", "-t", "main:Dirty"]);
     } finally {

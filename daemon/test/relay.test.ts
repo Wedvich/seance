@@ -87,12 +87,16 @@ async function phoneRequest(
   tsOffset = 0,
 ): Promise<{ id: string }> {
   const id = crypto.randomUUID();
-  const env = await seal(phoneKey, { to: deviceId, from: PHONE_ID }, {
-    id,
-    ts: Date.now() + tsOffset,
-    op,
-    payload,
-  });
+  const env = await seal(
+    phoneKey,
+    { to: deviceId, from: PHONE_ID },
+    {
+      id,
+      ts: Date.now() + tsOffset,
+      op,
+      payload,
+    },
+  );
   relay.sendToDaemon(env);
   return { id };
 }
@@ -109,7 +113,7 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId, info } = await registerWithRepo(relay, "myrepo");
-      expect(deviceId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(deviceId).toMatch(/^[0-9a-f-]{36}$/u);
       expect(info.name).toBe("TestMac");
       expect(info.platform).toBe(process.platform);
       expect(info.repos[0]?.defaultBranch).toBe("main");
@@ -215,12 +219,16 @@ describe("daemon ↔ relay integration", () => {
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
       const id = crypto.randomUUID();
-      const env = await seal(phoneKey, { to: deviceId, from: PHONE_ID }, {
-        id,
-        ts: Date.now(),
-        op: "sessions",
-        payload: {},
-      });
+      const env = await seal(
+        phoneKey,
+        { to: deviceId, from: PHONE_ID },
+        {
+          id,
+          ts: Date.now(),
+          op: "sessions",
+          payload: {},
+        },
+      );
       relay.sendToDaemon(env);
       await phoneReceive(relay);
       relay.sendToDaemon(env); // byte-identical replay
@@ -251,12 +259,16 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
-      const env = await seal(phoneKey, { to: "some-other-device", from: PHONE_ID }, {
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        op: "sessions",
-        payload: {},
-      });
+      const env = await seal(
+        phoneKey,
+        { to: "some-other-device", from: PHONE_ID },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "sessions",
+          payload: {},
+        },
+      );
       // a compromised relay rewrites the routing to reach this daemon
       relay.sendToDaemon({ ...env, to: deviceId });
       await Bun.sleep(200);

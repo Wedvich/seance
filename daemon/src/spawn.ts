@@ -1,13 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DEFAULT_EFFORT,
-  DEFAULT_MODEL,
-  type RepoEntry,
-  type SpawnErrorCode,
-  type SpawnRequest,
-} from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnErrorCode, type SpawnRequest } from "@seance/shared";
 import { git } from "./exec.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { resolveTargetSession, tmux, tmuxOk, TmuxError } from "./tmux.ts";
@@ -31,16 +25,17 @@ export interface SpawnOutcome {
 export function slugify(src: string): string {
   const slug = src
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "")
     .slice(0, 40)
-    .replace(/-+$/, "");
+    .replace(/-+$/u, "");
   return slug === "" ? "session" : slug;
 }
 
+const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
+
 function timestamp(d: Date = new Date()): string {
-  const p = (n: number, w = 2): string => String(n).padStart(w, "0");
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 function shq(s: string): string {
@@ -119,11 +114,7 @@ interface InnerCommand {
   readonly seedDir: string | null;
 }
 
-async function buildInnerCommand(
-  prepared: Prepared,
-  windowName: string,
-  request: SpawnRequest,
-): Promise<InnerCommand> {
+async function buildInnerCommand(prepared: Prepared, windowName: string, request: SpawnRequest): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
@@ -141,7 +132,7 @@ async function buildInnerCommand(
   const seedFile = join(seedDir, "seed.txt");
   await Bun.write(seedFile, `${prepared.preamble}\n\nTask: ${request.prompt}\n`);
   // the substitution runs before exec, so the file is consumed at shell start
-  return { command: `${base} \"$(cat ${shq(seedFile)})\"`, seedDir };
+  return { command: `${base} "$(cat ${shq(seedFile)})"`, seedDir };
 }
 
 /**
@@ -153,9 +144,7 @@ async function buildInnerCommand(
 async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
   await Bun.sleep(waitMs);
-  const dead = (await tmux(["list-panes", "-t", windowId, "-F", "#{pane_dead}"])).stdout
-    .split("\n")[0]
-    ?.trim();
+  const dead = (await tmux(["list-panes", "-t", windowId, "-F", "#{pane_dead}"])).stdout.split("\n")[0]?.trim();
   if (dead === "1") {
     // -S -/-E -: the death redraw scrolls the final output into history — the visible screen keeps only the dead-pane banner
     const captured = (await tmux(["capture-pane", "-p", "-S", "-", "-E", "-", "-t", windowId])).stdout
@@ -184,8 +173,7 @@ export async function spawnSession(
   const worktreeName = `${slugify(slugSource)}-${timestamp()}`;
   const windowName = request.title ?? worktreeName;
 
-  const prepared =
-    request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
+  const prepared = request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
   const inner = await buildInnerCommand(prepared, windowName, request);
 
   const target = await resolveTargetSession(tmuxSessionGroup);

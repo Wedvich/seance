@@ -4,10 +4,10 @@
   "private": true,
   "description": "seanced — per-machine daemon that holds the relay socket and spawns claude in tmux",
   "license": "MIT",
-  "type": "module",
   "bin": {
     "seanced": "./src/main.ts"
   },
+  "type": "module",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"

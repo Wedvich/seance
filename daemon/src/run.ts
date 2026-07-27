@@ -42,12 +42,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       repos: state.repos,
       scannedAt: state.scannedAt ?? 0,
     };
-    return seal(key, { to: PHONE_ID, from: state.deviceId }, {
-      id: crypto.randomUUID(),
-      ts: Date.now(),
-      op: "machine-info",
-      payload: info,
-    });
+    return seal(
+      key,
+      { to: PHONE_ID, from: state.deviceId },
+      {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "machine-info",
+        payload: info,
+      },
+    );
   };
 
   const rescan = async (): Promise<State["repos"]> => {

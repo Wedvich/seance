@@ -5,8 +5,7 @@ import { join } from "node:path";
 
 export function configDir(): string {
   return (
-    process.env["SEANCE_CONFIG_DIR"] ??
-    join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "seance")
+    process.env["SEANCE_CONFIG_DIR"] ?? join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "seance")
   );
 }
 
@@ -34,5 +33,5 @@ export function logPath(): string {
 }
 
 export function expandTilde(p: string): string {
-  return p.replace(/^~(?=\/|$)/, homedir());
+  return p.replace(/^~(?=\/|$)/u, homedir());
 }

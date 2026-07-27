@@ -29,10 +29,6 @@ export async function exec(
   return { exitCode, stdout, stderr, timedOut };
 }
 
-export async function git(
-  cwd: string,
-  args: readonly string[],
-  timeoutMs?: number,
-): Promise<ExecResult> {
+export async function git(cwd: string, args: readonly string[], timeoutMs?: number): Promise<ExecResult> {
   return exec(["git", ...args], { cwd, timeoutMs });
 }
