@@ -21,16 +21,13 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
       type="button"
       className={offline ? "tile card tile-offline" : "tile card"}
       onClick={onClick}
-      aria-label={`${tile.label}: ${tile.value}${tile.sub === null ? "" : `, ${tile.sub}`}`}
+      aria-label={`${tile.label}: ${tile.value}`}
     >
       <span className="label">{tile.label}</span>
       <span className={valueClass}>
         {tile.dot !== null && <span className={tile.dot === "ok" ? "dot dot-ok" : "dot"} />}
         <span>{tile.value}</span>
       </span>
-      {tile.sub !== null && (
-        <span className={tile.subTone === "err" ? "tile-sub tile-sub-err" : "tile-sub"}>{tile.sub}</span>
-      )}
     </button>
   );
 }

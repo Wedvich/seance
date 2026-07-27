@@ -142,8 +142,7 @@ describe("banner and button", () => {
     expect(view.banner?.title).toBe("MacBook Pro is offline");
     expect(view.banner?.body).toContain("plugged in");
     expect(view.button).toEqual({ label: "MacBook Pro is asleep", enabled: false });
-    expect(view.machineTile.sub).toBe("asleep · seen 3d");
-    expect(view.machineTile.subTone).toBe("err");
+    expect(view.machineTile.dot).toBe("off");
     expect(view.footerStatus).toBe("Last seen 3d · sessions unknown");
   });
 
@@ -229,7 +228,6 @@ describe("selection", () => {
     const view = deriveView(state({ relay: relay({ machines: [bare] }) }), NOW);
     expect(view.repo).toBeNull();
     expect(view.repoTile.value).toBe("No repos");
-    expect(view.repoTile.sub).toBeNull();
   });
 });
 

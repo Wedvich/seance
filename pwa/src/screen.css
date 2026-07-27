@@ -191,9 +191,6 @@
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  /* Uniform rows: model and effort carry no sub-label, and a short bottom row
-     reads as a rendering fault rather than a choice. */
-  grid-auto-rows: 1fr;
   gap: 10px;
 }
 
@@ -231,15 +228,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tile-sub {
-  font-size: 11px;
-  color: var(--fg2);
-}
-
-.tile-sub-err {
-  color: var(--err);
 }
 
 .ignored-note {

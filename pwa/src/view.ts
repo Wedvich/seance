@@ -20,10 +20,8 @@ export type Tone = "fg2" | "err";
 export interface Tile {
   readonly label: string;
   readonly value: string;
-  readonly sub: string | null;
   readonly mono: boolean;
   readonly dot: "ok" | "off" | null;
-  readonly subTone: Tone;
 }
 
 export interface Banner {
@@ -247,39 +245,26 @@ export function deriveView(state: AppState, now: number): ViewModel {
     machineTile: {
       label: "MACHINE",
       value: machine?.name ?? "No machines",
-      sub:
-        machine === null
-          ? null
-          : machine.connected
-            ? "online now"
-            : `asleep · seen ${formatSeen(machine.lastSeen, now)}`,
       mono: false,
       dot: machine === null ? null : machine.connected ? "ok" : "off",
-      subTone: machine !== null && !machine.connected ? "err" : "fg2",
     },
     repoTile: {
       label: "REPOSITORY",
       value: repo === null ? "No repos" : abbreviatePath(repo.path, paths),
-      sub: repo === null ? null : "tap to change",
       mono: true,
       dot: null,
-      subTone: "fg2",
     },
     modelTile: {
       label: "MODEL",
       value: MODEL_LABELS[state.form.model],
-      sub: null,
       mono: false,
       dot: null,
-      subTone: "fg2",
     },
     effortTile: {
       label: "EFFORT",
       value: EFFORT_LABELS[state.form.effort],
-      sub: null,
       mono: false,
       dot: null,
-      subTone: "fg2",
     },
     worktreeHint: state.form.worktree ? "Branches off main, fast-forwarded first" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, now),
