@@ -1,0 +1,67 @@
+import { describe, expect, test } from "bun:test";
+import type { RepoEntry } from "@seance/shared";
+import { parsePanes } from "./sessions.ts";
+import { slugify } from "./spawn.ts";
+
+const repos: readonly RepoEntry[] = [
+  { name: "seance", path: "/Users/m/repos/seance", defaultBranch: "main" },
+  { name: "api", path: "/Users/m/repos/api", defaultBranch: "main" },
+];
+
+function line(id: string, name: string, cmd: string, path: string): string {
+  return `${id}\t${name}\t${cmd}\t${path}`;
+}
+
+describe("parsePanes", () => {
+  test("detects claude by version-string title, ignores shells", () => {
+    const raw = [
+      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
+      line("@2", "martin", "zsh", "/Users/m"),
+    ].join("\n");
+    const sessions = parsePanes(raw, repos);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.window).toBe("seance");
+    expect(sessions[0]?.repo).toBe("seance");
+  });
+
+  test("dedups grouped-session repeats and split panes by window id", () => {
+    const raw = [
+      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
+      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
+      line("@1", "seance", "zsh", "/Users/m/repos/seance"),
+    ].join("\n");
+    expect(parsePanes(raw, repos)).toHaveLength(1);
+  });
+
+  test("maps worktree paths back to their repo", () => {
+    const raw = line("@3", "fix (wt)", "2.1.220", "/Users/m/repos/seance/.claude/worktrees/fix-123");
+    const sessions = parsePanes(raw, repos);
+    expect(sessions[0]?.repo).toBe("seance");
+    expect(sessions[0]?.path).toContain("worktrees/fix-123");
+  });
+
+  test("repo is null outside every known repo", () => {
+    const raw = line("@4", "scratch", "2.1.220", "/Users/m/elsewhere");
+    expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
+  });
+
+  test("prefix match does not cross sibling boundaries", () => {
+    // /Users/m/repos/api-v2 must not match repo "api"
+    const raw = line("@5", "x", "2.1.220", "/Users/m/repos/api-v2");
+    expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
+  });
+
+  test("tolerates malformed lines and trailing newline", () => {
+    expect(parsePanes("garbage\n\n", repos)).toEqual([]);
+  });
+});
+
+describe("slugify", () => {
+  test("ports the /spawn slug rules", () => {
+    expect(slugify("Fix the flaky test!")).toBe("fix-the-flaky-test");
+    expect(slugify("  --- ")).toBe("session");
+    expect(slugify("")).toBe("session");
+    expect(slugify("a".repeat(60))).toHaveLength(40);
+    expect(slugify(`${"a".repeat(39)}-b`)).toBe("a".repeat(39));
+  });
+});
