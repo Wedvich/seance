@@ -27,8 +27,17 @@ export type SheetKind = "machine" | "repo" | "model" | "effort" | "settings";
 export type Verdict =
   | { readonly kind: "ok"; readonly window: string; readonly note?: string }
   | { readonly kind: "failed"; readonly code: SpawnErrorCode; readonly message: string; readonly repo: string }
-  /** The reply was lost — usually the app was backgrounded mid-spawn. */
-  | { readonly kind: "unknown"; readonly machine: string; readonly sessionCount: number | null };
+  /**
+   * `dropped` — the reply was lost, usually to a background/suspend mid-spawn, so
+   * a session may well be running. `undelivered` — the relay refused delivery, so
+   * nothing started. Never conflated: one is unknown, the other is a known no.
+   */
+  | {
+      readonly kind: "unknown";
+      readonly reason: "dropped" | "undelivered";
+      readonly machine: string;
+      readonly sessionCount: number | null;
+    };
 
 /** What survives a reload; transient fields are deliberately absent. */
 export interface PersistedForm {

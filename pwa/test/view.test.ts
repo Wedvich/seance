@@ -202,6 +202,11 @@ describe("sessions", () => {
     expect(view.meta).toBe("2 online · 0 asleep · 2 sessions");
   });
 
+  test("singularises the header total too", () => {
+    const view = deriveView(state({ sessions: { "dev-1": sessions(1) } }), NOW);
+    expect(view.meta).toBe("1 online · 0 asleep · 1 session");
+  });
+
   test("shows a checking state before the first reply", () => {
     expect(deriveView(state(), NOW).footerStatus).toBe("Checking sessions on MacBook Pro…");
   });

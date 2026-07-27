@@ -1,0 +1,598 @@
+/* Sizes, radii and weights here are the handoff's locked values, not preferences. */
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- header ---- */
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  background: var(--sur);
+  border-bottom: 1px solid var(--line);
+  padding-top: max(14px, env(safe-area-inset-top));
+}
+
+.header-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.header-meta {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 11px;
+  color: var(--fg2);
+}
+
+/* Visually 24px tall as designed; the ::after inset lifts the hit area to 44px. */
+.relay-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--sur2);
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 10.5px;
+  color: var(--fg2);
+  flex: none;
+}
+
+.relay-chip::after {
+  content: "";
+  position: absolute;
+  inset: -10px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg2);
+  flex: none;
+}
+
+.dot-ok {
+  background: var(--ok);
+}
+
+.dot-err {
+  background: var(--err);
+}
+
+.relay-chip .dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* ---- scrolling middle ---- */
+
+.column {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--gap) var(--gutter);
+}
+
+.card {
+  background: var(--sur);
+  border: 1px solid var(--line);
+}
+
+.label {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg2);
+}
+
+/* The prompt card absorbs leftover height so the screen always fills the viewport. */
+.prompt-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 170px;
+  padding: 16px;
+  border-radius: 16px;
+}
+
+.prompt-input {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  resize: none;
+  outline: none;
+  font-family: var(--serif);
+  font-size: 23px;
+  line-height: 1.35;
+  color: var(--fg);
+}
+
+.prompt-input::placeholder {
+  color: var(--fg2);
+}
+
+/* ---- banner ---- */
+
+.banner {
+  display: flex;
+  gap: 11px;
+  padding: 13px 14px;
+  border-radius: 14px;
+  text-align: left;
+  width: 100%;
+}
+
+.banner-rule {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--fg2);
+  flex: none;
+}
+
+.banner-err .banner-rule {
+  background: var(--err);
+}
+
+/* These live inside <button>, which permits only phrasing content — hence spans
+   made block rather than <p>. */
+.banner-text,
+.worktree-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner-title {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.banner-body {
+  display: block;
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+.banner-chevron {
+  margin-left: auto;
+  align-self: center;
+  color: var(--fg2);
+  flex: none;
+}
+
+/* ---- target grid ---- */
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  /* Uniform rows: model and effort carry no sub-label, and a short bottom row
+     reads as a rendering fault rather than a choice. */
+  grid-auto-rows: 1fr;
+  gap: 10px;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+  border-radius: 14px;
+  text-align: left;
+  min-width: 0;
+}
+
+.tile-offline {
+  border-color: var(--fg2);
+}
+
+.tile-value {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.tile-value-mono {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tile-value span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-sub {
+  font-size: 11px;
+  color: var(--fg2);
+}
+
+.tile-sub-err {
+  color: var(--err);
+}
+
+.ignored-note {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: var(--fg2);
+}
+
+/* ---- worktree row ---- */
+
+.worktree {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  text-align: left;
+  width: 100%;
+}
+
+.worktree-title {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.worktree-hint {
+  display: block;
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--fg2);
+}
+
+.toggle {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  border-radius: 10px;
+  background: var(--line);
+  flex: none;
+}
+
+.toggle-on {
+  background: var(--acc);
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #ffffff;
+  transition: left 0.18s ease;
+}
+
+.toggle-on .toggle-knob {
+  left: 23px;
+}
+
+/* ---- footer ---- */
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  background: var(--sur);
+  border-top: 1px solid var(--line);
+}
+
+.footer-status {
+  font-size: 11.5px;
+  color: var(--fg2);
+  min-height: 17px;
+}
+
+.primary {
+  width: 100%;
+  padding: 15px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--acc);
+  color: var(--acc-fg);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.primary:disabled {
+  background: var(--sur2);
+  color: var(--fg2);
+  cursor: default;
+}
+
+.quiet {
+  width: 100%;
+  padding: 13px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fg2);
+  font-size: 14px;
+}
+
+/* ---- bottom sheet ---- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: flex-end;
+  z-index: 10;
+}
+
+.sheet {
+  width: 100%;
+  max-height: 74%;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 14px 0;
+  padding-bottom: max(14px, env(safe-area-inset-bottom));
+  background: var(--sur);
+  border-top: 1px solid var(--line);
+  border-radius: 20px 20px 0 0;
+  animation: sheet-in 0.2s ease-out;
+  text-align: left;
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+}
+
+.sheet-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.sheet-close {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--sur2);
+  color: var(--fg);
+  flex: none;
+}
+
+.sheet-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  padding-bottom: 10px;
+}
+
+.sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 12px 13px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  min-width: 0;
+}
+
+.sheet-item-selected {
+  background: var(--sur2);
+}
+
+.sheet-item-disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.sheet-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sheet-item-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-item-mono {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+
+.sheet-item-sub {
+  display: block;
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--fg2);
+}
+
+.sheet-check {
+  margin-left: auto;
+  color: var(--acc);
+  flex: none;
+}
+
+/* ---- verdict ---- */
+
+.verdict {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 28px 22px;
+  text-align: center;
+}
+
+.verdict-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--sur2);
+  color: var(--acc);
+  font-size: 20px;
+  flex: none;
+}
+
+.verdict-glyph-err {
+  color: var(--err);
+}
+
+/* Indeterminate is neither success nor failure, so it borrows neither colour. */
+.verdict-glyph-muted {
+  color: var(--fg2);
+}
+
+.verdict-headline {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 400;
+}
+
+.verdict-body {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--fg2);
+}
+
+.verdict-detail {
+  width: 100%;
+  margin: 0;
+  padding: 12px 13px;
+  border-radius: 12px;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg2);
+  text-align: left;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  /* Captured pane output can be 20 lines; scroll rather than push the buttons off. */
+  max-height: 13em;
+  overflow-y: auto;
+}
+
+.verdict-actions {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---- setup ---- */
+
+.setup {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--gap) var(--gutter);
+}
+
+.setup-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field input {
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 13px;
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--acc);
+}
+
+.field-hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+.field-error {
+  font-size: 11.5px;
+  color: var(--err);
+}

@@ -151,7 +151,7 @@ function deriveMeta(state: AppState): string {
     .map((machine) => sessionCount(state, machine.deviceId))
     .filter((count): count is number => count !== null);
   const total = counted.reduce((sum, count) => sum + count, 0);
-  return `${online} online · ${asleep} asleep · ${total} sessions`;
+  return `${online} online · ${asleep} asleep · ${total} ${total === 1 ? "session" : "sessions"}`;
 }
 
 function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
