@@ -37,7 +37,7 @@ export async function cmdInit(): Promise<void> {
   console.log("  1. paste a PSK into psk — generate it offline, e.g. in 1Password or:");
   console.log("       openssl rand -base64 32");
   console.log("  2. fill in relayUrl, repoRoots, and a bearerToken shared with the relay:");
-  console.log("       openssl rand 32 | base64 | tr '+/' '-_' | tr -d '='");
+  console.log("       openssl rand -base64 32 | tr '+/' '-_' | tr -d '='");
   console.log("  3. run `seanced doctor`, then `seanced install`");
 }
 

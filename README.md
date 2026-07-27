@@ -39,30 +39,84 @@ private tmux server, and a stub claude; the relay and PWA suites boot the real
 Worker and Durable Object under workerd via Miniflare — the PWA's relay client
 is exercised against the shipped relay rather than a double.
 
-## Deploying the relay
+## Setting up end to end
+
+Everything runs from one dev machine — which can also be the first daemon
+machine. There is no chicken-and-egg: the two secrets are minted by you before
+anything exists, and the only other shared value (the relay URL) is _produced_
+by step 2 and consumed by steps 3 and 4.
+
+Prerequisites: [Bun](https://bun.sh), a Cloudflare account, and this repo
+cloned with `bun install` run at the root. Each daemon machine (macOS for now)
+additionally needs `tmux`, `git`, and `claude` on PATH.
+
+### 1. Mint the shared secrets
+
+```sh
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='   # bearer token
+openssl rand -base64 32                               # PSK
+```
+
+Keep both in a password manager — every daemon and the phone get the same two
+values. The bearer token must be base64url-safe because the app sends it as a
+query parameter: a `+` decodes to a space and you get a silent 401 instead of
+an error. The PSK is the actual trust boundary; the relay never sees it.
+
+### 2. Deploy the relay
 
 ```sh
 cd relay
-bun run wrangler secret put BEARER_TOKEN   # same value as every daemon config + the app
-bun run deploy
+bun run wrangler login                     # once
+bun run wrangler secret put BEARER_TOKEN   # paste the bearer token
+bun run deploy                             # prints https://seance-relay.<subdomain>.workers.dev
 ```
 
-## Deploying the app
+Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
+from it.
+
+### 3. Deploy the app
 
 `VITE_RELAY_URL` is required: it pins the CSP's `connect-src` to your relay, so
-a build without it fails rather than shipping a page that cannot connect.
+a build without it fails rather than shipping a page that cannot connect. It
+also means pointing the app at a different relay later requires a rebuild, not
+just a settings edit.
 
 ```sh
 cd pwa
 VITE_RELAY_URL=wss://seance-relay.<subdomain>.workers.dev/app bun run deploy
 ```
 
-Daemons then point `relayUrl` at
-`wss://seance-relay.<your-subdomain>.workers.dev/daemon`. For local runs, put
-`BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see `.dev.vars.example`)
-and use `bun run dev`.
+### 4. Install seanced on each machine
 
-## Storing the PSK
+Distribution is the git checkout itself: the launchd agent runs
+`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. Run
+the CLI the same way from the checkout root (`alias seanced='bun
+<checkout>/daemon/src/main.ts'` if you like).
+
+```sh
+git clone <this repo> && cd seance && bun install
+bun daemon/src/main.ts init      # writes the ~/.config/seance/config.json skeleton
+```
+
+Edit `~/.config/seance/config.json`:
+
+- `relayUrl` — `wss://seance-relay.<subdomain>.workers.dev/daemon` (must end
+  in `/daemon`)
+- `bearerToken` — from step 1
+- `psk` — from step 1, or leave empty and run `seanced psk-import` to keep it
+  in the macOS login keychain instead
+- `repoRoots` — directories to scan for repos
+
+```sh
+bun daemon/src/main.ts doctor    # preflight: config, tmux/git/claude, relay reachability
+bun daemon/src/main.ts install   # launchd agent: RunAtLoad + KeepAlive
+```
+
+`doctor` prints a PSK fingerprint — compare it across machines to confirm they
+all hold the same key. A daemon with the right token and PSK simply appears in
+the app; there is no pairing step.
+
+#### Storing the PSK
 
 On macOS the PSK belongs in the login keychain, not `config.json`. Run
 `seanced psk-import` bare and `security` prompts for it on the terminal, or
@@ -74,3 +128,24 @@ op item get Séance --fields password --reveal | seanced psk-import
 ```
 
 Then clear `psk` in `config.json` and `seanced restart`.
+
+### 5. Set up the phone
+
+Open `https://seance-pwa.<subdomain>.workers.dev`, add it to your home screen,
+and in first-run setup enter the relay URL
+(`wss://seance-relay.<subdomain>.workers.dev/app`), the bearer token, and the
+PSK. Machines appear as their daemons register.
+
+### Updating
+
+```sh
+git pull && bun daemon/src/main.ts restart    # daemon, on each machine
+bun run --cwd relay deploy                    # relay
+VITE_RELAY_URL=... bun run --cwd pwa deploy   # app
+```
+
+### Local development
+
+Put `BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see
+`.dev.vars.example`) and use `bun run dev` in `relay/` and `pwa/` — the app
+defaults to `ws://127.0.0.1:8787/app` outside production builds.
