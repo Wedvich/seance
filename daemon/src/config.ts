@@ -148,7 +148,7 @@ export function bearerTokenWarnings(token: string): readonly string[] {
       .join(" ");
     warnings.push(
       `bearerToken has characters the app's ?t= parameter mangles (${offenders}) — regenerate as base64url: ` +
-        `openssl rand 32 | base64 | tr '+/' '-_' | tr -d '='`,
+        `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`,
     );
   }
   if (token.length < MIN_BEARER_LENGTH) {
