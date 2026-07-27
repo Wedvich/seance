@@ -80,7 +80,12 @@ export async function startStack(base: string): Promise<Stack> {
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
-      spawnWaitMs: 700,
+      // The failing stub dies at 0.3s + process startup, which macOS can
+      // stretch by hundreds of ms (load, first-exec scanning of the fresh
+      // script). The deadline needs real headroom over that or the daemon
+      // reports a false ok; verifyPaneAlive polls, so failing spawns still
+      // resolve at death time, and only successful spawns pay the full wait.
+      spawnWaitMs: 1_500,
     });
 
   let daemon = await startTestDaemon();

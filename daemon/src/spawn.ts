@@ -137,15 +137,30 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
 
 /**
  * tmux new-window returns 0 as soon as the window frame exists — it knows
- * nothing about whether claude started or died. Keep the pane on exit, wait,
- * and check pane_dead: a dead pane means claude failed and "spawned" would
- * be a false success. Ported from /spawn.
+ * nothing about whether claude started or died. Keep the pane on exit and
+ * poll pane_dead until the deadline: a dead pane means claude failed and
+ * "spawned" would be a false success. Polling rather than one check at the
+ * deadline reports the death as soon as it happens; "alive" still means
+ * only "survived waitMs". Ported from /spawn.
  */
 async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
-  await Bun.sleep(waitMs);
-  const dead = (await tmux(["list-panes", "-t", windowId, "-F", "#{pane_dead}"])).stdout.split("\n")[0]?.trim();
-  if (dead === "1") {
+  const deadline = Bun.nanoseconds() + waitMs * 1e6;
+  let dead = false;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next, nothing to parallelize
+    const panes = await tmux(["list-panes", "-t", windowId, "-F", "#{pane_dead}"]);
+    // A vanished window is a death that beat remain-on-exit: the pane died
+    // before the option landed and tmux closed the window, output and all.
+    if (panes.exitCode !== 0) {
+      throw new SpawnFailure("claude_died", "claude exited before the session started (window already closed)");
+    }
+    dead = panes.stdout.split("\n")[0]?.trim() === "1";
+    if (dead || Bun.nanoseconds() >= deadline) break;
+    // oxlint-disable-next-line no-await-in-loop
+    await Bun.sleep(100);
+  }
+  if (dead) {
     // -S -/-E -: the death redraw scrolls the final output into history — the visible screen keeps only the dead-pane banner
     const captured = (await tmux(["capture-pane", "-p", "-S", "-", "-E", "-", "-t", windowId])).stdout
       .split("\n")

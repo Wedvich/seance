@@ -32,6 +32,14 @@ afterAll(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
+// Store.spawn() silently no-ops unless the machine entry already carries the
+// repo — the daemon registers before its scan finishes, so `connected` alone
+// is a spawn-shaped race, not readiness.
+function spawnReady(state: AppState): boolean {
+  const machine = ownMachine(state, stack.deviceId);
+  return machine?.connected === true && machine.repos.some((r) => r.name === "myrepo");
+}
+
 describe("daemon ↔ relay ↔ app", () => {
   test("machine appears decrypted and sessions fan out on connect", async () => {
     const app = startApp(stack);
@@ -70,7 +78,7 @@ describe("daemon ↔ relay ↔ app", () => {
     });
     let window: string | null = null;
     try {
-      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      await app.waitForApp(spawnReady, "machine ready to spawn");
       await app.store.spawn();
 
       const { verdict, form } = app.store.getState();
@@ -101,7 +109,7 @@ describe("daemon ↔ relay ↔ app", () => {
     });
     process.env["SEANCE_CLAUDE_BIN"] = stack.stub.failing;
     try {
-      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      await app.waitForApp(spawnReady, "machine ready to spawn");
       await app.store.spawn();
 
       const { verdict } = app.store.getState();
@@ -123,10 +131,10 @@ describe("daemon ↔ relay ↔ app", () => {
     let recovered: ReturnType<typeof startApp> | null = null;
     let window: string | null = null;
     try {
-      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      await app.waitForApp(spawnReady, "machine ready to spawn");
 
       // Close the app after the request is in flight but well before the
-      // daemon's reply (>= 700ms spawnWaitMs) — the iOS-kill-mid-spawn shape.
+      // daemon's reply (>= 1500ms spawnWaitMs) — the iOS-kill-mid-spawn shape.
       const spawning = app.store.spawn();
       await Bun.sleep(300);
       app.stop();
@@ -138,7 +146,8 @@ describe("daemon ↔ relay ↔ app", () => {
       const pending = app.store.pendingSpawn;
       expect(pending).not.toBeNull();
 
-      // Let the daemon finish the spawn nobody heard the answer to.
+      // Let the daemon finish the spawn nobody heard the answer to (its
+      // window exists from new-window time, well before the verdict).
       await Bun.sleep(1_500);
       window = (await listWindows()).find((name) => name.startsWith("recover-me-")) ?? null;
       expect(window).not.toBeNull();

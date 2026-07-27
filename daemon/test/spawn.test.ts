@@ -11,6 +11,10 @@ import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
 const WAIT = { waitMs: 700 };
+// Failure tests race the stub's actual death (0.3s sleep + process startup,
+// which macOS can stretch under load) against the deadline. verifyPaneAlive
+// polls, so a wide deadline adds no latency to a spawn that really dies.
+const FAIL_WAIT = { waitMs: 5_000 };
 let base: string;
 let fixture: GitFixture;
 let stub: ClaudeStub;
@@ -109,10 +113,10 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.failing;
     try {
       await expect(
-        spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", WAIT),
+        spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT),
       ).rejects.toThrow(SpawnFailure);
       try {
-        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", WAIT);
+        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT);
       } catch (err) {
         expect((err as SpawnFailure).code).toBe("claude_died");
         expect((err as SpawnFailure).message).toContain("boom: untrusted workspace");
