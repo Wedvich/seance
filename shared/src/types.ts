@@ -9,6 +9,16 @@ export const APP_PATH = "/app";
 /** Browsers cannot set WS headers, so the app passes the bearer token as `?t=`. */
 export const TOKEN_PARAM = "t";
 
+/**
+ * App-side close codes (4000–4999 is the app-defined range). A browser cannot
+ * read the HTTP status of a failed WS handshake, so `/app` accepts the upgrade
+ * and then closes with one of these; both are permanent, so the app must stop
+ * reconnecting rather than back off. Daemons read the real 401 from `fetch`,
+ * so `/daemon` keeps refusing pre-upgrade.
+ */
+export const CLOSE_BAD_REQUEST = 4400;
+export const CLOSE_UNAUTHORIZED = 4401;
+
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "medium";
 

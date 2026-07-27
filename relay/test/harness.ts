@@ -167,10 +167,11 @@ export async function connectDaemon(relay: TestRelay): Promise<Client> {
   return open(new WebSocket(url.href, { headers: { authorization: `Bearer ${relay.token}` } }));
 }
 
-export async function connectApp(relay: TestRelay): Promise<Client> {
+/** `token` overrides the valid one so a rejected app handshake can be observed. */
+export async function connectApp(relay: TestRelay, token: string | null = relay.token): Promise<Client> {
   const url = new URL("/app", relay.url);
   url.protocol = "ws:";
-  url.searchParams.set("t", relay.token);
+  if (token !== null) url.searchParams.set("t", token);
   return open(new WebSocket(url.href));
 }
 

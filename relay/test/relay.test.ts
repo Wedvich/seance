@@ -1,4 +1,11 @@
-import { APP_ID, type RegistryView, type RelayToAppFrame, type RelayToDaemonFrame } from "@seance/shared";
+import {
+  APP_ID,
+  CLOSE_BAD_REQUEST,
+  CLOSE_UNAUTHORIZED,
+  type RegistryView,
+  type RelayToAppFrame,
+  type RelayToDaemonFrame,
+} from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connectApp, connectDaemon, envelope, startRelay, type Client, type TestRelay } from "./harness.ts";
 
@@ -63,9 +70,26 @@ describe("upgrade", () => {
     expect((await relay.probe("/daemon", { headers: { authorization: TOKEN } })).status).toBe(401);
   });
 
-  test("401s an app without a valid ?t= token", async () => {
+  test("401s a non-upgrade app request without a valid ?t= token", async () => {
     expect((await relay.probe("/app")).status).toBe(401);
     expect((await relay.probe(`/app?t=${TOKEN}x`)).status).toBe(401);
+  });
+
+  // A browser cannot read the status of a rejected handshake, so the reason has
+  // to arrive as a close code the app can act on instead of retrying forever.
+  test("closes an app handshake with a wrong token as 4401", async () => {
+    const app = await connectApp(relay, `${TOKEN}x`);
+    expect(await app.waitClosed()).toBe(CLOSE_UNAUTHORIZED);
+  });
+
+  test("closes an app handshake with no token at all as 4400", async () => {
+    const app = await connectApp(relay, null);
+    expect(await app.waitClosed()).toBe(CLOSE_BAD_REQUEST);
+  });
+
+  test("never pushes the registry to a rejected app handshake", async () => {
+    const app = await connectApp(relay, `${TOKEN}x`);
+    await app.expectNo("registry");
   });
 
   test("426s an authenticated request that is not a websocket upgrade", async () => {
