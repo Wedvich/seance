@@ -6,11 +6,14 @@
         "hooks": [
           {
             "type": "command",
-            "statusMessage": "Formatting with oxfmt",
-            "command": "jq -r '[(.tool_input.file_path? // empty), (.tool_response | objects | .filePath // empty), (.tool_input.files[]?.path // empty)] | .[]' | while read -r f; do root=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; case \"$f\" in /*) ;; *) f=\"$root/$f\" ;; esac; case \"$f\" in \"$root\"/*) \"$root/node_modules/.bin/oxfmt\" \"$f\" >/dev/null 2>&1 ;; esac; done; true"
+            "command": "jq -r '[(.tool_input.file_path? // empty), (.tool_response | objects | .filePath // empty), (.tool_input.files[]?.path // empty)] | .[]' | while read -r f; do root=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; case \"$f\" in /*) ;; *) f=\"$root/$f\" ;; esac; case \"$f\" in \"$root\"/*) \"$root/node_modules/.bin/oxfmt\" \"$f\" >/dev/null 2>&1 ;; esac; done; true",
+            "statusMessage": "Formatting with oxfmt"
           }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "cloudflare@claude-plugins-official": true
   }
 }

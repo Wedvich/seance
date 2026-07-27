@@ -101,6 +101,10 @@ export async function startStack(base: string): Promise<Stack> {
     deviceId,
     daemon,
     restartDaemon: async (): Promise<void> => {
+      // A failed test's finally can land here with the old daemon still live;
+      // an orphan would share the state dir, deviceId and tmux for the rest
+      // of the process. stop() is idempotent, so always stop before starting.
+      daemon.stop();
       daemon = await startTestDaemon();
       stack.daemon = daemon;
     },

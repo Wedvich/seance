@@ -25,7 +25,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await stack.dispose();
+  // startStack failing in beforeAll leaves stack unset; a teardown TypeError
+  // here would mask the real error.
+  await stack?.dispose();
   delete process.env["SEANCE_STATE_DIR"];
   delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
