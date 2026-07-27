@@ -1,0 +1,263 @@
+import { chmod, mkdir, stat } from "node:fs/promises";
+import { hostname } from "node:os";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
+import { configSkeleton, loadConfig, runnableProblems } from "./config.ts";
+import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
+import { configDir, configPath, logPath, statePath } from "./paths.ts";
+import { scanRepos } from "./scan.ts";
+import { listClaudeSessions } from "./sessions.ts";
+import { SpawnFailure, spawnSession } from "./spawn.ts";
+import { loadOrInitState, readRuntime, saveState } from "./state.ts";
+import { tmux } from "./tmux.ts";
+
+export async function cmdInit(): Promise<void> {
+  const path = configPath();
+  if (await Bun.file(path).exists()) {
+    console.log(`config already exists at ${path} — not touching it`);
+  } else {
+    await mkdir(configDir(), { recursive: true });
+    await Bun.write(path, configSkeleton(hostname().replace(/\.local$/, "")));
+    await chmod(path, 0o600);
+    console.log(`wrote ${path} (0600)`);
+  }
+  const state = await loadOrInitState();
+  console.log(`deviceId: ${state.deviceId}`);
+  console.log("\nnext steps:");
+  console.log("  1. generate a 32-byte base64 PSK offline (e.g. in 1Password) and paste it into psk");
+  console.log("  2. fill in relayUrl, bearerToken, and repoRoots");
+  console.log("  3. run `seanced doctor`, then `seanced install`");
+}
+
+export async function cmdScan(): Promise<void> {
+  const config = await loadConfig();
+  const state = await loadOrInitState();
+  const repos = await scanRepos(config.repoRoots, state.repos);
+  await saveState({ ...state, repos, scannedAt: Date.now() });
+  for (const repo of repos) {
+    console.log(`${repo.name.padEnd(30)} ${(repo.defaultBranch ?? "-").padEnd(12)} ${repo.path}`);
+  }
+  console.log(`\n${repos.length} repos`);
+}
+
+export interface SpawnCliArgs {
+  readonly repo: string;
+  readonly here: boolean;
+  readonly title?: string;
+  readonly prompt?: string;
+}
+
+const SPAWN_USAGE = "usage: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]";
+
+/** Mirrors /spawn: -p is optional, bare words join into the prompt. Exported for tests. */
+export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
+  let repo: string | undefined;
+  let here = false;
+  let title: string | undefined;
+  const promptParts: string[] = [];
+  let expect: "title" | "prompt" | null = null;
+  for (const arg of argv) {
+    if (expect === "title") {
+      title = arg;
+      expect = null;
+    } else if (expect === "prompt") {
+      promptParts.push(arg);
+      expect = null;
+    } else if (arg === "--here") {
+      here = true;
+    } else if (arg === "-t") {
+      expect = "title";
+    } else if (arg === "-p") {
+      expect = "prompt";
+    } else if (arg.startsWith("-")) {
+      throw new Error(SPAWN_USAGE);
+    } else if (repo === undefined) {
+      repo = arg;
+    } else {
+      promptParts.push(arg);
+    }
+  }
+  if (repo === undefined) throw new Error(SPAWN_USAGE);
+  const prompt = promptParts.join(" ");
+  return {
+    repo,
+    here,
+    ...(title !== undefined ? { title } : {}),
+    ...(prompt !== "" ? { prompt } : {}),
+  };
+}
+
+/** The relay-free spawn path — same code the phone request runs, driven over SSH. */
+export async function cmdSpawn(argv: readonly string[]): Promise<void> {
+  const args = parseSpawnArgs(argv);
+  const config = await loadConfig();
+  const state = await loadOrInitState();
+  const repos = state.repos.length > 0 ? state.repos : await scanRepos(config.repoRoots);
+  const request: SpawnRequest = {
+    repo: args.repo,
+    mode: args.here ? "here" : "worktree",
+    ...(args.title !== undefined ? { title: args.title } : {}),
+    ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
+  };
+  try {
+    const outcome = await spawnSession(request, repos, config.tmuxSession);
+    if (outcome.note !== undefined) console.log(`note: ${outcome.note}`);
+    console.log(`spawned '${outcome.window}' (${outcome.path})`);
+  } catch (err) {
+    if (err instanceof SpawnFailure) {
+      console.error(`spawn failed [${err.code}] — ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+export async function cmdStatus(): Promise<void> {
+  const loaded = await serviceLoaded();
+  console.log(`service:   ${loaded ? "loaded" : "not loaded"} (${plistPath()})`);
+  const runtime = await readRuntime();
+  if (runtime === null) {
+    console.log("daemon:    no runtime info — never started?");
+    return;
+  }
+  let alive = false;
+  try {
+    process.kill(runtime.pid, 0);
+    alive = true;
+  } catch {
+    // dead or not ours
+  }
+  console.log(`daemon:    pid ${runtime.pid} ${alive ? "running" : "not running"}`);
+  console.log(`relay:     ${runtime.connected && alive ? `connected since ${new Date(runtime.connectedSince ?? 0).toISOString()}` : "disconnected"}`);
+  const state = await loadOrInitState();
+  console.log(`repos:     ${state.repos.length}${state.scannedAt !== null ? ` (scanned ${new Date(state.scannedAt).toISOString()})` : ""}`);
+  console.log(`defaults:  model=${DEFAULT_MODEL} effort=${DEFAULT_EFFORT}`);
+}
+
+async function checkRelayReachable(url: string, bearerToken: string): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url, { headers: { authorization: `Bearer ${bearerToken}` } });
+    } catch (err) {
+      resolvePromise(String(err));
+      return;
+    }
+    const timer = setTimeout(() => {
+      ws.close();
+      resolvePromise("timed out after 5s");
+    }, 5_000);
+    ws.addEventListener("open", () => {
+      clearTimeout(timer);
+      ws.close();
+      resolvePromise(null);
+    });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      resolvePromise("connection failed");
+    });
+  });
+}
+
+export async function cmdDoctor(): Promise<void> {
+  let failed = false;
+  const ok = (msg: string): void => console.log(`  ok    ${msg}`);
+  const warn = (msg: string): void => console.log(`  warn  ${msg}`);
+  const fail = (msg: string): void => {
+    failed = true;
+    console.log(`  FAIL  ${msg}`);
+  };
+
+  console.log("config");
+  let config;
+  try {
+    config = await loadConfig();
+    ok(`loads from ${configPath()}`);
+    for (const problem of runnableProblems(config)) fail(problem);
+    if (runnableProblems(config).length === 0) ok("psk, bearerToken, relayUrl look valid");
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+
+  console.log("binaries");
+  for (const bin of ["tmux", "git", "claude"]) {
+    const found = Bun.which(bin);
+    if (found === null) fail(`${bin} not on PATH`);
+    else ok(`${bin} at ${found}`);
+  }
+
+  if (config !== undefined) {
+    console.log("repo roots");
+    for (const root of config.repoRoots) {
+      try {
+        const info = await stat(root);
+        if (info.isDirectory()) ok(root);
+        else fail(`${root} is not a directory`);
+      } catch {
+        fail(`${root} does not exist`);
+      }
+    }
+
+    console.log("tmux");
+    const sessions = await tmux(["list-sessions", "-F", "#{session_name}"]);
+    if (sessions.exitCode === 0) {
+      ok(`server running (sessions: ${sessions.stdout.trim().split("\n").join(", ")})`);
+    } else {
+      warn("no tmux server — fine; spawn creates the session detached");
+    }
+
+    console.log("relay");
+    if (/^wss?:\/\/.+/.test(config.relayUrl)) {
+      const problem = await checkRelayReachable(config.relayUrl, config.bearerToken);
+      if (problem === null) ok(`reachable at ${config.relayUrl}`);
+      else warn(`${config.relayUrl}: ${problem} (not deployed yet?)`);
+    } else {
+      warn("relayUrl not set — skipping reachability");
+    }
+  }
+
+  console.log("state");
+  const state = await loadOrInitState();
+  ok(`deviceId ${state.deviceId} (${statePath()})`);
+
+  const logFile = Bun.file(logPath());
+  if (await logFile.exists()) {
+    const size = logFile.size;
+    if (size > 10 * 1024 * 1024) warn(`log is ${Math.round(size / 1024 / 1024)}MB — consider truncating (${logPath()})`);
+    else ok(`log ${Math.round(size / 1024)}KB (${logPath()})`);
+  }
+
+  console.log("service");
+  if (process.platform === "darwin") {
+    if (await serviceLoaded()) ok("launchd agent loaded");
+    else warn("launchd agent not loaded — run `seanced install`");
+  } else {
+    warn("not macOS — service management deferred (WSL support pending)");
+  }
+
+  if (failed) process.exit(1);
+}
+
+export async function cmdInstall(): Promise<void> {
+  const target = await installService();
+  console.log(`installed and started launchd agent (${target})`);
+  console.log(`logs: ${logPath()}`);
+}
+
+export async function cmdUninstall(): Promise<void> {
+  await uninstallService();
+  console.log("launchd agent unloaded and plist removed");
+}
+
+export async function cmdRestart(): Promise<void> {
+  await restartService();
+  console.log("kickstarted");
+}
+
+export async function cmdSessions(): Promise<void> {
+  const state = await loadOrInitState();
+  const sessions = await listClaudeSessions(state.repos);
+  for (const s of sessions) {
+    console.log(`${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
+  }
+  console.log(`\n${sessions.length} running claude session${sessions.length === 1 ? "" : "s"}`);
+}
