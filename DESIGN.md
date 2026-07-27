@@ -400,7 +400,12 @@ together (re-sends registry data on every poll, useless offline).
 - **Testing: `bun:test`**, overriding the personal Vitest default — tests
   run on the runtime the daemon ships on (Bun.spawn, WebSocket, WebCrypto
   work without shims), and the integration harness is a throwaway Bun
-  WebSocket relay under the daemon's test dir (not the real relay).
+  WebSocket relay under the daemon's test dir (not the real relay). The
+  `e2e/` workspace then wires the real daemon, the real Worker + DO under
+  workerd, and the real app transport + store together for the user flows;
+  the pairwise doubles stay, because they are controllable in ways the real
+  components forbid (a relay that stops answering pings, a daemon with a
+  scripted handler map).
 - **Sleep policy**: daemon holds `caffeinate -is` **only while on AC power**;
   on battery the Mac sleeps and shows offline. Keeps desk machines always
   spawnable without cooking laptop batteries. Rejected: no assertion

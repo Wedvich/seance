@@ -24,7 +24,7 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
   const seen = new Set<string>();
   const sessions: SessionEntry[] = [];
   for (const line of raw.split("\n")) {
-    const [windowId, windowName, command, panePath] = line.split("\t");
+    const [windowId, windowName, command, panePath] = line.split("|");
     if (windowId === undefined || windowName === undefined || command === undefined || panePath === undefined) {
       continue;
     }
@@ -38,11 +38,15 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
 }
 
 export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<readonly SessionEntry[]> {
+  // `|` rather than a tab: tmux 3.4 (Linux distros) mangles non-printables in
+  // format output (tab becomes `_`), while printable separators survive on
+  // every version. A `|` inside a window name or path misparses that line,
+  // exactly as a tab did before.
   const result = await tmux([
     "list-panes",
     "-a",
     "-F",
-    "#{window_id}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}",
+    "#{window_id}|#{window_name}|#{pane_current_command}|#{pane_current_path}",
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running
   return parsePanes(result.stdout, repos);

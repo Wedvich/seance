@@ -10,7 +10,7 @@
     "deploy": "vite build && wrangler deploy",
     "dev": "vite",
     "preview": "vite preview",
-    "test": "bun test",
+    "test": "bun test --timeout 15000",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test"
   },
   "dependencies": {

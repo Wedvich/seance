@@ -34,10 +34,17 @@ notices.
 PWA implemented: spawn screen, bottom sheets, verdicts, first-run setup and
 settings, offline-capable shell. WSL support deferred.
 
-Tests: `bun test`. The daemon suite uses a throwaway in-process relay, a
+Tests: `bun run test` (the script raises bun's 5s hook timeout — the suites
+that boot workerd need the headroom). The daemon suite uses a throwaway in-process relay, a
 private tmux server, and a stub claude; the relay and PWA suites boot the real
 Worker and Durable Object under workerd via Miniflare — the PWA's relay client
-is exercised against the shipped relay rather than a double.
+is exercised against the shipped relay rather than a double. The `e2e/` suite
+then wires all three real components together — the daemon from `daemon/src`,
+the Worker + Durable Object under workerd, and the app's relay client and
+store — and runs the user flows end to end: machine discovery, spawns (and
+their failures), dropped-reply reconciliation, rescan, and daemon restart.
+It needs `tmux` and `git` on PATH, but no Cloudflare account and no real
+`claude`.
 
 ## Setting up end to end
 

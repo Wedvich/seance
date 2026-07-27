@@ -89,6 +89,11 @@ export class RelayClient {
     if (this.#stopped) return;
     const ws = new WebSocket(this.#opts.url, {
       headers: { authorization: `Bearer ${this.#opts.bearerToken}` },
+      // Bun's client and workerd disagree about permessage-deflate and the
+      // socket dies with 1002 after a few frames (see pwa/test/client.test.ts).
+      // Cloudflare never negotiates the extension on incoming Worker sockets,
+      // so in production this only removes an offer that was always declined.
+      perMessageDeflate: false,
     });
     this.#ws = ws;
 

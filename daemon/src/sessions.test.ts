@@ -9,7 +9,7 @@ const repos: readonly RepoEntry[] = [
 ];
 
 function line(id: string, name: string, cmd: string, path: string): string {
-  return `${id}\t${name}\t${cmd}\t${path}`;
+  return `${id}|${name}|${cmd}|${path}`;
 }
 
 describe("parsePanes", () => {

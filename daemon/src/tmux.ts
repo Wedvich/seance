@@ -24,10 +24,13 @@ export async function tmuxOk(args: readonly string[]): Promise<string> {
  * matching session: create it detached; the next terminal attaches to it.
  */
 export async function resolveTargetSession(group: string): Promise<string> {
-  const result = await tmux(["list-sessions", "-F", "#{session_name}\t#{session_group}"]);
+  // `|` rather than a tab: tmux 3.4 (Linux distros) mangles non-printables in
+  // format output (tab becomes `_`), while printable separators survive on
+  // every version.
+  const result = await tmux(["list-sessions", "-F", "#{session_name}|#{session_group}"]);
   if (result.exitCode === 0) {
     for (const line of result.stdout.split("\n")) {
-      const [name, sessionGroup] = line.split("\t");
+      const [name, sessionGroup] = line.split("|");
       if (name !== undefined && name !== "" && (name === group || sessionGroup === group)) {
         return name;
       }

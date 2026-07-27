@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Séance spawns remote-controlled Claude Code sessions on dev machines via a blind relay. Bun workspaces
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
-(Vite + React app), `shared/` (wire types + envelope crypto).
+(Vite + React app), `shared/` (wire types + envelope crypto), `e2e/` (full-stack test suite, no
+shipped code).
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:
 
@@ -14,7 +15,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 
 ## Commands
 
-- `bun test` — everything; single file: `bun test daemon/src/scan.test.ts`
+- `bun run test` — everything (the script raises bun's 5s hook timeout, which the workerd-booting
+  suites need); single file: `bun test daemon/src/scan.test.ts`
 - `bun run typecheck` / `bun run lint` / `bun run lint:fix` / `bun run format:check` (root)
 - `bun run dev` in `relay/` and `pwa/` for local dev; needs a gitignored `relay/.dev.vars` with
   `BEARER_TOKEN` (see `.dev.vars.example`)
@@ -32,10 +34,18 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   wire protocol section is the spec.
 - Relay and PWA suites boot the real Worker + Durable Object under workerd via Miniflare, reading
   bindings from `wrangler.jsonc` — config drift there fails tests, which is intended.
-- The full suite is only green on macOS: session detection encodes macOS comm semantics
-  (`pane_current_command` returns the bare versioned comm), so daemon integration tests fail on
-  Linux containers, and sandboxed workerd can be flaky there too. On Linux, trust the unit tests
-  and typecheck/lint; leave full-suite verification to a macOS machine.
+- `e2e/` wires all three real components (daemon, workerd relay, app RelayClient + Store) and runs
+  the user flows end to end. Each pairwise suite keeps its double on purpose — the daemon's fake
+  relay is controllable in ways the real DO forbids — and the e2e suite is what catches
+  fake-vs-real drift.
+- The full suite is green on macOS and Linux. Two hard-won portability rules: tmux `-F` format
+  strings must use printable separators (tmux 3.4 mangles tabs to `_`; see `sessions.ts`/`tmux.ts`),
+  and sockets Bun dials into workerd need `perMessageDeflate: false` (frames die with close code
+  1002 otherwise).
+- Never `dispose()` a Miniflare mid-process — the next boot in the same process hangs workerd.
+  `relay/test/harness.ts`'s `dispose` is deliberately a no-op (instances leak until process exit),
+  and its worker bundle is memoized because `Bun.build` runs once per process. Reuse `startRelay`;
+  never boot your own.
 
 ## Conventions
 

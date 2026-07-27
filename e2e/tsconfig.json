@@ -1,0 +1,9 @@
+{
+  // No DOM lib, and not by preference: this project typechecks daemon code
+  // (`new WebSocket(url, { headers })`) and the app-side createSocket seam
+  // (`{ perMessageDeflate: false }`), both bun-types WebSocket overloads that
+  // vanish as soon as lib.dom loads (see pwa/test/tsconfig.json). The browser
+  // globals store.ts touches are declared minimally in globals.d.ts instead.
+  "extends": "../tsconfig.base.json",
+  "include": ["."]
+}
