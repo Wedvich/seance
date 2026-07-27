@@ -1,12 +1,15 @@
-import type {
-  ErrorResponse,
-  Plain,
-  RepoEntry,
-  RescanResponse,
-  SessionsResponse,
-  SpawnRequest,
-  SpawnResponse,
+import {
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  type ErrorResponse,
+  type Plain,
+  type RepoEntry,
+  type RescanResponse,
+  type SessionsResponse,
+  type SpawnRequest,
+  type SpawnResponse,
 } from "@seance/shared";
+import { fingerprintText } from "./hash.ts";
 import { log } from "./log.ts";
 import { listClaudeSessions } from "./sessions.ts";
 import { SpawnFailure, spawnSession } from "./spawn.ts";
@@ -19,6 +22,12 @@ export interface HandlerContext {
   readonly spawnWaitMs?: number;
 }
 
+/**
+ * Quoted, never bare: every value below arrives over the wire, and an
+ * unescaped newline in one would let a caller forge whole audit lines.
+ */
+const q = (value: string): string => JSON.stringify(value);
+
 function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (typeof payload !== "object" || payload === null) return false;
   const obj = payload as Record<string, unknown>;
@@ -30,18 +39,37 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   return true;
 }
 
+/**
+ * The prompt is hashed, not logged: this file is plaintext at rest, and a
+ * length plus eight hex characters is enough to answer "was that mine?"
+ * without turning the log into a transcript.
+ */
+async function auditSpawnRequest(request: SpawnRequest): Promise<void> {
+  const prompt = request.prompt ?? "";
+  const promptNote =
+    prompt === "" ? "prompt=none" : `promptLen=${prompt.length} promptSha=${await fingerprintText(prompt)}`;
+  log.info(
+    `audit spawn repo=${q(request.repo)} mode=${request.mode} title=${q(request.title ?? "")} ` +
+      `model=${q(request.model ?? DEFAULT_MODEL)} effort=${q(request.effort ?? DEFAULT_EFFORT)} ${promptNote}`,
+  );
+}
+
 async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
+    log.warn("audit spawn rejected: malformed request");
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
+  await auditSpawnRequest(payload);
   try {
     const outcome = await spawnSession(payload, ctx.getRepos(), ctx.tmuxSession, {
       ...(ctx.spawnWaitMs !== undefined ? { waitMs: ctx.spawnWaitMs } : {}),
     });
+    log.info(`audit spawn ok window=${q(outcome.window)} path=${q(outcome.path)}`);
     const sessions = await listClaudeSessions(ctx.getRepos());
     return { ok: true, ...outcome, sessions };
   } catch (err) {
     if (err instanceof SpawnFailure) {
+      log.warn(`audit spawn failed code=${err.code}`);
       return { ok: false, code: err.code, message: err.message };
     }
     log.error(`spawn crashed: ${String(err)}`);
@@ -52,6 +80,10 @@ async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<Spawn
 /** Routes decrypted request ops to their implementations and wraps the reply. */
 export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Plain | null> {
   return async (plain: Plain): Promise<Plain | null> => {
+    // Every op, not just spawn: with a stolen PSK, "something enumerated my
+    // sessions at 3am" is the same signal as "something spawned".
+    log.info(`audit request op=${q(plain.op)} id=${q(plain.id)}`);
+
     const reply = (payload: unknown): Plain => ({
       id: crypto.randomUUID(),
       ts: Date.now(),
@@ -75,11 +107,11 @@ export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Pl
           return reply(payload);
         }
         default:
-          log.warn(`ignoring unknown op "${plain.op}"`);
+          log.warn(`ignoring unknown op ${q(plain.op)}`);
           return null;
       }
     } catch (err) {
-      log.error(`handler for ${plain.op} crashed: ${String(err)}`);
+      log.error(`handler for ${q(plain.op)} crashed: ${String(err)}`);
       const payload: ErrorResponse = { ok: false, code: "internal_error", message: String(err) };
       return reply(payload);
     }
