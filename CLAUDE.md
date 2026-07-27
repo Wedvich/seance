@@ -27,11 +27,15 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - Daemon integration tests need real `tmux` and `git` on PATH. They isolate via a private tmux
   server (`SEANCE_TMUX_SOCKET`) and a stub claude binary (`SEANCE_CLAUDE_BIN`) — set in the tests,
   useful to know when debugging.
-- `daemon/test/harness.ts` is a throwaway relay double with behaviors *inverted* from the real DO
+- `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.
 - Relay and PWA suites boot the real Worker + Durable Object under workerd via Miniflare, reading
   bindings from `wrangler.jsonc` — config drift there fails tests, which is intended.
+- The full suite is only green on macOS: session detection encodes macOS comm semantics
+  (`pane_current_command` returns the bare versioned comm), so daemon integration tests fail on
+  Linux containers, and sandboxed workerd can be flaky there too. On Linux, trust the unit tests
+  and typecheck/lint; leave full-suite verification to a macOS machine.
 
 ## Conventions
 
