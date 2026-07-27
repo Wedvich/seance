@@ -166,12 +166,21 @@ third is the gap they leave.
   shell string is the tmux inner command, where every wire-supplied value —
   `title`, `model`, `effort`, worktree name — goes through `shq()`. Nothing
   wire-supplied may be concatenated into a command unquoted.
-- Every spawn is **logged at start and outcome** with repo, mode, title, prompt
-  length and prompt SHA-256 prefix. With a stolen PSK this log is the only
-  thing that says someone else used your machines, and today a _successful_
-  spawn logs nothing at all — only crashes do. This is the design's largest
-  detection gap; the log is local and rewritable by whoever compromised the
-  machine, so it is evidence for the honest-machine case only.
+- Every spawn is **logged at start and outcome** with repo, mode, title, model,
+  effort, prompt length and prompt SHA-256 prefix — never the prompt text,
+  which would make `seanced.log` a transcript of everything ever asked. With a
+  stolen PSK this log is the only thing that says someone else used your
+  machines.
+- **Both spawn paths audit, through one formatter**, tagged `origin=relay` or
+  `origin=cli`. A trail that covered only the relay would make `seanced spawn`
+  the quieter way in — precisely the path someone with local shell access would
+  choose — and the tag is what separates "me at my desk at 2pm" from "my phone
+  was in a drawer at 3am". The daemon writes via stdout (launchd redirects it);
+  the CLI appends to the same file itself, and failing to do so warns rather
+  than failing a spawn the human asked for. Two independent writers is safe
+  only while nothing rotates the file.
+- The log is local and rewritable by whoever compromised the machine, so it is
+  evidence for the honest-machine case only. There is no off-box copy in v1.
 
 **Non-goals**: multi-user access control (one human owns every device); relay
 availability (an outage is no spawns, not a breach); defending a dev machine
@@ -429,7 +438,9 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 
 ## Accepted trade-offs
 
-- `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned.
+- `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
+  its way out: `seanced spawn` now audits like the relay path, so the slash
+  command can become a thin wrapper over it and the duplication disappears.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.
 - Battery-powered Macs show offline when asleep.
@@ -456,8 +467,21 @@ DO hibernation — decisions recorded in their sections above. Also resolved wit
 the PWA: `/app` close codes, PSK at rest, session fan-out, and lost-reply
 reconciliation.
 
-Decided but not yet built (threat model, 2026-07-27): spawn audit logging;
-keychain-backed PSK on macOS behind `loadPsk()`; PSK fingerprint in `doctor`;
-registry entry caps, UUID `deviceId` validation and register rate limiting in
-the DO; regression tests pinning the two spawn invariants. The PWA's
-non-extractable-key and CSP items are tracked in `HANDOFF-pwa-security.md`.
+Built since the threat model (2026-07-27): spawn audit logging on both paths
+with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
+`seanced psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
+invariants.
+
+Still open from it: registry entry caps, UUID `deviceId` validation and
+register rate limiting in the DO (waiting on the PWA session to clear
+`relay/test/`). The PWA's non-extractable-key and CSP items are tracked in
+`HANDOFF-pwa-security.md`.
+
+- Log rotation now has two writers to reconcile — the daemon holds the file
+  through launchd's redirect while the CLI opens it by path, so a
+  rename-and-recreate would strand the daemon on the old inode. Still no
+  rotation in v1; `doctor` warns past ~10 MB.
+- The keychain ACL path is unverified from CI: read and write both go through
+  `/usr/bin/security`, so the entry recorded on create should be the one
+  presented on read, but confirming the launchd agent is never prompted needs
+  one real `psk-import` + `restart` on a machine.

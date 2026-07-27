@@ -1,7 +1,12 @@
-type Level = "info" | "warn" | "error";
+export type Level = "info" | "warn" | "error";
+
+/** Exported so the CLI's audit sink writes bytes identical to the daemon's. */
+export function formatLine(level: Level, msg: string): string {
+  return `${new Date().toISOString()} ${level} ${msg}`;
+}
 
 function write(level: Level, msg: string): void {
-  const line = `${new Date().toISOString()} ${level} ${msg}`;
+  const line = formatLine(level, msg);
   if (level === "error") console.error(line);
   else console.log(line);
 }

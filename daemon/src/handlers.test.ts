@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { OpName, Plain, RepoEntry } from "@seance/shared";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 
-// stdout is the audit trail's transport (launchd redirects it to seanced.log),
-// so capturing the console is capturing the artifact under test.
+// stdout is the daemon's audit transport (launchd redirects it into
+// seanced.log), so capturing the console is capturing the artifact under test.
 const lines: string[] = [];
 let realLog: typeof console.log;
 let realError: typeof console.error;
@@ -33,40 +33,30 @@ const request = (op: OpName, payload: unknown): Plain => ({ id: "req-1", ts: Dat
 
 const logged = (): string => lines.join("\n");
 
-describe("audit trail", () => {
+// "nope" fails the repo lookup before any git or tmux work, so the audit path
+// is exercised without a machine underneath it.
+const spawnNope = (extra: Record<string, unknown> = {}): Plain =>
+  request("spawn", { repo: "nope", mode: "worktree", ...extra });
+
+describe("relay ops are audited", () => {
   test("every op is recorded, not just spawn — enumeration at 3am is the same signal", async () => {
     await createHandler(ctx)(request("rescan", {}));
     expect(logged()).toContain('audit request op="rescan" id="req-1"');
   });
 
-  test("a spawn records its parameters with the prompt hashed, never quoted", async () => {
-    // "nope" fails the repo lookup before any git or tmux work, so this
-    // exercises the audit path without a machine underneath it.
-    await createHandler(ctx)(request("spawn", { repo: "nope", mode: "worktree", prompt: "deploy the thing" }));
-    expect(logged()).toContain('audit spawn repo="nope" mode=worktree');
-    expect(logged()).toContain("promptLen=16");
-    expect(logged()).toMatch(/promptSha=[0-9a-f]{8}/u);
-    expect(logged()).not.toContain("deploy the thing");
-  });
-
-  test("an absent prompt is recorded as such rather than as an empty hash", async () => {
-    await createHandler(ctx)(request("spawn", { repo: "nope", mode: "here" }));
-    expect(logged()).toContain("prompt=none");
-  });
-
-  test("defaults are recorded as they will be applied, not as absent", async () => {
-    await createHandler(ctx)(request("spawn", { repo: "nope", mode: "here" }));
-    expect(logged()).toContain('model="opus" effort="medium"');
+  test("a relay spawn is tagged as such, so it is distinguishable from one typed at the machine", async () => {
+    await createHandler(ctx)(spawnNope());
+    expect(logged()).toContain('audit spawn origin=relay repo="nope" mode=worktree');
   });
 
   test("the outcome carries the structured failure code", async () => {
-    await createHandler(ctx)(request("spawn", { repo: "nope", mode: "worktree" }));
-    expect(logged()).toContain("audit spawn failed code=repo_not_found");
+    await createHandler(ctx)(spawnNope());
+    expect(logged()).toContain("audit spawn origin=relay failed code=repo_not_found");
   });
 
   test("a malformed payload is recorded as rejected rather than passing silently", async () => {
     await createHandler(ctx)(request("spawn", { repo: "", mode: "nonsense" }));
-    expect(logged()).toContain("audit spawn rejected");
+    expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
   test("a newline in a wire value cannot forge an audit line", async () => {

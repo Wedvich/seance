@@ -1,6 +1,7 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
+import { cliSink, spawnAudit } from "./audit.ts";
 import {
   bearerTokenWarnings,
   configSkeleton,
@@ -98,7 +99,11 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   };
 }
 
-/** The relay-free spawn path — same code the app request runs, driven over SSH. */
+/**
+ * The relay-free spawn path — same code the app request runs, driven over SSH.
+ * Audits to the same log the daemon writes, tagged `origin=cli`: a trail that
+ * omitted the locally-reachable path would make it the quieter way in.
+ */
 export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const args = parseSpawnArgs(argv);
   const config = await loadConfig();
@@ -110,12 +115,16 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
   };
+  const audit = spawnAudit("cli", cliSink);
+  await audit.request(request);
   try {
     const outcome = await spawnSession(request, repos, config.tmuxSession);
+    await audit.ok(outcome);
     if (outcome.note !== undefined) console.log(`note: ${outcome.note}`);
     console.log(`spawned '${outcome.window}' (${outcome.path})`);
   } catch (err) {
     if (err instanceof SpawnFailure) {
+      await audit.failed(err.code);
       console.error(`spawn failed [${err.code}] — ${err.message}`);
       process.exit(1);
     }
