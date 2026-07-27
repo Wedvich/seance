@@ -135,6 +135,15 @@ needs no polling); `msg { envelope }` for daemon replies; and
   tchars — for a benefit the threat model doesn't need), first-frame auth
   (unauthenticated sockets plus a reaper timer, i.e. state in the one place
   the design keeps stateless).
+- **`/app` rejects after upgrading, not before.** A browser cannot read the
+  HTTP status of a failed WS handshake, so a pre-upgrade 401 is
+  indistinguishable from a dead relay and the app would retry a token that will
+  never be accepted, forever. `/app` therefore completes the handshake and
+  closes with `4401` (bad token) or `4400` (no token), which the app treats as
+  permanent and stops on. The socket never reaches the DO, so an
+  unauthenticated caller still cannot wake it, and non-upgrade requests keep
+  the plain 401. `/daemon` is unchanged — daemons read the real status from
+  `fetch`.
 - **Bearer-token blast radius, restated:** with the token but not the PSK an
   attacker can register junk (the PWA ignores non-decrypting entries) and read
   registry metadata (machine count, deviceIds, last-seen), but cannot spawn or
@@ -269,14 +278,42 @@ together (re-sends registry data on every poll, useless offline).
 - Config file: relay URL, bearer token, PSK, deviceId, machine name, repo
   roots.
 
-## PWA (Cloudflare Pages)
+## PWA (Cloudflare Workers, static assets)
+
+Vite + React, deployed as an **assets-only Worker** (no `main`) rather than
+Pages, which is in maintenance. Security headers ship as a generated
+`dist/_headers`, because the CSP has to carry two build-time facts: the sha256
+of the inline theme boot script, and the relay origin for `connect-src`. A
+production build without `VITE_RELAY_URL` fails rather than shipping a policy
+that silently blocks the only socket the app has.
 
 V1 surface: machine list (online/offline + last-seen), per-machine repo
-picker, spawn form (prompt optional, worktree/`--here` toggle; collapsed
-advanced: model/effort, defaults opus/medium), spawn verdict (daemon
+picker, spawn form (prompt optional, worktree/`--here` toggle, model and
+effort as first-class tiles, defaults opus/medium), spawn verdict (daemon
 relays tmux window name or the captured error), and a **read-only** list of
 running claude tmux windows per machine (avoids spawning duplicates).
-PSK + bearer token entered once, kept in local storage.
+Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
+
+- **The PSK is stored as a non-extractable `CryptoKey` in IndexedDB** and its
+  base64 is never persisted. An XSS can then use the key while it runs but
+  cannot exfiltrate 32 bytes that would otherwise grant permanent authority
+  over every machine, so there is nothing to rotate afterwards. Consequence:
+  the key can never be redisplayed — 1Password stays the source of truth.
+  Bearer token and relay URL remain in `localStorage`; the token has to be
+  readable because it goes on the URL.
+- **The form and any in-flight spawn are persisted.** iOS kills backgrounded
+  PWAs freely, and the prompt is the only thing here the user wrote. The prompt
+  therefore sits in plaintext `localStorage` — a deliberate asymmetry against
+  the PSK, weighing one message's text against standing authority.
+- **Sessions are fanned out, not polled.** The header total spans every online
+  machine, so `sessions` is sent to each on connect, when a machine wakes, and
+  on resume from background — that last one because a suspended PWA's socket
+  dies silently and stale counts under a green dot are worse than none.
+- **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
+  mid-spawn loses the reply (a blind relay cannot queue it), so the pending
+  spawn is persisted and the machine is asked what is running once there is a
+  socket again. Reporting a failure there would be a lie: the session may well
+  be live. A refused delivery is reported as a known no, separately.
 
 ## Accepted trade-offs
 
@@ -284,10 +321,20 @@ PSK + bearer token entered once, kept in local storage.
 - Key rotation or a new phone touches 4 devices manually.
 - Battery-powered Macs show offline when asleep.
 - No deep link from spawn verdict into the Claude app session.
+- A spawn reply lost to a >45s background cannot be recovered exactly, only
+  reconciled from the session list. Relay-side buffering of app-bound envelopes
+  would fix the short cases, but `ts` lives inside the ciphertext so a blind
+  relay cannot re-stamp one; anything flushed beyond `REPLAY_WINDOW_MS` is
+  rejected as stale. Deliberately not built — see below.
 
 ## Open design details (build time)
 
 - Exact WSL keepalive mechanism (WSL support deferred to a later pass).
+- Optional: relay buffers app-bound envelopes (bounded, TTL ≤ ~45s to stay
+  inside the replay window) so a spawn reply survives a short background
+  instead of falling through to reconciliation.
 
 Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
-DO hibernation — decisions recorded in their sections above.
+DO hibernation — decisions recorded in their sections above. Also resolved with
+the PWA: `/app` close codes, PSK at rest, session fan-out, and lost-reply
+reconciliation.
