@@ -11,6 +11,10 @@ import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
 const WAIT = { waitMs: 700 };
+// Failure tests race the stub's actual death (0.3s sleep + process startup,
+// which macOS can stretch under load) against the deadline. verifyPaneAlive
+// polls, so a wide deadline adds no latency to a spawn that really dies.
+const FAIL_WAIT = { waitMs: 5_000 };
 let base: string;
 let fixture: GitFixture;
 let stub: ClaudeStub;
@@ -73,6 +77,21 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     await tmux(["kill-window", "-t", "main:Fix Tests"]);
   });
 
+  test("a title carrying the format separator stays detectable", async () => {
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "fix | build" }, repos, "main", WAIT);
+    expect(outcome.window).toBe("fix - build");
+
+    const sessions = await listClaudeSessions(repos);
+    expect(sessions.find((s) => s.window === outcome.window)?.repo).toBe("myrepo");
+
+    // renamed outside séance, tmux substitutes the separator out of the format
+    await tmuxOk(["rename-window", "-t", `main:${outcome.window}`, "a | b"]);
+    const renamed = await listClaudeSessions(repos);
+    expect(renamed.find((s) => s.window === "a - b")?.repo).toBe("myrepo");
+
+    await tmux(["kill-window", "-t", "main:a - b"]);
+  });
+
   test("here mode: launches at the repo root, no git preparation", async () => {
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
@@ -94,10 +113,10 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.failing;
     try {
       await expect(
-        spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", WAIT),
+        spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT),
       ).rejects.toThrow(SpawnFailure);
       try {
-        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", WAIT);
+        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT);
       } catch (err) {
         expect((err as SpawnFailure).code).toBe("claude_died");
         expect((err as SpawnFailure).message).toContain("boom: untrusted workspace");

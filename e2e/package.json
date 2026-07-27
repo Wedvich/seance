@@ -1,0 +1,19 @@
+{
+  "name": "@seance/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Full-stack flows: real daemon ↔ real relay (workerd) ↔ real app transport and store",
+  "type": "module",
+  "scripts": {
+    "test": "bun test --timeout 15000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@seance/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "miniflare": "^4.20260722.0",
+    "typescript": "^7.0.2"
+  }
+}

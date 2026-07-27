@@ -363,8 +363,11 @@ together (re-sends registry data on every poll, useless offline).
   `--remote-control` always, **opus**/medium defaults (revised from
   sonnet), `--permission-mode auto`, per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
-  and the pane-death verification (remain-on-exit + 3s wait + `pane_dead`
-  check — tmux returning 0 does not mean claude started). `--here` mode
+  and the pane-death verification (remain-on-exit, then poll `pane_dead`
+  up to a 3s deadline — tmux returning 0 does not mean claude started;
+  polling reports a death the moment it happens instead of after the full
+  wait, and a window that vanished mid-check counts as a death that beat
+  remain-on-exit, not a success). `--here` mode
   spawns at the repo root (no remote "current directory" exists).
   Failures return structured codes (`repo_not_found`, `fetch_failed`,
   `no_default_branch`, `tmux_error`, `claude_died` + captured pane output,
@@ -400,7 +403,12 @@ together (re-sends registry data on every poll, useless offline).
 - **Testing: `bun:test`**, overriding the personal Vitest default — tests
   run on the runtime the daemon ships on (Bun.spawn, WebSocket, WebCrypto
   work without shims), and the integration harness is a throwaway Bun
-  WebSocket relay under the daemon's test dir (not the real relay).
+  WebSocket relay under the daemon's test dir (not the real relay). The
+  `e2e/` workspace then wires the real daemon, the real Worker + DO under
+  workerd, and the real app transport + store together for the user flows;
+  the pairwise doubles stay, because they are controllable in ways the real
+  components forbid (a relay that stops answering pings, a daemon with a
+  scripted handler map).
 - **Sleep policy**: daemon holds `caffeinate -is` **only while on AC power**;
   on battery the Mac sleeps and shows offline. Keeps desk machines always
   spawnable without cooking laptop batteries. Rejected: no assertion

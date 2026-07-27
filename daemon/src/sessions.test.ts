@@ -9,7 +9,7 @@ const repos: readonly RepoEntry[] = [
 ];
 
 function line(id: string, name: string, cmd: string, path: string): string {
-  return `${id}\t${name}\t${cmd}\t${path}`;
+  return `${id}|${name}|${cmd}|${path}`;
 }
 
 describe("parsePanes", () => {
@@ -49,6 +49,11 @@ describe("parsePanes", () => {
     // /Users/m/repos/api-v2 must not match repo "api"
     const raw = line("@5", "x", "2.1.220", "/Users/m/repos/api-v2");
     expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
+  });
+
+  test("a separator inside the path keeps the line parseable", () => {
+    const raw = line("@6", "seance", "2.1.220", "/Users/m/repos/seance/a|b");
+    expect(parsePanes(raw, repos)[0]?.path).toBe("/Users/m/repos/seance/a|b");
   });
 
   test("tolerates malformed lines and trailing newline", () => {

@@ -68,6 +68,8 @@ export async function startRelay(token: string): Promise<TestRelay> {
     url,
     token,
     probe: (path, init) => mf.dispatchFetch(new URL(path, url).href, init) as unknown as Promise<Response>,
+    // Must dispose: `bun test` fires no process exit hooks, so an undisposed
+    // Miniflare leaves its workerd running past the test process itself.
     dispose: () => mf.dispose(),
   };
 }
