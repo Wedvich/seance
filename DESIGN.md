@@ -1,7 +1,8 @@
 # Séance — Design
 
 Finalized 2026-07-26 after a decision-tree review. Each section records the
-decision, the alternatives considered, and why.
+decision, the alternatives considered, and why. Revised 2026-07-27 with
+daemon implementation decisions from a second grilling.
 
 ## Problem & scope
 
@@ -41,9 +42,25 @@ its Tailscale lockdown defeats the relay's purpose).
   one human owns every device), QR pairing (requires being at the machine).
 - **AES-256-GCM via native WebCrypto** on both ends (built into browsers and
   Bun — zero crypto dependencies). Encrypt-and-authenticate in one
-  primitive. Random 12-byte nonce per message; timestamp + nonce inside the
-  ciphertext for replay protection. Rejected: XSalsa20-Poly1305 secretbox
-  (same properties, needs a library).
+  primitive. Rejected: XSalsa20-Poly1305 secretbox (same properties, needs a
+  library).
+- **Envelope**: `{ v, to, from, iv, ct }`. The random 12-byte GCM IV doubles
+  as the replay nonce — a replayed frame is byte-identical, so receivers
+  dedup on the IV. Rejected: separate nonce inside the ciphertext (as
+  originally written here — redundant; catches nothing IV dedup misses).
+- **Routing fields bound as AAD** (`` `${v}|${to}|${from}` ``): one PSK
+  covers all devices, so without this a compromised relay could re-address
+  a captured spawn blob to a different machine and it would decrypt. AAD
+  makes "relay compromise cannot spawn anything" literally true. Both ends
+  build the AAD via one shared helper (byte-identical or nothing decrypts).
+- **Replay window**: plaintext carries `ts`; receivers reject frames outside
+  ±60s of local time and keep seen IVs for 120s (2× window, pruned lazily on
+  insert). All devices are NTP-synced; 60s is generous. Rejected: ±30s
+  (confusing false rejections after sleep/resume clock drift), ±300s
+  (5-minute replayability for no benefit).
+- **PSK is generated offline by the human** (1Password) and pasted into each
+  config. `seanced` never generates key material — `init` writes a skeleton
+  with an empty `psk` field; `doctor` validates it decodes to 32 bytes.
 - **Post-quantum safe by construction**: symmetric-only crypto — no key
   exchange exists to attack (Grover only halves a 256-bit key's strength;
   ML-KEM/ML-DSA solve problems this design doesn't have).
@@ -72,23 +89,75 @@ The Durable Object persists a machine registry:
 - Offline machines stay listed with last-seen (an asleep PC is actionable;
   a vanished one is confusing). "Forget machine" in the PWA removes entries.
 - Online = WebSocket open, with heartbeat pings to catch silent drops.
+- Daemon sockets use DO WebSocket hibernation. No connection state in class
+  fields (`state.getWebSockets()` + DO storage are truth), heartbeats via
+  `setWebSocketAutoResponse()` so pings don't wake the DO. Wake is
+  milliseconds — no cold-start hang.
 - Human names live in daemon config (`name: "MacBook Pro"`), never visible
   to Cloudflare.
+
+## Wire protocol
+
+Two layers. Layer 1 (plaintext, daemon↔relay): `register { deviceId, info:
+<envelope> }` on connect and whenever the repo set changes; `msg {
+envelope }` for routed traffic; literal `"ping"`/`"pong"` strings for
+heartbeats (bare strings, not JSON, so DO auto-response can answer without
+waking — daemon pings every 30s, expects pong within 10s, else closes and
+redials with 1→60s jittered exponential backoff, reset on successful
+register).
+
+Layer 2 (end-to-end encrypted ops, phone→daemon request/response):
+
+- `sessions {}` → running claude tmux windows. The one live pull — session
+  state is inherently fresh-only.
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort? }`
+  → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
+  verdict embeds a refreshed session list so the PWA updates without a
+  second round trip.
+- `rescan {}` → fresh repo list; daemon re-registers if the set changed.
+
+Repos are **pushed, not pulled**: they ride the encrypted register blob, so
+the PWA's repo picker renders from the machine registry alone and works for
+offline machines. Rejected: a `status` op returning repos + sessions
+together (re-sends registry data on every poll, useless offline).
 
 ## Daemon (`seanced`, Bun)
 
 - **Runtime: Bun** (TS end-to-end with relay + PWA, shared payload types,
-  native WebSocket/WebCrypto, single-file compile for install). Rejected:
-  Node (chosen defaults fit, but Bun preferred), Go (second language, no
-  shared types).
-- **Lifecycle**: launchd agent on macOS; systemd user unit on WSL **plus a
-  Windows-side keepalive** (scheduled task pinning the WSL VM — it halts
-  when idle otherwise). Rejected: daemon-inside-tmux (reboot silently takes
+  native WebSocket/WebCrypto). Rejected: Node (chosen defaults fit, but Bun
+  preferred), Go (second language, no shared types).
+- **Distribution: run from the git checkout** — the launchd plist executes
+  `bun <checkout>/daemon/src/main.ts`; update = `git pull` +
+  `launchctl kickstart -k`. Rejected: `bun build --compile` single-file
+  install (originally written here — ~100 MB artifact plus a build/ship
+  step per machine, and every machine already runs Bun).
+- **CLI**: `seanced` (run in foreground; launchd supervises), `init` (write
+  config skeleton + deviceId), `install`/`uninstall` (launchd plist),
+  `doctor` (preflight: tmux/claude/git/roots/relay/config), `status`,
+  `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
+  relay, the SSH-debuggability hook.
+- **Config split**: `~/.config/seance/config.json` (hand-edited, 0600,
+  never rewritten by the daemon: relayUrl, bearerToken, psk, name,
+  repoRoots, tmuxSession) and `~/.local/state/seance/state.json`
+  (daemon-owned: deviceId, repo cache, scannedAt). Rejected: single file
+  the daemon writes back (clobbers hand edits), PSK in OS keychain (no
+  clean WSL counterpart).
+- **Lifecycle**: launchd agent on macOS. **WSL support deferred** to a
+  later pass at the actual machine (systemd user unit **plus a
+  Windows-side keepalive** — scheduled task pinning the WSL VM, which halts
+  when idle; untestable blind from a Mac). `install` exits with a clear
+  message on non-macOS. Rejected: daemon-inside-tmux (reboot silently takes
   the machine offline — recreates the god-session fragility).
-- **tmux**: spawns into a named session (`tmux new-window -t claude`),
-  creating it detached if absent — works from cold boot with no terminal
-  open. Manual sessions coexist. Rejected: daemon child processes without
-  tmux (loses walk-up-and-attach).
+- **tmux**: spawns a window into the **`main` session group** (`tmux
+  new-window -t main:`) — terminals auto-attach to that group via zshrc, so
+  daemon-spawned windows appear in every attached terminal instantly. Cold
+  boot with no session: create it detached (`tmux new-session -d -s main`);
+  the next terminal attaches to it seamlessly. If only a grouped sibling
+  (e.g. `main-1`) survives, target any session whose `session_group` is
+  `main`. Configurable as `tmuxSession`, default `"main"`. Rejected:
+  separate named `claude` session (as originally written here — orphans
+  spawned windows outside the one-window-per-task workflow), daemon child
+  processes without tmux (loses walk-up-and-attach).
 - **Spawn logic is reimplemented natively** in the daemon (structured
   errors, no shell-script templating). The `/spawn` slash command stays
   as-is for in-terminal use; drift between the two implementations is an
@@ -96,13 +165,47 @@ The Durable Object persists a machine registry:
   (`~/.claude/commands/spawn.md`): ff-only fast-forward of the default
   branch before `claude --worktree`, worktree/window naming
   (slug + timestamp), seed-prompt preamble (worktree setup instructions),
-  `--remote-control` always, sonnet/medium defaults, and the
-  pane-death verification (remain-on-exit + `pane_dead` check — tmux
-  returning 0 does not mean claude started).
+  `--remote-control` always, **opus**/medium defaults (revised from
+  sonnet), `--permission-mode auto`, per-spawn `caffeinate -is`
+  unconditionally (a session you asked for stays awake even on battery),
+  and the pane-death verification (remain-on-exit + 3s wait + `pane_dead`
+  check — tmux returning 0 does not mean claude started). `--here` mode
+  spawns at the repo root (no remote "current directory" exists).
+  Failures return structured codes (`repo_not_found`, `fetch_failed`,
+  `no_default_branch`, `tmux_error`, `claude_died` + captured pane output,
+  `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
+  basing worktree on local HEAD").
 - **Repo discovery**: config lists parent roots (e.g. `~/pengefix`,
-  `~/repos`); daemon scans for `.git` at depth ~2 at startup/on-demand. New
-  clones appear automatically. Rejected: explicit repo list (config edit per
-  clone — the friction being eliminated), whole-home scan (slow, noisy).
+  `~/repos`); daemon scans for `.git` at depth 2. Measured: 19ms for 58
+  repos — the walk is free. Scans run at startup, hourly, and on explicit
+  `rescan` — never implicitly from PWA activity. Results cached in
+  state.json (restart re-registers instantly from cache); re-register only
+  when the set changed. `defaultBranch` is best-effort from local refs only
+  (`origin/HEAD` on disk, null otherwise — ~⅓ of repos lack it), carried
+  forward for known repos; the network-touching `git remote set-head -a`
+  runs only in the spawn path when unresolved. Rejected: explicit repo list
+  (config edit per clone — the friction being eliminated), whole-home scan
+  (slow, noisy), authoritative default-branch resolution at scan time
+  (turns a 19ms local walk into a multi-second networked operation that
+  fails offline).
+- **Session detection**: list all tmux panes across all sessions, dedup by
+  window id (grouped sessions repeat windows), count a window as claude
+  when `pane_current_command` matches `/^\d+\.\d+\.\d+$/` — claude retitles
+  its process to its bare version string. Repo mapped by longest path
+  prefix; worktrees under `<repo>/.claude/worktrees/*` map to their repo.
+  Undocumented convention; if a release changes it the list goes visibly
+  empty and the pattern is a one-line fix. Rejected: daemon-tracked window
+  ids (manual `/spawn` windows invisible — defeats duplicate avoidance;
+  union variant adds id-reconciliation state for a hedge the visible
+  breakage already covers).
+- **Logging**: plain text (`ISO-timestamp level message`) to
+  stdout/stderr; the launchd plist redirects both to
+  `~/.local/state/seance/seanced.log`. No rotation in v1; `doctor` warns
+  past ~10 MB.
+- **Testing: `bun:test`**, overriding the personal Vitest default — tests
+  run on the runtime the daemon ships on (Bun.spawn, WebSocket, WebCrypto
+  work without shims), and the integration harness is a throwaway Bun
+  WebSocket relay under the daemon's test dir (not the real relay).
 - **Sleep policy**: daemon holds `caffeinate -is` **only while on AC power**;
   on battery the Mac sleeps and shows offline. Keeps desk machines always
   spawnable without cooking laptop batteries. Rejected: no assertion
@@ -115,7 +218,7 @@ The Durable Object persists a machine registry:
 
 V1 surface: machine list (online/offline + last-seen), per-machine repo
 picker, spawn form (prompt optional, worktree/`--here` toggle; collapsed
-advanced: model/effort, defaults sonnet/medium), spawn verdict (daemon
+advanced: model/effort, defaults opus/medium), spawn verdict (daemon
 relays tmux window name or the captured error), and a **read-only** list of
 running claude tmux windows per machine (avoids spawning duplicates).
 PSK + bearer token entered once, kept in local storage.
@@ -129,7 +232,7 @@ PSK + bearer token entered once, kept in local storage.
 
 ## Open design details (build time)
 
-- Repo-scan caching / rescan triggers.
-- Exact WSL keepalive mechanism.
-- Replay-protection window size (timestamp tolerance, nonce cache).
-- DO WebSocket hibernation vs. always-warm for daemon sockets.
+- Exact WSL keepalive mechanism (WSL support deferred to a later pass).
+
+Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
+DO hibernation — decisions recorded in their sections above.
