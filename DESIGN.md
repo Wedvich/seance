@@ -15,7 +15,14 @@ Happy Coder was evaluated and rejected because it wraps sessions in its own
 UI instead of tmux + Remote Control.
 
 Out of scope for v1: killing sessions, streaming output, deep-linking into
-the Claude app (no such link exists — handoff is manual).
+the _specific_ session the spawn verdict just created. The success screen links to
+`claude://code` (opens the app's Code tab/session list — mobile-only, no desktop
+equivalent), because no Claude-assigned session ID ever reaches the daemon: Remote
+Control's session ID is only observable from inside the spawned `claude` process
+(`$CLAUDE_CODE_BRIDGE_SESSION_ID`, set once its own async connection to the Anthropic
+API completes), and the relay's blind request/response design has no channel to
+deliver a value that becomes known only after the spawn reply already went out.
+Handoff to the right session in the list is manual.
 
 ## Topology: blind relay, daemons dial out
 
@@ -462,7 +469,8 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.
 - Battery-powered Macs show offline when asleep.
-- No deep link from spawn verdict into the Claude app session.
+- No deep link from spawn verdict into the _specific_ Claude app session — only the
+  coarse `claude://code` (session list) link; see Problem & scope.
 - A spawn reply lost to a >45s background cannot be recovered exactly, only
   reconciled from the session list. Relay-side buffering of app-bound envelopes
   would fix the short cases, but `ts` lives inside the ciphertext so a blind

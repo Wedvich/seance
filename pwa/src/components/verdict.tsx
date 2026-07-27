@@ -92,6 +92,11 @@ export function VerdictView(props: {
         <button type="button" className="primary" onClick={content.primary.onClick === "retry" ? onRetry : onAnother}>
           {content.primary.label}
         </button>
+        {verdict.kind === "ok" && (
+          <a className="quiet" href="claude://code">
+            Open in Claude
+          </a>
+        )}
         {content.showBack && (
           <button type="button" className="quiet" onClick={onBack}>
             Back to the form

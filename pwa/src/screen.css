@@ -326,6 +326,7 @@
 }
 
 .quiet {
+  display: block;
   width: 100%;
   padding: 13px;
   border: 0;
@@ -333,6 +334,8 @@
   background: transparent;
   color: var(--fg2);
   font-size: 14px;
+  text-align: center;
+  text-decoration: none;
 }
 
 /* ---- bottom sheet ---- */
