@@ -102,11 +102,17 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
       names.set(group[0], base);
       continue;
     }
-    const seen = new Set<string>();
+    const byParented = new Map<string, string[]>();
     for (const p of group) {
       const parented = `${basename(dirname(p))}/${base}`;
-      names.set(p, seen.has(parented) ? p : parented);
-      seen.add(parented);
+      byParented.set(parented, [...(byParented.get(parented) ?? []), p]);
+    }
+    for (const [parented, sub] of byParented) {
+      if (sub.length === 1 && sub[0] !== undefined) {
+        names.set(sub[0], parented);
+        continue;
+      }
+      for (const p of sub) names.set(p, p);
     }
   }
   return names;

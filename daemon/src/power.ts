@@ -16,10 +16,18 @@ export function startPowerLoop(intervalMs = 60_000): () => void {
   if (process.platform !== "darwin") return (): void => {};
 
   let assertion: ReturnType<typeof Bun.spawn> | null = null;
+  const hold = (): void => {
+    const child = Bun.spawn(["caffeinate", "-is"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    assertion = child;
+    // caffeinate dying on its own must not leave us thinking the assertion still holds
+    void child.exited.then(() => {
+      if (assertion === child) assertion = null;
+    });
+  };
   const tick = async (): Promise<void> => {
     const ac = await onACPower();
     if (ac && assertion === null) {
-      assertion = Bun.spawn(["caffeinate", "-is"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      hold();
       log.info("on AC power — holding sleep assertion");
     } else if (!ac && assertion !== null) {
       assertion.kill();

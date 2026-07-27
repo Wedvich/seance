@@ -1,4 +1,5 @@
 import type {
+  ErrorResponse,
   Plain,
   RepoEntry,
   RescanResponse,
@@ -79,7 +80,8 @@ export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Pl
       }
     } catch (err) {
       log.error(`handler for ${plain.op} crashed: ${String(err)}`);
-      return null;
+      const payload: ErrorResponse = { ok: false, code: "internal_error", message: String(err) };
+      return reply(payload);
     }
   };
 }

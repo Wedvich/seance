@@ -63,6 +63,15 @@ describe("scanRepos", () => {
     expect(repos.map((r) => r.name).toSorted()).toEqual(["personal/api", "work/api"]);
   });
 
+  test("falls back to full paths when even parent/base collides", async () => {
+    const rootA = await makeRoot();
+    const rootB = await makeRoot();
+    const a = await makeRepo(rootA, "work/api", "main");
+    const b = await makeRepo(rootB, "work/api", "main");
+    const repos = await scanRepos([rootA, rootB]);
+    expect(repos.map((r) => r.name).toSorted()).toEqual([a, b].toSorted());
+  });
+
   test("carries cached defaultBranch forward without re-reading", async () => {
     const root = await makeRoot();
     const path = await makeRepo(root, "cached"); // no origin/HEAD on disk

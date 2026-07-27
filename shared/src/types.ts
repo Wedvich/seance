@@ -112,3 +112,10 @@ export interface RescanResponse {
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number;
 }
+
+/** Reply payload when an op handler crashes; `re` still correlates it to the request. */
+export interface ErrorResponse {
+  readonly ok: false;
+  readonly code: "internal_error";
+  readonly message: string;
+}
