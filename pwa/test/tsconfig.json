@@ -1,9 +1,7 @@
 {
+  // No DOM lib on purpose: these run on Bun, and bun-types drops its own
+  // WebSocket client overloads (headers, perMessageDeflate) as soon as lib.dom
+  // is loaded. Browser-facing modules are typechecked by ../tsconfig.json.
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "jsx": "react-jsx",
-    "lib": ["DOM", "DOM.Iterable", "ESNext"],
-    "types": ["bun", "vite/client"]
-  },
-  "include": [".", "../src"]
+  "include": ["."]
 }

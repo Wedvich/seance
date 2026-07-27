@@ -31,17 +31,32 @@ async function readWranglerConfig(): Promise<WranglerConfig> {
   return JSON.parse(stripped) as WranglerConfig;
 }
 
+/**
+ * Bundled once per process: a second Bun.build in the same process fails with
+ * "Unexpected reading file", which is how the relay and PWA suites collide when
+ * `bun test` runs both.
+ */
+let bundlePromise: Promise<string> | null = null;
+
+function workerBundle(): Promise<string> {
+  bundlePromise ??= (async () => {
+    const built = await Bun.build({ entrypoints: [join(import.meta.dir, "../src/index.ts")], target: "browser" });
+    const bundle = built.outputs[0];
+    if (!built.success || bundle === undefined) {
+      throw new Error(`bundling the worker failed: ${built.logs.join("\n")}`);
+    }
+    return bundle.text();
+  })();
+  return bundlePromise;
+}
+
 export async function startRelay(token: string): Promise<TestRelay> {
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
 
-  const built = await Bun.build({ entrypoints: [join(import.meta.dir, "../src/index.ts")], target: "browser" });
-  const bundle = built.outputs[0];
-  if (!built.success || bundle === undefined) throw new Error(`bundling the worker failed: ${built.logs.join("\n")}`);
-
   const mf = new Miniflare({
-    modules: [{ type: "ESModule", path: "index.mjs", contents: await bundle.text() }],
+    modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
     compatibilityDate: config.compatibility_date,
     // Free-tier Durable Objects are SQLite-backed; match that here.
     durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
