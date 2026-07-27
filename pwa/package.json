@@ -1,0 +1,14 @@
+{
+  "name": "@seance/pwa",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cloudflare Pages app — machine list, repo picker, spawn form, spawn verdict",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@seance/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "wrangler": "^4.114.0"
+  }
+}

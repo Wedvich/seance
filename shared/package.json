@@ -1,0 +1,11 @@
+{
+  "name": "@seance/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Payload types and AES-256-GCM envelope helpers shared by daemon, relay, and PWA",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
