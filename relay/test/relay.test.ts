@@ -292,3 +292,112 @@ describe("robustness", () => {
     app.close();
   });
 });
+
+/** Current registry as the DO reports it: a fresh app socket is pushed it on connect. */
+async function registryIds(target: TestRelay): Promise<string[]> {
+  const observer = await connectApp(target);
+  const frame = await observer.waitFor<RegistryFrame>("registry");
+  observer.close();
+  return frame.entries.map((entry) => entry.deviceId);
+}
+
+/**
+ * Round-trips a frame the DO must answer, so a preceding refusal is known to
+ * have been processed and dropped rather than merely still in flight.
+ */
+async function drain(app: Client): Promise<void> {
+  app.send({ t: "msg", env: envelope("no-such-device", APP_ID) });
+  await app.waitFor<UndeliverableFrame>("undeliverable");
+}
+
+// Own instance: the registry is permanent, so a test that deliberately fills it
+// would starve every later test sharing the object.
+describe("registry entry cap", () => {
+  const MAX_DEVICES = 32;
+  let bounded: TestRelay;
+
+  beforeAll(async () => {
+    bounded = await startRelay(TOKEN);
+  });
+
+  afterAll(async () => {
+    await bounded.dispose();
+  });
+
+  test("a full registry turns away unknown machines and keeps serving known ones", async () => {
+    const app = await connectApp(bounded);
+    const daemons: Client[] = [];
+    for (let i = 0; i < MAX_DEVICES; i += 1) {
+      const deviceId = `full-${i}`;
+      // oxlint-disable-next-line no-await-in-loop -- the assertion is about the boundary, so fill in a known order
+      const daemon = await connectDaemon(bounded);
+      daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+      // oxlint-disable-next-line no-await-in-loop -- each entry must land before the next is counted
+      await waitForEntry(app, deviceId, (entry) => entry.connected);
+      daemons.push(daemon);
+    }
+
+    const overflow = await connectDaemon(bounded);
+    overflow.send({ t: "register", deviceId: "overflow", info: envelope(APP_ID, "overflow") });
+    await drain(app);
+
+    const ids = await registryIds(bounded);
+    expect(ids).toHaveLength(MAX_DEVICES);
+    expect(ids).not.toContain("overflow");
+
+    // The cap must not cost you a machine you already had: reconnecting one of
+    // the filled entries still registers, because its id is already known.
+    daemons[0]?.close();
+    await waitForEntry(app, "full-0", (entry) => !entry.connected);
+    const rejoined = await connectDaemon(bounded);
+    rejoined.send({ t: "register", deviceId: "full-0", info: envelope(APP_ID, "full-0") });
+    await waitForEntry(app, "full-0", (entry) => entry.connected);
+
+    rejoined.close();
+    overflow.close();
+    for (const daemon of daemons.slice(1)) daemon.close();
+    app.close();
+  }, 30_000);
+});
+
+describe("register rate limit", () => {
+  const MAX_REGISTERS_PER_WINDOW = 10;
+  let limited: TestRelay;
+
+  beforeAll(async () => {
+    limited = await startRelay(TOKEN);
+  });
+
+  afterAll(async () => {
+    await limited.dispose();
+  });
+
+  test("a socket registering faster than any daemon would is cut off", async () => {
+    const app = await connectApp(limited);
+    const daemon = await connectDaemon(limited);
+    for (let i = 0; i < MAX_REGISTERS_PER_WINDOW; i += 1) {
+      const deviceId = `rate-${i}`;
+      daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+      // oxlint-disable-next-line no-await-in-loop -- spending the window one register at a time is the point
+      await waitForEntry(app, deviceId, () => true);
+    }
+
+    daemon.send({ t: "register", deviceId: "rate-over", info: envelope(APP_ID, "rate-over") });
+    await drain(app);
+
+    const ids = await registryIds(limited);
+    expect(ids).toHaveLength(MAX_REGISTERS_PER_WINDOW);
+    expect(ids).not.toContain("rate-over");
+
+    // Honest about the shape of the guarantee: the budget is per socket, so a
+    // new connection starts a new window. This bounds one socket's write rate,
+    // not an attacker's total — MAX_DEVICES is what bounds the damage.
+    const second = await connectDaemon(limited);
+    second.send({ t: "register", deviceId: "rate-fresh", info: envelope(APP_ID, "rate-fresh") });
+    await waitForEntry(app, "rate-fresh", (entry) => entry.connected);
+
+    second.close();
+    daemon.close();
+    app.close();
+  }, 30_000);
+});

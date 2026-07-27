@@ -13,11 +13,31 @@ import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 const ENTRY_PREFIX = "device:";
 
 /**
+ * Four machines today. 32 leaves room for reinstalls — each one mints a new
+ * deviceId and v1 has no forget verb — while keeping a bearer-token holder
+ * from growing storage without bound. Reaching it needs manual cleanup.
+ */
+const MAX_DEVICES = 32;
+
+/**
+ * A daemon registers on connect and when its repo set changes (hourly scan at
+ * most). Ten a minute is far above that and far below useful abuse. This
+ * bounds writes per socket, which `MAX_DEVICES` does not: re-registering one
+ * id is unbounded puts and a registry push to every app each time.
+ */
+const REGISTER_WINDOW_MS = 60_000;
+const MAX_REGISTERS_PER_WINDOW = 10;
+
+/**
  * Attached to a daemon socket at register time. Survives hibernation, which is
  * why routing needs no class fields: `getWebSockets()` plus storage are truth.
+ * The register counter rides along for the same reason.
  */
 interface SocketIdentity {
   readonly deviceId: string;
+  /** Start of the current register-rate window, ms. */
+  readonly windowStart: number;
+  readonly registers: number;
 }
 
 /**
@@ -109,18 +129,59 @@ export class Hub implements DurableObject {
     await this.#route(frame.env, ws, "app");
   }
 
+  /**
+   * The refusals here make the bearer token's blast radius finite. Neither cap
+   * defends *against* a token holder — rotating the token does — they only keep
+   * what a holder can cost from being unbounded.
+   */
   async #register(ws: WebSocket, deviceId: string, info: Envelope): Promise<void> {
-    ws.serializeAttachment({ deviceId } satisfies SocketIdentity);
+    const now = Date.now();
+    const prior = ws.deserializeAttachment() as SocketIdentity | null;
+    const rate =
+      prior === null || now - prior.windowStart >= REGISTER_WINDOW_MS
+        ? { windowStart: now, registers: 1 }
+        : { windowStart: prior.windowStart, registers: prior.registers + 1 };
+    if (rate.registers > MAX_REGISTERS_PER_WINDOW) {
+      // The attachment is deliberately left untouched: the window has to expire
+      // on its own clock, so refusing cannot hand the caller a way to reset it.
+      console.log(`refused register from ${deviceId}: over ${MAX_REGISTERS_PER_WINDOW} per window`);
+      return;
+    }
+
+    const key = ENTRY_PREFIX + deviceId;
+    const known = (await this.#ctx.storage.get<RegistryEntry>(key)) !== undefined;
+    if (!known && (await this.#entryCount()) >= MAX_DEVICES) {
+      // Only unknown ids are turned away, so a full registry locks out machines
+      // you have not added yet and never knocks a known one offline.
+      console.log(`refused register from ${deviceId}: registry full at ${MAX_DEVICES}`);
+      return;
+    }
+
+    ws.serializeAttachment({ deviceId, ...rate } satisfies SocketIdentity);
     // Two open sockets for one machine would deliver a spawn twice, so the older
     // one loses. Attaching first keeps the loser's close handler from reporting
     // the machine as disconnected.
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
     }
-    const entry: RegistryEntry = { deviceId, info, lastSeen: Date.now() };
-    await this.#ctx.storage.put(ENTRY_PREFIX + deviceId, entry);
+    if (!(await this.#put(key, { deviceId, info, lastSeen: now }))) return;
     console.log(`registered ${deviceId}`);
     await this.#pushRegistry();
+  }
+
+  async #entryCount(): Promise<number> {
+    return (await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX })).size;
+  }
+
+  /** A failed put must not take the socket down with it — the daemon re-registers on reconnect. */
+  async #put(key: string, entry: RegistryEntry): Promise<boolean> {
+    try {
+      await this.#ctx.storage.put(key, entry);
+      return true;
+    } catch (err) {
+      console.log(`failed to persist ${key}: ${String(err)}`);
+      return false;
+    }
   }
 
   async #route(env: Envelope, sender: WebSocket, senderRole: Role): Promise<void> {
@@ -157,7 +218,7 @@ export class Hub implements DurableObject {
     const key = ENTRY_PREFIX + deviceId;
     const entry = await this.#ctx.storage.get<RegistryEntry>(key);
     if (entry !== undefined) {
-      await this.#ctx.storage.put(key, { ...entry, lastSeen: Date.now() } satisfies RegistryEntry);
+      await this.#put(key, { ...entry, lastSeen: Date.now() });
     }
     await this.#pushRegistry(undefined, ws);
   }
