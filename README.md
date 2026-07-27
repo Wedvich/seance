@@ -81,6 +81,12 @@ bun run deploy                             # prints https://seance-relay.<subdom
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
 
+The first deploy also mints the `workers.dev` hostname, which needs a few
+minutes to route and get a certificate. Until it does, requests fail the TLS
+handshake or return a 404 with body `error code: 1042` — propagation, not a
+broken deploy. The edge caches those errors, so re-check with a cache-buster
+(`curl -sI '<url>/?x=1'`) rather than the path you already probed.
+
 ### 3. Deploy the app
 
 `VITE_RELAY_URL` is required: it pins the CSP's `connect-src` to your relay, so
@@ -92,6 +98,10 @@ just a settings edit.
 cd pwa
 VITE_RELAY_URL=wss://seance-relay.<subdomain>.workers.dev/app bun run deploy
 ```
+
+Or put it in a gitignored `pwa/.env` (see `.env.example`) and just
+`bun run deploy`. This hostname is new too — the step 2 propagation note
+applies again.
 
 ### 4. Install seanced on each machine
 
@@ -113,6 +123,10 @@ Edit `~/.config/seance/config.json`:
 - `psk` — from step 1, or leave empty and run `seanced psk-import` to keep it
   in the macOS login keychain instead
 - `repoRoots` — directories to scan for repos
+
+Config is read once at startup, so `seanced restart` after any edit here. A repo
+added _inside_ an existing root needs no restart — the hourly rescan, or the
+app's refresh, picks it up; only `repoRoots` itself is sticky.
 
 ```sh
 bun daemon/src/main.ts doctor    # preflight: config, tmux/git/claude, relay reachability
