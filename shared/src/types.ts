@@ -87,6 +87,7 @@ export const SPAWN_ERROR_CODES = [
   "tmux_error",
   "claude_died",
   "timeout",
+  "internal_error",
 ] as const;
 
 export type SpawnErrorCode = (typeof SPAWN_ERROR_CODES)[number];
