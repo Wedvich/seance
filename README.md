@@ -61,3 +61,16 @@ Daemons then point `relayUrl` at
 `wss://seance-relay.<your-subdomain>.workers.dev/daemon`. For local runs, put
 `BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see `.dev.vars.example`)
 and use `bun run dev`.
+
+## Storing the PSK
+
+On macOS the PSK belongs in the login keychain, not `config.json`. Run
+`seanced psk-import` bare and `security` prompts for it on the terminal, or
+pipe it straight from 1Password — either way it never lands in argv or shell
+history:
+
+```sh
+op item get Séance --fields password --reveal | seanced psk-import
+```
+
+Then clear `psk` in `config.json` and `seanced restart`.

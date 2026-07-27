@@ -10,7 +10,7 @@ import {
   pskFingerprint,
   runnableProblems,
 } from "./config.ts";
-import { importKeychainPsk, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
+import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
 import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { scanRepos } from "./scan.ts";
@@ -313,7 +313,9 @@ export async function cmdSessions(): Promise<void> {
 
 /**
  * One-time setup, at the machine or over SSH: `security` prompts for the key on
- * the terminal, so it lands in neither argv nor shell history.
+ * the terminal, so it lands in neither argv nor shell history. With stdin piped
+ * (e.g. from `op item get`), the value is read from the pipe instead — same
+ * guarantee, since it crosses to `security` over stdin, never argv.
  */
 export async function cmdPskImport(): Promise<void> {
   if (process.platform !== "darwin") {
@@ -321,8 +323,26 @@ export async function cmdPskImport(): Promise<void> {
     process.exit(1);
   }
   console.log(`storing the PSK as generic password "${PSK_SERVICE}" in the login keychain.`);
-  console.log("security will prompt below — paste the base64 value (it will not echo).\n");
-  await importKeychainPsk();
+  if (process.stdin.isTTY) {
+    console.log("security will prompt below — paste the base64 value (it will not echo).\n");
+    await importKeychainPsk();
+  } else {
+    const piped = (await new Response(Bun.stdin.stream()).text()).trim();
+    // Validate before storing: -U updates in place, and a bad pipe (empty
+    // output, an op error message) must not clobber a good keychain entry.
+    let byteLength: number;
+    try {
+      byteLength = fromBase64(piped).byteLength;
+    } catch {
+      console.error("piped value is not valid base64 — nothing stored");
+      process.exit(1);
+    }
+    if (byteLength !== 32) {
+      console.error(`piped value decodes to ${byteLength} bytes, need 32 — nothing stored`);
+      process.exit(1);
+    }
+    await importKeychainPskValue(piped);
+  }
 
   const stored = await readKeychainPsk();
   if (stored === null) {
