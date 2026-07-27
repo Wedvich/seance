@@ -35,3 +35,34 @@ export async function importKeychainPsk(service: string = PSK_SERVICE): Promise<
     throw new Error(`security add-generic-password exited ${code}`);
   }
 }
+
+/**
+ * The `security -i` command line that stores a known PSK value. Double quotes
+ * are safe: callers validate the value as base64 first, and the base64
+ * alphabet (`A–Z a–z 0–9 + / =`) contains no quote, backslash, or whitespace.
+ * Exported for tests.
+ */
+export function pskImportCommand(psk: string, account: string, service: string): string {
+  return `add-generic-password -U -a "${account}" -s "${service}" -w "${psk}"`;
+}
+
+/**
+ * Stores a PSK that arrived on our own stdin (e.g. piped from `op`). The
+ * interactive path above can't take a pipe — `security`'s prompt reads
+ * /dev/tty, not stdin — so this runs `security -i`, where the whole command
+ * including `-w <psk>` travels over security's stdin: still never in argv,
+ * never in shell history.
+ */
+export async function importKeychainPskValue(psk: string, service: string = PSK_SERVICE): Promise<void> {
+  const proc = Bun.spawn(["security", "-i"], {
+    stdin: "pipe",
+    stdout: "ignore",
+    stderr: "inherit",
+  });
+  proc.stdin.write(`${pskImportCommand(psk, userInfo().username, service)}\n`);
+  await proc.stdin.end();
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`security -i exited ${code}`);
+  }
+}

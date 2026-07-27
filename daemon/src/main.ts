@@ -21,7 +21,7 @@ usage: seanced [command]
 
   (none)      run the daemon in the foreground (launchd supervises)
   init        write config skeleton + generate deviceId (never the PSK)
-  psk-import  store the PSK in the macOS login keychain (prompts; never argv)
+  psk-import  store the PSK in the macOS login keychain (prompts, or reads a pipe; never argv)
   install     write launchd plist and start the agent (macOS)
   uninstall   stop the agent and remove the plist
   restart     kickstart the agent (after git pull)

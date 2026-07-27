@@ -13,7 +13,7 @@ import {
   runnableProblems,
   type Config,
 } from "./config.ts";
-import { readKeychainPsk } from "./keychain.ts";
+import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
 
 const cleanups: string[] = [];
@@ -111,6 +111,14 @@ describe("psk resolution", () => {
 
   test("an empty field with nothing in the keychain resolves to null", async () => {
     expect(await loadPsk({ ...base, psk: "" }, "seance-psk-absent-in-tests")).toBeNull();
+  });
+
+  test("the piped-import command carries the key on security's stdin, quoted verbatim", () => {
+    // The `security -i` *store* path needs a real login keychain too — only the
+    // command line it feeds is pinned here.
+    expect(pskImportCommand(VALID.psk, "user", "seance-psk")).toBe(
+      `add-generic-password -U -a "user" -s "seance-psk" -w "${VALID.psk}"`,
+    );
   });
 });
 
