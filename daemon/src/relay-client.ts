@@ -6,7 +6,7 @@ import {
   type DaemonFrame,
   type Envelope,
   type Plain,
-  type RelayFrame,
+  type RelayToDaemonFrame,
 } from "@seance/shared";
 import { log } from "./log.ts";
 
@@ -146,9 +146,9 @@ export class RelayClient {
       return;
     }
 
-    let frame: RelayFrame;
+    let frame: RelayToDaemonFrame;
     try {
-      frame = JSON.parse(data) as RelayFrame;
+      frame = JSON.parse(data) as RelayToDaemonFrame;
     } catch {
       log.warn("dropped non-JSON frame from relay");
       return;

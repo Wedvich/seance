@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  PHONE_ID,
+  APP_ID,
   importPsk,
   open,
   seal,
@@ -24,7 +24,7 @@ const PSK = toBase64(new Uint8Array(32).fill(3));
 const TOKEN = "test-bearer";
 let base: string;
 let fixture: GitFixture;
-let phoneKey: CryptoKey;
+let appKey: CryptoKey;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-relay-"));
@@ -33,7 +33,7 @@ beforeAll(async () => {
   fixture = await makeGitFixture(base);
   const stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-  phoneKey = await importPsk(PSK);
+  appKey = await importPsk(PSK);
 });
 
 afterAll(async () => {
@@ -70,7 +70,7 @@ async function startTestDaemon(relayUrl: string, overrides: Record<string, numbe
 async function registerWithRepo(relay: TestRelay, repoName: string): Promise<{ deviceId: string; info: MachineInfo }> {
   for (let i = 0; i < 5; i++) {
     const frame = await relay.registers.next();
-    const plain = await open(phoneKey, frame.info);
+    const plain = await open(appKey, frame.info);
     const info = plain.payload as MachineInfo;
     if (info.repos.some((r) => r.name === repoName)) {
       return { deviceId: frame.deviceId, info };
@@ -79,7 +79,7 @@ async function registerWithRepo(relay: TestRelay, repoName: string): Promise<{ d
   throw new Error(`no register with repo ${repoName}`);
 }
 
-async function phoneRequest(
+async function appRequest(
   relay: TestRelay,
   deviceId: string,
   op: Plain["op"],
@@ -88,8 +88,8 @@ async function phoneRequest(
 ): Promise<{ id: string }> {
   const id = crypto.randomUUID();
   const env = await seal(
-    phoneKey,
-    { to: deviceId, from: PHONE_ID },
+    appKey,
+    { to: deviceId, from: APP_ID },
     {
       id,
       ts: Date.now() + tsOffset,
@@ -101,10 +101,10 @@ async function phoneRequest(
   return { id };
 }
 
-async function phoneReceive(relay: TestRelay, timeoutMs = 3_000): Promise<Plain> {
+async function appReceive(relay: TestRelay, timeoutMs = 3_000): Promise<Plain> {
   const env = await relay.messages.next(timeoutMs);
-  expect(env.to).toBe(PHONE_ID);
-  return open(phoneKey, env);
+  expect(env.to).toBe(APP_ID);
+  return open(appKey, env);
 }
 
 describe("daemon ↔ relay integration", () => {
@@ -141,8 +141,8 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
-      const { id } = await phoneRequest(relay, deviceId, "sessions", {});
-      const response = await phoneReceive(relay);
+      const { id } = await appRequest(relay, deviceId, "sessions", {});
+      const response = await appReceive(relay);
       expect(response.op).toBe("sessions");
       expect(response.re).toBe(id);
       expect(Array.isArray((response.payload as SessionsResponse).sessions)).toBe(true);
@@ -157,13 +157,13 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
-      await phoneRequest(relay, deviceId, "spawn", {
+      await appRequest(relay, deviceId, "spawn", {
         repo: "myrepo",
         mode: "here",
         title: "From Phone",
         prompt: "do the thing",
       });
-      const response = await phoneReceive(relay, 5_000);
+      const response = await appReceive(relay, 5_000);
       const payload = response.payload as SpawnResponse;
       expect(payload.ok).toBe(true);
       if (payload.ok) {
@@ -182,8 +182,8 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
-      await phoneRequest(relay, deviceId, "spawn", { mode: "worktree" });
-      const response = await phoneReceive(relay);
+      await appRequest(relay, deviceId, "spawn", { mode: "worktree" });
+      const response = await appReceive(relay);
       const payload = response.payload as SpawnResponse;
       expect(payload.ok).toBe(false);
       if (!payload.ok) expect(payload.code).toBe("internal_error");
@@ -199,8 +199,8 @@ describe("daemon ↔ relay integration", () => {
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
       await mkdir(join(fixture.root, "newrepo", ".git"), { recursive: true });
-      const { id } = await phoneRequest(relay, deviceId, "rescan", {});
-      const response = await phoneReceive(relay);
+      const { id } = await appRequest(relay, deviceId, "rescan", {});
+      const response = await appReceive(relay);
       expect(response.re).toBe(id);
       const payload = response.payload as RescanResponse;
       expect(payload.repos.map((r) => r.name)).toContain("newrepo");
@@ -220,8 +220,8 @@ describe("daemon ↔ relay integration", () => {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
       const id = crypto.randomUUID();
       const env = await seal(
-        phoneKey,
-        { to: deviceId, from: PHONE_ID },
+        appKey,
+        { to: deviceId, from: APP_ID },
         {
           id,
           ts: Date.now(),
@@ -230,7 +230,7 @@ describe("daemon ↔ relay integration", () => {
         },
       );
       relay.sendToDaemon(env);
-      await phoneReceive(relay);
+      await appReceive(relay);
       relay.sendToDaemon(env); // byte-identical replay
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
@@ -245,7 +245,7 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
-      await phoneRequest(relay, deviceId, "sessions", {}, -120_000);
+      await appRequest(relay, deviceId, "sessions", {}, -120_000);
       await Bun.sleep(200);
       expect(relay.messages.size).toBe(0);
     } finally {
@@ -260,8 +260,8 @@ describe("daemon ↔ relay integration", () => {
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
       const env = await seal(
-        phoneKey,
-        { to: "some-other-device", from: PHONE_ID },
+        appKey,
+        { to: "some-other-device", from: APP_ID },
         {
           id: crypto.randomUUID(),
           ts: Date.now(),

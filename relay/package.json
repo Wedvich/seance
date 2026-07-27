@@ -2,7 +2,7 @@
   "name": "@seance/relay",
   "version": "0.0.0",
   "private": true,
-  "description": "Cloudflare Worker + Durable Object routing opaque blobs between phone and daemons",
+  "description": "Cloudflare Worker + Durable Object routing opaque blobs between the app and daemons",
   "license": "MIT",
   "type": "module",
   "dependencies": {

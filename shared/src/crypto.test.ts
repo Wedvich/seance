@@ -12,7 +12,7 @@ const plain: Plain = {
   payload: {},
 };
 
-const route = { to: "device-a", from: "phone" };
+const route = { to: "device-a", from: "app" };
 
 describe("base64", () => {
   test("roundtrips arbitrary bytes", () => {

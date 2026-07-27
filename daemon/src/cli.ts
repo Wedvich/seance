@@ -1,6 +1,6 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
+import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
 import { configSkeleton, loadConfig, runnableProblems } from "./config.ts";
 import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
@@ -86,7 +86,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   };
 }
 
-/** The relay-free spawn path — same code the phone request runs, driven over SSH. */
+/** The relay-free spawn path — same code the app request runs, driven over SSH. */
 export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const args = parseSpawnArgs(argv);
   const config = await loadConfig();
@@ -178,7 +178,12 @@ export async function cmdDoctor(): Promise<void> {
     config = await loadConfig();
     ok(`loads from ${configPath()}`);
     for (const problem of runnableProblems(config)) fail(problem);
-    if (runnableProblems(config).length === 0) ok("psk, bearerToken, relayUrl look valid");
+    if (runnableProblems(config).length === 0) {
+      ok("psk, bearerToken, relayUrl look valid");
+      if (!config.relayUrl.endsWith(DAEMON_PATH)) {
+        warn(`relayUrl does not end in ${DAEMON_PATH} — the relay rejects the upgrade and the daemon retries silently`);
+      }
+    }
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }

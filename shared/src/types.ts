@@ -1,7 +1,13 @@
 export const PROTOCOL_VERSION = 1;
 
-/** Routing id the PWA uses on the wire; daemons address responses to it. */
-export const PHONE_ID = "phone";
+/** Routing id the app uses on the wire; daemons address responses to it. */
+export const APP_ID = "app";
+
+/** WS upgrade paths. Role is fixed by path, so the app sends no register frame. */
+export const DAEMON_PATH = "/daemon";
+export const APP_PATH = "/app";
+/** Browsers cannot set WS headers, so the app passes the bearer token as `?t=`. */
+export const TOKEN_PARAM = "t";
 
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "medium";
@@ -30,9 +36,65 @@ export type DaemonFrame =
   | { readonly t: "msg"; readonly env: Envelope };
 
 /** Layer 1: relay→daemon frames. */
-export type RelayFrame = { readonly t: "msg"; readonly env: Envelope };
+export type RelayToDaemonFrame = { readonly t: "msg"; readonly env: Envelope };
+
+/** Layer 1: app→relay frames. */
+export type AppFrame = { readonly t: "msg"; readonly env: Envelope };
+
+/** Why the relay could not hand an envelope to its target daemon. */
+export type UndeliverableCode = "offline" | "unknown";
+
+/**
+ * Layer 1: relay→app frames. `registry` arrives on connect and on every
+ * change. `undeliverable` correlates by `iv` — the request `id` lives inside
+ * the ciphertext, so a blind relay has nothing else to echo. App-bound
+ * envelopes go to every open app socket; clients drop unmatched `re`.
+ */
+export type RelayToAppFrame =
+  | { readonly t: "registry"; readonly entries: readonly RegistryView[] }
+  | { readonly t: "msg"; readonly env: Envelope }
+  | {
+      readonly t: "undeliverable";
+      readonly to: string;
+      readonly iv: string;
+      readonly code: UndeliverableCode;
+    };
+
+/**
+ * Machine registry as persisted by the Durable Object. Entries are permanent —
+ * overwritten only by a later register.
+ */
+export interface RegistryEntry {
+  readonly deviceId: string;
+  /** Encrypted MachineInfo, AAD-bound to APP_ID. */
+  readonly info: Envelope;
+  /** Written on register and on close — the only liveness events the DO observes. */
+  readonly lastSeen: number;
+}
+
+/**
+ * A registry entry as sent to the app. `connected` is derived from open
+ * sockets at read time and never persisted: heartbeats use DO auto-response
+ * and never wake the object, so a stored flag would survive as a stale `true`
+ * past an eviction.
+ */
+export type RegistryView = RegistryEntry & { readonly connected: boolean };
 
 export type OpName = "sessions" | "spawn" | "rescan" | "machine-info";
+
+/** Ops that expect a response; `machine-info` is a stored blob, not a request. */
+export type RequestOp = Exclude<OpName, "machine-info">;
+
+/**
+ * App-side response deadlines. A backstop rather than the primary error path —
+ * the daemon returns a structured error on its own — so spawn's ceiling clears
+ * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check.
+ */
+export const OP_TIMEOUT_MS = {
+  sessions: 10_000,
+  rescan: 15_000,
+  spawn: 90_000,
+} as const satisfies Record<RequestOp, number>;
 
 /**
  * Decrypted message body. `ts` feeds the ±60s replay window; `re` correlates

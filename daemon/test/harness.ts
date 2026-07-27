@@ -1,9 +1,18 @@
 import type { DaemonFrame, Envelope } from "@seance/shared";
 
 /**
- * Throwaway in-process relay for integration tests — NOT the real relay.
- * Routes frames like the Durable Object will: bearer gate on upgrade,
- * register tracking, msg routing, optional "pong" auto-response.
+ * Throwaway in-process relay for integration tests — NOT the real relay, and
+ * NOT a reference for building it. This doubles only the daemon-facing subset
+ * of the Durable Object: bearer-header gate on upgrade, register tracking, msg
+ * routing by `env.to`, optional "pong" auto-response. DESIGN.md's wire
+ * protocol section is the spec.
+ *
+ * Absent here: `/daemon` vs `/app` path roles (this accepts any path), `?t=`
+ * app auth, `registry` push, broadcast to app sockets. Two behaviours are
+ * outright inverted from the real DO, so do not copy them — the registry is
+ * ephemeral socket state dropped on close (the DO persists entries with
+ * `lastSeen` and derives `connected` at read), and an unroutable envelope
+ * throws in-process (the DO replies `undeliverable`).
  */
 
 export class AsyncQueue<T> {

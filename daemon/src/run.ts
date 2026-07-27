@@ -1,4 +1,4 @@
-import { PHONE_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
+import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
 import { loadConfig, runnableProblems, type Config } from "./config.ts";
 import { createHandler } from "./handlers.ts";
 import { log } from "./log.ts";
@@ -44,7 +44,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     };
     return seal(
       key,
-      { to: PHONE_ID, from: state.deviceId },
+      { to: APP_ID, from: state.deviceId },
       {
         id: crypto.randomUUID(),
         ts: Date.now(),
