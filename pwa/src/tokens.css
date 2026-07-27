@@ -1,0 +1,46 @@
+/*
+ * The locked "violet" palette. `data-theme` on <html> is always a resolved
+ * value — the inline boot script in index.html guarantees it before first
+ * paint — so there is deliberately no prefers-color-scheme query here.
+ */
+:root,
+html[data-theme="light"] {
+  --bg: #f4f2f8;
+  --sur: #ffffff;
+  --sur2: #ece8f4;
+  --fg: #171320;
+  --fg2: #6b6479;
+  --line: #e3def0;
+  --acc: #6a4bd0;
+  --acc-fg: #ffffff;
+  --ok: #2e8a63;
+  --err: #c2452f;
+}
+
+html[data-theme="dark"] {
+  --bg: #121017;
+  --sur: #19161f;
+  --sur2: #221d2b;
+  --fg: #eae6f0;
+  --fg2: #948da3;
+  --line: #2a2434;
+  --acc: #b198f2;
+  --acc-fg: #150e26;
+  --ok: #54c08f;
+  --err: #ef8878;
+}
+
+:root {
+  /*
+   * Fallbacks matter: the mono stack renders verbatim daemon pane output, which
+   * carries box-drawing and symbols beyond any Latin subset. Missing glyphs must
+   * fall through to a system face rather than tofu.
+   */
+  --sans: "Manrope", system-ui, -apple-system, sans-serif;
+  --serif: "Newsreader", ui-serif, Georgia, serif;
+  --mono: "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --gutter: 14px;
+  --gap: 12px;
+  --scrim: rgba(0, 0, 0, 0.45);
+}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- viewport-fit=cover is load-bearing: without it env(safe-area-inset-*) resolves to 0
+         and the pinned footer sits under the home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#19161f" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Séance" />
+    <meta name="robots" content="noindex" />
+
+    <!--
+      MUST stay the first script and stay inline: it runs synchronously, so the
+      parser blocks and <html> carries a resolved theme before any pixel is
+      painted. Anything later (React, a module script) lands after first paint,
+      which is exactly the flash of wrong theme this prevents. Its sha256 is
+      added to the CSP at build time — see vite.config.ts.
+    -->
+    <script>
+      (function () {
+        var pref = "system";
+        try {
+          pref = localStorage.getItem("seance:theme") || "system";
+        } catch (_) {
+          // Storage can throw in private modes; the OS preference still resolves below.
+        }
+        var dark = pref === "dark" || (pref === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var resolved = dark ? "dark" : "light";
+        var root = document.documentElement;
+        root.dataset.themePref = pref;
+        root.dataset.theme = resolved;
+        // Makes UA widgets (textarea, scrollbars) match before CSS is parsed.
+        root.style.colorScheme = resolved;
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", dark ? "#19161f" : "#ffffff");
+      })();
+    </script>
+
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+    <link rel="preload" href="/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/newsreader-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <title>Séance</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

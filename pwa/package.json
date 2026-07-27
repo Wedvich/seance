@@ -2,13 +2,30 @@
   "name": "@seance/pwa",
   "version": "0.0.0",
   "private": true,
-  "description": "Cloudflare Pages app — machine list, repo picker, spawn form, spawn verdict",
+  "description": "Cloudflare Workers app — machine list, repo picker, spawn form, spawn verdict",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "dev": "vite",
+    "preview": "vite preview",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test"
+  },
   "dependencies": {
-    "@seance/shared": "workspace:*"
+    "@seance/shared": "workspace:*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "miniflare": "^4.20260722.0",
+    "vite": "^7.2.0",
+    "vite-plugin-pwa": "^1.0.3",
     "wrangler": "^4.114.0"
   }
 }
