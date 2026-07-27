@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import type { RepoEntry, SpawnRequest } from "@seance/shared";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
-import { SpawnFailure, spawnSession } from "../src/spawn.ts";
+import { SpawnFailure, spawnSession, type SpawnOutcome } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
@@ -149,5 +149,90 @@ describe("exec timeout", () => {
     const result = await exec(["sleep", "5"], { timeoutMs: 100 });
     expect(result.timedOut).toBe(true);
     expect(result.exitCode).not.toBe(0);
+  });
+});
+
+/** Kill by window id — a hostile window *name* is not a safe tmux target string. */
+async function killWindow(name: string): Promise<void> {
+  const listed = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_id}\t#{window_name}"]);
+  const ids = listed
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .filter((parts) => parts[1] === name)
+    .map((parts) => parts[0])
+    .filter((id): id is string => id !== undefined);
+  await Promise.all(ids.map((id) => tmux(["kill-window", "-t", id])));
+}
+
+/**
+ * Names the breach rather than the symptom: a broken quote usually kills the
+ * pane too, and "claude_died" would send the next reader hunting the wrong bug.
+ * Marker files are checked first and reported by name, and only then is the
+ * spawn required to have succeeded — a metacharacter-laden title is still
+ * legitimate input, not an error.
+ */
+async function expectNoInjection(request: SpawnRequest, markers: readonly string[]): Promise<void> {
+  const result: SpawnOutcome | Error = await spawnSession(request, repos, "main", WAIT).catch((err: unknown) =>
+    err instanceof Error ? err : new Error(String(err)),
+  );
+  try {
+    const created = (
+      await Promise.all(markers.map(async (marker) => ((await Bun.file(marker).exists()) ? marker : null)))
+    ).filter((marker) => marker !== null);
+    expect(created).toEqual([]);
+    expect(result).not.toBeInstanceOf(Error);
+  } finally {
+    if (!(result instanceof Error)) await killWindow(result.window);
+  }
+}
+/**
+ * The daemon's two standing invariants, pinned. Both hold by construction today
+ * — `repo` is a name lookup and every value reaching the one shell string goes
+ * through `shq()` — and both are one careless refactor from being false.
+ */
+describe("wire input cannot escape the repo set or the shell", () => {
+  test("path-shaped repo values are repo_not_found — resolution is a name lookup, never a path join", async () => {
+    const cases = ["../../etc", "/etc", "myrepo/../../etc", "./myrepo", "myrepo\n", "…/myrepo"];
+    const errors = await Promise.all(
+      cases.map((repo) => spawnSession({ repo, mode: "here" }, repos, "main", WAIT).catch((err: unknown) => err)),
+    );
+    for (const err of errors) {
+      expect(err).toBeInstanceOf(SpawnFailure);
+      expect((err as SpawnFailure).code).toBe("repo_not_found");
+    }
+  });
+
+  test("title metacharacters stay data — none of the three injection forms run", async () => {
+    const semi = join(base, "pwned-semicolon");
+    const subst = join(base, "pwned-substitution");
+    const tick = join(base, "pwned-backtick");
+    await expectNoInjection(
+      { repo: "myrepo", mode: "here", title: `x'; touch ${semi} #$(touch ${subst})\`touch ${tick}\`` },
+      [semi, subst, tick],
+    );
+  });
+
+  test("model and effort metacharacters stay data", async () => {
+    const viaModel = join(base, "pwned-model");
+    const viaEffort = join(base, "pwned-effort");
+    await expectNoInjection(
+      {
+        repo: "myrepo",
+        mode: "here",
+        title: "Flags",
+        model: `opus'; touch ${viaModel} #`,
+        effort: `medium$(touch ${viaEffort})`,
+      },
+      [viaModel, viaEffort],
+    );
+  });
+
+  test("prompt metacharacters stay data — the seed file is read, not evaluated", async () => {
+    const viaQuote = join(base, "pwned-prompt-quote");
+    const viaSubst = join(base, "pwned-prompt-subst");
+    await expectNoInjection(
+      { repo: "myrepo", mode: "here", title: "Prompted", prompt: `"; touch ${viaQuote} #$(touch ${viaSubst})` },
+      [viaQuote, viaSubst],
+    );
   });
 });
