@@ -16,7 +16,7 @@ import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { scanRepos } from "./scan.ts";
 import { listClaudeSessions } from "./sessions.ts";
 import { SpawnFailure, spawnSession } from "./spawn.ts";
-import { loadOrInitState, readRuntime, saveState } from "./state.ts";
+import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 import { tmux } from "./tmux.ts";
 
 export async function cmdInit(): Promise<void> {
@@ -41,15 +41,28 @@ export async function cmdInit(): Promise<void> {
   console.log("  3. run `seanced doctor`, then `seanced install`");
 }
 
+/**
+ * Prints what the configured roots hold now, and primes the cache for the next
+ * start — but only when no daemon is running. A live daemon holds `repos` in
+ * memory and rewrites state.json from it on every rescan, so writing here would
+ * be clobbered without ever reaching it: silently losing the work and leaving
+ * `status` reporting a count nothing had registered.
+ */
 export async function cmdScan(): Promise<void> {
   const config = await loadConfig();
   const state = await loadOrInitState();
   const repos = await scanRepos(config.repoRoots, state.repos);
-  await saveState({ ...state, repos, scannedAt: Date.now() });
+  const daemonPid = await livePid();
+  if (daemonPid === null) await saveState({ ...state, repos, scannedAt: Date.now() });
   for (const repo of repos) {
     console.log(`${repo.name.padEnd(30)} ${(repo.defaultBranch ?? "-").padEnd(12)} ${repo.path}`);
   }
   console.log(`\n${repos.length} repos`);
+  if (daemonPid !== null) {
+    console.log(
+      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seanced restart\` if you edited repoRoots.`,
+    );
+  }
 }
 
 export interface SpawnCliArgs {
@@ -140,13 +153,7 @@ export async function cmdStatus(): Promise<void> {
     console.log("daemon:    no runtime info — never started?");
     return;
   }
-  let alive = false;
-  try {
-    process.kill(runtime.pid, 0);
-    alive = true;
-  } catch {
-    // dead or not ours
-  }
+  const alive = pidAlive(runtime.pid);
   console.log(`daemon:    pid ${runtime.pid} ${alive ? "running" : "not running"}`);
   console.log(
     `relay:     ${runtime.connected && alive ? `connected since ${new Date(runtime.connectedSince ?? 0).toISOString()}` : "disconnected"}`,

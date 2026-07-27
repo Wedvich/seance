@@ -59,6 +59,27 @@ export async function writeRuntime(runtime: Runtime, path: string = runtimePath(
   await Bun.write(path, `${JSON.stringify(runtime, null, 2)}\n`);
 }
 
+/** True while that pid is ours and alive — the liveness half of `readRuntime`. */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    // dead or not ours
+    return false;
+  }
+}
+
+/**
+ * The running daemon's pid, or null when nothing live owns state.json. Anything
+ * that writes the cache has to ask first: the daemon rewrites it from memory.
+ */
+export async function livePid(path: string = runtimePath()): Promise<number | null> {
+  const runtime = await readRuntime(path);
+  if (runtime === null) return null;
+  return pidAlive(runtime.pid) ? runtime.pid : null;
+}
+
 export async function readRuntime(path: string = runtimePath()): Promise<Runtime | null> {
   const file = Bun.file(path);
   if (!(await file.exists())) return null;

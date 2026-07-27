@@ -27,7 +27,7 @@ usage: seanced [command]
   restart     kickstart the agent (after git pull)
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
-  scan        discover repos now and persist the cache
+  scan        discover repos now; caches for the next start unless a daemon is running
   sessions    list running claude tmux windows
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
   help        this text
