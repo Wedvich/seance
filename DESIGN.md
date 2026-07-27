@@ -74,6 +74,118 @@ its Tailscale lockdown defeats the relay's purpose).
   registration. Anti-junk hygiene only — the PSK is the trust boundary; the
   PWA ignores registry entries that don't decrypt.
 
+## Threat model
+
+Mapped against MITRE ATT&CK v19 (released 2026-04-28) on 2026-07-27. ATT&CK
+catalogues observed adversary behaviour, not design flaws, so it is used two
+ways here: as an inventory of what Séance itself does that an attacker would
+inherit, and as a frame for the paths into it. What it doesn't cover is
+recorded as invariants below.
+
+**Assets, in order**: the PSK (it is the only trust boundary); code execution
+on four dev machines; prompts and repo names; presence metadata. The bearer
+token is not an asset in the same sense — see its blast radius above.
+
+**Séance's own footprint.** The daemon is structurally a remote access tool and
+reads as one to any EDR:
+
+| Behaviour                                                | ATT&CK                           |
+| -------------------------------------------------------- | -------------------------------- |
+| launchd agent runs `seanced`                             | T1543.001 Launch Agent           |
+| persistent outbound WSS to the relay                     | T1071.001, T1102.002             |
+| AES-256-GCM under a PSK                                  | T1573.001 Symmetric Cryptography |
+| remotely starting an interactive coding agent            | **T1219.001 IDE Tunneling**      |
+| `caffeinate -is` per spawn + the AC-power hold           | T1653 Power Settings             |
+| depth-2 `.git` scan of `repoRoots`                       | T1083                            |
+| tmux pane enumeration                                    | T1057                            |
+| `git pull` + `launchctl kickstart -k` as the update path | T1195.001                        |
+
+T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
+and JetBrains Gateway, i.e. this exact shape. Consequence: those persistence
+and C2 techniques firing together is a RAT signature, so a machine that later
+gets an EDR needs Séance allowlisted deliberately — and once allowlisted,
+Séance's noise is cover for a real intruder.
+
+**Paths in, ranked.**
+
+1. **PSK theft from the browser** (T1189 → T1555.003-adjacent; localStorage has
+   no exact technique). The PWA holds the only copy of the key outside the four
+   configs, and is the only place reachable without touching a machine. Every
+   control in the security model above defends the _channel_ — AAD binding, IV
+   dedup, the ±60s window, relay blindness — and none of them touch this.
+   Decision: the PWA keeps the key as a non-extractable `CryptoKey`
+   (`importPsk` already imports with `extractable: false`) in IndexedDB, never
+   as base64 in local storage, under a strict CSP. XSS can then use the key
+   while a tab is open but cannot exfiltrate it — the difference between a
+   transient compromise and a permanent silent one.
+2. **Infostealer reading `config.json`** (T1552.001). 0600 stops other users,
+   not a process running as the user, and macOS commodity stealers already
+   sweep `~/.config`. The keychain rejection above optimised for parity with a
+   WSL machine that doesn't exist yet; revised — macOS reads the PSK from the
+   login keychain when present and falls back to the config field, behind one
+   `loadPsk()` so WSL keeps the file path.
+3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
+   above holds for Cloudflare itself, but the token also reaches Workers Trace
+   Events and any Logpush sink — enabling Logpush to a third party later moves
+   the blast radius off Cloudflare, so that choice is not free. The token also
+   buys slightly more than stated: `register` overwrites by `deviceId`, so a
+   holder can blank a real machine's entry until it re-registers (T1565.001),
+   and nothing caps registry growth (T1499.003). Bounded by entry caps, a
+   UUID check on `deviceId`, and a per-socket register rate limit in the DO.
+4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
+   AAD binding makes re-addressing fail closed. Residual is availability and
+   traffic analysis, both accepted. One unstated dependency: the ±60s window
+   trusts local time and NTP is unauthenticated, so an attacker who can skew a
+   daemon's clock widens the window.
+5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
+   unsigned; a compromised repo is RCE on every machine, onto boxes that
+   already carry launchd persistence. Bounded by 2FA and branch protection
+   rather than an update daemon — proportionate to four machines.
+6. **Prompt injection into the spawned agent.** Outside ATT&CK Enterprise;
+   v19's AI additions (T1682, T1683) model adversaries _using_ AI, not
+   compromising an agent — MITRE ATLAS is the companion frame. Two parts: a PSK
+   holder's `prompt` reaches Claude under `--permission-mode auto`, and the
+   spawned agent then reads repo content Séance does not control.
+
+**What "structured payloads only" does and does not mean.** It stops wire input
+being interpolated into the daemon's own shell construction. It is not a
+capability limit: `prompt` is free text handed to a Claude session running
+`--permission-mode auto`, so anyone who can form a valid spawn frame has
+arbitrary code execution, laundered through the agent. The PSK is the whole
+boundary and there is nothing behind it. Recorded here so the control isn't
+read as a sandbox.
+
+**Invariants.** The first two hold in the code today and are requirements, not
+observations — they are exactly the kind of thing that drifts silently. The
+third is the gap they leave.
+
+- `spawn` resolves `repo` by **name lookup against the cached scan set**
+  (`repos.find(r => r.name === request.repo)`). A wire-supplied string is never
+  joined onto a path root. `repo_not_found` is a security outcome, not just UX.
+- Every external process is invoked as an **argv array** (`exec.ts`). The one
+  shell string is the tmux inner command, where every wire-supplied value —
+  `title`, `model`, `effort`, worktree name — goes through `shq()`. Nothing
+  wire-supplied may be concatenated into a command unquoted.
+- Every spawn is **logged at start and outcome** with repo, mode, title, prompt
+  length and prompt SHA-256 prefix. With a stolen PSK this log is the only
+  thing that says someone else used your machines, and today a _successful_
+  spawn logs nothing at all — only crashes do. This is the design's largest
+  detection gap; the log is local and rewritable by whoever compromised the
+  machine, so it is evidence for the honest-machine case only.
+
+**Non-goals**: multi-user access control (one human owns every device); relay
+availability (an outage is no spawns, not a breach); defending a dev machine
+that is already compromised (it holds the PSK, so it _is_ the boundary);
+zero-downtime key rotation.
+
+**Key rotation runbook.** Rotation and revocation are one operation: generate
+32 bytes in 1Password, paste into all four configs and the PWA, `seanced
+restart` on each. Spawns fail closed in between. No `keyId` in the envelope —
+considered and rejected, because a rollover window buys nothing for four
+devices owned by one person and costs a wire-format change. `seanced doctor`
+prints a PSK fingerprint (SHA-256 prefix of the raw key) so agreement across
+devices is checkable without comparing secrets.
+
 ## Presence & identity
 
 The Durable Object persists a machine registry:
@@ -318,7 +430,8 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned.
-- Key rotation or a new phone touches 4 devices manually.
+- Key rotation or a new phone touches 4 devices manually, with spawns failing
+  closed in between — no `keyId`, no rollover window.
 - Battery-powered Macs show offline when asleep.
 - No deep link from spawn verdict into the Claude app session.
 - A spawn reply lost to a >45s background cannot be recovered exactly, only
@@ -326,6 +439,10 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   would fix the short cases, but `ts` lives inside the ciphertext so a blind
   relay cannot re-stamp one; anything flushed beyond `REPLAY_WINDOW_MS` is
   rejected as stale. Deliberately not built — see below.
+- A PSK holder has arbitrary code execution on every machine; the spawn audit
+  log is local and rewritable, so detection assumes the machine is honest.
+- The daemon's own footprint is indistinguishable from a RAT — machines that
+  gain an EDR need it allowlisted by hand.
 
 ## Open design details (build time)
 
@@ -338,3 +455,9 @@ Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
 DO hibernation — decisions recorded in their sections above. Also resolved with
 the PWA: `/app` close codes, PSK at rest, session fan-out, and lost-reply
 reconciliation.
+
+Decided but not yet built (threat model, 2026-07-27): spawn audit logging;
+keychain-backed PSK on macOS behind `loadPsk()`; PSK fingerprint in `doctor`;
+registry entry caps, UUID `deviceId` validation and register rate limiting in
+the DO; regression tests pinning the two spawn invariants. The PWA's
+non-extractable-key and CSP items are tracked in `HANDOFF-pwa-security.md`.
