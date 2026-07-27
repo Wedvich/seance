@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
 import { toBase64 } from "@seance/shared";
-import { configSkeleton, loadConfig, runnableProblems, type Config } from "./config.ts";
+import { bearerTokenWarnings, configSkeleton, loadConfig, runnableProblems, type Config } from "./config.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
 
 const cleanups: string[] = [];
@@ -79,6 +79,43 @@ describe("runnableProblems", () => {
     expect(runnableProblems({ ...base, psk: "!!!" })[0]).toContain("base64");
     expect(runnableProblems({ ...base, relayUrl: "https://x" })[0]).toContain("ws://");
     expect(runnableProblems({ ...base, bearerToken: "", psk: "" })).toHaveLength(2);
+  });
+});
+
+describe("bearerTokenWarnings", () => {
+  const strong = "CMQWe8MLQUjWD4UpUlqaiMrVEUTDxe3PlPpSECJn0Pg";
+
+  test("a base64url token of decent length draws no warnings", () => {
+    expect(bearerTokenWarnings(strong)).toEqual([]);
+  });
+
+  test("padded base64url is fine — `=` survives both a header and a query value", () => {
+    expect(bearerTokenWarnings(`${strong}=`)).toEqual([]);
+  });
+
+  test("empty is left to runnableProblems rather than double-reported", () => {
+    expect(bearerTokenWarnings("")).toEqual([]);
+  });
+
+  test("flags standard-base64 characters that ?t= mangles", () => {
+    const [warning] = bearerTokenWarnings("DQ0N7k/gkySJE7MxZEyEBZuyShlCC1PP1TFOPx+fkzU=");
+    expect(warning).toContain("?t=");
+    expect(warning).toContain("base64url");
+  });
+
+  test("names each offending character once, quoted so whitespace is visible", () => {
+    const [warning] = bearerTokenWarnings(`${strong}++&& #`);
+    expect(warning).toContain(`"+" "&" " " "#"`);
+  });
+
+  test("flags a token short enough to be worth regenerating", () => {
+    expect(bearerTokenWarnings("short")[0]).toContain("5 characters");
+    expect(bearerTokenWarnings("a".repeat(31))[0]).toContain("31 characters");
+    expect(bearerTokenWarnings("a".repeat(32))).toEqual([]);
+  });
+
+  test("reports encoding and length independently", () => {
+    expect(bearerTokenWarnings("a+b")).toHaveLength(2);
   });
 });
 

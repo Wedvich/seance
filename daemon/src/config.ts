@@ -75,7 +75,7 @@ export function runnableProblems(config: Config): readonly string[] {
     problems.push("name is empty");
   }
   if (config.psk === "") {
-    problems.push("psk is empty — generate 32 random bytes (base64) and paste them in");
+    problems.push("psk is empty — generate 32 random bytes: openssl rand -base64 32");
   } else {
     try {
       const bytes = fromBase64(config.psk);
@@ -87,4 +87,37 @@ export function runnableProblems(config: Config): readonly string[] {
     }
   }
   return problems;
+}
+
+/** base64url plus `=` padding — the intersection of what an Authorization header and a `?t=` value both carry intact. */
+const URL_SAFE_TOKEN = /^[A-Za-z0-9._~=-]+$/u;
+
+/** 32 base64url characters is 192 bits; below that the token is worth regenerating. */
+const MIN_BEARER_LENGTH = 32;
+
+/**
+ * Non-fatal `bearerToken` advice. An awkwardly encoded token still
+ * authenticates the daemon — its header carries any bytes — but the app passes
+ * the same string as `?t=`, where `+` decodes to a space. That surfaces as a
+ * silent 401 and a backoff loop rather than an error, so it is worth catching
+ * here. Empty is left to `runnableProblems`, which already fails on it.
+ */
+export function bearerTokenWarnings(token: string): readonly string[] {
+  if (token === "") return [];
+  const warnings: string[] = [];
+  if (!URL_SAFE_TOKEN.test(token)) {
+    // Quoted: a stray space or newline from a bad paste is the likeliest
+    // offender and the one that says nothing at all unrendered.
+    const offenders = [...new Set(token.replaceAll(/[A-Za-z0-9._~=-]/gu, ""))]
+      .map((char) => JSON.stringify(char))
+      .join(" ");
+    warnings.push(
+      `bearerToken has characters the app's ?t= parameter mangles (${offenders}) — regenerate as base64url: ` +
+        `openssl rand 32 | base64 | tr '+/' '-_' | tr -d '='`,
+    );
+  }
+  if (token.length < MIN_BEARER_LENGTH) {
+    warnings.push(`bearerToken is only ${token.length} characters — use at least ${MIN_BEARER_LENGTH}`);
+  }
+  return warnings;
 }

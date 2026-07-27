@@ -1,7 +1,7 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
-import { configSkeleton, loadConfig, runnableProblems } from "./config.ts";
+import { bearerTokenWarnings, configSkeleton, loadConfig, runnableProblems } from "./config.ts";
 import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { scanRepos } from "./scan.ts";
@@ -23,8 +23,12 @@ export async function cmdInit(): Promise<void> {
   const state = await loadOrInitState();
   console.log(`deviceId: ${state.deviceId}`);
   console.log("\nnext steps:");
-  console.log("  1. generate a 32-byte base64 PSK offline (e.g. in 1Password) and paste it into psk");
-  console.log("  2. fill in relayUrl, bearerToken, and repoRoots");
+  // Standard base64 for the psk (it round-trips through atob); base64url for the
+  // bearer token, which the app also has to pass through a `?t=` query value.
+  console.log("  1. paste a PSK into psk — generate it offline, e.g. in 1Password or:");
+  console.log("       openssl rand -base64 32");
+  console.log("  2. fill in relayUrl, repoRoots, and a bearerToken shared with the relay:");
+  console.log("       openssl rand 32 | base64 | tr '+/' '-_' | tr -d '='");
   console.log("  3. run `seanced doctor`, then `seanced install`");
 }
 
@@ -178,12 +182,16 @@ export async function cmdDoctor(): Promise<void> {
     config = await loadConfig();
     ok(`loads from ${configPath()}`);
     for (const problem of runnableProblems(config)) fail(problem);
+    // Independent of those failures: a token can be shape-valid and still be one
+    // the app cannot pass through `?t=` intact.
+    const tokenWarnings = bearerTokenWarnings(config.bearerToken);
     if (runnableProblems(config).length === 0) {
-      ok("psk, bearerToken, relayUrl look valid");
+      ok(tokenWarnings.length === 0 ? "psk, bearerToken, relayUrl look valid" : "psk and relayUrl look valid");
       if (!config.relayUrl.endsWith(DAEMON_PATH)) {
         warn(`relayUrl does not end in ${DAEMON_PATH} — the relay rejects the upgrade and the daemon retries silently`);
       }
     }
+    for (const warning of tokenWarnings) warn(warning);
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
