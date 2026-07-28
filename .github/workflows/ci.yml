@@ -13,7 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  # Source analysis is platform-independent, so it runs once instead of per matrix leg.
+  checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,10 +25,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
-
-      # Daemon and e2e suites shell out to a real tmux (private server per test).
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -40,6 +37,37 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+  # Both daemon platforms: ubuntu stands in for WSL's Linux userland, macOS for Macs.
+  # The WSL-gated interop tests (isWsl) self-skip on both legs — those stay local-only,
+  # since WSL2 on hosted Windows runners rides unsupported nested virtualization.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # Daemon and e2e suites shell out to a real tmux (private server per test).
+      - name: Install tmux
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install tmux
+          else
+            sudo apt-get update && sudo apt-get install -y tmux
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
 
       - name: Test
         run: bun run test
