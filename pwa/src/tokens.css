@@ -8,6 +8,7 @@ html[data-theme="light"] {
   --bg: #f4f2f8;
   --sur: #ffffff;
   --sur2: #ece8f4;
+  --sur3: #ffffff;
   --fg: #171320;
   --fg2: #6b6479;
   --line: #e3def0;
@@ -21,6 +22,7 @@ html[data-theme="dark"] {
   --bg: #0c0b0f;
   --sur: #1c1a22;
   --sur2: #2a2732;
+  --sur3: #3b3745;
   --fg: #f5f3f8;
   --fg2: #bcb7c6;
   --line: #454150;

@@ -45,12 +45,6 @@ export function setPref(pref: ThemePref): void {
   applyPref(pref);
 }
 
-/** Next value in the Settings sheet's tap-to-cycle order. */
-export function nextPref(pref: ThemePref): ThemePref {
-  const index = THEME_PREFS.indexOf(pref);
-  return THEME_PREFS[(index + 1) % THEME_PREFS.length] ?? "system";
-}
-
 /** Live OS changes only matter while the pref is `system`, but the listener stays attached. */
 export function watchSystemTheme(): () => void {
   const media = darkMedia();
