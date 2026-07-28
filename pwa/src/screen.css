@@ -142,6 +142,10 @@
   color: var(--fg2);
 }
 
+.prompt-card:focus-within {
+  border-color: var(--acc);
+}
+
 /* ---- banner ---- */
 
 .banner {
