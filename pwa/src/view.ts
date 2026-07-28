@@ -69,13 +69,16 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/** Compact and deliberately coarse: "3d" reads faster than a timestamp on a phone. */
+/**
+ * Compact and deliberately coarse: "3d ago" reads faster than a timestamp on a
+ * phone. Carries its own "ago" so callers can't pair it with "just now".
+ */
 export function formatSeen(lastSeen: number, now: number): string {
   const elapsed = Math.max(0, now - lastSeen);
   if (elapsed < MINUTE) return "just now";
-  if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m`;
-  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
-  return `${Math.floor(elapsed / DAY)}d`;
+  if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m ago`;
+  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h ago`;
+  return `${Math.floor(elapsed / DAY)}d ago`;
 }
 
 function segments(path: string): string[] {

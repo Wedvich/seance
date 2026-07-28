@@ -77,7 +77,7 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
         ))}
         <SheetItem
           label="Rescan repos"
-          sub={view.machine === null ? null : `last scanned ${formatSeen(view.machine.scannedAt, now)} ago`}
+          sub={view.machine === null ? null : `last scanned ${formatSeen(view.machine.scannedAt, now)}`}
           onClick={() => {
             store.dismissLayer();
             void store.rescan();

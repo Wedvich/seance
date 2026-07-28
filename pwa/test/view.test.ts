@@ -60,9 +60,9 @@ function sessions(count: number): SessionsView {
 describe("formatSeen", () => {
   test("coarsens by magnitude", () => {
     expect(formatSeen(NOW, NOW)).toBe("just now");
-    expect(formatSeen(NOW - 90_000, NOW)).toBe("1m");
-    expect(formatSeen(NOW - 2 * 3_600_000, NOW)).toBe("2h");
-    expect(formatSeen(NOW - 3 * 86_400_000, NOW)).toBe("3d");
+    expect(formatSeen(NOW - 90_000, NOW)).toBe("1m ago");
+    expect(formatSeen(NOW - 2 * 3_600_000, NOW)).toBe("2h ago");
+    expect(formatSeen(NOW - 3 * 86_400_000, NOW)).toBe("3d ago");
   });
 
   test("never renders a negative age from clock skew", () => {
@@ -144,7 +144,7 @@ describe("banner and button", () => {
     expect(view.banner?.body).toContain("plugged in");
     expect(view.button).toEqual({ label: "MacBook Pro is asleep", enabled: false });
     expect(view.machineTile.dot).toBe("off");
-    expect(view.footerStatus).toBe("Last seen 3d · sessions unknown");
+    expect(view.footerStatus).toBe("Last seen 3d ago · sessions unknown");
   });
 
   test("a non-Mac offline machine gets the keepalive copy instead", () => {
