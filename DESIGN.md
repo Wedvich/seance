@@ -462,6 +462,16 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
   dies silently and stale counts under a green dot are worse than none.
+- **The service worker's update lifecycle is configured explicitly, not inherited
+  from `registerType`.** vite-plugin-pwa only derives `skipWaiting`/`clientsClaim`
+  from `autoUpdate` when `injectRegister` is left at `"auto"`, and this build sets
+  `injectRegister: null` to keep a second inline script hash out of the CSP — so
+  `autoUpdate` was inert and a new worker waited behind the old one indefinitely,
+  which an installed PWA never reliably releases. Registration lives in
+  `src/sw.ts` for two things the injected script cannot do: check for an update on
+  resume, because an installed PWA can go days without a navigation, and reload
+  only on a visibility change, so a new build lands like a cold launch instead of
+  yanking the screen mid-use.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict and the Relay & keys screen all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.

@@ -74,8 +74,9 @@ export default defineConfig(({ mode }) => {
       react(),
       VitePWA({
         registerType: "autoUpdate",
-        // An external registration script keeps the CSP free of a second inline hash.
-        injectRegister: "script-defer",
+        // Registration is src/sw.ts, so the CSP stays free of a second inline hash
+        // and the update check can hang off resume. See that file.
+        injectRegister: null,
         manifest: {
           name: "Séance",
           short_name: "Séance",
@@ -94,6 +95,13 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
+          // The plugin only derives these from registerType: "autoUpdate" when
+          // injectRegister is left at "auto" (index.js: `injectRegister === "auto"`),
+          // so they are set here. Without them a new worker installs and waits behind
+          // the old one until every client closes — which an installed PWA never
+          // reliably does, so a deployed build simply never arrives.
+          skipWaiting: true,
+          clientsClaim: true,
           // Precaching the shell is the whole point: launching offline must reach
           // the app's own "relay unreachable" state, not the browser error page.
           globPatterns: ["**/*.{js,css,html,woff2,png,txt}"],

@@ -8,11 +8,13 @@ import { RelayClient } from "./relay/client.ts";
 import { loadPsk, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import { Store } from "./store.ts";
+import { registerServiceWorker } from "./sw.ts";
 import { watchSystemTheme } from "./theme.ts";
 
 const PERSIST_DEBOUNCE_MS = 300;
 
 watchSystemTheme();
+registerServiceWorker();
 
 // Prompts are the one thing here the user authored, so make eviction unlikely.
 void navigator.storage?.persist?.();
