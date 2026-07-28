@@ -142,7 +142,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
       <div className="column">
         <div className="prompt-card card">
           <span className="label" id="prompt-label">
-            PROMPT · OPTIONAL
+            PROMPT
           </span>
           <textarea
             className="prompt-input"
