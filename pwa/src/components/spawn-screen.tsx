@@ -136,7 +136,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
           onClick={() => store.openSheet("settings")}
           aria-label="Relay and settings"
         >
-          <span className={view.relayOk ? "dot dot-ok" : "dot dot-err"} />
+          <span className={view.relayDot === null ? "dot" : `dot dot-${view.relayDot}`} />
           relay
         </button>
       </header>

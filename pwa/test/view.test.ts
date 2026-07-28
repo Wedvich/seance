@@ -29,6 +29,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     machines,
     registrySize: machines.length,
     ignored: 0,
+    settling: false,
     ...overrides,
   };
 }
@@ -100,6 +101,15 @@ describe("banner and button", () => {
     expect(view.banner?.title).toBe("Relay unreachable");
     expect(view.button).toEqual({ label: "Waiting for the relay", enabled: false });
     expect(view.meta).toBe("relay unreachable · retrying");
+  });
+
+  // A refresh and every resume start here, and the screen must not shout on the way in.
+  test("a settling relay reads as connecting, with no banner and no red dot", () => {
+    const view = deriveView(state({ relay: relay({ status: "connecting", settling: true }) }), NOW);
+    expect(view.banner).toBeNull();
+    expect(view.meta).toBe("connecting…");
+    expect(view.relayDot).toBeNull();
+    expect(view.button).toEqual({ label: "Connecting…", enabled: false });
   });
 
   test("a rejected token is reported as such, not as an unreachable relay", () => {

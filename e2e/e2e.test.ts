@@ -111,6 +111,14 @@ describe("daemon ↔ relay ↔ app", () => {
     });
     process.env["SEANCE_CLAUDE_BIN"] = stack.stub.failing;
     try {
+      // Only a death is asserted here, and the daemon reports one as soon as the pane
+      // goes — the budget is the deadline for calling a corpse alive, so it is generous
+      // rather than tight. At the default it read the stub's bash + sleep 0.3 as a live
+      // session whenever the other shards were competing for the CPU.
+      // Well under the runner's 15s per-test timeout: if the stub is slower than even
+      // this, the assertion below has to be what reports it, not a killed test whose
+      // finally never restores the default budget for the spawns that follow.
+      await stack.restartDaemon({ spawnWaitMs: 8_000 });
       await app.waitForApp(spawnReady, "machine ready to spawn");
       await app.store.spawn();
 
@@ -124,6 +132,8 @@ describe("daemon ↔ relay ↔ app", () => {
     } finally {
       process.env["SEANCE_CLAUDE_BIN"] = stack.stub.ok;
       app.stop();
+      // Back to the default, or every later spawn in this file pays 15s to be called alive.
+      await stack.restartDaemon();
     }
   });
 

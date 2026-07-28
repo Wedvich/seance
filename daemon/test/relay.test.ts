@@ -196,6 +196,25 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  // `typeof null === "object"`, so a null envelope used to clear the frame guard and
+  // throw on the first dereference — inside a voided promise, so it took the op down
+  // with no log line and nothing to answer the app with.
+  test("a null envelope is dropped, and the socket keeps serving", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId } = await registerWithRepo(relay, "myrepo");
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: null }));
+
+      await appRequest(relay, deviceId, "sessions", {});
+      const response = await appReceive(relay);
+      expect((response.payload as SessionsResponse).sessions).toBeDefined();
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("rescan finds a new clone and re-registers", async () => {
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url);

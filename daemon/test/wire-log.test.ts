@@ -25,6 +25,7 @@ let fixture: GitFixture;
 let appKey: CryptoKey;
 let lines: string[] = [];
 let realLog: typeof console.log;
+let realError: typeof console.error;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-wirelog-"));
@@ -34,14 +35,21 @@ beforeAll(async () => {
   const stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
   appKey = await importPsk(PSK);
-  realLog = console.log;
-  console.log = (...args: unknown[]): void => {
+  // Both streams: log.ts sends `error` to console.error, and the realistic leak is a
+  // handler crash stringifying an error that quotes the request — capturing only
+  // console.log would let the prompt assertion below pass over a prompt in the output.
+  const capture = (...args: unknown[]): void => {
     lines.push(args.map(String).join(" "));
   };
+  realLog = console.log;
+  realError = console.error;
+  console.log = capture;
+  console.error = capture;
 });
 
 afterAll(async () => {
   console.log = realLog;
+  console.error = realError;
   await tmux(["kill-server"]);
   delete process.env["SEANCE_STATE_DIR"];
   delete process.env["SEANCE_TMUX_SOCKET"];

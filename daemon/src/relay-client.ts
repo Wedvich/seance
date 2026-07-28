@@ -159,7 +159,10 @@ export class RelayClient {
       log.warn("dropped non-JSON frame from relay");
       return;
     }
-    if (frame.t !== "msg" || typeof frame.env !== "object") {
+    // `typeof null === "object"`, so null has to be named: it would otherwise reach
+    // #onEnvelope and throw on the first dereference, and the caller voids this promise
+    // — an unhandled rejection and no log line, which is the opposite of dropping it.
+    if (frame.t !== "msg" || frame.env === null || typeof frame.env !== "object") {
       log.warn(`dropped unexpected frame type from relay`);
       return;
     }

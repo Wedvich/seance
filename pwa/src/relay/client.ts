@@ -63,10 +63,26 @@ export interface RelayState {
   readonly registrySize: number;
   /** registrySize minus machines.length — a stale PSK somewhere. */
   readonly ignored: number;
+  /**
+   * The socket is not open, but too briefly to be worth reporting yet. Set from the
+   * moment `open` is left until SETTLE_MS later, and never re-armed by a retry that
+   * follows one — once the drop has been shown it stays shown.
+   */
+  readonly settling: boolean;
 }
 
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 15_000;
+
+/**
+ * How long a gap in the socket is allowed to go unreported. A refresh dials from
+ * scratch and a resume re-dials unconditionally (the socket dies silently while an
+ * installed PWA is suspended), so the app is legitimately not open for a moment on
+ * the way in — and rendering that immediately flashed "Relay unreachable" for a
+ * frame or two every single time. Anything that recovers inside this window is
+ * never shown at all; a real outage lasts far longer than it.
+ */
+const SETTLE_MS = 1_500;
 
 const INITIAL_STATE: RelayState = {
   status: "connecting",
@@ -74,6 +90,7 @@ const INITIAL_STATE: RelayState = {
   machines: [],
   registrySize: 0,
   ignored: 0,
+  settling: true,
 };
 
 interface Pending {
@@ -120,10 +137,12 @@ export class RelayClient {
   #socket: WebSocket | null = null;
   #attempt = 0;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
+  #settleTimer: ReturnType<typeof setTimeout> | null = null;
   #stopped = false;
 
   readonly #timeouts: Partial<Record<RequestOp, number>>;
   readonly #createSocket: (url: string) => WebSocket;
+  readonly #settleMs: number;
 
   constructor(opts: {
     readonly url: string;
@@ -133,12 +152,15 @@ export class RelayClient {
     readonly timeouts?: Partial<Record<RequestOp, number>>;
     /** Socket construction, injected so tests can pass runtime-specific options. */
     readonly createSocket?: (url: string) => WebSocket;
+    /** Override for SETTLE_MS; tests use it to avoid a real 1.5s wait. */
+    readonly settleMs?: number;
   }) {
     this.#url = opts.url;
     this.#token = opts.token;
     this.#key = opts.key;
     this.#timeouts = opts.timeouts ?? {};
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
+    this.#settleMs = opts.settleMs ?? SETTLE_MS;
   }
 
   #timeoutFor(op: RequestOp): number {
@@ -161,6 +183,10 @@ export class RelayClient {
     this.#stopped = true;
     if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
     this.#retryTimer = null;
+    this.#clearSettle();
+    // Leaving the settle window set would strand the screen on "connecting…" for as
+    // long as the client stays stopped, which is the one thing it is certainly not.
+    this.#patch({ settling: false });
     this.#socket?.close();
     this.#socket = null;
     this.#failAllPending(new RequestFailure("disconnected", "client stopped"));
@@ -171,8 +197,12 @@ export class RelayClient {
     if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
     this.#retryTimer = null;
     this.#attempt = 0;
-    this.#socket?.close();
+    // Detached before closing, or a close dispatched synchronously still passes the
+    // identity guard and runs the backoff path — arming a second retry chain and
+    // reporting the deliberate swap as a drop.
+    const previous = this.#socket;
     this.#socket = null;
+    previous?.close();
     this.#stopped = false;
     this.#connect();
   }
@@ -237,11 +267,12 @@ export class RelayClient {
     url.searchParams.set(TOKEN_PARAM, this.#token);
     const socket = this.#createSocket(url.href);
     this.#socket = socket;
-    this.#patch({ status: this.#attempt === 0 ? "connecting" : "retrying" });
+    this.#patchDown(this.#attempt === 0 ? "connecting" : "retrying");
 
     socket.addEventListener("open", () => {
       this.#attempt = 0;
-      this.#patch({ status: "open", rejection: null });
+      this.#clearSettle();
+      this.#patch({ status: "open", rejection: null, settling: false });
     });
     socket.addEventListener("message", (event) => {
       if (typeof event.data === "string") void this.#onFrame(event.data);
@@ -258,17 +289,39 @@ export class RelayClient {
     // A rejected token is permanent: retrying forever would only hide the reason.
     if (code === CLOSE_UNAUTHORIZED || code === CLOSE_BAD_REQUEST) {
       this.#stopped = true;
+      this.#clearSettle();
       this.#patch({
         status: "rejected",
         rejection: code === CLOSE_UNAUTHORIZED ? "unauthorized" : "bad-request",
+        settling: false,
       });
       return;
     }
     if (this.#stopped) return;
     const delay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** this.#attempt);
     this.#attempt += 1;
-    this.#patch({ status: "retrying" });
+    this.#patchDown("retrying");
     this.#retryTimer = setTimeout(() => this.#connect(), delay * (0.5 + Math.random() / 2));
+  }
+
+  /**
+   * Reports a status other than `open`, holding it back for SETTLE_MS if this is the
+   * moment the socket went away. A retry inside a window already declared over is
+   * shown at once, so backoff never makes the banner blink.
+   */
+  #patchDown(status: "connecting" | "retrying"): void {
+    const settling = this.#state.settling || this.#state.status === "open";
+    this.#patch({ status, settling });
+    if (!settling || this.#settleTimer !== null) return;
+    this.#settleTimer = setTimeout(() => {
+      this.#settleTimer = null;
+      this.#patch({ settling: false });
+    }, this.#settleMs);
+  }
+
+  #clearSettle(): void {
+    if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
+    this.#settleTimer = null;
   }
 
   async #onFrame(text: string): Promise<void> {

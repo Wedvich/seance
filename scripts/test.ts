@@ -9,7 +9,8 @@
  * *inside* the daemon shard, which touches neither Miniflare nor Bun.build.
  *
  * Shards are directory paths, not name patterns: `bun test relay` would also
- * sweep daemon/test/relay.test.ts. Test counts must add up to a plain run's.
+ * sweep daemon/test/relay.test.ts. Counts must add up to a plain run's, which the
+ * coverage check below enforces — every tracked test file has to fall in a shard.
  */
 const TIMEOUT_MS = 15_000;
 
@@ -31,6 +32,23 @@ const SHARDS: readonly Shard[] = [
 // the timeout the workerd-booting suites need.
 const filters = process.argv.slice(2);
 const shards: readonly Shard[] = filters.length === 0 ? SHARDS : [{ name: filters.join(" "), paths: filters }];
+
+/**
+ * The shard paths are prefixes, so a test file added outside all of them would simply
+ * never run — and the run would still report every shard passing, which is worse than
+ * a failure. Tracked test files are the source of truth for what must be covered.
+ */
+if (filters.length === 0) {
+  const tracked = await new Response(Bun.spawn(["git", "ls-files", "*.test.ts"]).stdout).text();
+  const unclaimed = tracked
+    .split("\n")
+    .filter((path) => path !== "")
+    .filter((path) => !SHARDS.some((shard) => shard.paths.some((prefix) => path.startsWith(prefix))));
+  if (unclaimed.length > 0) {
+    console.error(`no shard covers: ${unclaimed.join(", ")}\nadd it to SHARDS in scripts/test.ts`);
+    process.exit(1);
+  }
+}
 
 interface Result {
   readonly name: string;

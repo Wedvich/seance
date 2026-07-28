@@ -107,6 +107,46 @@ describe("connection", () => {
     }
   });
 
+  // Every resume re-dials, so the gap it opens must not surface as an outage —
+  // this is what used to flash "Relay unreachable" on foregrounding.
+  test("a re-dial that recovers is never reported as a drop", async () => {
+    const { client, waitFor } = startClient();
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      client.reconnect();
+      expect(client.getState()).toMatchObject({ status: "connecting", settling: true });
+      await waitFor((s) => s.status === "open", "open again");
+      expect(client.getState().settling).toBe(false);
+    } finally {
+      client.stop();
+    }
+  });
+
+  // The window excuses a re-dial, not an outage: a socket that never arrives has to
+  // stop being excused.
+  test("reports the drop once the settle window elapses", async () => {
+    // Port 1 is never listening, so this client cannot reach open.
+    const client = new RelayClient({ url: "ws://127.0.0.1:1/app", token: TOKEN, key, settleMs: 30 });
+    try {
+      expect(client.getState().settling).toBe(true);
+      client.start();
+      for (let waited = 0; waited < 2_000 && client.getState().settling; waited += 10) await Bun.sleep(10);
+      expect(client.getState().settling).toBe(false);
+      expect(client.getState().status).not.toBe("open");
+    } finally {
+      client.stop();
+    }
+  });
+
+  // Otherwise the screen sits on "connecting…" for a client that has stopped trying.
+  test("stopping mid-connect ends the settle window", () => {
+    const client = new RelayClient({ url: "ws://127.0.0.1:1/app", token: TOKEN, key });
+    client.start();
+    expect(client.getState().settling).toBe(true);
+    client.stop();
+    expect(client.getState().settling).toBe(false);
+  });
+
   test("refuses to send with no socket", async () => {
     const client = new RelayClient({ url: appUrl(), token: TOKEN, key });
     await expect(client.request("whoever", "sessions", {})).rejects.toMatchObject({ reason: "disconnected" });

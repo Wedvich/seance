@@ -53,6 +53,8 @@ export interface TestRelay {
   rejectedCount: () => number;
   connectionCount: () => number;
   sendToDaemon: (env: Envelope) => void;
+  /** Raw text, for the frame shapes the wire types forbid but a byte stream allows. */
+  sendRawToDaemon: (deviceId: string, text: string) => void;
   stop: () => void;
 }
 
@@ -120,6 +122,11 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       const ws = daemons.get(env.to);
       if (ws === undefined) throw new Error(`no daemon registered as ${env.to}`);
       ws.send(JSON.stringify({ t: "msg", env }));
+    },
+    sendRawToDaemon: (deviceId: string, text: string): void => {
+      const ws = daemons.get(deviceId);
+      if (ws === undefined) throw new Error(`no daemon registered as ${deviceId}`);
+      ws.send(text);
     },
     stop: (): void => {
       server.stop(true);

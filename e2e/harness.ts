@@ -47,8 +47,11 @@ export interface Stack {
   readonly appKey: CryptoKey;
   readonly deviceId: string;
   daemon: DaemonHandle;
-  /** Restart with identical opts — same state dir, so the same deviceId. */
-  readonly restartDaemon: () => Promise<void>;
+  /**
+   * Restart with identical opts — same state dir, so the same deviceId. `spawnWaitMs`
+   * overrides the default budget for the new daemon; pass nothing to get it back.
+   */
+  readonly restartDaemon: (opts?: { readonly spawnWaitMs?: number }) => Promise<void>;
   readonly dispose: () => Promise<void>;
 }
 
@@ -74,18 +77,20 @@ export async function startStack(base: string): Promise<Stack> {
     repoRoots: [fixture.root],
     tmuxSession: TMUX_SESSION,
   };
-  const startTestDaemon = (): Promise<DaemonHandle> =>
+  // Only a *successful* spawn pays this in full — verifyPaneAlive resolves as soon as
+  // a pane dies — so the default is tuned for the many spawns that work, and the one
+  // test that asserts a death raises it via restartDaemon. Too low a budget there
+  // reads a slow-starting corpse as a live session: the failing stub is bash + sleep
+  // 0.3, which the shards running concurrently can stretch past a second.
+  const DEFAULT_SPAWN_WAIT_MS = 1_500;
+
+  const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
     startDaemon({
       config,
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
-      // The failing stub dies at 0.3s + process startup, which macOS can
-      // stretch by hundreds of ms (load, first-exec scanning of the fresh
-      // script). The deadline needs real headroom over that or the daemon
-      // reports a false ok; verifyPaneAlive polls, so failing spawns still
-      // resolve at death time, and only successful spawns pay the full wait.
-      spawnWaitMs: 1_500,
+      spawnWaitMs,
     });
 
   let daemon = await startTestDaemon();
@@ -100,12 +105,12 @@ export async function startStack(base: string): Promise<Stack> {
     appKey,
     deviceId,
     daemon,
-    restartDaemon: async (): Promise<void> => {
+    restartDaemon: async (opts: { readonly spawnWaitMs?: number } = {}): Promise<void> => {
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest
       // of the process. stop() is idempotent, so always stop before starting.
       daemon.stop();
-      daemon = await startTestDaemon();
+      daemon = await startTestDaemon(opts.spawnWaitMs);
       stack.daemon = daemon;
     },
     dispose: async (): Promise<void> => {

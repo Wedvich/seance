@@ -39,7 +39,8 @@ export interface PrimaryButton {
 
 export interface ViewModel {
   readonly meta: string;
-  readonly relayOk: boolean;
+  /** null is the muted dot: connected state not known yet, rather than known bad. */
+  readonly relayDot: "ok" | "err" | null;
   readonly banner: Banner | null;
   readonly machineTile: Tile;
   readonly repoTile: Tile;
@@ -146,7 +147,7 @@ function deriveMeta(state: AppState): string {
   const { relay } = state;
   if (relay.rejection === "unauthorized") return "bearer token rejected";
   if (relay.rejection === "bad-request") return "no bearer token";
-  if (relay.status !== "open") return "relay unreachable · retrying";
+  if (relay.status !== "open") return relay.settling ? "connecting…" : "relay unreachable · retrying";
 
   const online = relay.machines.filter((machine) => machine.connected).length;
   const asleep = relay.machines.length - online;
@@ -168,6 +169,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
     };
   }
   if (relay.status !== "open") {
+    if (relay.settling) return null;
     return {
       title: "Relay unreachable",
       body: "Nothing can be spawned until a daemon socket is back. Your prompt is kept.",
@@ -214,7 +216,7 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   const { relay } = state;
 
   if (relay.rejection !== null) return blocked("Bearer token rejected");
-  if (relay.status !== "open") return blocked("Waiting for the relay");
+  if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) return blocked("Check your key");
   if (state.spawning) return blocked("Summoning…");
@@ -245,7 +247,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
 
   return {
     meta: deriveMeta(state),
-    relayOk: state.relay.status === "open",
+    relayDot: state.relay.status === "open" ? "ok" : state.relay.settling ? null : "err",
     banner: deriveBanner(state, machine),
     machineTile: {
       label: "MACHINE",

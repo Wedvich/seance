@@ -489,6 +489,14 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
   dies silently and stale counts under a green dot are worse than none.
+- **A gap in the relay socket is held back for 1.5s before it is shown.** The app is
+  legitimately not connected for a moment on the way in — a refresh dials from
+  scratch, and the resume above re-dials unconditionally — so rendering the status
+  as it stands flashed "Relay unreachable" for a frame or two on every refresh and
+  every foregrounding. `RelayState.settling` marks that window: the screen reads
+  "connecting…" with a muted dot and no banner, and anything that recovers inside
+  it is never reported at all. The window opens only on leaving `open`, so the
+  backoff retries after a real outage keep the banner up rather than blinking it.
 - **The service worker's update lifecycle is configured explicitly, not inherited
   from `registerType`.** vite-plugin-pwa only derives `skipWaiting`/`clientsClaim`
   from `autoUpdate` when `injectRegister` is left at `"auto"`, and this build sets
