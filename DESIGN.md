@@ -633,12 +633,19 @@ Resolved 2026-07-28, at the WSL machine: WSL support — DPAPI PSK store
 (threat-model item 2) and the systemd-unit + linger + logon-task lifecycle
 (daemon section). Verified on the machine that day: the DPAPI round-trip
 through `powershell.exe`, and interop surviving a stripped environment (no
-`WSL_INTEROP`, detached session). Unverified until one real pass after
-flipping `systemd=true` — the flip restarts the distro, so it cannot happen
-in the session that writes it: interop (and therefore DPAPI decrypt) from a
-lingering systemd user unit started before any login session, and
-non-elevated `schtasks` logon-task registration. Mirrors the keychain-ACL
-note below.
+`WSL_INTEROP`, detached session). The post-flip pass ran later the same day
+and settled both open claims. Interop from the lingering unit: confirmed —
+the daemon under `user@1000` (zero logind sessions registered; WSL shells
+never create one) decrypted the DPAPI blob and served an encrypted app
+request. Non-elevated `schtasks` registration: answered the other way —
+`/Create` through interop fails with `Access is denied`, and `install`
+falls back to printing the manual command as designed; registration from a
+Windows shell is the supported path. One sequencing discovery from the same
+pass: on a fresh box `user@<uid>` does not exist until linger is enabled
+(no logind sessions means nothing else starts it), so `loginctl
+enable-linger` has to run before the first `install`. The preflight now
+tells the two apart via sd_booted's `/run/systemd/system` check and names
+the linger fix when system systemd is up.
 
 Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
 DO hibernation — decisions recorded in their sections above. Also resolved with

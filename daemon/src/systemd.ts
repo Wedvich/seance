@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -57,18 +58,27 @@ function manualTaskCommand(distro: string): string {
 }
 
 /**
- * `is-system-running` answers over the bus even when degraded; only a missing
- * bus means the distro is running WSL's own init. Flipping wsl.conf is never
- * done here — it restarts the distro, killing every session on the box.
+ * `is-system-running` answers over the bus even when degraded; a missing bus
+ * has two distinct causes worth naming. No `/run/systemd/system` (sd_booted's
+ * check) means the distro runs WSL's own init — only wsl.conf fixes that.
+ * With systemd as PID 1 the culprit is user@<uid> never starting: WSL shells
+ * skip PAM, so no logind session exists to start it and linger is the only
+ * trigger. Flipping wsl.conf is never done here — it restarts the distro,
+ * killing every session on the box.
  */
 async function assertSystemdRunning(): Promise<void> {
   const result = await exec(["systemctl", "--user", "is-system-running"]);
-  if (result.stderr.includes("Failed to connect to bus")) {
+  if (!result.stderr.includes("Failed to connect to bus")) return;
+  if (existsSync("/run/systemd/system")) {
     throw new Error(
-      "systemd is not running in this distro — add [boot] systemd=true to /etc/wsl.conf, " +
-        "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seanced install`",
+      "systemd is running but the user instance is not — WSL sessions don't register with logind, " +
+        `so only linger starts it: run \`sudo loginctl enable-linger ${userInfo().username}\`, then re-run \`seanced install\``,
     );
   }
+  throw new Error(
+    "systemd is not running in this distro — add [boot] systemd=true to /etc/wsl.conf, " +
+      "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seanced install`",
+  );
 }
 
 export interface WslInstallResult {
@@ -168,7 +178,7 @@ export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
   } else {
     checks.push({
       ok: false,
-      message: "systemd unit not active — run `seanced install` (needs systemd=true in /etc/wsl.conf)",
+      message: "systemd unit not active — run `seanced install` (its preflight names what's missing)",
     });
   }
   const username = userInfo().username;
@@ -185,9 +195,12 @@ export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
   if (task.exitCode === 0) {
     checks.push({ ok: true, message: `logon pin task ${PIN_TASK_NAME} registered` });
   } else {
+    // install's own registration may be denied (interop schtasks runs non-elevated), so point at the manual command directly
     checks.push({
       ok: false,
-      message: `no ${PIN_TASK_NAME} scheduled task — a Windows reboot leaves the machine offline; re-run \`seanced install\``,
+      message:
+        `no ${PIN_TASK_NAME} scheduled task — a Windows reboot leaves the machine offline; ` +
+        `from a Windows shell: ${manualTaskCommand(process.env["WSL_DISTRO_NAME"] ?? "<distro>")}`,
     });
   }
   return checks;
