@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import type { ComponentChildren, JSX } from "preact";
+import { useEffect, useRef } from "preact/hooks";
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -7,7 +8,7 @@ const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:n
  * keyboard use in a desktop browser as much as for assistive tech — the sheet
  * replaces the screen's focus context, so leaving focus behind it strands you.
  */
-export function Sheet(props: { title: string; onClose: () => void; children: ReactNode }): React.JSX.Element {
+export function Sheet(props: { title: string; onClose: () => void; children: ComponentChildren }): JSX.Element {
   const { title, onClose, children } = props;
   const panel = useRef<HTMLDivElement>(null);
 
@@ -70,7 +71,7 @@ export function SheetItem(props: {
   mono?: boolean;
   dot?: "ok" | "off" | null;
   onClick: () => void;
-}): React.JSX.Element {
+}): JSX.Element {
   const { label, sub = null, selected = false, disabled = false, mono = false, dot = null, onClick } = props;
   const classes = ["sheet-item"];
   if (selected) classes.push("sheet-item-selected");

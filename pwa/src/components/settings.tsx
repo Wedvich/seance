@@ -1,4 +1,5 @@
-import { useState } from "react";
+import type { JSX } from "preact";
+import { useState } from "preact/hooks";
 import { nextPref, readPref, setPref, type ThemePref } from "../theme.ts";
 import { Sheet, SheetItem } from "./sheet.tsx";
 
@@ -19,7 +20,7 @@ export function SettingsSheet(props: {
   onClose: () => void;
   onOpenSetup: () => void;
   onReconnect: () => void;
-}): React.JSX.Element {
+}): JSX.Element {
   const { relayUrl, relayStatus, onClose, onOpenSetup, onReconnect } = props;
   const [theme, setTheme] = useState<ThemePref>(readPref);
 

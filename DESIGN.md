@@ -448,7 +448,7 @@ together (re-sends registry data on every poll, useless offline).
 
 ## PWA (Cloudflare Workers, static assets)
 
-Vite + React, deployed as an **assets-only Worker** (no `main`) rather than
+Vite + Preact, deployed as an **assets-only Worker** (no `main`) rather than
 Pages, which is in maintenance. Security headers ship as a generated
 `dist/_headers`, because the CSP has to carry two build-time facts: the sha256
 of the inline theme boot script, and the relay origin for `connect-src`. A
@@ -465,6 +465,15 @@ relays tmux window name or the captured error), and a **read-only** list of
 running claude tmux windows per machine (avoids spawning duplicates).
 Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 
+- **Preact, not React, and without `preact/compat`.** The whole app is one screen,
+  four sheets and a verdict; React's runtime cost 70 kB gzip against Preact's 16 kB,
+  all of it also precached onto a phone. `compat` was rejected because it re-adds the
+  layer whose size was the reason to switch. Going native costs the three things
+  compat papers over: no `StrictMode` (nothing here relies on double-invoked effects),
+  no `useSyncExternalStore` (`app.tsx` has an 8-line stand-in — Preact renders
+  synchronously, so there is no torn read to guard, only the render-to-effect gap the
+  resync closes), and `onChange` means the _native_ change event, so every text input
+  and the prompt use `onInput`.
 - **The PSK is stored as a non-extractable `CryptoKey` in IndexedDB** and its
   base64 is never persisted. An XSS can then use the key while it runs but
   cannot exfiltrate 32 bytes that would otherwise grant permanent authority

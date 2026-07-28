@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Séance spawns remote-controlled Claude Code sessions on dev machines via a blind relay. Bun workspaces
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
-(Vite + React app), `shared/` (wire types + envelope crypto), `e2e/` (full-stack test suite, no
+(Vite + Preact app), `shared/` (wire types + envelope crypto), `e2e/` (full-stack test suite, no
 shipped code).
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:

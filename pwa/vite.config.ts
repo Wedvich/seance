@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import react from "@vitejs/plugin-react";
+import preact from "@preact/preset-vite";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
@@ -119,7 +119,7 @@ export default defineConfig(({ mode }) => {
     // VITE_RELAY_URL reaches the app through import.meta.env; it is read here only
     // so the CSP can name the one origin the app is allowed to connect to.
     plugins: [
-      react(),
+      preact(),
       VitePWA({
         registerType: "autoUpdate",
         // Registration is src/sw.ts, so the CSP stays free of a second inline hash

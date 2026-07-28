@@ -1,15 +1,16 @@
-import { useEffect, useSyncExternalStore } from "react";
+import type { JSX } from "preact";
+import { useEffect, useState } from "preact/hooks";
 import { Setup } from "./components/setup.tsx";
 import { SpawnScreen } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
-import { deriveView } from "./view.ts";
+import { deriveView, type AppState } from "./view.ts";
 
-export function App(props: { store: Store }): React.JSX.Element {
+export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
-  const state = useSyncExternalStore(store.subscribe, store.getState);
+  const state = useStoreState(store);
 
   useEffect(() => store.attach(), [store]);
 
@@ -60,4 +61,19 @@ export function App(props: { store: Store }): React.JSX.Element {
       <SpawnScreen store={store} view={view} now={now} />
     </main>
   );
+}
+
+/**
+ * Stands in for React's useSyncExternalStore, which preact/hooks has no
+ * equivalent of. Preact renders synchronously, so there is no torn-read window
+ * to guard against; the only gap is a notification landing between render and
+ * effect attach, which the resync inside the effect closes.
+ */
+function useStoreState(store: Store): AppState {
+  const [state, setState] = useState(store.getState);
+  useEffect(() => {
+    setState(store.getState());
+    return store.subscribe(() => setState(store.getState()));
+  }, [store]);
+  return state;
 }

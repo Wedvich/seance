@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { EFFORTS, EFFORT_LABELS, MODELS, MODEL_LABELS, type SheetKind } from "../state.ts";
 import type { Store } from "../store.ts";
 import { abbreviatePath, formatSeen, type Tile, type ViewModel } from "../view.ts";
@@ -13,7 +14,7 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   settings: "Settings",
 };
 
-function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void }): React.JSX.Element {
+function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void }): JSX.Element {
   const { tile, offline = false, onClick } = props;
   const valueClass = tile.mono ? "tile-value tile-value-mono" : "tile-value";
   return (
@@ -32,7 +33,7 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
   );
 }
 
-function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; now: number }): React.JSX.Element {
+function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; now: number }): JSX.Element {
   const { store, view, kind, now } = props;
   const close = (): void => store.dismissLayer();
   const state = store.getState();
@@ -116,7 +117,7 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
   );
 }
 
-export function SpawnScreen(props: { store: Store; view: ViewModel; now: number }): React.JSX.Element {
+export function SpawnScreen(props: { store: Store; view: ViewModel; now: number }): JSX.Element {
   const { store, view, now } = props;
   const state = store.getState();
   const offline = view.machine !== null && !view.machine.connected;
@@ -149,7 +150,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
             aria-labelledby="prompt-label"
             placeholder="Describe the work — or leave it blank and start empty."
             value={state.form.prompt}
-            onChange={(event) => store.setPrompt(event.target.value)}
+            onInput={(event) => store.setPrompt(event.currentTarget.value)}
           />
         </div>
 

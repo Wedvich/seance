@@ -1,4 +1,5 @@
-import { useState } from "react";
+import type { JSX } from "preact";
+import { useState } from "preact/hooks";
 import { storeBearer, storePsk, storeRelayUrl } from "../relay/keys.ts";
 
 /** Stands in for a secret that is already stored: the PSK cannot be read back, and the bearer is not worth showing. */
@@ -23,7 +24,7 @@ export function Setup(props: {
   hasPsk: boolean;
   onSaved: () => void;
   onCancel?: (() => void) | undefined;
-}): React.JSX.Element {
+}): JSX.Element {
   const { hasBearer, hasPsk, onCancel } = props;
   const [relayUrl, setRelayUrl] = useState(props.relayUrl);
   const [bearer, setBearer] = useState("");
@@ -97,7 +98,7 @@ export function Setup(props: {
               autoComplete="off"
               inputMode="url"
               value={relayUrl}
-              onChange={(event) => setRelayUrl(event.target.value)}
+              onInput={(event) => setRelayUrl(event.currentTarget.value)}
             />
           </label>
 
@@ -109,10 +110,10 @@ export function Setup(props: {
               type="text"
               autoComplete="username"
               autoCapitalize="none"
-              spellCheck={false}
+              spellcheck={false}
               placeholder={hasBearer ? MASK : undefined}
               value={bearer}
-              onChange={(event) => setBearer(event.target.value)}
+              onInput={(event) => setBearer(event.currentTarget.value)}
             />
             {hasBearer && <span className="field-hint">Stored on this device. Leave blank to keep it.</span>}
           </label>
@@ -126,7 +127,7 @@ export function Setup(props: {
               autoComplete="current-password"
               placeholder={hasPsk ? MASK : undefined}
               value={psk}
-              onChange={(event) => setPsk(event.target.value)}
+              onInput={(event) => setPsk(event.currentTarget.value)}
             />
             <span className="field-hint">
               32 bytes of base64. It is stored as a non-extractable key and never shown again — keep 1Password as the

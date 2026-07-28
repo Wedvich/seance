@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import type { Verdict } from "../state.ts";
 import { failureBody } from "../view.ts";
 
@@ -76,7 +77,7 @@ export function VerdictView(props: {
   onRetry: () => void;
   onAnother: () => void;
   onBack: () => void;
-}): React.JSX.Element {
+}): JSX.Element {
   const { verdict, machineName, onRetry, onAnother, onBack } = props;
   const content = describe(verdict, machineName);
 

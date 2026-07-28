@@ -1,5 +1,4 @@
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
+import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
@@ -21,23 +20,21 @@ void navigator.storage?.persist?.();
 
 const container = document.querySelector("#root");
 if (container === null) throw new Error("#root is missing from index.html");
-const root = createRoot(container);
 
 const key = await loadPsk();
 const token = readBearer();
 
 if (key === null || token === null) {
-  root.render(
-    <StrictMode>
-      <main className="screen">
-        <Setup
-          relayUrl={readRelayUrl()}
-          hasBearer={token !== null}
-          hasPsk={key !== null}
-          onSaved={() => location.reload()}
-        />
-      </main>
-    </StrictMode>,
+  render(
+    <main className="screen">
+      <Setup
+        relayUrl={readRelayUrl()}
+        hasBearer={token !== null}
+        hasPsk={key !== null}
+        onSaved={() => location.reload()}
+      />
+    </main>,
+    container,
   );
 } else {
   const client = new RelayClient({ url: readRelayUrl(), token, key });
@@ -54,9 +51,5 @@ if (key === null || token === null) {
   });
 
   client.start();
-  root.render(
-    <StrictMode>
-      <App store={store} />
-    </StrictMode>,
-  );
+  render(<App store={store} />, container);
 }
