@@ -716,22 +716,48 @@
   background: var(--bg);
 }
 
-/* Plain full-width pager slides, mirrored: setup arrives from the right on
-   push and leaves the same way on pop. */
+/* Stacked push/pop rather than a flat pager: settings slides in over the form,
+   which gives way by a third and dims under it — the depth says "back leads
+   here". The curve is a hard decelerate, all but stopped by two-thirds in. */
+.panel-push-in,
+.panel-pop-out {
+  box-shadow: -18px 0 36px rgba(0, 0, 0, 0.25);
+}
+
 .panel-push-in {
-  animation: screen-push-in 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: screen-push-in 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 .panel-push-out {
-  animation: screen-push-out 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: screen-push-out 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 .panel-pop-in {
-  animation: screen-pop-in 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: screen-pop-in 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 .panel-pop-out {
-  animation: screen-pop-out 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: screen-pop-out 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* The dim rides the underlying panel, so it shares the slide's clock exactly.
+   Named panel-* on purpose: app.tsx clears the transition on the first
+   animationend whose name starts with "screen-". */
+.panel-push-out::after,
+.panel-pop-in::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #000;
+  pointer-events: none;
+}
+
+.panel-push-out::after {
+  animation: panel-dim 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.panel-pop-in::after {
+  animation: panel-undim 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
 @keyframes screen-push-in {
@@ -742,18 +768,36 @@
 
 @keyframes screen-push-out {
   to {
-    transform: translateX(-100%);
+    transform: translateX(-30%);
   }
 }
 
 @keyframes screen-pop-in {
   from {
-    transform: translateX(-100%);
+    transform: translateX(-30%);
   }
 }
 
 @keyframes screen-pop-out {
   to {
     transform: translateX(100%);
+  }
+}
+
+@keyframes panel-dim {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.18;
+  }
+}
+
+@keyframes panel-undim {
+  from {
+    opacity: 0.18;
+  }
+  to {
+    opacity: 0;
   }
 }
