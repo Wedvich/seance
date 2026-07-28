@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RepoEntry, SpawnRequest } from "@seance/shared";
+import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
@@ -69,8 +69,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     expect(windows).toContain("Fix Tests");
 
     // detection: stub's comm is "9.9.9", pane path is the repo → mapped
-    const sessions = await listClaudeSessions(repos);
-    const found = sessions.find((s) => s.window === "Fix Tests");
+    const found = await waitForSession("Fix Tests");
     expect(found).toBeDefined();
     expect(found?.repo).toBe("myrepo");
 
@@ -81,13 +80,11 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "fix | build" }, repos, "main", WAIT);
     expect(outcome.window).toBe("fix - build");
 
-    const sessions = await listClaudeSessions(repos);
-    expect(sessions.find((s) => s.window === outcome.window)?.repo).toBe("myrepo");
+    expect((await waitForSession(outcome.window))?.repo).toBe("myrepo");
 
     // renamed outside séance, tmux substitutes the separator out of the format
     await tmuxOk(["rename-window", "-t", `main:${outcome.window}`, "a | b"]);
-    const renamed = await listClaudeSessions(repos);
-    expect(renamed.find((s) => s.window === "a - b")?.repo).toBe("myrepo");
+    expect((await waitForSession("a - b"))?.repo).toBe("myrepo");
 
     await tmux(["kill-window", "-t", "main:a - b"]);
   });
@@ -198,6 +195,23 @@ async function killWindow(name: string): Promise<void> {
     .map((parts) => parts[0])
     .filter((id): id is string => id !== undefined);
   await Promise.all(ids.map((id) => tmux(["kill-window", "-t", id])));
+}
+
+/**
+ * The stub reaches its detectable comm only once bash execs it, which the disk
+ * contention of parallel test workers can stretch past the pane-alive wait —
+ * so poll for the session instead of sampling once. Absence still resolves,
+ * leaving the assertion (not a timeout) to report it.
+ */
+async function waitForSession(window: string): Promise<SessionEntry | undefined> {
+  const deadline = Bun.nanoseconds() + 5_000 * 1e6;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next, nothing to parallelize
+    const found = (await listClaudeSessions(repos)).find((s) => s.window === window);
+    if (found !== undefined || Bun.nanoseconds() >= deadline) return found;
+    // oxlint-disable-next-line no-await-in-loop
+    await Bun.sleep(50);
+  }
 }
 
 /**

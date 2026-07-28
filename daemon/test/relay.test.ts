@@ -154,7 +154,10 @@ describe("daemon ↔ relay integration", () => {
 
   test("spawn op spawns into tmux and embeds the refreshed session list", async () => {
     const relay = startTestRelay(TOKEN);
-    const daemon = await startTestDaemon(relay.url);
+    // The embedded list is a snapshot taken after the pane-alive wait, so it can
+    // only see the stub once bash has exec'd it. Nothing here can poll that away
+    // — a wider wait is what keeps parallel workers' disk contention out of it.
+    const daemon = await startTestDaemon(relay.url, { spawnWaitMs: 2_500 });
     try {
       const { deviceId } = await registerWithRepo(relay, "myrepo");
       await appRequest(relay, deviceId, "spawn", {
@@ -163,7 +166,7 @@ describe("daemon ↔ relay integration", () => {
         title: "From Phone",
         prompt: "do the thing",
       });
-      const response = await appReceive(relay, 5_000);
+      const response = await appReceive(relay, 8_000);
       const payload = response.payload as SpawnResponse;
       expect(payload.ok).toBe(true);
       if (payload.ok) {

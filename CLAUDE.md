@@ -15,8 +15,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 
 ## Commands
 
-- `bun run test` — everything (the script raises bun's 5s hook timeout, which the workerd-booting
-  suites need); single file: `bun test daemon/src/scan.test.ts`
+- `bun run test` — everything via `scripts/test.ts`, which shards into concurrent `bun test`
+  processes and raises bun's 5s hook timeout (the workerd-booting suites need it); narrow to one
+  shard with `bun run test daemon/test/spawn.test.ts`
 - `bun run typecheck` / `bun run lint` / `bun run lint:fix` / `bun run format:check` (root)
 - `bun run dev` in `relay/` and `pwa/` for local dev; needs a gitignored `relay/.dev.vars` with
   `BEARER_TOKEN` (see `.dev.vars.example`)
@@ -42,6 +43,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   strings must use printable separators (tmux 3.4 mangles tabs to `_`; see `sessions.ts`/`tmux.ts`),
   and sockets Bun dials into workerd need `perMessageDeflate: false` (frames die with close code
   1002 otherwise).
+- Parallelism lives between shard processes (`scripts/test.ts`), never `bun test --parallel` at the
+  top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
+  once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
+  across files, so no in-process cache can survive it. `--parallel` inside the daemon shard is fine.
 - Never `dispose()` a Miniflare mid-process — the next boot in the same process hangs workerd.
   `relay/test/harness.ts`'s `dispose` is deliberately a no-op (instances leak until process exit),
   and its worker bundle is memoized because `Bun.build` runs once per process. Reuse `startRelay`;

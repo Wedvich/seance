@@ -17,10 +17,11 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "test": "bun test --timeout 15000",
-    "typecheck": "bun run --filter '*' typecheck"
+    "test": "bun scripts/test.ts",
+    "typecheck": "tsc --noEmit && bun run --filter '*' typecheck"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
     "oxfmt": "0.60.0",
     "oxlint": "1.75.0",
     "typescript": "^7.0.2"

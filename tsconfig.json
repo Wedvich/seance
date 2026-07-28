@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  // Standalone scripts have no imports; force module detection so top-level
+  // await (which oxlint prefers over a promise chain) typechecks.
+  "compilerOptions": {
+    "moduleDetection": "force"
+  },
+  "include": ["scripts"]
+}
