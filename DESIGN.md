@@ -300,6 +300,21 @@ needs no polling); `msg { envelope }` for daemon replies; and
   also refuses to send when `connected === false`; the frame exists for the
   stale-presence race, where the alternative is a 90s spinner that ends in
   "timed out" when the truth was "that Mac is asleep".
+- **`iv` is also the cross-tier debug join key**, for the same reason it carries
+  `undeliverable`: it is the only per-message identifier a blind relay can name.
+  All three tiers emit `wire <event> iv=… ` lines through one `quote()` in
+  `shared/`, so one grep spans the daemon log, `wrangler tail`, and the browser
+  console. Failure paths carry the same prefix (`wire dropped … reason=…`,
+  `wire unsent … reason=…`) rather than prose, because the case you grep for is
+  usually the one that failed. Success lines are emitted _after_ the send, so a
+  line never claims a frame that never left the socket. The two encrypting ends
+  add the `id` (or `re`) the relay cannot read;
+  the relay adds only routing. Because `seal` mints a fresh iv per envelope, a
+  request and its reply have _different_ ivs — a round trip joins in two hops,
+  endpoints on `id`, relay on `iv`, and reading it as one iv end to end is the
+  mistake to avoid. The registry path is deliberately not instrumented: a
+  `machine-info` iv repeats across every push (the PWA keys `#infoCache` on it),
+  so it is not a message identity there. Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
   90s) because the right values derive from daemon internals — `exec.ts`'s 60s
   command timeout plus `spawn.ts`'s 3s pane-death check — and would silently
@@ -511,6 +526,29 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   log is local and rewritable, so detection assumes the machine is honest.
 - The daemon's own footprint is indistinguishable from a RAT — machines that
   gain an EDR need it allowlisted by hand.
+- Relay tracing (`observability.traces`) is **dashboard-only, no OTLP
+  destination**. Cloudflare can export traces and correlated logs to Honeycomb,
+  Grafana or Sentry, but span attributes carry the request URL and the app
+  authenticates with `?t=<bearer>` — a browser cannot set a header on a
+  WebSocket — so any export moves the token off Cloudflare, which is exactly the
+  cost threat-model item 3 refuses to pay for free. Getting the token out of the
+  query string is the prerequisite for wiring a destination later. Note that
+  "dashboard-only" is not "not stored": traces persist in Cloudflare's own
+  observability store and are queryable there, so this is a second retained copy
+  of the `?t=` token alongside the invocation logs `observability.enabled`
+  already produces. Item 3 already accepts that exposure to Cloudflare; what is
+  refused here is widening it to a third party.
+- True distributed tracing across daemon→relay→pwa is not available and was not
+  faked. Trace context rides `traceparent` on an HTTP request, but both tiers
+  hold one long-lived WebSocket whose only header exchange is the upgrade; every
+  frame after it is a separate hibernation-wake invocation with its own trace.
+  Cloudflare's external W3C context propagation is unreleased. The relay's own
+  traces are still worth having (DO wake latency, storage ops), and `iv`-keyed
+  logs cover the cross-tier question they cannot answer.
+- The PWA now logs wire metadata to the browser console in production builds —
+  op name, `id`/`re`, `iv`, target deviceId, and timeouts. Never payloads or key
+  material. Accepted so a phone-only failure, the one case that cannot be
+  reproduced at a desk, arrives with its join key already in hand.
 
 ## Open design details (build time)
 

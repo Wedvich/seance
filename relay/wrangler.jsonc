@@ -8,7 +8,19 @@
   // Off: a preview URL per uploaded version would keep superseded relays reachable
   // under the same BEARER_TOKEN, widening the surface for nothing this repo uses.
   "preview_urls": false,
-  "observability": { "enabled": true },
+  // `enabled` alone is logs only while automatic tracing is in beta; traces need
+  // the explicit flag. No head_sampling_rate: sampling defeats "find the one slow
+  // op", and the traffic here is a handful of request/response ops, not volume.
+  //
+  // Deliberately no OTLP destination (dashboard only). Span attributes carry the
+  // request URL, and the app authenticates with `?t=<bearer>` because a browser
+  // cannot set a header on a WebSocket — so any export would put the token in a
+  // third party's logs, which is the cost DESIGN.md's threat model item 3 calls
+  // out. Getting the token off the query string is the prerequisite for one.
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true },
+  },
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }],
   },

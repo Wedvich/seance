@@ -5,6 +5,7 @@ import {
   open as openEnvelope,
   OP_TIMEOUT_MS,
   ReplayGuard,
+  quote,
   seal,
   TOKEN_PARAM,
   type Envelope,
@@ -18,6 +19,16 @@ import {
 } from "@seance/shared";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
+
+/**
+ * Same shape the daemon and relay emit, so one grep spans all three tiers. The
+ * `iv` is what the blind relay can name; the `id`/`re` beside it is what only
+ * the two encrypting ends can read. Ships in production builds — a phone-only
+ * failure is the one that cannot be reproduced at a desk. Never the payload.
+ */
+function wireLog(event: string, detail: string): void {
+  console.log(`wire ${event} ${detail}`);
+}
 
 /** Why a request will never get an answer. */
 export type FailureReason = UndeliverableCode | "timeout" | "disconnected";
@@ -183,6 +194,7 @@ export class RelayClient {
     return new Promise<T>((resolve, reject) => {
       const limit = this.#timeoutFor(op);
       const timer = setTimeout(() => {
+        wireLog("timeout", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
         this.#discard(id);
         reject(new RequestFailure("timeout", `${op} timed out after ${limit}ms`));
       }, limit);
@@ -198,6 +210,7 @@ export class RelayClient {
       });
       this.#idByIv.set(env.iv, id);
       socket.send(JSON.stringify({ t: "msg", env }));
+      wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
   }
 
@@ -279,6 +292,9 @@ export class RelayClient {
       this.#rebuildMachines();
     }
     const id = this.#idByIv.get(iv);
+    // `code` is relay-supplied and `parseFrame` does not narrow it, so it is quoted
+    // like every other wire value rather than trusted to be one of the two codes.
+    wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
     if (id === undefined) return;
     this.#pending.get(id)?.settle({
       ok: false,
@@ -292,16 +308,29 @@ export class RelayClient {
       plain = await openEnvelope(this.#key, env);
     } catch {
       // Not ours to read: a stale PSK somewhere, or traffic for another key.
+      wireLog("dropped", `iv=${quote(env.iv)} reason=unopenable`);
       return;
     }
     try {
       this.#guard.check(env.iv, plain.ts);
     } catch {
+      // A phone more than REPLAY_WINDOW_MS off NTP lands here for every reply
+      // while the registry still renders every machine online, so every request
+      // ends in `wire timeout`. Without this line that has no other symptom.
+      wireLog("dropped", `iv=${quote(env.iv)} re=${quote(plain.re ?? "")} reason=replay`);
       return;
     }
     // Replies fan out to every open app socket, so another tab's are expected here.
     if (plain.re === undefined) return;
-    this.#pending.get(plain.re)?.settle({ ok: true, payload: plain.payload });
+    // Logged before the lookup: an unmatched `re` is the late reply to a request
+    // that already timed out, and "arrived late" vs "never came" is the whole
+    // point of the ids. Another tab's reply lands here too, hence `pending`.
+    const pending = this.#pending.get(plain.re);
+    wireLog(
+      "recv",
+      `iv=${quote(env.iv)} re=${quote(plain.re)} op=${quote(plain.op)} pending=${pending === undefined ? "no" : "yes"}`,
+    );
+    pending?.settle({ ok: true, payload: plain.payload });
   }
 
   async #onRegistry(entries: readonly RegistryView[]): Promise<void> {

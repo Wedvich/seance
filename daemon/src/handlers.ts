@@ -7,7 +7,8 @@ import type {
   SpawnRequest,
   SpawnResponse,
 } from "@seance/shared";
-import { daemonSink, quote, spawnAudit } from "./audit.ts";
+import { quote } from "@seance/shared";
+import { daemonSink, spawnAudit } from "./audit.ts";
 import { log } from "./log.ts";
 import { listClaudeSessions } from "./sessions.ts";
 import { SpawnFailure, spawnSession } from "./spawn.ts";

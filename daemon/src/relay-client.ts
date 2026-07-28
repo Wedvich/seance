@@ -2,6 +2,7 @@ import {
   ReplayError,
   ReplayGuard,
   open,
+  quote,
   seal,
   type DaemonFrame,
   type Envelope,
@@ -167,28 +168,49 @@ export class RelayClient {
 
   async #onEnvelope(env: Envelope): Promise<void> {
     if (env.to !== this.#opts.deviceId) {
-      log.warn(`dropped envelope addressed to ${env.to}`);
+      log.warn(`wire dropped iv=${quote(env.iv)} to=${quote(env.to)} reason=misaddressed`);
       return;
     }
     let plain: Plain;
     try {
       plain = await open(this.#opts.key, env);
     } catch (err) {
-      log.warn(`dropped envelope that failed to open: ${String(err)}`);
+      log.warn(`wire dropped iv=${quote(env.iv)} reason=unopenable detail=${quote(String(err))}`);
       return;
     }
     try {
       this.#guard.check(env.iv, plain.ts);
     } catch (err) {
       const reason = err instanceof ReplayError ? err.reason : String(err);
-      log.warn(`dropped ${plain.op} message: replay check failed (${reason})`);
+      log.warn(
+        `wire dropped iv=${quote(env.iv)} id=${quote(plain.id)} op=${quote(plain.op)} ` +
+          `reason=replay detail=${quote(reason)}`,
+      );
       return;
     }
 
+    // The one point where the envelope `iv` and the plaintext `id` are both in
+    // scope. Logging the pair here is what lets a relay line — which can only
+    // ever name the `iv` — be joined to an op end to end. Never the payload.
+    log.info(`wire recv iv=${quote(env.iv)} id=${quote(plain.id)} op=${quote(plain.op)}`);
     const response = await this.#opts.handle(plain);
-    if (response === null || !this.connected) return;
+    if (response === null) return;
+    if (!this.connected) {
+      // The socket died while the handler ran. The op did happen — a spawn is
+      // already spawned — so this line is the only record that its reply is lost.
+      log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=disconnected`);
+      return;
+    }
     const sealed = await seal(this.#opts.key, { to: env.from, from: this.#opts.deviceId }, response);
     const frame: DaemonFrame = { t: "msg", env: sealed };
-    this.#ws?.send(JSON.stringify(frame));
+    const ws = this.#ws;
+    if (ws === null) {
+      log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=socket-gone`);
+      return;
+    }
+    ws.send(JSON.stringify(frame));
+    // Logged after the send, so the line never claims a frame that never left.
+    // A reply carries a fresh iv, so the two directions join through `re`, not the iv.
+    log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(env.from)}`);
   }
 }

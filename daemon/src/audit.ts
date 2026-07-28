@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type SpawnRequest } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest } from "@seance/shared";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
@@ -32,12 +32,6 @@ export const cliSink: AuditSink = async (line) => {
     console.error(`could not write the audit log at ${path}: ${String(err)}`);
   }
 };
-
-/**
- * Quoted, never bare: these values arrive over the wire or off a command line,
- * and an unescaped newline in one would let a caller forge whole audit lines.
- */
-export const quote = (value: string): string => JSON.stringify(value);
 
 export interface SpawnAudit {
   readonly request: (request: SpawnRequest) => Promise<void>;

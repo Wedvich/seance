@@ -1,4 +1,4 @@
-import { importPsk, toBase64, type MachineInfo, type SessionsResponse } from "@seance/shared";
+import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import { RelayClient, RequestFailure, type RelayState } from "../src/relay/client.ts";
@@ -181,6 +181,87 @@ describe("requests", () => {
     } finally {
       daemon.close();
       client.stop();
+    }
+  });
+
+  // The app holds the `id`; the relay can only ever name the `iv`. Logging both
+  // on each side of a round trip is what makes a relay line joinable to an op.
+  test("logs the iv beside the id on the way out and the re on the way back", async () => {
+    const deviceId = nextDeviceId();
+    const secret = "port-the-pane-20260727-093214";
+    const sessions: SessionsResponse = {
+      sessions: [{ window: secret, repo: "seance", path: "/Users/m/repos/seance" }],
+      at: Date.now(),
+    };
+    const lines: string[] = [];
+    const realLog = console.log;
+    // Restored in an outer finally: a throw from startClient or startFakeDaemon
+    // would otherwise leave console.log patched for every later test in the file.
+    try {
+      const { client, waitFor } = startClient();
+      const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("MacBook Pro"), {
+        sessions: () => sessions,
+      });
+      try {
+        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+        console.log = (...args: unknown[]): void => {
+          lines.push(args.map(String).join(" "));
+        };
+        await client.request<SessionsResponse>(deviceId, "sessions", {});
+        console.log = realLog;
+
+        const sent = lines.find((line) => line.startsWith("wire send "));
+        const received = lines.find((line) => line.startsWith("wire recv "));
+        const id = /id="([^"]+)"/u.exec(sent ?? "")?.[1];
+        expect(id).toBeDefined();
+        expect(sent).toContain(`op="sessions" to=${JSON.stringify(deviceId)}`);
+        // The reply's own iv differs, so `re` is what closes the loop back to the request.
+        expect(received).toContain(`re=${JSON.stringify(id)} op="sessions" pending=yes`);
+        expect(lines.join("\n")).not.toContain(secret);
+      } finally {
+        daemon.close();
+        client.stop();
+      }
+    } finally {
+      console.log = realLog;
+    }
+  });
+
+  // "The reply arrived, just too late" and "no reply ever came" are the two
+  // stories behind one `timed out`, and only the log can tell them apart. A reply
+  // whose `re` matches nothing pending is that case (and another tab's reply).
+  test("logs a reply matching no pending request, marked unmatched", async () => {
+    const deviceId = nextDeviceId();
+    const orphanId = crypto.randomUUID();
+    const lines: string[] = [];
+    const realLog = console.log;
+    try {
+      const { client, waitFor } = startClient();
+      const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Late Mac"));
+      try {
+        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+        console.log = (...args: unknown[]): void => {
+          lines.push(args.map(String).join(" "));
+        };
+        const reply: Plain = {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "sessions",
+          re: orphanId,
+          payload: { sessions: [], at: Date.now() },
+        };
+        daemon.client.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, reply) });
+        await Bun.sleep(300);
+        console.log = realLog;
+
+        const received = lines.find((line) => line.startsWith("wire recv "));
+        expect(received).toContain(`re=${JSON.stringify(orphanId)} op="sessions" pending=no`);
+      } finally {
+        daemon.close();
+        client.stop();
+      }
+    } finally {
+      console.log = realLog;
     }
   });
 

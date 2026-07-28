@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  quote,
   type Envelope,
   type RegistryEntry,
   type RegistryView,
@@ -11,6 +12,16 @@ import { roleForPath, type Role } from "./auth.ts";
 import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
+
+/**
+ * One shape for every routing line. `iv` is the only per-message identifier a
+ * blind relay can see — the request `id` is inside the ciphertext — so it is
+ * what joins these lines to the daemon's and the app's, which log the `iv`
+ * beside the plaintext `id` they alone can read.
+ */
+function wireLog(event: string, env: Envelope, extra = ""): void {
+  console.log(`wire ${event} iv=${quote(env.iv)} to=${quote(env.to)} from=${quote(env.from)}${extra}`);
+}
 
 /**
  * Four machines today. 32 leaves room for reinstalls — each one mints a new
@@ -97,7 +108,7 @@ export class Hub implements DurableObject {
   async #onDaemonMessage(ws: WebSocket, text: string): Promise<void> {
     const frame = parseDaemonFrame(text);
     if (frame === null) {
-      console.log("dropped malformed daemon frame");
+      console.log("wire dropped reason=malformed-daemon-frame");
       return;
     }
     if (frame.t === "register") {
@@ -106,11 +117,14 @@ export class Hub implements DurableObject {
     }
     const deviceId = this.#deviceIdOf(ws);
     if (deviceId === null) {
-      console.log("dropped msg from a daemon socket that has not registered");
+      console.log("wire dropped reason=unregistered-daemon");
       return;
     }
     if (frame.env.from !== deviceId) {
-      console.log(`dropped msg from ${deviceId} claiming from=${frame.env.from}`);
+      console.log(
+        `wire dropped iv=${quote(frame.env.iv)} from=${quote(frame.env.from)} ` +
+          `socket=${quote(deviceId)} reason=from-mismatch`,
+      );
       return;
     }
     await this.#route(frame.env, ws, "daemon");
@@ -119,11 +133,11 @@ export class Hub implements DurableObject {
   async #onAppMessage(ws: WebSocket, text: string): Promise<void> {
     const frame = parseAppFrame(text);
     if (frame === null) {
-      console.log("dropped malformed app frame");
+      console.log("wire dropped reason=malformed-app-frame");
       return;
     }
     if (frame.env.from !== APP_ID) {
-      console.log(`dropped app msg claiming from=${frame.env.from}`);
+      console.log(`wire dropped iv=${quote(frame.env.iv)} from=${quote(frame.env.from)} reason=not-app-id`);
       return;
     }
     await this.#route(frame.env, ws, "app");
@@ -190,7 +204,10 @@ export class Hub implements DurableObject {
       // matches no pending `re`.
       const frame: RelayToAppFrame = { t: "msg", env };
       const text = JSON.stringify(frame);
-      for (const app of this.#ctx.getWebSockets("app")) app.send(text);
+      const apps = this.#ctx.getWebSockets("app");
+      for (const app of apps) app.send(text);
+      // Zero apps is the lost-reply case DESIGN.md reconciles from the session list.
+      wireLog("fanout", env, ` apps=${apps.length}`);
       return;
     }
 
@@ -198,17 +215,23 @@ export class Hub implements DurableObject {
     if (target !== undefined) {
       const frame: RelayToDaemonFrame = { t: "msg", env };
       target.send(JSON.stringify(frame));
+      wireLog("deliver", env, ` role=${senderRole}`);
       return;
     }
 
-    // Only an app can act on the notice. A daemon reply that finds no app socket
-    // is a response nobody is waiting for.
-    if (senderRole !== "app") return;
+    // Only an app can act on the notice, and `env.to === APP_ID` was handled
+    // above — so reaching here means a daemon addressed a device that is neither
+    // the app nor currently connected. Nobody is waiting for it either way.
+    if (senderRole !== "app") {
+      wireLog("dropped", env, " reason=unroutable");
+      return;
+    }
     const known = await this.#ctx.storage.get<RegistryEntry>(ENTRY_PREFIX + env.to);
     const code: UndeliverableCode = known === undefined ? "unknown" : "offline";
     // Correlated by `iv`: the request `id` is inside the ciphertext.
     const notice: RelayToAppFrame = { t: "undeliverable", to: env.to, iv: env.iv, code };
     sender.send(JSON.stringify(notice));
+    wireLog("undeliverable", env, ` code=${code}`);
   }
 
   /** Only daemon sockets carry an identity, so an app socket closing is a no-op. */
