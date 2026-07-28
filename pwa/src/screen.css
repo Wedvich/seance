@@ -678,3 +678,65 @@
 .seg-icon {
   flex: none;
 }
+
+/* ---- screen transitions ---- */
+
+.stage {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Mid-flight taps would land on whichever screen is leaving; swallow them. */
+.stage-animating {
+  pointer-events: none;
+}
+
+/* Opaque, so nothing bleeds through while the panels are in motion. */
+.stage-panel {
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+}
+
+/* Plain full-width pager slides, mirrored: setup arrives from the right on
+   push and leaves the same way on pop. */
+.panel-push-in {
+  animation: screen-push-in 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.panel-push-out {
+  animation: screen-push-out 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.panel-pop-in {
+  animation: screen-pop-in 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.panel-pop-out {
+  animation: screen-pop-out 0.3s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes screen-push-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes screen-push-out {
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes screen-pop-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes screen-pop-out {
+  to {
+    transform: translateX(100%);
+  }
+}
