@@ -18,8 +18,9 @@ import { resolveMachine, resolveRepo } from "./view.ts";
  * spawn outcome means.
  *
  * It also pushes history entries when a layer opens, so Android back closes the
- * sheet or leaves the verdict instead of exiting the app. Keeping that here
- * rather than in a component is what keeps push and pop symmetrical.
+ * sheet, leaves settings, or leaves the verdict instead of exiting the app.
+ * Keeping that here rather than in a component is what keeps push and pop
+ * symmetrical.
  */
 export class Store {
   readonly #client: RelayClient;
@@ -36,7 +37,7 @@ export class Store {
       relay: client.getState(),
       form,
       sheet: null,
-      setup: false,
+      settings: false,
       spawning: false,
       verdict: null,
       sessions: {},
@@ -168,21 +169,15 @@ export class Store {
     this.#patch({ sheet });
   }
 
-  /**
-   * Setup is a layer, not a screen: opened from the settings sheet it takes over
-   * that sheet's history entry, so one back leaves it. Pushing a second entry
-   * would cost two backs, and closing the sheet with back() first would race the
-   * pop that clears it.
-   */
-  openSetup(): void {
-    if (this.#state.sheet === null) history.pushState({ seance: "layer" }, "");
-    else history.replaceState({ seance: "layer" }, "");
-    this.#patch({ sheet: null, setup: true });
+  /** The settings screen is a layer like the sheets: one entry, popped by back. */
+  openSettings(): void {
+    history.pushState({ seance: "layer" }, "");
+    this.#patch({ settings: true });
   }
 
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
-    if (this.#state.sheet === null && this.#state.verdict === null && !this.#state.setup) return;
+    if (this.#state.sheet === null && this.#state.verdict === null && !this.#state.settings) return;
     history.back();
   }
 
@@ -192,8 +187,8 @@ export class Store {
       this.#patch({ sheet: null });
       return;
     }
-    if (this.#state.setup) {
-      this.#patch({ setup: false });
+    if (this.#state.settings) {
+      this.#patch({ settings: false });
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });

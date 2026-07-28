@@ -521,7 +521,7 @@ relays tmux window name or the captured error), and a **read-only** list of
 running claude tmux windows per machine (avoids spawning duplicates).
 Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 
-- **Preact, not React, and without `preact/compat`.** The whole app is one screen,
+- **Preact, not React, and without `preact/compat`.** The whole app is two screens,
   four sheets and a verdict; React's runtime cost 70 kB gzip against Preact's 16 kB,
   all of it also precached onto a phone. `compat` was rejected because it re-adds the
   layer whose size was the reason to switch. Going native costs the three things
@@ -564,15 +564,19 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   only on a visibility change, so a new build lands like a cold launch instead of
   yanking the screen mid-use.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
-  verdict and the Relay & keys screen all push on open and are cleared by
+  verdict and the Settings screen all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
-  Opening Relay & keys from the settings sheet therefore _replaces_ that sheet's
-  entry rather than pushing its own: two entries would need two backs, and
-  closing the sheet with `back()` first would race the pop that clears it.
+- **Settings is one screen, reached straight from the relay pill.** It absorbed
+  what used to be a bottom-sheet drawer plus a separate Relay & keys screen:
+  credentials, connection status and theme in one place. The drawer's
+  entry-replacing history special case went with it, and its "Reconnect now" row
+  is folded into the screen's single bottom action, which reads "Reconnect"
+  while the relay is down, saves-then-reconnects when credentials were edited,
+  and otherwise just returns.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
-  Relay & keys is editable without being a re-entry chore, and only a field
+  Settings is editable without being a re-entry chore, and only a field
   actually typed into is written.
 - **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
   mid-spawn loses the reply (a blind relay cannot queue it), so the pending

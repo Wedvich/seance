@@ -39,7 +39,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     relay: relay(),
     form: { ...DEFAULT_FORM, ...form },
     sheet: null,
-    setup: false,
+    settings: false,
     spawning: false,
     verdict: null,
     sessions: {},
@@ -101,6 +101,7 @@ describe("banner and button", () => {
     expect(view.banner?.title).toBe("Relay unreachable");
     expect(view.button).toEqual({ label: "Waiting for the relay", enabled: false });
     expect(view.meta).toBe("relay unreachable · retrying");
+    expect(view.relayLine).toBe("relay unreachable · retrying");
   });
 
   // A refresh and every resume start here, and the screen must not shout on the way in.
@@ -108,6 +109,7 @@ describe("banner and button", () => {
     const view = deriveView(state({ relay: relay({ status: "connecting", settling: true }) }), NOW);
     expect(view.banner).toBeNull();
     expect(view.meta).toBe("connecting…");
+    expect(view.relayLine).toBe("connecting…");
     expect(view.relayDot).toBeNull();
     expect(view.button).toEqual({ label: "Connecting…", enabled: false });
   });
@@ -115,7 +117,8 @@ describe("banner and button", () => {
   test("a rejected token is reported as such, not as an unreachable relay", () => {
     const view = deriveView(state({ relay: relay({ status: "rejected", rejection: "unauthorized" }) }), NOW);
     expect(view.meta).toBe("bearer token rejected");
-    expect(view.banner?.opensSetup).toBe(true);
+    expect(view.relayLine).toBe("bearer token rejected");
+    expect(view.banner?.opensSettings).toBe(true);
     expect(view.button.enabled).toBe(false);
   });
 
@@ -132,7 +135,7 @@ describe("banner and button", () => {
     const view = deriveView(state({ relay: relay({ machines: [], registrySize: 2, ignored: 2 }) }), NOW);
     expect(view.banner?.title).toBe("Key mismatch");
     expect(view.banner?.body).toContain("2 machines are registered");
-    expect(view.banner?.opensSetup).toBe(true);
+    expect(view.banner?.opensSettings).toBe(true);
     expect(view.button.label).toBe("Check your key");
   });
 
@@ -140,6 +143,7 @@ describe("banner and button", () => {
     const view = deriveView(state({ relay: relay({ machines: [machine()], registrySize: 2, ignored: 1 }) }), NOW);
     expect(view.banner).toBeNull();
     expect(view.ignoredNote).toBe("1 entry ignored (key mismatch)");
+    expect(view.relayLine).toBe("connected");
     expect(view.button.enabled).toBe(true);
   });
 

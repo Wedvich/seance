@@ -1,7 +1,11 @@
 import type { JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
+import type { Store } from "../store.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
-import { Sheet, SheetItem } from "./sheet.tsx";
+import { CredentialFields, useCredentials } from "./setup.tsx";
+
+/** Matches the client's settle hold-back: a dial that hasn't resolved by then has failed. */
+const RECONNECT_HOLD_MS = 1_500;
 
 const THEME_LABELS: Record<ThemePref, string> = {
   system: "System",
@@ -10,37 +14,105 @@ const THEME_LABELS: Record<ThemePref, string> = {
 };
 
 /**
- * Reached from the relay chip. Deliberately has no "Forget machine": DESIGN.md
- * keeps the registry append-only so the bearer token authorizes nothing
- * destructive, and adding one here would quietly undo that.
+ * Reached from the relay chip: credentials, connection status and theme in one
+ * place. Deliberately has no "Forget machine": DESIGN.md keeps the registry
+ * append-only so the bearer token authorizes nothing destructive, and adding
+ * one here would quietly undo that.
  */
-export function SettingsSheet(props: {
+export function Settings(props: {
+  store: Store;
   relayUrl: string;
-  relayStatus: string;
-  onClose: () => void;
-  onOpenSetup: () => void;
-  onReconnect: () => void;
+  relayLine: string;
+  relayDot: "ok" | "err" | null;
+  connected: boolean;
 }): JSX.Element {
-  const { relayUrl, relayStatus, onClose, onOpenSetup, onReconnect } = props;
+  const { store, relayLine, relayDot, connected } = props;
+  // Both secrets are known to exist: the app only mounts once they load.
+  const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
+  const [reconnecting, setReconnecting] = useState(false);
+
+  // The client never reports a dial as failed — it just backs off and retries —
+  // so the settle window is the honest bound on how long a tap can claim to be
+  // doing something.
+  useEffect(() => {
+    if (!reconnecting) return;
+    if (connected) {
+      setReconnecting(false);
+      return;
+    }
+    const timer = setTimeout(() => setReconnecting(false), RECONNECT_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [reconnecting, connected]);
+
+  const submit = async (): Promise<void> => {
+    if (creds.dirty) {
+      // New credentials mean a new socket and a new key, so the cheapest correct
+      // move is to boot from scratch. The form is persisted, so nothing is lost.
+      if (await creds.save()) location.reload();
+      return;
+    }
+    if (connected) {
+      store.dismissLayer();
+      return;
+    }
+    if (reconnecting) return;
+    setReconnecting(true);
+    store.reconnect();
+  };
 
   return (
-    <Sheet title="Settings" onClose={onClose}>
-      <SheetItem label="Relay & keys" sub={relayUrl} onClick={onOpenSetup} />
-      <SheetItem label="Reconnect now" sub={relayStatus} onClick={onReconnect} />
-      {/* Inline segmented control rather than a nested sheet: two scrims on a
-          phone is worse than three always-visible options. */}
-      <div className="sheet-item theme-row">
-        <span className="sheet-item-label">Theme</span>
-        <ThemeSeg
-          value={theme}
-          onChange={(pref) => {
-            setPref(pref);
-            setTheme(pref);
-          }}
-        />
-      </div>
-    </Sheet>
+    <>
+      <header className="header">
+        <div className="header-lead">
+          <button type="button" className="header-back" onClick={() => store.dismissLayer()} aria-label="Back">
+            ‹
+          </button>
+          <div>
+            <h1 className="header-title">Settings</h1>
+            <p className="header-meta header-status">
+              <span className={relayDot === null ? "dot" : `dot dot-${relayDot}`} />
+              {relayLine}
+            </p>
+          </div>
+        </div>
+      </header>
+
+      <form
+        id="settings-form"
+        className="setup"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <div className="setup-card card">
+          <CredentialFields creds={creds} />
+        </div>
+
+        {/* Inline segmented control rather than a picker: three always-visible
+            options beat another layer on a phone. */}
+        <div className="theme-card card">
+          <span className="theme-title">Theme</span>
+          <ThemeSeg
+            value={theme}
+            onChange={(pref) => {
+              setPref(pref);
+              setTheme(pref);
+            }}
+          />
+        </div>
+      </form>
+
+      <footer className="footer">
+        {/* One bottom action: saves edits, retries the relay when it is down,
+            and otherwise just returns — a separate "Reconnect now" row would
+            duplicate it. */}
+        <button type="submit" form="settings-form" className="primary">
+          {reconnecting ? "Reconnecting…" : connected ? "Connect" : "Reconnect"}
+        </button>
+      </footer>
+    </>
   );
 }
 

@@ -22,7 +22,7 @@ export const MODEL_LABELS: Record<Model, string> = {
   sonnet: "Sonnet",
 };
 
-export type SheetKind = "machine" | "repo" | "model" | "effort" | "settings";
+export type SheetKind = "machine" | "repo" | "model" | "effort";
 
 export type Verdict =
   | { readonly kind: "ok"; readonly window: string; readonly note?: string }

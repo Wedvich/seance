@@ -2,8 +2,6 @@ import type { JSX } from "preact";
 import { EFFORTS, EFFORT_LABELS, MODELS, MODEL_LABELS, type SheetKind } from "../state.ts";
 import type { Store } from "../store.ts";
 import { abbreviatePath, formatSeen, type Tile, type ViewModel } from "../view.ts";
-import { readRelayUrl } from "../relay/keys.ts";
-import { SettingsSheet } from "./settings.tsx";
 import { Sheet, SheetItem } from "./sheet.tsx";
 
 const SHEET_TITLES: Record<SheetKind, string> = {
@@ -11,7 +9,6 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   repo: "Which repo?",
   model: "Model",
   effort: "Thinking effort",
-  settings: "Settings",
 };
 
 function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void }): JSX.Element {
@@ -130,12 +127,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
           <h1 className="header-title">Séance</h1>
           <p className="header-meta">{view.meta}</p>
         </div>
-        <button
-          type="button"
-          className="relay-chip"
-          onClick={() => store.openSheet("settings")}
-          aria-label="Relay and settings"
-        >
+        <button type="button" className="relay-chip" onClick={() => store.openSettings()} aria-label="Relay settings">
           <span className={view.relayDot === null ? "dot" : `dot dot-${view.relayDot}`} />
           relay
         </button>
@@ -156,11 +148,11 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
         </div>
 
         {view.banner !== null &&
-          (view.banner.opensSetup ? (
+          (view.banner.opensSettings ? (
             <button
               type="button"
               className={view.banner.tone === "err" ? "banner card banner-err" : "banner card"}
-              onClick={() => store.openSetup()}
+              onClick={() => store.openSettings()}
             >
               <span className="banner-rule" />
               <span className="banner-text">
@@ -214,20 +206,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
         </button>
       </footer>
 
-      {state.sheet === "settings" ? (
-        <SettingsSheet
-          relayUrl={readRelayUrl()}
-          relayStatus={state.relay.status}
-          onClose={() => store.dismissLayer()}
-          onOpenSetup={() => store.openSetup()}
-          onReconnect={() => {
-            store.dismissLayer();
-            store.reconnect();
-          }}
-        />
-      ) : (
-        state.sheet !== null && <ActiveSheet store={store} view={view} kind={state.sheet} now={now} />
-      )}
+      {state.sheet !== null && <ActiveSheet store={store} view={view} kind={state.sheet} now={now} />}
     </>
   );
 }

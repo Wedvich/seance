@@ -42,6 +42,13 @@
   color: var(--fg2);
 }
 
+/* The settings header's subtitle carries the live status dot. */
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* Visually 24px tall as designed; the ::after inset lifts the hit area to 44px. */
 .relay-chip {
   position: relative;
@@ -396,7 +403,7 @@
   font-weight: 600;
 }
 
-/* Shared with the setup layer's back button: same affordance, opposite direction. */
+/* Shared with the settings screen's back button: same affordance, opposite direction. */
 .sheet-close,
 .header-back {
   width: 28px;
@@ -626,8 +633,18 @@
 
 /* ---- theme segmented control ---- */
 
-.theme-row {
+.theme-card {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+}
+
+.theme-title {
+  font-size: 15.5px;
+  font-weight: 600;
 }
 
 .seg {

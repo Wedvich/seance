@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Setup } from "./components/setup.tsx";
+import { Settings } from "./components/settings.tsx";
 import { SpawnScreen } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
@@ -8,18 +8,18 @@ import "./screen.css";
 import type { Store } from "./store.ts";
 import { deriveView, type AppState } from "./view.ts";
 
-type SetupAnim = "push" | "pop";
+type ScreenAnim = "push" | "pop";
 
 export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
-  const [anim, clearAnim] = useSetupTransition(state.setup);
+  const [anim, clearAnim] = useScreenTransition(state.settings);
 
   useEffect(() => store.attach(), [store]);
 
   useEffect(() => {
-    // Back closes a sheet, leaves setup, or leaves the verdict; without this it
-    // exits the app, which on Android is the primary dismissal gesture.
+    // Back closes a sheet, leaves settings, or leaves the verdict; without this
+    // it exits the app, which on Android is the primary dismissal gesture.
     const onPopState = (): void => store.onPopState();
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -37,7 +37,7 @@ export function App(props: { store: Store }): JSX.Element {
         if (event.animationName.startsWith("screen-")) clearAnim();
       }}
     >
-      {(anim !== null || !state.setup) && (
+      {(anim !== null || !state.settings) && (
         <main key="form" className={panelClass(anim, "push-out", "pop-in")}>
           {state.verdict !== null ? (
             <VerdictView
@@ -52,17 +52,14 @@ export function App(props: { store: Store }): JSX.Element {
           )}
         </main>
       )}
-      {(anim !== null || state.setup) && (
-        <main key="setup" className={panelClass(anim, "push-in", "pop-out")}>
-          {/* Both secrets are known to exist: main.tsx only mounts App once they load.
-              New credentials mean a new socket and a new key, so the cheapest correct
-              move is to boot from scratch. The form is persisted, so nothing is lost. */}
-          <Setup
+      {(anim !== null || state.settings) && (
+        <main key="settings" className={panelClass(anim, "push-in", "pop-out")}>
+          <Settings
+            store={store}
             relayUrl={readRelayUrl()}
-            hasBearer
-            hasPsk
-            onSaved={() => location.reload()}
-            onCancel={() => store.dismissLayer()}
+            relayLine={view.relayLine}
+            relayDot={view.relayDot}
+            connected={state.relay.status === "open"}
           />
         </main>
       )}
@@ -70,28 +67,28 @@ export function App(props: { store: Store }): JSX.Element {
   );
 }
 
-function panelClass(anim: SetupAnim | null, pushing: string, popping: string): string {
+function panelClass(anim: ScreenAnim | null, pushing: string, popping: string): string {
   if (anim === null) return "screen stage-panel";
   return `screen stage-panel panel-${anim === "push" ? pushing : popping}`;
 }
 
 /**
- * Direction to animate when the setup layer opens ("push") or closes ("pop"),
- * null once the transition has played. useLayoutEffect so the animation
- * classes land before the swapped screen paints — an effect after paint would
- * flash the final state for a frame. The timeout backstops a lost
+ * Direction to animate when the settings screen opens ("push") or closes
+ * ("pop"), null once the transition has played. useLayoutEffect so the
+ * animation classes land before the swapped screen paints — an effect after
+ * paint would flash the final state for a frame. The timeout backstops a lost
  * animationend, which would otherwise wedge the stage under
  * pointer-events: none.
  */
-function useSetupTransition(setup: boolean): [SetupAnim | null, () => void] {
-  const [anim, setAnim] = useState<SetupAnim | null>(null);
-  const previous = useRef(setup);
+function useScreenTransition(settings: boolean): [ScreenAnim | null, () => void] {
+  const [anim, setAnim] = useState<ScreenAnim | null>(null);
+  const previous = useRef(settings);
 
   useLayoutEffect(() => {
-    if (setup === previous.current) return;
-    previous.current = setup;
-    setAnim(setup ? "push" : "pop");
-  }, [setup]);
+    if (settings === previous.current) return;
+    previous.current = settings;
+    setAnim(settings ? "push" : "pop");
+  }, [settings]);
 
   useEffect(() => {
     if (anim === null) return;

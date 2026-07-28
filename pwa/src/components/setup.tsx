@@ -5,48 +5,49 @@ import { storeBearer, storePsk, storeRelayUrl } from "../relay/keys.ts";
 /** Stands in for a secret that is already stored: the PSK cannot be read back, and the bearer is not worth showing. */
 const MASK = "************";
 
+export interface Credentials {
+  readonly relayUrl: string;
+  readonly bearer: string;
+  readonly psk: string;
+  readonly error: string | null;
+  /** True once any field differs from what is stored; blank secrets are not edits. */
+  readonly dirty: boolean;
+  readonly hasBearer: boolean;
+  readonly hasPsk: boolean;
+  readonly setRelayUrl: (value: string) => void;
+  readonly setBearer: (value: string) => void;
+  readonly setPsk: (value: string) => void;
+  /** Validates and writes the edited fields; false leaves `error` set to show. */
+  readonly save: () => Promise<boolean>;
+}
+
 /**
- * First run, and the way back in after a rejected token. Field names and
- * autocomplete hints are chosen so a 1Password Login item fills both secrets in
- * one tap: the bearer token takes the username slot (it is anti-junk hygiene and
- * authorizes nothing destructive) and the PSK the password slot (it is the trust
- * boundary). A real <form> with a submit button is required for the extension's
- * heuristics to fire at all; the same attributes drive iOS Password AutoFill.
- *
- * Reached again from Settings on a configured install, where neither secret can be
- * prefilled — the PSK is non-extractable by design. A masked placeholder says
- * "configured" where a blank field would read as "lost", and a field left blank
- * keeps what is stored, so the screen is editable without being a re-entry chore.
+ * The credential fields' state and save semantics, shared between first-run
+ * setup and the settings screen: a field left blank keeps what is stored, so
+ * only fields actually typed into are written.
  */
-export function Setup(props: {
-  relayUrl: string;
-  hasBearer: boolean;
-  hasPsk: boolean;
-  onSaved: () => void;
-  onCancel?: (() => void) | undefined;
-}): JSX.Element {
-  const { hasBearer, hasPsk, onCancel } = props;
-  const [relayUrl, setRelayUrl] = useState(props.relayUrl);
+export function useCredentials(stored: { relayUrl: string; hasBearer: boolean; hasPsk: boolean }): Credentials {
+  const [relayUrl, setRelayUrl] = useState(stored.relayUrl);
   const [bearer, setBearer] = useState("");
   const [psk, setPsk] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const submit = async (): Promise<void> => {
+  const save = async (): Promise<boolean> => {
     setError(null);
     // Scheme matters, not just parseability: a WebSocket cannot be opened to http://.
     if (!URL.canParse(relayUrl) || !/^wss?:$/u.test(new URL(relayUrl).protocol)) {
       setError("The relay URL must start with wss:// (or ws:// locally).");
-      return;
+      return false;
     }
     const nextBearer = bearer.trim();
     const nextPsk = psk.trim();
-    if (nextBearer === "" && !hasBearer) {
+    if (nextBearer === "" && !stored.hasBearer) {
       setError("The bearer token is required.");
-      return;
+      return false;
     }
-    if (nextPsk === "" && !hasPsk) {
+    if (nextPsk === "" && !stored.hasPsk) {
       setError("The pre-shared key is required.");
-      return;
+      return false;
     }
     if (nextPsk !== "") {
       try {
@@ -55,28 +56,118 @@ export function Setup(props: {
         await storePsk(nextPsk);
       } catch {
         setError("The pre-shared key must be 32 bytes of base64.");
-        return;
+        return false;
       }
     }
     storeRelayUrl(relayUrl.trim());
     if (nextBearer !== "") storeBearer(nextBearer);
     void navigator.storage?.persist?.();
-    props.onSaved();
+    return true;
   };
+
+  return {
+    relayUrl,
+    bearer,
+    psk,
+    error,
+    dirty: relayUrl.trim() !== stored.relayUrl || bearer.trim() !== "" || psk.trim() !== "",
+    hasBearer: stored.hasBearer,
+    hasPsk: stored.hasPsk,
+    setRelayUrl,
+    setBearer,
+    setPsk,
+    save,
+  };
+}
+
+/**
+ * Field names and autocomplete hints are chosen so a 1Password Login item fills
+ * both secrets in one tap: the bearer token takes the username slot (it is
+ * anti-junk hygiene and authorizes nothing destructive) and the PSK the
+ * password slot (it is the trust boundary). A real <form> with a submit button
+ * is required for the extension's heuristics to fire at all; the same
+ * attributes drive iOS Password AutoFill.
+ *
+ * On a configured install neither secret can be prefilled — the PSK is
+ * non-extractable by design. A masked placeholder says "configured" where a
+ * blank field would read as "lost".
+ */
+export function CredentialFields(props: { creds: Credentials }): JSX.Element {
+  const { creds } = props;
+
+  return (
+    <>
+      <label className="field" htmlFor="relay-url">
+        <span className="label">RELAY URL</span>
+        <input
+          id="relay-url"
+          name="relay-url"
+          type="url"
+          autoComplete="off"
+          inputMode="url"
+          value={creds.relayUrl}
+          onInput={(event) => creds.setRelayUrl(event.currentTarget.value)}
+        />
+      </label>
+
+      <label className="field" htmlFor="username">
+        <span className="label">BEARER TOKEN</span>
+        <input
+          id="username"
+          name="username"
+          type="text"
+          autoComplete="username"
+          autoCapitalize="none"
+          spellcheck={false}
+          placeholder={creds.hasBearer ? MASK : undefined}
+          value={creds.bearer}
+          onInput={(event) => creds.setBearer(event.currentTarget.value)}
+        />
+        {creds.hasBearer && <span className="field-hint">Stored on this device. Leave blank to keep it.</span>}
+      </label>
+
+      <label className="field" htmlFor="password">
+        <span className="label">PRE-SHARED KEY</span>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          placeholder={creds.hasPsk ? MASK : undefined}
+          value={creds.psk}
+          onInput={(event) => creds.setPsk(event.currentTarget.value)}
+        />
+        <span className="field-hint">
+          32 bytes of base64. It is stored as a non-extractable key and never shown again — keep 1Password as the source
+          of truth.
+          {creds.hasPsk && " Leave blank to keep the stored key."}
+        </span>
+      </label>
+
+      {creds.error !== null && <span className="field-error">{creds.error}</span>}
+    </>
+  );
+}
+
+/**
+ * First run, and the way back in after a rejected token: main.tsx renders this
+ * instead of the app until both secrets exist. Editing them later lives on the
+ * settings screen, which shares the fields above.
+ */
+export function Setup(props: {
+  relayUrl: string;
+  hasBearer: boolean;
+  hasPsk: boolean;
+  onSaved: () => void;
+}): JSX.Element {
+  const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: props.hasBearer, hasPsk: props.hasPsk });
 
   return (
     <>
       <header className="header">
-        <div className="header-lead">
-          {onCancel !== undefined && (
-            <button type="button" className="header-back" onClick={onCancel} aria-label="Back">
-              ‹
-            </button>
-          )}
-          <div>
-            <h1 className="header-title">Séance</h1>
-            <p className="header-meta">{hasBearer && hasPsk ? "update your keys" : "paste your keys once"}</p>
-          </div>
+        <div>
+          <h1 className="header-title">Séance</h1>
+          <p className="header-meta">paste your keys once</p>
         </div>
       </header>
 
@@ -85,58 +176,13 @@ export function Setup(props: {
         className="setup"
         onSubmit={(event) => {
           event.preventDefault();
-          void submit();
+          void creds.save().then((saved) => {
+            if (saved) props.onSaved();
+          });
         }}
       >
         <div className="setup-card card">
-          <label className="field" htmlFor="relay-url">
-            <span className="label">RELAY URL</span>
-            <input
-              id="relay-url"
-              name="relay-url"
-              type="url"
-              autoComplete="off"
-              inputMode="url"
-              value={relayUrl}
-              onInput={(event) => setRelayUrl(event.currentTarget.value)}
-            />
-          </label>
-
-          <label className="field" htmlFor="username">
-            <span className="label">BEARER TOKEN</span>
-            <input
-              id="username"
-              name="username"
-              type="text"
-              autoComplete="username"
-              autoCapitalize="none"
-              spellcheck={false}
-              placeholder={hasBearer ? MASK : undefined}
-              value={bearer}
-              onInput={(event) => setBearer(event.currentTarget.value)}
-            />
-            {hasBearer && <span className="field-hint">Stored on this device. Leave blank to keep it.</span>}
-          </label>
-
-          <label className="field" htmlFor="password">
-            <span className="label">PRE-SHARED KEY</span>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              placeholder={hasPsk ? MASK : undefined}
-              value={psk}
-              onInput={(event) => setPsk(event.currentTarget.value)}
-            />
-            <span className="field-hint">
-              32 bytes of base64. It is stored as a non-extractable key and never shown again — keep 1Password as the
-              source of truth.
-              {hasPsk && " Leave blank to keep the stored key."}
-            </span>
-          </label>
-
-          {error !== null && <span className="field-error">{error}</span>}
+          <CredentialFields creds={creds} />
         </div>
       </form>
 

@@ -28,8 +28,8 @@ export interface Banner {
   readonly title: string;
   readonly body: string;
   readonly tone: Tone;
-  /** Tapping opens setup; only true when re-entering credentials is the fix. */
-  readonly opensSetup: boolean;
+  /** Tapping opens settings; only true when re-entering credentials is the fix. */
+  readonly opensSettings: boolean;
 }
 
 export interface PrimaryButton {
@@ -41,6 +41,8 @@ export interface ViewModel {
   readonly meta: string;
   /** null is the muted dot: connected state not known yet, rather than known bad. */
   readonly relayDot: "ok" | "err" | null;
+  /** Bare connection state for the settings screen; meta carries the machine counts. */
+  readonly relayLine: string;
   readonly banner: Banner | null;
   readonly machineTile: Tile;
   readonly repoTile: Tile;
@@ -58,8 +60,8 @@ export interface AppState {
   readonly relay: RelayState;
   readonly form: PersistedForm;
   readonly sheet: SheetKind | null;
-  /** The Relay & keys screen, a layer like the sheets so back leaves it instead of the app. */
-  readonly setup: boolean;
+  /** The settings screen, a layer like the sheets so back leaves it instead of the app. */
+  readonly settings: boolean;
   readonly spawning: boolean;
   readonly verdict: Verdict | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
@@ -143,6 +145,14 @@ function sessionCount(state: AppState, deviceId: string): number | null {
   return entry.sessions.length;
 }
 
+/** The settings screen's status line: connection only, no machine counts. */
+function deriveRelayLine(relay: RelayState): string {
+  if (relay.rejection === "unauthorized") return "bearer token rejected";
+  if (relay.rejection === "bad-request") return "no bearer token";
+  if (relay.status === "open") return "connected";
+  return relay.settling ? "connecting…" : "relay unreachable · retrying";
+}
+
 function deriveMeta(state: AppState): string {
   const { relay } = state;
   if (relay.rejection === "unauthorized") return "bearer token rejected";
@@ -165,7 +175,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       title: relay.rejection === "unauthorized" ? "Bearer token rejected" : "No bearer token",
       body: "The relay refused this token. Re-enter your credentials to reconnect.",
       tone: "err",
-      opensSetup: true,
+      opensSettings: true,
     };
   }
   if (relay.status !== "open") {
@@ -174,7 +184,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       title: "Relay unreachable",
       body: "Nothing can be spawned until a daemon socket is back. Your prompt is kept.",
       tone: "err",
-      opensSetup: false,
+      opensSettings: false,
     };
   }
   if (relay.registrySize === 0) {
@@ -182,7 +192,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       title: "No machines yet",
       body: "Install seanced on a machine and it will appear here.",
       tone: "fg2",
-      opensSetup: false,
+      opensSettings: false,
     };
   }
   // Entries exist but none decrypt: a fresh install and a wrong PSK look
@@ -192,11 +202,11 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       title: "Key mismatch",
       body: `${relay.registrySize} ${relay.registrySize === 1 ? "machine is" : "machines are"} registered, but none decrypt with this key. Check the pre-shared key.`,
       tone: "err",
-      opensSetup: true,
+      opensSettings: true,
     };
   }
   if (machine !== null && !machine.connected) {
-    return { title: `${machine.name} is offline`, body: offlineBody(machine), tone: "fg2", opensSetup: false };
+    return { title: `${machine.name} is offline`, body: offlineBody(machine), tone: "fg2", opensSettings: false };
   }
   return null;
 }
@@ -248,6 +258,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
   return {
     meta: deriveMeta(state),
     relayDot: state.relay.status === "open" ? "ok" : state.relay.settling ? null : "err",
+    relayLine: deriveRelayLine(state.relay),
     banner: deriveBanner(state, machine),
     machineTile: {
       label: "MACHINE",
