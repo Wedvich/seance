@@ -116,13 +116,8 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
   );
 }
 
-export function SpawnScreen(props: {
-  store: Store;
-  view: ViewModel;
-  now: number;
-  onOpenSetup: () => void;
-}): React.JSX.Element {
-  const { store, view, now, onOpenSetup } = props;
+export function SpawnScreen(props: { store: Store; view: ViewModel; now: number }): React.JSX.Element {
+  const { store, view, now } = props;
   const state = store.getState();
   const offline = view.machine !== null && !view.machine.connected;
 
@@ -163,7 +158,7 @@ export function SpawnScreen(props: {
             <button
               type="button"
               className={view.banner.tone === "err" ? "banner card banner-err" : "banner card"}
-              onClick={onOpenSetup}
+              onClick={() => store.openSetup()}
             >
               <span className="banner-rule" />
               <span className="banner-text">
@@ -222,7 +217,7 @@ export function SpawnScreen(props: {
           relayUrl={readRelayUrl()}
           relayStatus={state.relay.status}
           onClose={() => store.dismissLayer()}
-          onOpenSetup={onOpenSetup}
+          onOpenSetup={() => store.openSetup()}
           onReconnect={() => {
             store.dismissLayer();
             store.reconnect();

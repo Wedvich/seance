@@ -26,7 +26,7 @@ Object.defineProperty(globalThis, "document", {
   configurable: true,
 });
 Object.defineProperty(globalThis, "history", {
-  value: { pushState(): void {}, back(): void {} },
+  value: { pushState(): void {}, replaceState(): void {}, back(): void {} },
   configurable: true,
 });
 

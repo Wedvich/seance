@@ -20,6 +20,13 @@
   padding-top: max(14px, env(safe-area-inset-top));
 }
 
+/* Keeps the back affordance beside the title instead of the header's far edges. */
+.header-lead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .header-title {
   margin: 0;
   font-size: 16px;
@@ -385,7 +392,9 @@
   font-weight: 600;
 }
 
-.sheet-close {
+/* Shared with the setup layer's back button: same affordance, opposite direction. */
+.sheet-close,
+.header-back {
   width: 28px;
   height: 28px;
   border: 0;
@@ -571,6 +580,11 @@
   font-variant-ligatures: none;
   font-size: 13px;
   outline: none;
+}
+
+/* Dim on purpose: the mask stands for a stored secret, not for text to read. */
+.field input::placeholder {
+  color: var(--fg2);
 }
 
 .field input:focus {

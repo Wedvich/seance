@@ -462,6 +462,17 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
   dies silently and stale counts under a green dot are worse than none.
+- **Every layer is exactly one history entry, owned by the store.** Sheets, the
+  verdict and the Relay & keys screen all push on open and are cleared by
+  `popstate`, so Android back dismisses the layer instead of exiting the app.
+  Opening Relay & keys from the settings sheet therefore _replaces_ that sheet's
+  entry rather than pushing its own: two entries would need two backs, and
+  closing the sheet with `back()` first would race the pop that clears it.
+- **Stored secrets show as a masked placeholder, and a blank field keeps them.**
+  The PSK cannot be read back at all and the bearer is not worth redisplaying,
+  but two empty inputs read as "credentials lost" on a working install. So
+  Relay & keys is editable without being a re-entry chore, and only a field
+  actually typed into is written.
 - **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
   mid-spawn loses the reply (a blind relay cannot queue it), so the pending
   spawn is persisted and the machine is asked what is running once there is a

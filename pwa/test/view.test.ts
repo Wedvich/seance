@@ -38,6 +38,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     relay: relay(),
     form: { ...DEFAULT_FORM, ...form },
     sheet: null,
+    setup: false,
     spawning: false,
     verdict: null,
     sessions: {},

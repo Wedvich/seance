@@ -28,7 +28,12 @@ if (key === null || token === null) {
   root.render(
     <StrictMode>
       <div className="screen">
-        <Setup relayUrl={readRelayUrl()} onSaved={() => location.reload()} />
+        <Setup
+          relayUrl={readRelayUrl()}
+          hasBearer={token !== null}
+          hasPsk={key !== null}
+          onSaved={() => location.reload()}
+        />
       </div>
     </StrictMode>,
   );

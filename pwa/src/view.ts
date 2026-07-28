@@ -57,6 +57,8 @@ export interface AppState {
   readonly relay: RelayState;
   readonly form: PersistedForm;
   readonly sheet: SheetKind | null;
+  /** The Relay & keys screen, a layer like the sheets so back leaves it instead of the app. */
+  readonly setup: boolean;
   readonly spawning: boolean;
   readonly verdict: Verdict | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */

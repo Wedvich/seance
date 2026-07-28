@@ -36,6 +36,7 @@ export class Store {
       relay: client.getState(),
       form,
       sheet: null,
+      setup: false,
       spawning: false,
       verdict: null,
       sessions: {},
@@ -167,9 +168,21 @@ export class Store {
     this.#patch({ sheet });
   }
 
+  /**
+   * Setup is a layer, not a screen: opened from the settings sheet it takes over
+   * that sheet's history entry, so one back leaves it. Pushing a second entry
+   * would cost two backs, and closing the sheet with back() first would race the
+   * pop that clears it.
+   */
+  openSetup(): void {
+    if (this.#state.sheet === null) history.pushState({ seance: "layer" }, "");
+    else history.replaceState({ seance: "layer" }, "");
+    this.#patch({ sheet: null, setup: true });
+  }
+
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
-    if (this.#state.sheet === null && this.#state.verdict === null) return;
+    if (this.#state.sheet === null && this.#state.verdict === null && !this.#state.setup) return;
     history.back();
   }
 
@@ -177,6 +190,10 @@ export class Store {
   onPopState(): void {
     if (this.#state.sheet !== null) {
       this.#patch({ sheet: null });
+      return;
+    }
+    if (this.#state.setup) {
+      this.#patch({ setup: false });
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });

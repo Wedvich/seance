@@ -11,5 +11,6 @@ declare var document: {
 
 declare var history: {
   pushState(data: unknown, unused: string): void;
+  replaceState(data: unknown, unused: string): void;
   back(): void;
 };

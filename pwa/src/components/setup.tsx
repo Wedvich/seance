@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { storeBearer, storePsk, storeRelayUrl } from "../relay/keys.ts";
 
+/** Stands in for a secret that is already stored: the PSK cannot be read back, and the bearer is not worth showing. */
+const MASK = "************";
+
 /**
  * First run, and the way back in after a rejected token. Field names and
  * autocomplete hints are chosen so a 1Password Login item fills both secrets in
@@ -8,8 +11,20 @@ import { storeBearer, storePsk, storeRelayUrl } from "../relay/keys.ts";
  * authorizes nothing destructive) and the PSK the password slot (it is the trust
  * boundary). A real <form> with a submit button is required for the extension's
  * heuristics to fire at all; the same attributes drive iOS Password AutoFill.
+ *
+ * Reached again from Settings on a configured install, where neither secret can be
+ * prefilled — the PSK is non-extractable by design. A masked placeholder says
+ * "configured" where a blank field would read as "lost", and a field left blank
+ * keeps what is stored, so the screen is editable without being a re-entry chore.
  */
-export function Setup(props: { relayUrl: string; onSaved: () => void }): React.JSX.Element {
+export function Setup(props: {
+  relayUrl: string;
+  hasBearer: boolean;
+  hasPsk: boolean;
+  onSaved: () => void;
+  onCancel?: (() => void) | undefined;
+}): React.JSX.Element {
+  const { hasBearer, hasPsk, onCancel } = props;
   const [relayUrl, setRelayUrl] = useState(props.relayUrl);
   const [bearer, setBearer] = useState("");
   const [psk, setPsk] = useState("");
@@ -22,20 +37,28 @@ export function Setup(props: { relayUrl: string; onSaved: () => void }): React.J
       setError("The relay URL must start with wss:// (or ws:// locally).");
       return;
     }
-    if (bearer.trim() === "") {
+    const nextBearer = bearer.trim();
+    const nextPsk = psk.trim();
+    if (nextBearer === "" && !hasBearer) {
       setError("The bearer token is required.");
       return;
     }
-    try {
-      // Only proves the base64 decodes to 32 bytes. A wrong key imports fine and
-      // shows up later as a registry that will not decrypt.
-      await storePsk(psk.trim());
-    } catch {
-      setError("The pre-shared key must be 32 bytes of base64.");
+    if (nextPsk === "" && !hasPsk) {
+      setError("The pre-shared key is required.");
       return;
     }
+    if (nextPsk !== "") {
+      try {
+        // Only proves the base64 decodes to 32 bytes. A wrong key imports fine and
+        // shows up later as a registry that will not decrypt.
+        await storePsk(nextPsk);
+      } catch {
+        setError("The pre-shared key must be 32 bytes of base64.");
+        return;
+      }
+    }
     storeRelayUrl(relayUrl.trim());
-    storeBearer(bearer.trim());
+    if (nextBearer !== "") storeBearer(nextBearer);
     void navigator.storage?.persist?.();
     props.onSaved();
   };
@@ -43,9 +66,16 @@ export function Setup(props: { relayUrl: string; onSaved: () => void }): React.J
   return (
     <>
       <header className="header">
-        <div>
-          <h1 className="header-title">Séance</h1>
-          <p className="header-meta">paste your keys once</p>
+        <div className="header-lead">
+          {onCancel !== undefined && (
+            <button type="button" className="header-back" onClick={onCancel} aria-label="Back">
+              ‹
+            </button>
+          )}
+          <div>
+            <h1 className="header-title">Séance</h1>
+            <p className="header-meta">{hasBearer && hasPsk ? "update your keys" : "paste your keys once"}</p>
+          </div>
         </div>
       </header>
 
@@ -80,9 +110,11 @@ export function Setup(props: { relayUrl: string; onSaved: () => void }): React.J
               autoComplete="username"
               autoCapitalize="none"
               spellCheck={false}
+              placeholder={hasBearer ? MASK : undefined}
               value={bearer}
               onChange={(event) => setBearer(event.target.value)}
             />
+            {hasBearer && <span className="field-hint">Stored on this device. Leave blank to keep it.</span>}
           </label>
 
           <label className="field" htmlFor="password">
@@ -92,12 +124,14 @@ export function Setup(props: { relayUrl: string; onSaved: () => void }): React.J
               name="password"
               type="password"
               autoComplete="current-password"
+              placeholder={hasPsk ? MASK : undefined}
               value={psk}
               onChange={(event) => setPsk(event.target.value)}
             />
             <span className="field-hint">
               32 bytes of base64. It is stored as a non-extractable key and never shown again — keep 1Password as the
               source of truth.
+              {hasPsk && " Leave blank to keep the stored key."}
             </span>
           </label>
 
