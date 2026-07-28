@@ -29,7 +29,7 @@
 
 .header-title {
   margin: 0;
-  font-size: 16px;
+  font-size: 18.5px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -38,7 +38,7 @@
   margin: 2px 0 0;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--fg2);
 }
 
@@ -54,7 +54,7 @@
   background: var(--sur2);
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--fg2);
   flex: none;
 }
@@ -106,9 +106,9 @@
 .label {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 9.5px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--fg2);
 }
@@ -174,14 +174,14 @@
 
 .banner-title {
   display: block;
-  font-size: 12.5px;
+  font-size: 14.5px;
   font-weight: 600;
 }
 
 .banner-body {
   display: block;
   margin: 3px 0 0;
-  font-size: 11.5px;
+  font-size: 13px;
   line-height: 1.5;
   color: var(--fg2);
 }
@@ -219,7 +219,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   min-width: 0;
 }
@@ -227,7 +227,7 @@
 .tile-value-mono {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
 }
 
@@ -239,7 +239,7 @@
 
 .ignored-note {
   margin: -4px 0 0;
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--fg2);
 }
 
@@ -258,14 +258,14 @@
 
 .worktree-title {
   display: block;
-  font-size: 13.5px;
+  font-size: 15.5px;
   font-weight: 600;
 }
 
 .worktree-hint {
   display: block;
   margin: 2px 0 0;
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--fg2);
 }
 
@@ -310,9 +310,9 @@
 }
 
 .footer-status {
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--fg2);
-  min-height: 17px;
+  min-height: 19px;
 }
 
 .primary {
@@ -322,7 +322,7 @@
   border-radius: 12px;
   background: var(--acc);
   color: var(--acc-fg);
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
 }
 
@@ -340,7 +340,7 @@
   border-radius: 12px;
   background: transparent;
   color: var(--fg2);
-  font-size: 14px;
+  font-size: 16px;
   text-align: center;
   text-decoration: none;
 }
@@ -388,7 +388,7 @@
 
 .sheet-title {
   margin: 0;
-  font-size: 14.5px;
+  font-size: 16.5px;
   font-weight: 600;
 }
 
@@ -441,7 +441,7 @@
 }
 
 .sheet-item-label {
-  font-size: 13.5px;
+  font-size: 15.5px;
   font-weight: 500;
   min-width: 0;
   overflow: hidden;
@@ -457,7 +457,7 @@
 .sheet-item-sub {
   display: block;
   margin: 2px 0 0;
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--fg2);
 }
 
@@ -514,7 +514,7 @@
 
 .verdict-body {
   margin: 0;
-  font-size: 14.5px;
+  font-size: 16.5px;
   line-height: 1.55;
   color: var(--fg2);
 }
@@ -526,7 +526,7 @@
   border-radius: 12px;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.5;
   color: var(--fg2);
   text-align: left;
@@ -578,7 +578,7 @@
   background: var(--bg);
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 13px;
+  font-size: 15px;
   outline: none;
 }
 
@@ -592,12 +592,12 @@
 }
 
 .field-hint {
-  font-size: 11.5px;
+  font-size: 13px;
   line-height: 1.5;
   color: var(--fg2);
 }
 
 .field-error {
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--err);
 }

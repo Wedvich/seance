@@ -18,16 +18,16 @@ html[data-theme="light"] {
 }
 
 html[data-theme="dark"] {
-  --bg: #121017;
-  --sur: #19161f;
-  --sur2: #221d2b;
-  --fg: #eae6f0;
-  --fg2: #948da3;
-  --line: #2a2434;
-  --acc: #b198f2;
-  --acc-fg: #150e26;
+  --bg: #0c0b0f;
+  --sur: #1c1a22;
+  --sur2: #2a2732;
+  --fg: #f5f3f8;
+  --fg2: #bcb7c6;
+  --line: #454150;
+  --acc: #bda6f5;
+  --acc-fg: #120a22;
   --ok: #54c08f;
-  --err: #ef8878;
+  --err: #f39383;
 }
 
 :root {

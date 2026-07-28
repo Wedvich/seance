@@ -10,7 +10,7 @@ export type ThemePref = (typeof THEME_PREFS)[number];
 const STORAGE_KEY = "seance:theme";
 
 /** Matches `sur`, so the status bar continues the header rather than cutting it off. */
-const THEME_COLOR = { dark: "#19161f", light: "#ffffff" } as const;
+const THEME_COLOR = { dark: "#1c1a22", light: "#ffffff" } as const;
 
 const darkMedia = (): MediaQueryList => window.matchMedia("(prefers-color-scheme: dark)");
 
