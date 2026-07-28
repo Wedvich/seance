@@ -23,7 +23,7 @@ export function App(props: { store: Store }): React.JSX.Element {
 
   if (state.setup) {
     return (
-      <div className="screen">
+      <main className="screen">
         {/* Both secrets are known to exist: main.tsx only mounts App once they load.
             New credentials mean a new socket and a new key, so the cheapest correct
             move is to boot from scratch. The form is persisted, so nothing is lost. */}
@@ -34,7 +34,7 @@ export function App(props: { store: Store }): React.JSX.Element {
           onSaved={() => location.reload()}
           onCancel={() => store.dismissLayer()}
         />
-      </div>
+      </main>
     );
   }
 
@@ -43,7 +43,7 @@ export function App(props: { store: Store }): React.JSX.Element {
 
   if (state.verdict !== null) {
     return (
-      <div className="screen">
+      <main className="screen">
         <VerdictView
           verdict={state.verdict}
           machineName={view.machine?.name ?? "that machine"}
@@ -51,13 +51,13 @@ export function App(props: { store: Store }): React.JSX.Element {
           onAnother={() => store.startAnother()}
           onBack={() => store.dismissLayer()}
         />
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="screen">
+    <main className="screen">
       <SpawnScreen store={store} view={view} now={now} />
-    </div>
+    </main>
   );
 }

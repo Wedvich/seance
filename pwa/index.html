@@ -41,6 +41,10 @@
 
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" href="/icon-192.png" type="image/png" />
+    <!-- Same-origin, unhashed public/ assets, so the paths are stable across builds. Without these the
+         stylesheet has to parse before the fonts are even discovered. crossorigin is required: font
+         fetches are CORS-mode, and a preload without it warms a cache entry the CSS can't reuse. -->
+    <link rel="preload" href="/fonts/fira-code-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/newsreader-latin.woff2" as="font" type="font/woff2" crossorigin />
     <title>Séance</title>

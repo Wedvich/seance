@@ -29,14 +29,14 @@ const token = readBearer();
 if (key === null || token === null) {
   root.render(
     <StrictMode>
-      <div className="screen">
+      <main className="screen">
         <Setup
           relayUrl={readRelayUrl()}
           hasBearer={token !== null}
           hasPsk={key !== null}
           onSaved={() => location.reload()}
         />
-      </div>
+      </main>
     </StrictMode>,
   );
 } else {
