@@ -98,7 +98,15 @@ async function discoverRepoPaths(roots: readonly string[]): Promise<readonly str
     return true;
   };
 
-  const level1 = (await mapLimit(roots, listDirs)).flat();
+  // A root that is itself a repo stops the walk there: descending would register
+  // its submodules and linked worktrees as separate repos.
+  const rootHits = await mapLimit(roots, collect);
+  const level1 = (
+    await mapLimit(
+      roots.filter((_, i) => rootHits[i] === false),
+      listDirs,
+    )
+  ).flat();
   const missed = await mapLimit(level1, collect);
   const level2 = (
     await mapLimit(
@@ -140,7 +148,9 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
 }
 
 /**
- * Depth-2 walk under each root. `defaultBranch` carries forward from the
+ * Depth-2 walk under each root, or the root itself when it is a repo (so a
+ * lone clone can be exposed without opening its parent). `defaultBranch`
+ * carries forward from the
  * previous scan when already resolved — default branches practically never
  * change — and is read from local refs only for new (or still-null) repos.
  */

@@ -451,7 +451,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `-YYYYMMDD-HHMMSS` suffix (as originally shipped — these sessions rarely
   live a day, so the stamp was noise in every window title and every path).
 - **Repo discovery**: config lists parent roots (e.g. `~/pengefix`,
-  `~/repos`); daemon scans for `.git` at depth 2. Measured: 19ms for 58
+  `~/repos`); daemon scans for `.git` at depth 2. A root that is itself a
+  repo counts as that one repo and is not descended into — it lets a lone
+  clone (`~/dotfiles`) be exposed without making its parent a root, and
+  stopping the walk keeps submodules and linked worktrees inside it from
+  registering as separate repos. Measured: 19ms for 58
   repos — the walk is free. Scans run at startup, hourly, and on explicit
   `rescan` — never implicitly from PWA activity. Results cached in
   state.json (restart re-registers instantly from cache); re-register only

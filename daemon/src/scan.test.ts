@@ -42,6 +42,15 @@ describe("scanRepos", () => {
     expect(repos[1]?.defaultBranch).toBe("master");
   });
 
+  test("a root that is itself a repo registers as one, and isn't descended into", async () => {
+    const parent = await makeRoot();
+    const root = await makeRepo(parent, "dotfiles", "main");
+    await makeRepo(parent, "dotfiles/submodule", "main"); // depth 1 under the root — not descended into
+
+    const repos = await scanRepos([root]);
+    expect(repos).toEqual([{ name: "dotfiles", path: root, defaultBranch: "main" }]);
+  });
+
   test("skips hidden directories", async () => {
     const root = await makeRoot();
     await makeRepo(root, ".hidden/repo", "main");
