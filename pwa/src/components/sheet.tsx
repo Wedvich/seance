@@ -69,13 +69,25 @@ export function SheetItem(props: {
   selected?: boolean;
   disabled?: boolean;
   mono?: boolean;
+  /** Command row (does something) rather than option row (picks something). */
+  action?: boolean;
   dot?: "ok" | "off" | null;
   onClick: () => void;
 }): JSX.Element {
-  const { label, sub = null, selected = false, disabled = false, mono = false, dot = null, onClick } = props;
+  const {
+    label,
+    sub = null,
+    selected = false,
+    disabled = false,
+    mono = false,
+    action = false,
+    dot = null,
+    onClick,
+  } = props;
   const classes = ["sheet-item"];
   if (selected) classes.push("sheet-item-selected");
   if (disabled) classes.push("sheet-item-disabled");
+  if (action) classes.push("sheet-item-action");
 
   return (
     <button type="button" className={classes.join(" ")} onClick={onClick} disabled={disabled} aria-current={selected}>

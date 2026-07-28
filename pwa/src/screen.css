@@ -438,6 +438,24 @@
   cursor: default;
 }
 
+/* Options select; an action row commands — border, tint and accent set it apart. */
+.sheet-item-action {
+  margin-top: 6px;
+  justify-content: center;
+  border: 1px solid var(--line);
+  background: var(--sur2);
+}
+
+.sheet-item-action .sheet-item-text {
+  flex: none;
+  align-items: center;
+}
+
+.sheet-item-action .sheet-item-label {
+  color: var(--acc);
+  font-weight: 600;
+}
+
 .sheet-item-text {
   display: flex;
   flex-direction: column;
