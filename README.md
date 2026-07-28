@@ -145,7 +145,7 @@ pipe it straight from 1Password — either way it never lands in argv or shell
 history:
 
 ```sh
-op item get Séance --fields password --reveal | seanced psk-import
+op item get Séance --fields password --reveal --account my | seanced psk-import
 ```
 
 Then clear `psk` in `config.json` and `seanced restart`.
