@@ -366,7 +366,7 @@ together (re-sends registry data on every poll, useless offline).
   accepted risk. Port the accumulated wisdom from `/spawn`
   (`~/.claude/commands/spawn.md`): ff-only fast-forward of the default
   branch before `claude --worktree`, worktree/window naming
-  (slug + timestamp), seed-prompt preamble (worktree setup instructions),
+  (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
   `--remote-control` always, **opus**/medium defaults (revised from
   sonnet), `--permission-mode auto`, per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
@@ -380,6 +380,13 @@ together (re-sends registry data on every poll, useless offline).
   `no_default_branch`, `tmux_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
+- **Worktree/window naming**: the prompt (or explicit `--title`) slugified
+  to 40 chars, nothing more. A trailing `-2`, `-3`, … is appended only when
+  the name is already taken — either the worktree directory exists or a
+  `worktree-<name>` branch survived a `git worktree remove`, which would
+  otherwise base a new session on old work. Rejected: unconditional
+  `-YYYYMMDD-HHMMSS` suffix (as originally shipped — these sessions rarely
+  live a day, so the stamp was noise in every window title and every path).
 - **Repo discovery**: config lists parent roots (e.g. `~/pengefix`,
   `~/repos`); daemon scans for `.git` at depth 2. Measured: 19ms for 58
   repos — the walk is free. Scans run at startup, hourly, and on explicit

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnErrorCode, type SpawnRequest } from "@seance/shared";
@@ -32,10 +32,23 @@ export function slugify(src: string): string {
   return slug === "" ? "session" : slug;
 }
 
-const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
-
-function timestamp(d: Date = new Date()): string {
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+/**
+ * Sessions are short-lived, so names stay bare: no timestamp, just the slug.
+ * Collisions are the exception, and a leftover branch counts as one — `git
+ * worktree remove` leaves `worktree-<name>` behind, and reusing it would base
+ * the new session on the old work.
+ */
+async function freeWorktreeName(repo: RepoEntry, slug: string): Promise<string> {
+  const [dirs, refs] = await Promise.all([
+    readdir(join(repo.path, ".claude", "worktrees")).catch(() => [] as string[]),
+    git(repo.path, ["for-each-ref", "--format=%(refname:short)", `refs/heads/worktree-${slug}*`]),
+  ]);
+  const taken = new Set([...dirs, ...refs.stdout.split("\n").map((ref) => ref.trim().replace(/^worktree-/u, ""))]);
+  for (let n = 1; n < 100; n++) {
+    const name = n === 1 ? slug : `${slug}-${n}`;
+    if (!taken.has(name)) return name;
+  }
+  throw new SpawnFailure("internal_error", `too many worktrees named ${slug}-* — clean some up`);
 }
 
 function shq(s: string): string {
@@ -184,8 +197,8 @@ export async function spawnSession(
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
   }
 
-  const slugSource = request.title ?? request.prompt ?? "session";
-  const worktreeName = `${slugify(slugSource)}-${timestamp()}`;
+  const slug = slugify(request.title ?? request.prompt ?? "session");
+  const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
   const prepared = request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);

@@ -55,7 +55,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     );
 
     expect(outcome.window).toBe("Fix Tests");
-    expect(outcome.path).toContain(join(".claude", "worktrees", "fix-tests-"));
+    expect(outcome.path).toEndWith(join(".claude", "worktrees", "fix-tests"));
     expect(outcome.note).toBeUndefined();
 
     // clean checkout on main → ff-only moved HEAD to the new origin commit
@@ -96,6 +96,23 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
     await tmux(["kill-window", "-t", "main:Here Now"]);
+  });
+
+  test("worktree name falls back to the prompt slug and dodges a leftover branch", async () => {
+    await git(fixture.repoPath, ["branch", "worktree-reuse-the-name"]);
+    try {
+      const outcome = await spawnSession(
+        { repo: "myrepo", mode: "worktree", prompt: "Reuse the name!" },
+        repos,
+        "main",
+        WAIT,
+      );
+      expect(outcome.path).toEndWith(join(".claude", "worktrees", "reuse-the-name-2"));
+      expect(outcome.window).toBe("reuse-the-name-2");
+      await killWindow(outcome.window);
+    } finally {
+      await git(fixture.repoPath, ["branch", "-D", "worktree-reuse-the-name"]);
+    }
   });
 
   test("dirty checkout: spawn proceeds with a note", async () => {

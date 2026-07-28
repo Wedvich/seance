@@ -86,7 +86,7 @@ describe("daemon ↔ relay ↔ app", () => {
       const { verdict, form } = app.store.getState();
       if (verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(verdict)}`);
       window = verdict.window;
-      expect(window).toStartWith("port-the-pane-");
+      expect(window).toBe("port-the-pane");
       expect(form.prompt).toBe("");
 
       // Not just a verdict: the window is really running on the tmux server.
@@ -120,7 +120,7 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(verdict.message).toContain("boom: untrusted workspace");
 
       // The daemon killed the dead window rather than leaving a corpse.
-      expect((await listWindows()).some((name) => name.startsWith("doomed-"))).toBe(false);
+      expect(await listWindows()).not.toContain("doomed");
     } finally {
       process.env["SEANCE_CLAUDE_BIN"] = stack.stub.ok;
       app.stop();
@@ -151,7 +151,7 @@ describe("daemon ↔ relay ↔ app", () => {
       // Let the daemon finish the spawn nobody heard the answer to (its
       // window exists from new-window time, well before the verdict).
       await Bun.sleep(1_500);
-      window = (await listWindows()).find((name) => name.startsWith("recover-me-")) ?? null;
+      window = (await listWindows()).find((name) => name === "recover-me") ?? null;
       expect(window).not.toBeNull();
 
       // Relaunch: a fresh client + Store seeded with the persisted pending
