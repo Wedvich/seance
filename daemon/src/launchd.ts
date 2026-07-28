@@ -50,7 +50,7 @@ function gui(): string {
 
 export function assertMacos(action: string): void {
   if (process.platform !== "darwin") {
-    throw new Error(`${action} is macOS-only for now — WSL support is deferred to a later pass`);
+    throw new Error(`${action} reached the launchd path off macOS — service.ts owns platform dispatch`);
   }
 }
 

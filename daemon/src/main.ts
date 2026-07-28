@@ -19,12 +19,12 @@ const USAGE = `seanced — séance daemon
 
 usage: seanced [command]
 
-  (none)      run the daemon in the foreground (launchd supervises)
+  (none)      run the daemon in the foreground (launchd/systemd supervises)
   init        write config skeleton + generate deviceId (never the PSK)
-  psk-import  store the PSK in the macOS login keychain (prompts, or reads a pipe; never argv)
-  install     write launchd plist and start the agent (macOS)
-  uninstall   stop the agent and remove the plist
-  restart     kickstart the agent (after git pull)
+  psk-import  store the PSK in the platform store — macOS login keychain or WSL DPAPI blob (prompts, or reads a pipe; never argv)
+  install     install and start the service (macOS launchd plist; WSL systemd unit + linger + logon pin task)
+  uninstall   stop the service and remove it
+  restart     restart the service (after git pull)
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
   scan        discover repos now; caches for the next start unless a daemon is running

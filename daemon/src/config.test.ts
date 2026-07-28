@@ -13,8 +13,10 @@ import {
   runnableProblems,
   type Config,
 } from "./config.ts";
+import { importDpapiPskValue } from "./dpapi.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
+import { isWsl } from "./wsl.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -99,19 +101,38 @@ describe("runnableProblems", () => {
 describe("psk resolution", () => {
   const base: Config = { ...VALID, repoRoots: ["/tmp"] };
 
-  test("a non-empty config field wins — the only path WSL has", async () => {
+  // Absent-store markers: on a WSL box the default dpapi path may hold the
+  // machine's real key, so resolution tests always point away from it.
+  const ABSENT_KEYCHAIN = "seance-psk-absent-in-tests";
+  const ABSENT_DPAPI = "/nonexistent/seance-tests/psk.dpapi";
+
+  test("a non-empty config field wins over any platform store", async () => {
     expect(await loadPsk(base)).toEqual({ psk: VALID.psk, source: "config" });
   });
 
   test("a missing keychain item reads as null rather than throwing", async () => {
     // The keychain *hit* path needs a real login keychain with an item in it,
     // so it is verified by hand on a machine, not here.
-    expect(await readKeychainPsk("seance-psk-absent-in-tests")).toBeNull();
+    expect(await readKeychainPsk(ABSENT_KEYCHAIN)).toBeNull();
   });
 
-  test("an empty field with nothing in the keychain resolves to null", async () => {
-    expect(await loadPsk({ ...base, psk: "" }, "seance-psk-absent-in-tests")).toBeNull();
+  test("an empty field with nothing in any store resolves to null", async () => {
+    expect(await loadPsk({ ...base, psk: "" }, ABSENT_KEYCHAIN, ABSENT_DPAPI)).toBeNull();
   });
+
+  test.skipIf(!isWsl())(
+    "an empty field falls back to the dpapi blob on WSL",
+    async () => {
+      const dir = await tempDir();
+      const path = join(dir, "psk.dpapi");
+      await importDpapiPskValue(VALID.psk, path);
+      expect(await loadPsk({ ...base, psk: "" }, ABSENT_KEYCHAIN, path)).toEqual({
+        psk: VALID.psk,
+        source: "dpapi",
+      });
+    },
+    30_000,
+  );
 
   test("the piped-import command carries the key on security's stdin, quoted verbatim", () => {
     // The `security -i` *store* path needs a real login keychain too — only the

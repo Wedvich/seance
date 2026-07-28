@@ -10,14 +10,17 @@ import {
   pskFingerprint,
   runnableProblems,
 } from "./config.ts";
+import { dpapiPskPath, dpapiRoundTrip, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
 import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
-import { installService, plistPath, restartService, serviceLoaded, uninstallService } from "./launchd.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
+import { installService, restartService, serviceLoaded, servicePath, uninstallService } from "./service.ts";
+import { doctorServiceChecks } from "./systemd.ts";
 import { scanRepos } from "./scan.ts";
 import { listClaudeSessions } from "./sessions.ts";
 import { SpawnFailure, spawnSession } from "./spawn.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 import { tmux } from "./tmux.ts";
+import { isWsl } from "./wsl.ts";
 
 export async function cmdInit(): Promise<void> {
   const path = configPath();
@@ -147,7 +150,7 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
 
 export async function cmdStatus(): Promise<void> {
   const loaded = await serviceLoaded();
-  console.log(`service:   ${loaded ? "loaded" : "not loaded"} (${plistPath()})`);
+  console.log(`service:   ${loaded ? "loaded" : "not loaded"} (${servicePath()})`);
   const runtime = await readRuntime();
   if (runtime === null) {
     console.log("daemon:    no runtime info — never started?");
@@ -220,9 +223,10 @@ export async function cmdDoctor(): Promise<void> {
         // Printed on every device so a mismatched paste is one glance away,
         // rather than surfacing later as "nothing decrypts".
         ok(`psk from ${resolved.source}, fingerprint ${await pskFingerprint(resolved.psk)} — same on every device`);
-        if (resolved.source === "config" && process.platform === "darwin") {
+        if (resolved.source === "config" && (process.platform === "darwin" || isWsl())) {
+          const store = process.platform === "darwin" ? "the keychain" : "a DPAPI blob";
           warn(
-            "psk sits in config.json, readable by anything running as you — `seanced psk-import` moves it to the keychain",
+            `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store}`,
           );
         }
       }
@@ -286,27 +290,39 @@ export async function cmdDoctor(): Promise<void> {
   if (process.platform === "darwin") {
     if (await serviceLoaded()) ok("launchd agent loaded");
     else warn("launchd agent not loaded — run `seanced install`");
+  } else if (isWsl()) {
+    for (const check of await doctorServiceChecks()) {
+      if (check.ok) ok(check.message);
+      else warn(check.message);
+    }
+    // Broken interop surfaces here as a warning, and as a FAIL above only
+    // when the PSK actually lives in the blob and could not be read.
+    const interop = await dpapiRoundTrip();
+    if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
+    else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
   } else {
-    warn("not macOS — service management deferred (WSL support pending)");
+    warn("plain Linux — no service manager integration; run seanced under your own supervisor");
   }
 
   if (failed) process.exit(1);
 }
 
 export async function cmdInstall(): Promise<void> {
-  const target = await installService();
-  console.log(`installed and started launchd agent (${target})`);
+  const result = await installService();
+  console.log(`installed and started the service (${result.target})`);
+  for (const note of result.notes) console.log(`note: ${note}`);
   console.log(`logs: ${logPath()}`);
 }
 
 export async function cmdUninstall(): Promise<void> {
-  await uninstallService();
-  console.log("launchd agent unloaded and plist removed");
+  const notes = await uninstallService();
+  console.log("service stopped and removed");
+  for (const note of notes) console.log(`note: ${note}`);
 }
 
 export async function cmdRestart(): Promise<void> {
   await restartService();
-  console.log("kickstarted");
+  console.log("restarted");
 }
 
 export async function cmdSessions(): Promise<void> {
@@ -318,17 +334,45 @@ export async function cmdSessions(): Promise<void> {
   console.log(`\n${sessions.length} running claude session${sessions.length === 1 ? "" : "s"}`);
 }
 
+/** Shape complaint as a sentence fragment, or null when the value is a 32-byte base64 key. */
+function pskShapeProblem(value: string): string | null {
+  let byteLength: number;
+  try {
+    byteLength = fromBase64(value).byteLength;
+  } catch {
+    return "is not valid base64";
+  }
+  return byteLength === 32 ? null : `decodes to ${byteLength} bytes, need 32`;
+}
+
+/**
+ * Cooked-mode line read with echo off. On macOS `security` owns its own
+ * prompt, but DPAPI has no prompt, so on WSL the key is read here; stty
+ * inherits our tty via stdin, which beats hand-rolling raw-mode juggling.
+ */
+async function readLineNoEcho(): Promise<string> {
+  await Bun.spawn(["stty", "-echo"], { stdin: "inherit" }).exited;
+  try {
+    let buffer = "";
+    for await (const chunk of process.stdin) {
+      buffer += String(chunk);
+      const newline = buffer.indexOf("\n");
+      if (newline !== -1) return buffer.slice(0, newline);
+    }
+    return buffer;
+  } finally {
+    await Bun.spawn(["stty", "echo"], { stdin: "inherit" }).exited;
+    console.log();
+  }
+}
+
 /**
  * One-time setup, at the machine or over SSH: `security` prompts for the key on
  * the terminal, so it lands in neither argv nor shell history. With stdin piped
  * (e.g. from `op item get`), the value is read from the pipe instead — same
  * guarantee, since it crosses to `security` over stdin, never argv.
  */
-export async function cmdPskImport(): Promise<void> {
-  if (process.platform !== "darwin") {
-    console.error("keychain storage is macOS-only — keep the psk in config.json on this platform");
-    process.exit(1);
-  }
+async function cmdPskImportMacos(): Promise<void> {
   console.log(`storing the PSK as generic password "${PSK_SERVICE}" in the login keychain.`);
   if (process.stdin.isTTY) {
     console.log("security will prompt below — paste the base64 value (it will not echo).\n");
@@ -337,15 +381,9 @@ export async function cmdPskImport(): Promise<void> {
     const piped = (await new Response(Bun.stdin.stream()).text()).trim();
     // Validate before storing: -U updates in place, and a bad pipe (empty
     // output, an op error message) must not clobber a good keychain entry.
-    let byteLength: number;
-    try {
-      byteLength = fromBase64(piped).byteLength;
-    } catch {
-      console.error("piped value is not valid base64 — nothing stored");
-      process.exit(1);
-    }
-    if (byteLength !== 32) {
-      console.error(`piped value decodes to ${byteLength} bytes, need 32 — nothing stored`);
+    const problem = pskShapeProblem(piped);
+    if (problem !== null) {
+      console.error(`piped value ${problem} — nothing stored`);
       process.exit(1);
     }
     await importKeychainPskValue(piped);
@@ -358,16 +396,49 @@ export async function cmdPskImport(): Promise<void> {
     );
     process.exit(1);
   }
-  try {
-    const bytes = fromBase64(stored);
-    if (bytes.byteLength !== 32) {
-      console.error(`\nstored value decodes to ${bytes.byteLength} bytes, need 32 — re-run with the right key`);
-      process.exit(1);
-    }
-  } catch {
-    console.error("\nstored value is not valid base64 — re-run with the right key");
+  const storedProblem = pskShapeProblem(stored);
+  if (storedProblem !== null) {
+    console.error(`\nstored value ${storedProblem} — re-run with the right key`);
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
   console.log(`now clear "psk" in ${configPath()} so the daemon reads the keychain, then \`seanced restart\``);
+}
+
+/**
+ * WSL counterpart. DPAPI has no prompt of its own, so unlike macOS the key
+ * passes through this process on both paths — tty read or pipe — before
+ * crossing to powershell as stdin data (never argv, never script text).
+ * Validated up front on both paths for the same clobber reason as above.
+ */
+async function cmdPskImportWsl(): Promise<void> {
+  console.log(`storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`);
+  let psk: string;
+  if (process.stdin.isTTY) {
+    console.log("paste the base64 value (it will not echo):");
+    psk = (await readLineNoEcho()).trim();
+  } else {
+    psk = (await new Response(Bun.stdin.stream()).text()).trim();
+  }
+  const problem = pskShapeProblem(psk);
+  if (problem !== null) {
+    console.error(`value ${problem} — nothing stored`);
+    process.exit(1);
+  }
+  await importDpapiPskValue(psk);
+
+  const stored = await readDpapiPsk();
+  if (stored !== psk) {
+    console.error("\nstored, but reading it back failed — check powershell.exe interop (`seanced doctor`)");
+    process.exit(1);
+  }
+  console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads the DPAPI blob, then \`seanced restart\``);
+}
+
+export async function cmdPskImport(): Promise<void> {
+  if (process.platform === "darwin") return cmdPskImportMacos();
+  if (isWsl()) return cmdPskImportWsl();
+  console.error("no platform key store here — keep the psk in config.json on plain Linux");
+  process.exit(1);
 }

@@ -96,16 +96,17 @@ token is not an asset in the same sense — see its blast radius above.
 **Séance's own footprint.** The daemon is structurally a remote access tool and
 reads as one to any EDR:
 
-| Behaviour                                                | ATT&CK                           |
-| -------------------------------------------------------- | -------------------------------- |
-| launchd agent runs `seanced`                             | T1543.001 Launch Agent           |
-| persistent outbound WSS to the relay                     | T1071.001, T1102.002             |
-| AES-256-GCM under a PSK                                  | T1573.001 Symmetric Cryptography |
-| remotely starting an interactive coding agent            | **T1219.001 IDE Tunneling**      |
-| `caffeinate -is` per spawn + the AC-power hold           | T1653 Power Settings             |
-| depth-2 `.git` scan of `repoRoots`                       | T1083                            |
-| tmux pane enumeration                                    | T1057                            |
-| `git pull` + `launchctl kickstart -k` as the update path | T1195.001                        |
+| Behaviour                                            | ATT&CK                           |
+| ---------------------------------------------------- | -------------------------------- |
+| launchd agent runs `seanced`                         | T1543.001 Launch Agent           |
+| systemd user unit + Windows logon task run it on WSL | T1543.002, T1053.005             |
+| persistent outbound WSS to the relay                 | T1071.001, T1102.002             |
+| AES-256-GCM under a PSK                              | T1573.001 Symmetric Cryptography |
+| remotely starting an interactive coding agent        | **T1219.001 IDE Tunneling**      |
+| `caffeinate -is` per spawn + the AC-power hold       | T1653 Power Settings             |
+| depth-2 `.git` scan of `repoRoots`                   | T1083                            |
+| tmux pane enumeration                                | T1057                            |
+| `git pull` + service kickstart as the update path    | T1195.001                        |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
 and JetBrains Gateway, i.e. this exact shape. Consequence: those persistence
@@ -130,7 +131,30 @@ Séance's noise is cover for a real intruder.
    sweep `~/.config`. The keychain rejection above optimised for parity with a
    WSL machine that doesn't exist yet; revised — macOS reads the PSK from the
    login keychain when present and falls back to the config field, behind one
-   `loadPsk()` so WSL keeps the file path.
+   `loadPsk()`. Revised again at the actual WSL machine (2026-07-28): WSL gets
+   its own store behind the same `loadPsk()` — a DPAPI blob
+   (`ProtectedData`, CurrentUser scope) at `~/.local/state/seance/psk.dpapi`,
+   encrypted and decrypted through `powershell.exe` interop, written by the
+   same `seanced psk-import`. What it buys: a Linux-context sweep of
+   `~/.config` gets ciphertext, and the key never rests in plaintext inside
+   the ext4.vhdx, so at-rest theft (the vhdx itself, backups of it) is
+   covered. What it honestly does not: DPAPI has no ACL — any process in the
+   Windows user's session decrypts silently, where macOS records an ACL for
+   `/usr/bin/security` and prompts anything else. That principal could
+   already read the vhdx and `\\wsl.localhost`, so interop adds no new
+   trusted party; it just fails to subtract one. The PSK crosses the interop
+   boundary as stdin/stdout data only — never argv (visible in both OS
+   process lists), never script text (PowerShell script-block logging,
+   event 4104, captures script text but not `$input` data). Rejected:
+   Windows Credential Manager (DPAPI underneath plus a vault entry
+   enumerable by name — strictly more discoverable for no added
+   protection), secret-service/gnome-keyring (headless WSL has no login
+   ceremony to unlock a keyring; the unlock secret would itself need
+   storing — circular), systemd-creds (no TPM device in the WSL VM, so it
+   falls back to a host key on the same disk), kernel keyring (not
+   persistent across VM restart), DPAPI's optional entropy parameter (a
+   second secret with nowhere to live — the same circle). A plain Linux
+   box — neither darwin nor WSL — still has only the config field.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
@@ -346,8 +370,9 @@ together (re-sends registry data on every poll, useless offline).
   `launchctl kickstart -k`. Rejected: `bun build --compile` single-file
   install (originally written here — ~100 MB artifact plus a build/ship
   step per machine, and every machine already runs Bun).
-- **CLI**: `seanced` (run in foreground; launchd supervises), `init` (write
-  config skeleton + deviceId), `install`/`uninstall` (launchd plist),
+- **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
+  (write config skeleton + deviceId), `install`/`uninstall` (launchd plist on
+  macOS; systemd unit + linger + Windows logon task on WSL),
   `doctor` (preflight: tmux/claude/git/roots/relay/config), `status`,
   `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
   relay, the SSH-debuggability hook.
@@ -357,14 +382,37 @@ together (re-sends registry data on every poll, useless offline).
   upgrade and a silent backoff loop — bearerToken, psk, name,
   repoRoots, tmuxSession) and `~/.local/state/seance/state.json`
   (daemon-owned: deviceId, repo cache, scannedAt). Rejected: single file
-  the daemon writes back (clobbers hand edits), PSK in OS keychain (no
-  clean WSL counterpart).
-- **Lifecycle**: launchd agent on macOS. **WSL support deferred** to a
-  later pass at the actual machine (systemd user unit **plus a
-  Windows-side keepalive** — scheduled task pinning the WSL VM, which halts
-  when idle; untestable blind from a Mac). `install` exits with a clear
-  message on non-macOS. Rejected: daemon-inside-tmux (reboot silently takes
-  the machine offline — recreates the god-session fragility).
+  the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
+  rejected here as having no clean WSL counterpart; both halves of that are
+  now revised — each platform has a store (login keychain / DPAPI blob in
+  the state dir) as the fallback behind `loadPsk()`, with a non-empty
+  config field still winning, so `psk-import` never rewrites config.json
+  and a plain Linux box keeps the file path. See threat-model item 2.
+- **Lifecycle**: launchd agent on macOS. On WSL (resolved 2026-07-28 at the
+  actual machine): **systemd user unit + linger + a Windows logon task**.
+  The unit (`seanced.service`, `Restart=on-failure`) appends stdout/stderr
+  to the same `seanced.log` path launchd redirects to
+  (`StandardOutput=append:`), so the audit trail, the CLI's second writer,
+  and `doctor`'s size warning stay one story on both platforms — journald
+  was rejected for forking all three. `loginctl enable-linger` starts the
+  unit at distro boot with no login session; the Windows scheduled task at
+  logon runs `conhost.exe --headless wsl.exe -d <distro> --exec sleep
+infinity`, which both boots the distro after a Windows restart (nothing
+  else starts WSL until poked) and pins the VM against its idle timeout.
+  `install` automates all three — the task via `schtasks.exe` interop,
+  printing the manual command if registration is denied — and requires
+  `systemd=true` in `/etc/wsl.conf`, which it checks for and explains but
+  never flips itself: the flip restarts the distro and kills every session
+  on the box. `uninstall` reverses unit and task but leaves linger on (it
+  may serve other units). Logged out of Windows or sitting at the login
+  screen, WSL cannot run and the machine shows offline — same class as a
+  LaunchAgent, which is also per-login. Update = `git pull` +
+  `seanced restart` (`launchctl kickstart -k` / `systemctl --user
+restart`). Rejected: daemon-inside-tmux (reboot silently takes
+  the machine offline — recreates the god-session fragility), the logon
+  task running the daemon directly through `wsl.exe` (scheduled tasks
+  don't supervise — no restart-on-crash), `[boot] command =` in wsl.conf
+  (runs as root, same no-supervision hole).
 - **tmux**: spawns a window into the **`main` session group**
   (`tmux new-window -t main:`) — terminals auto-attach to that group via
   zshrc, so daemon-spawned windows appear in every attached terminal
@@ -426,7 +474,8 @@ together (re-sends registry data on every poll, useless offline).
   union variant adds id-reconciliation state for a hedge the visible
   breakage already covers).
 - **Logging**: plain text (`ISO-timestamp level message`) to
-  stdout/stderr; the launchd plist redirects both to
+  stdout/stderr; the launchd plist (macOS) and the systemd unit's
+  `StandardOutput=append:` (WSL) redirect both to
   `~/.local/state/seance/seanced.log`. No rotation in v1; `doctor` warns
   past ~10 MB.
 - **Testing: `bun:test`**, overriding the personal Vitest default — tests
@@ -442,7 +491,10 @@ together (re-sends registry data on every poll, useless offline).
   on battery the Mac sleeps and shows offline. Keeps desk machines always
   spawnable without cooking laptop batteries. Rejected: no assertion
   (marquee use case fails on idle machines), Wake-on-LAN (flaky on Wi-Fi,
-  needs cross-daemon coordination).
+  needs cross-daemon coordination). On WSL there is no caffeinate
+  analogue the VM could hold that outlives Windows power policy — the box
+  sleeps per Windows settings and shows offline; configure the power plan,
+  not the daemon. Both caffeinate call sites are already platform-gated.
 - Config file: relay URL, bearer token, PSK, deviceId, machine name, repo
   roots.
 
@@ -569,10 +621,20 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 
 ## Open design details (build time)
 
-- Exact WSL keepalive mechanism (WSL support deferred to a later pass).
 - Optional: relay buffers app-bound envelopes (bounded, TTL ≤ ~45s to stay
   inside the replay window) so a spawn reply survives a short background
   instead of falling through to reconciliation.
+
+Resolved 2026-07-28, at the WSL machine: WSL support — DPAPI PSK store
+(threat-model item 2) and the systemd-unit + linger + logon-task lifecycle
+(daemon section). Verified on the machine that day: the DPAPI round-trip
+through `powershell.exe`, and interop surviving a stripped environment (no
+`WSL_INTEROP`, detached session). Unverified until one real pass after
+flipping `systemd=true` — the flip restarts the distro, so it cannot happen
+in the session that writes it: interop (and therefore DPAPI decrypt) from a
+lingering systemd user unit started before any login session, and
+non-elevated `schtasks` logon-task registration. Mirrors the keychain-ACL
+note below.
 
 Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
 DO hibernation — decisions recorded in their sections above. Also resolved with
