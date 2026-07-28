@@ -47,10 +47,12 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
   once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
   across files, so no in-process cache can survive it. `--parallel` inside the daemon shard is fine.
-- Never `dispose()` a Miniflare mid-process — the next boot in the same process hangs workerd.
-  `relay/test/harness.ts`'s `dispose` is deliberately a no-op (instances leak until process exit),
-  and its worker bundle is memoized because `Bun.build` runs once per process. Reuse `startRelay`;
-  never boot your own.
+- Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare. Its worker bundle is
+  memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
+  fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
+  (An older note here said the opposite, that disposing mid-process hangs the next boot. Five
+  boot/dispose pairs across the relay, pwa, and e2e suites now share one process without hanging,
+  so whatever that scar was, it's healed.)
 
 ## Conventions
 
