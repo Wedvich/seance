@@ -438,7 +438,10 @@ Pages, which is in maintenance. Security headers ship as a generated
 `dist/_headers`, because the CSP has to carry two build-time facts: the sha256
 of the inline theme boot script, and the relay origin for `connect-src`. A
 production build without `VITE_RELAY_URL` fails rather than shipping a policy
-that silently blocks the only socket the app has.
+that silently blocks the only socket the app has. HSTS rides in the same file
+(the workers.dev hostname is not a zone, so Cloudflare's dashboard toggle does
+not apply), without `includeSubDomains`/`preload` — that hostname is not ours to
+make claims about, and `.dev` is preloaded at the TLD anyway.
 
 V1 surface: machine list (online/offline + last-seen), per-machine repo
 picker, spawn form (prompt optional, worktree/`--here` toggle, model and

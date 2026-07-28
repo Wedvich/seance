@@ -7,6 +7,50 @@ import { VitePWA } from "vite-plugin-pwa";
 
 const DEV_RELAY_URL = "ws://127.0.0.1:8787/app";
 
+/**
+ * Every policy-controlled feature any current engine names, denied outright: the app
+ * uses none of them, and unrecognised names are ignored, so the list can stay maximal.
+ * Anything added to the app that needs one has to come back here first.
+ */
+const DENIED_FEATURES = [
+  "accelerometer",
+  "ambient-light-sensor",
+  "attribution-reporting",
+  "autoplay",
+  "bluetooth",
+  "browsing-topics",
+  "camera",
+  "clipboard-read",
+  "clipboard-write",
+  "compute-pressure",
+  "display-capture",
+  "encrypted-media",
+  "fullscreen",
+  "gamepad",
+  "geolocation",
+  "gyroscope",
+  "hid",
+  "identity-credentials-get",
+  "idle-detection",
+  "keyboard-map",
+  "local-fonts",
+  "magnetometer",
+  "microphone",
+  "midi",
+  "otp-credentials",
+  "payment",
+  "picture-in-picture",
+  "publickey-credentials-create",
+  "publickey-credentials-get",
+  "screen-wake-lock",
+  "serial",
+  "speaker-selection",
+  "storage-access",
+  "usb",
+  "web-share",
+  "window-management",
+  "xr-spatial-tracking",
+];
 /** Origin only — CSP matches host, not path. */
 function relayOrigin(url: string): string {
   const parsed = new URL(url);
@@ -46,10 +90,14 @@ function securityHeaders(outDir: string, relay: string): Plugin {
       const headers = [
         "/*",
         `  Content-Security-Policy: ${csp}`,
+        // No preload/includeSubDomains: the host is a workers.dev subdomain we don't own.
+        "  Strict-Transport-Security: max-age=31536000",
         "  Referrer-Policy: no-referrer",
         "  X-Content-Type-Options: nosniff",
         "  X-Robots-Tag: noindex",
-        "  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()",
+        // Redundant with frame-ancestors 'none' outside legacy engines; kept so scanners agree.
+        "  X-Frame-Options: DENY",
+        `  Permissions-Policy: ${DENIED_FEATURES.map((feature) => `${feature}=()`).join(", ")}`,
         "",
       ].join("\n");
       await writeFile(join(outDir, "_headers"), headers, "utf8");
