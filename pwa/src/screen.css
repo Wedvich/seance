@@ -699,12 +699,6 @@
   border-color: var(--acc);
 }
 
-.field-hint {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--fg2);
-}
-
 .field-error {
   font-size: 13px;
   color: var(--err);

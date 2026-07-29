@@ -123,7 +123,6 @@ export function CredentialFields(props: { creds: Credentials }): JSX.Element {
           value={creds.bearer}
           onInput={(event) => creds.setBearer(event.currentTarget.value)}
         />
-        {creds.hasBearer && <span className="field-hint">Stored on this device. Leave blank to keep it.</span>}
       </label>
 
       <label className="field" htmlFor="password">
@@ -137,11 +136,6 @@ export function CredentialFields(props: { creds: Credentials }): JSX.Element {
           value={creds.psk}
           onInput={(event) => creds.setPsk(event.currentTarget.value)}
         />
-        <span className="field-hint">
-          32 bytes of base64. It is stored as a non-extractable key and never shown again — keep 1Password as the source
-          of truth.
-          {creds.hasPsk && " Leave blank to keep the stored key."}
-        </span>
       </label>
 
       {creds.error !== null && <span className="field-error">{creds.error}</span>}
