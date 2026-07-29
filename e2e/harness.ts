@@ -1,5 +1,6 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { join } from "node:path";
+import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { tmux } from "../daemon/src/tmux.ts";
@@ -87,10 +88,10 @@ export async function startStack(base: string): Promise<Stack> {
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
     startDaemon({
       config,
+      backend: createBackend(config, { waitMs: spawnWaitMs }),
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
-      spawnWaitMs,
     });
 
   let daemon = await startTestDaemon();

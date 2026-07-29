@@ -1,4 +1,6 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
+import { createBackend } from "./backend-default.ts";
+import type { SessionBackend } from "./backend.ts";
 import { loadConfig, loadPsk, runnableProblems, type Config } from "./config.ts";
 import { createHandler } from "./handlers.ts";
 import { log } from "./log.ts";
@@ -18,7 +20,8 @@ export interface RunOpts {
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
-  readonly spawnWaitMs?: number;
+  /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
+  readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
 }
 
@@ -85,10 +88,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     key,
     buildInfo,
     handle: createHandler({
-      tmuxSession: config.tmuxSession,
+      backend: opts.backend ?? createBackend(config),
       getRepos: () => state.repos,
       rescan,
-      ...(opts.spawnWaitMs !== undefined ? { spawnWaitMs: opts.spawnWaitMs } : {}),
     }),
     onConnect: () => updateRuntime(true),
     onDisconnect: () => updateRuntime(false),

@@ -14,6 +14,7 @@ import {
   type SessionsResponse,
   type SpawnResponse,
 } from "@seance/shared";
+import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
@@ -57,14 +58,19 @@ function makeConfig(relayUrl: string): Config {
   };
 }
 
-async function startTestDaemon(relayUrl: string, overrides: Record<string, number> = {}): Promise<DaemonHandle> {
+async function startTestDaemon(
+  relayUrl: string,
+  overrides: { readonly spawnWaitMs?: number; readonly pingIntervalMs?: number; readonly pongTimeoutMs?: number } = {},
+): Promise<DaemonHandle> {
+  const config = makeConfig(relayUrl);
+  const { spawnWaitMs = 700, ...rest } = overrides;
   return startDaemon({
-    config: makeConfig(relayUrl),
+    config,
+    backend: createBackend(config, { waitMs: spawnWaitMs }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
-    spawnWaitMs: 700,
-    ...overrides,
+    ...rest,
   });
 }
 

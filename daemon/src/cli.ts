@@ -2,6 +2,8 @@ import { chmod, mkdir, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { cliSink, spawnAudit } from "./audit.ts";
+import { createBackend } from "./backend-default.ts";
+import { SpawnFailure } from "./backend.ts";
 import {
   bearerTokenWarnings,
   configSkeleton,
@@ -16,10 +18,7 @@ import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { installService, restartService, serviceLoaded, servicePath, uninstallService } from "./service.ts";
 import { doctorServiceChecks } from "./systemd.ts";
 import { scanRepos } from "./scan.ts";
-import { listClaudeSessions } from "./sessions.ts";
-import { SpawnFailure, spawnSession } from "./spawn.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
-import { tmux } from "./tmux.ts";
 import { isWsl } from "./wsl.ts";
 
 export async function cmdInit(): Promise<void> {
@@ -134,7 +133,7 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const audit = spawnAudit("cli", cliSink);
   await audit.request(request);
   try {
-    const outcome = await spawnSession(request, repos, config.tmuxSession);
+    const outcome = await createBackend(config).spawn(request, repos);
     await audit.ok(outcome);
     if (outcome.note !== undefined) console.log(`note: ${outcome.note}`);
     console.log(`spawned '${outcome.window}' (${outcome.path})`);
@@ -237,11 +236,9 @@ export async function cmdDoctor(): Promise<void> {
   }
 
   console.log("binaries");
-  for (const bin of ["tmux", "git", "claude"]) {
-    const found = Bun.which(bin);
-    if (found === null) fail(`${bin} not on PATH`);
-    else ok(`${bin} at ${found}`);
-  }
+  const gitBin = Bun.which("git");
+  if (gitBin === null) fail("git not on PATH");
+  else ok(`git at ${gitBin}`);
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -256,12 +253,13 @@ export async function cmdDoctor(): Promise<void> {
       }
     }
 
-    console.log("tmux");
-    const sessions = await tmux(["list-sessions", "-F", "#{session_name}"]);
-    if (sessions.exitCode === 0) {
-      ok(`server running (sessions: ${sessions.stdout.trim().split("\n").join(", ")})`);
-    } else {
-      warn("no tmux server — fine; spawn creates the session detached");
+    // The backend owns its own preflight — the tmux one checks its binaries and
+    // probes the server; a replacement reports whatever it depends on instead.
+    console.log("backend");
+    for (const check of await createBackend(config).doctor()) {
+      if (check.level === "ok") ok(check.message);
+      else if (check.level === "warn") warn(check.message);
+      else fail(check.message);
     }
 
     console.log("relay");
@@ -326,8 +324,9 @@ export async function cmdRestart(): Promise<void> {
 }
 
 export async function cmdSessions(): Promise<void> {
+  const backend = createBackend(await loadConfig());
   const state = await loadOrInitState();
-  const sessions = await listClaudeSessions(state.repos);
+  const sessions = await backend.sessions(state.repos);
   for (const s of sessions) {
     console.log(`${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
   }

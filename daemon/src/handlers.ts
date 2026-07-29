@@ -9,16 +9,14 @@ import type {
 } from "@seance/shared";
 import { quote } from "@seance/shared";
 import { daemonSink, spawnAudit } from "./audit.ts";
+import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
-import { listClaudeSessions } from "./sessions.ts";
-import { SpawnFailure, spawnSession } from "./spawn.ts";
 
 export interface HandlerContext {
-  readonly tmuxSession: string;
+  readonly backend: SessionBackend;
   readonly getRepos: () => readonly RepoEntry[];
   /** Scan now, persist, re-register if the set changed; returns the fresh list. */
   readonly rescan: () => Promise<readonly RepoEntry[]>;
-  readonly spawnWaitMs?: number;
 }
 
 const audit = spawnAudit("relay", daemonSink);
@@ -41,11 +39,9 @@ async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<Spawn
   }
   await audit.request(payload);
   try {
-    const outcome = await spawnSession(payload, ctx.getRepos(), ctx.tmuxSession, {
-      ...(ctx.spawnWaitMs !== undefined ? { waitMs: ctx.spawnWaitMs } : {}),
-    });
+    const outcome = await ctx.backend.spawn(payload, ctx.getRepos());
     await audit.ok(outcome);
-    const sessions = await listClaudeSessions(ctx.getRepos());
+    const sessions = await ctx.backend.sessions(ctx.getRepos());
     return { ok: true, ...outcome, sessions };
   } catch (err) {
     if (err instanceof SpawnFailure) {
@@ -75,7 +71,7 @@ export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Pl
     try {
       switch (plain.op) {
         case "sessions": {
-          const sessions = await listClaudeSessions(ctx.getRepos());
+          const sessions = await ctx.backend.sessions(ctx.getRepos());
           const payload: SessionsResponse = { sessions, at: Date.now() };
           return reply(payload);
         }

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APP_ID, importPsk, open, seal, toBase64, type Envelope, type Plain } from "@seance/shared";
+import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
@@ -77,12 +78,13 @@ function makeConfig(relayUrl: string): Config {
 }
 
 async function startTestDaemon(relayUrl: string): Promise<DaemonHandle> {
+  const config = makeConfig(relayUrl);
   return startDaemon({
-    config: makeConfig(relayUrl),
+    config,
+    backend: createBackend(config, { waitMs: 700 }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
-    spawnWaitMs: 700,
   });
 }
 

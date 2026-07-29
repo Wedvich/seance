@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { OpName, Plain, RepoEntry } from "@seance/shared";
+import { createBackend } from "./backend-default.ts";
+import type { Config } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 
 // stdout is the daemon's audit transport (launchd redirects it into
@@ -23,8 +25,19 @@ afterEach(() => {
 
 const REPOS: readonly RepoEntry[] = [{ name: "myrepo", path: "/repos/myrepo", defaultBranch: "main" }];
 
-const ctx: HandlerContext = {
+// The real backend, as everywhere in the daemon suite — every scenario below
+// names a repo the scan set doesn't hold, so the failure lands before tmux.
+const CONFIG: Config = {
+  name: "TestMac",
+  relayUrl: "ws://localhost/daemon",
+  bearerToken: "test-bearer",
+  psk: "",
+  repoRoots: ["/repos"],
   tmuxSession: "main",
+};
+
+const ctx: HandlerContext = {
+  backend: createBackend(CONFIG),
   getRepos: () => REPOS,
   rescan: () => Promise.resolve(REPOS),
 };

@@ -1,27 +1,12 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnErrorCode, type SpawnRequest } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
-
-export class SpawnFailure extends Error {
-  constructor(
-    readonly code: SpawnErrorCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = "SpawnFailure";
-  }
-}
-
-export interface SpawnOutcome {
-  readonly window: string;
-  readonly path: string;
-  readonly note?: string;
-}
 
 export function slugify(src: string): string {
   const slug = src

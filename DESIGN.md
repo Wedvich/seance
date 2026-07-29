@@ -426,6 +426,27 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   task running the daemon directly through `wsl.exe` (scheduled tasks
   don't supervise — no restart-on-crash), `[boot] command =` in wsl.conf
   (runs as root, same no-supervision hole).
+- **Session backend seam** (`backend.ts`): the daemon splits at one interface —
+  `SessionBackend` = `spawn(request, repos)` / `sessions(repos)` / `doctor()`,
+  failures as `SpawnFailure` carrying a wire code — so a fork that starts
+  sessions some other way keeps the relay, the PWA and the whole daemon
+  frontend (relay client, handlers, run, cli, config/state/scan/audit) as
+  upstream and rewrites one factory: `createBackend(config)` in
+  `backend-default.ts`, the only reader of `config.tmuxSession` and of the
+  pane-death budget, and the only mention of tmux above
+  `spawn.ts`/`sessions.ts`. Two things sit above the seam on purpose. The
+  audit: handlers and the CLI wrap every backend call in the one formatter, so
+  a swapped backend cannot make a spawn quiet. And repo resolution: the
+  frontend hands over the cached scan set, never a path, and the contract is
+  that the wire string is only ever matched against it by name. A backend's
+  internal names and free-text messages may be tmux-specific — its `doctor()`
+  owns the tmux/claude binary checks and the server probe, while `git` stays in
+  core `doctor` because it belongs to scanning — but wire codes may not, which
+  is why `tmux_error` became `launch_error`. Rejected: injecting `spawnSession`
+  itself (three tmux details were already leaking through
+  `HandlerContext`/`RunOpts` — session group, pane-death budget, doctor's tmux
+  checks), and leaving `SpawnFailure`/`SpawnOutcome` in `spawn.ts`, the one
+  file such a fork deletes.
 - **tmux**: spawns a window into the **`main` session group**
   (`tmux new-window -t main:`) — terminals auto-attach to that group via
   zshrc, so daemon-spawned windows appear in every attached terminal

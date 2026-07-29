@@ -3,10 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
+import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
-import { SpawnFailure, spawnSession, type SpawnOutcome } from "../src/spawn.ts";
+import { spawnSession } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 

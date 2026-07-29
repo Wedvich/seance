@@ -1,10 +1,10 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest } from "@seance/shared";
+import type { SpawnOutcome } from "./backend.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
-import type { SpawnOutcome } from "./spawn.ts";
 
 /**
  * The first question when a line looks unfamiliar. `cli` at 2pm is the human at
