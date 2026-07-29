@@ -119,8 +119,12 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
   // forked child under a compound command leaves pane_current_command as the
   // shell, hiding the window from session detection.
+  //
+  // No `--permission-mode`: the flag would override whatever the machine's
+  // settings.json chose, so the session inherits the same default an
+  // in-terminal `claude` would get on that box.
   const base =
-    `exec ${caffeinate}${claude} -n ${shq(windowName)} --permission-mode auto ` +
+    `exec ${caffeinate}${claude} -n ${shq(windowName)} ` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)} ` +
     `--remote-control${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
   if (request.prompt === undefined || request.prompt === "") {

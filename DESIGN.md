@@ -186,16 +186,17 @@ Séance's noise is cover for a real intruder.
 6. **Prompt injection into the spawned agent.** Outside ATT&CK Enterprise;
    v19's AI additions (T1682, T1683) model adversaries _using_ AI, not
    compromising an agent — MITRE ATLAS is the companion frame. Two parts: a PSK
-   holder's `prompt` reaches Claude under `--permission-mode auto`, and the
-   spawned agent then reads repo content Séance does not control.
+   holder's `prompt` reaches Claude under the machine's configured permission
+   mode, and the spawned agent then reads repo content Séance does not control.
 
 **What "structured payloads only" does and does not mean.** It stops wire input
 being interpolated into the daemon's own shell construction. It is not a
-capability limit: `prompt` is free text handed to a Claude session running
-`--permission-mode auto`, so anyone who can form a valid spawn frame has
-arbitrary code execution, laundered through the agent. The PSK is the whole
-boundary and there is nothing behind it. Recorded here so the control isn't
-read as a sandbox.
+capability limit: `prompt` is free text handed to a Claude session whose
+permission mode is whatever the machine's settings say — `auto` or
+`bypassPermissions` on the machines this runs on — so anyone who can form a
+valid spawn frame has arbitrary code execution, laundered through the agent.
+The PSK is the whole boundary and there is nothing behind it. Recorded here so
+the control isn't read as a sandbox.
 
 **Invariants.** The first two hold in the code today and are requirements, not
 observations — they are exactly the kind of thing that drifts silently. The
@@ -468,7 +469,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   branch before `claude --worktree`, worktree/window naming
   (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
   `--remote-control` always, **opus**/medium defaults (revised from
-  sonnet), `--permission-mode auto`, per-spawn `caffeinate -is`
+  sonnet), per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
   and the pane-death verification (remain-on-exit, then poll `pane_dead`
   up to a 3s deadline — tmux returning 0 does not mean claude started;
@@ -480,6 +481,13 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `no_default_branch`, `launch_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
+- **No `--permission-mode` flag** (revised from `/spawn`'s `auto`). Passing it
+  would override the machine's own `settings.json` default, so a box configured
+  for `bypassPermissions` still got prompted for the things `auto` withholds.
+  Omitting it makes a spawned session behave like an in-terminal `claude` on
+  that machine. It is not a tightening: the effective mode is now ambient, and
+  on a machine left at the plain `default` mode a spawn will sit on permission
+  prompts until answered from the phone.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in `~/.claude.json`, or
   under `$CLAUDE_CONFIG_DIR` when set — the daemon mirrors claude's own
@@ -488,7 +496,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   it up front (`trust.ts`): read claude's config, set the flag for the repo
   root when missing, write back atomically (tmp + rename, mode preserved).
   The dialog guards less than spawning already grants — a PSK holder starts
-  claude in the repo under `--permission-mode auto` — so pre-answering it
+  claude in the repo under the machine's permission mode — so pre-answering it
   widens nothing; it is still an external tool's safety prompt being
   disabled, hence the T1562.001 row in the footprint table. Fails open: a
   failed write means the dialog may reappear, never a failed spawn. A
