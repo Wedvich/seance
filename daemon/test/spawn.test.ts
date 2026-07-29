@@ -23,6 +23,7 @@ let repos: readonly RepoEntry[];
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-spawn-"));
   process.env["SEANCE_TMUX_SOCKET"] = `seance-spawn-test-${process.pid}`;
+  process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   fixture = await makeGitFixture(base);
   stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
@@ -33,6 +34,7 @@ afterAll(async () => {
   await tmux(["kill-server"]);
   delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
+  delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });
 });
 
@@ -93,6 +95,19 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
     await tmux(["kill-window", "-t", "main:Here Now"]);
+  });
+
+  test("spawn answers claude's trust dialog up front in its config", async () => {
+    const claudeConfig = join(base, "claude-config", ".claude.json");
+    await Bun.write(claudeConfig, JSON.stringify({ projects: {} }));
+
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Trusting" }, repos, "main", WAIT);
+
+    const config = (await Bun.file(claudeConfig).json()) as {
+      projects: Record<string, { hasTrustDialogAccepted?: boolean } | undefined>;
+    };
+    expect(config.projects[fixture.repoPath]?.hasTrustDialogAccepted).toBe(true);
+    await tmux(["kill-window", "-t", `main:${outcome.window}`]);
   });
 
   test("worktree name falls back to the prompt slug and dodges a leftover branch", async () => {

@@ -30,6 +30,7 @@ beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-relay-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   process.env["SEANCE_TMUX_SOCKET"] = `seance-relay-test-${process.pid}`;
+  process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   fixture = await makeGitFixture(base);
   const stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
@@ -41,6 +42,7 @@ afterAll(async () => {
   delete process.env["SEANCE_STATE_DIR"];
   delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
+  delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });
 });
 

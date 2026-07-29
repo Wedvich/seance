@@ -21,6 +21,7 @@ beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-e2e-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   process.env["SEANCE_TMUX_SOCKET"] = `seance-e2e-${process.pid}`;
+  process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   stack = await startStack(base);
 });
 
@@ -31,6 +32,7 @@ afterAll(async () => {
   delete process.env["SEANCE_STATE_DIR"];
   delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
+  delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });
 });
 

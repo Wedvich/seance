@@ -96,17 +96,18 @@ token is not an asset in the same sense — see its blast radius above.
 **Séance's own footprint.** The daemon is structurally a remote access tool and
 reads as one to any EDR:
 
-| Behaviour                                            | ATT&CK                           |
-| ---------------------------------------------------- | -------------------------------- |
-| launchd agent runs `seanced`                         | T1543.001 Launch Agent           |
-| systemd user unit + Windows logon task run it on WSL | T1543.002, T1053.005             |
-| persistent outbound WSS to the relay                 | T1071.001, T1102.002             |
-| AES-256-GCM under a PSK                              | T1573.001 Symmetric Cryptography |
-| remotely starting an interactive coding agent        | **T1219.001 IDE Tunneling**      |
-| `caffeinate -is` per spawn + the AC-power hold       | T1653 Power Settings             |
-| depth-2 `.git` scan of `repoRoots`                   | T1083                            |
-| tmux pane enumeration                                | T1057                            |
-| `git pull` + service kickstart as the update path    | T1195.001                        |
+| Behaviour                                            | ATT&CK                            |
+| ---------------------------------------------------- | --------------------------------- |
+| launchd agent runs `seanced`                         | T1543.001 Launch Agent            |
+| systemd user unit + Windows logon task run it on WSL | T1543.002, T1053.005              |
+| persistent outbound WSS to the relay                 | T1071.001, T1102.002              |
+| AES-256-GCM under a PSK                              | T1573.001 Symmetric Cryptography  |
+| remotely starting an interactive coding agent        | **T1219.001 IDE Tunneling**       |
+| pre-answering claude's trust dialog in its config    | T1562.001 Disable or Modify Tools |
+| `caffeinate -is` per spawn + the AC-power hold       | T1653 Power Settings              |
+| depth-2 `.git` scan of `repoRoots`                   | T1083                             |
+| tmux pane enumeration                                | T1057                             |
+| `git pull` + service kickstart as the update path    | T1195.001                         |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
 and JetBrains Gateway, i.e. this exact shape. Consequence: those persistence
@@ -455,6 +456,29 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `no_default_branch`, `tmux_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
+- **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
+  dialog (`projects[<path>].hasTrustDialogAccepted` in `~/.claude.json`, or
+  under `$CLAUDE_CONFIG_DIR` when set — the daemon mirrors claude's own
+  lookup) that no remote can answer, so an untrusted repo spawned from the
+  phone reports success and sits dead at the prompt. Both spawn paths answer
+  it up front (`trust.ts`): read claude's config, set the flag for the repo
+  root when missing, write back atomically (tmp + rename, mode preserved).
+  The dialog guards less than spawning already grants — a PSK holder starts
+  claude in the repo under `--permission-mode auto` — so pre-answering it
+  widens nothing; it is still an external tool's safety prompt being
+  disabled, hence the T1562.001 row in the footprint table. Fails open: a
+  failed write means the dialog may reappear, never a failed spawn. A
+  missing config (claude never ran on the machine) is left alone —
+  first-run onboarding would block the session regardless, and fabricating
+  claude's own file is worse. The worktree needs no separate entry: claude
+  starts at the repo root and moves into the worktree after the trust
+  check. Memoized in-process per (config, repo) pair, so it costs one
+  config read per repo per daemon run. Rejected: caching trust in
+  state.json or `RepoEntry` (stale in the dangerous direction — revoking
+  trust in claude would be silently overridden forever by a cache that
+  outlives the decision; and `RepoEntry` crosses the wire, where trust is
+  daemon-local business), pre-trusting the whole scan set at scan time
+  (writes trust for repos never spawned).
 - **Worktree/window naming**: the prompt (or explicit `--title`) slugified
   to 40 chars, nothing more. A trailing `-2`, `-3`, … is appended only when
   the name is already taken — either the worktree directory exists or a

@@ -5,6 +5,7 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnErrorCode, typ
 import { git } from "./exec.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
+import { ensureRepoTrusted } from "./trust.ts";
 
 export class SpawnFailure extends Error {
   constructor(
@@ -196,6 +197,9 @@ export async function spawnSession(
   if (repo === undefined) {
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
   }
+
+  // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
+  await ensureRepoTrusted(repo.path);
 
   const slug = slugify(request.title ?? request.prompt ?? "session");
   const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
