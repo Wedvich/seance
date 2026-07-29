@@ -42,7 +42,12 @@ export type Verdict =
 /** What survives a reload; transient fields are deliberately absent. */
 export interface PersistedForm {
   readonly machineId: string | null;
-  readonly repo: string | null;
+  /**
+   * Last repo picked per machine, by deviceId — the single source of truth for
+   * the repo selection, so switching machines restores what you last ran there
+   * instead of resetting to its first repo.
+   */
+  readonly repos: Readonly<Record<string, string>>;
   readonly prompt: string;
   readonly worktree: boolean;
   readonly model: Model;
@@ -68,7 +73,7 @@ export interface SessionsView {
  */
 export const DEFAULT_FORM: PersistedForm = {
   machineId: null,
-  repo: null,
+  repos: {},
   prompt: "",
   worktree: true,
   model: DEFAULT_MODEL,

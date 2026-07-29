@@ -36,6 +36,11 @@ function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function asRepoMap(value: unknown): Readonly<Record<string, string>> {
+  if (typeof value !== "object" || value === null) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, repo]) => typeof repo === "string"));
+}
+
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
@@ -43,7 +48,7 @@ export function readForm(): PersistedForm {
   const record = raw as Record<string, unknown>;
   return {
     machineId: asString(record["machineId"]),
-    repo: asString(record["repo"]),
+    repos: asRepoMap(record["repos"]),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,

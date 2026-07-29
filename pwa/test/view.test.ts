@@ -234,8 +234,21 @@ describe("selection", () => {
   });
 
   test("falls back to the machine's first repo when the form names a missing one", () => {
-    const view = deriveView(state({}, { repo: "deleted-repo" }), NOW);
+    const view = deriveView(state({}, { repos: { "dev-1": "deleted-repo" } }), NOW);
     expect(view.repo?.name).toBe("seance");
+  });
+
+  test("restores the repo remembered for the selected machine", () => {
+    const studio = machine({ deviceId: "dev-2", name: "Mac Studio" });
+    const view = deriveView(
+      state(
+        { relay: relay({ machines: [machine(), studio] }) },
+        { machineId: "dev-2", repos: { "dev-1": "seance", "dev-2": "pengefix" } },
+      ),
+      NOW,
+    );
+    expect(view.machine?.deviceId).toBe("dev-2");
+    expect(view.repo?.name).toBe("pengefix");
   });
 
   test("reports no repos when the machine has none", () => {

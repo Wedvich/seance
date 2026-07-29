@@ -247,14 +247,16 @@ export function resolveMachine(relay: RelayState, machineId: string | null): Mac
   return relay.machines.find((machine) => machine.connected) ?? relay.machines[0] ?? null;
 }
 
-export function resolveRepo(machine: Machine | null, repoName: string | null): RepoEntry | null {
+/** The machine's remembered repo, else its first — the form may name one that has gone. */
+export function resolveRepo(machine: Machine | null, form: PersistedForm): RepoEntry | null {
   if (machine === null) return null;
-  return machine.repos.find((repo) => repo.name === repoName) ?? machine.repos[0] ?? null;
+  const remembered = form.repos[machine.deviceId];
+  return machine.repos.find((repo) => repo.name === remembered) ?? machine.repos[0] ?? null;
 }
 
 export function deriveView(state: AppState, now: number): ViewModel {
   const machine = resolveMachine(state.relay, state.form.machineId);
-  const repo = resolveRepo(machine, state.form.repo);
+  const repo = resolveRepo(machine, state.form);
   const paths = machine?.repos.map((entry) => entry.path) ?? [];
 
   return {

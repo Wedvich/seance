@@ -598,6 +598,12 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   PWAs freely, and the prompt is the only thing here the user wrote. The prompt
   therefore sits in plaintext `localStorage` — a deliberate asymmetry against
   the PSK, weighing one message's text against standing authority.
+- **The repo selection is remembered per machine, not globally.** Each machine has
+  its own repo set and its own habitual project, so one shared "last repo" was
+  wrong on every machine but the one just used. `PersistedForm.repos` maps deviceId
+  to repo name and is the only place the selection lives — a single global `repo`
+  field alongside it could only drift. An unknown or deleted repo still falls back
+  to the machine's first, so a stale map degrades rather than blocks.
 - **Sessions are fanned out, not polled.** The header total spans every online
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket

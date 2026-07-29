@@ -26,7 +26,7 @@ describe("form persistence", () => {
   test("round-trips a form", () => {
     const form = {
       machineId: "dev-1",
-      repo: "seance",
+      repos: { "dev-1": "seance" },
       prompt: "port the pane",
       worktree: false,
       model: "fable",
@@ -55,8 +55,11 @@ describe("form persistence", () => {
   });
 
   test("ignores wrongly typed fields rather than trusting them", () => {
-    store.set("seance:form", JSON.stringify({ machineId: 7, repo: [], prompt: null, worktree: "yes" }));
-    expect(readForm()).toEqual({ ...DEFAULT_FORM, machineId: null, repo: null, prompt: "" });
+    store.set(
+      "seance:form",
+      JSON.stringify({ machineId: 7, repos: { "dev-1": 3, "dev-2": "seance" }, prompt: null, worktree: "yes" }),
+    );
+    expect(readForm()).toEqual({ ...DEFAULT_FORM, machineId: null, repos: { "dev-2": "seance" }, prompt: "" });
   });
 });
 

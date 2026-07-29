@@ -139,14 +139,18 @@ export class Store {
     this.#patch({ form: { ...this.#state.form, prompt } });
   }
 
-  /** Selecting a machine resets the repo to that machine's first and clears any verdict. */
+  /** Restores that machine's last repo (falling back to its first) and clears any verdict. */
   selectMachine(machineId: string): void {
-    this.#patch({ form: { ...this.#state.form, machineId, repo: null }, verdict: null });
+    this.#patch({ form: { ...this.#state.form, machineId }, verdict: null });
     this.dismissLayer();
   }
 
   selectRepo(repo: string): void {
-    this.#patch({ form: { ...this.#state.form, repo } });
+    const { form, relay } = this.#state;
+    // Keyed by the resolved machine, not form.machineId, which is null until picked.
+    const machine = resolveMachine(relay, form.machineId);
+    const repos = machine === null ? form.repos : { ...form.repos, [machine.deviceId]: repo };
+    this.#patch({ form: { ...form, repos } });
     this.dismissLayer();
   }
 
@@ -214,7 +218,7 @@ export class Store {
   async spawn(): Promise<void> {
     const { relay, form } = this.#state;
     const machine = resolveMachine(relay, form.machineId);
-    const repo = resolveRepo(machine, form.repo);
+    const repo = resolveRepo(machine, form);
     if (machine === null || repo === null || !machine.connected || this.#state.spawning) return;
 
     const prompt = form.prompt.trim();

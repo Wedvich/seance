@@ -76,7 +76,7 @@ describe("daemon ↔ relay ↔ app", () => {
   test("spawn happy path: worktree mode lands a verdict and a real tmux window", async () => {
     const app = startApp(stack, {
       machineId: stack.deviceId,
-      repo: "myrepo",
+      repos: { [stack.deviceId]: "myrepo" },
       prompt: "port the pane",
       worktree: true,
     });
@@ -107,7 +107,7 @@ describe("daemon ↔ relay ↔ app", () => {
   test("spawn failure: claude dying becomes a failed verdict carrying the captured error", async () => {
     const app = startApp(stack, {
       machineId: stack.deviceId,
-      repo: "myrepo",
+      repos: { [stack.deviceId]: "myrepo" },
       prompt: "doomed",
       worktree: false,
     });
@@ -140,7 +140,12 @@ describe("daemon ↔ relay ↔ app", () => {
   });
 
   test("dropped reply mid-spawn: reconciliation asks the machine and finds the live session", async () => {
-    const form = { machineId: stack.deviceId, repo: "myrepo", prompt: "recover me", worktree: false };
+    const form = {
+      machineId: stack.deviceId,
+      repos: { [stack.deviceId]: "myrepo" },
+      prompt: "recover me",
+      worktree: false,
+    };
     const app = startApp(stack, form);
     let recovered: ReturnType<typeof startApp> | null = null;
     let window: string | null = null;
