@@ -50,7 +50,12 @@ function workerBundle(): Promise<string> {
   return bundlePromise;
 }
 
-export async function startRelay(token: string): Promise<TestRelay> {
+export interface SweepOverrides {
+  readonly sweepIntervalMs: number;
+  readonly sweepSilenceLimitMs: number;
+}
+
+export async function startRelay(token: string, sweep?: SweepOverrides): Promise<TestRelay> {
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
@@ -60,7 +65,15 @@ export async function startRelay(token: string): Promise<TestRelay> {
     compatibilityDate: config.compatibility_date,
     // Free-tier Durable Objects are SQLite-backed; match that here.
     durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
-    bindings: { BEARER_TOKEN: token },
+    bindings: {
+      BEARER_TOKEN: token,
+      ...(sweep === undefined
+        ? {}
+        : {
+            SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
+            SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
+          }),
+    },
   });
   const url = await mf.ready;
 

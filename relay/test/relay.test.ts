@@ -401,3 +401,68 @@ describe("register rate limit", () => {
     app.close();
   }, 30_000);
 });
+
+// Own instance: compressed sweep timings would race the suites above.
+describe("silent-socket sweep", () => {
+  // Generous gaps so CI jitter cannot blur a live daemon into a swept one:
+  // heartbeats every 300ms against a 2s silence limit and 250ms sweeps.
+  const SWEEP_INTERVAL_MS = 250;
+  const SILENCE_LIMIT_MS = 2_000;
+  const HEARTBEAT_MS = 300;
+  let sweeping: TestRelay;
+
+  beforeAll(async () => {
+    // The rate-limit suite's dispose() just ran, and booting workerd too soon
+    // after a dispose in the same process breaks its stdio wiring (CLAUDE.md's
+    // scar; "Broken pipe" from server.c++). Let it settle first.
+    await Bun.sleep(500);
+    sweeping = await startRelay(TOKEN, {
+      sweepIntervalMs: SWEEP_INTERVAL_MS,
+      sweepSilenceLimitMs: SILENCE_LIMIT_MS,
+    });
+  });
+
+  afterAll(async () => {
+    await sweeping.dispose();
+  });
+
+  test("closes a daemon that never heartbeats and reports it offline with an honest lastSeen", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(sweeping);
+    const before = Date.now();
+    const daemon = await connectDaemon(sweeping);
+    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+    const registeredAt = Date.now();
+
+    // The point of the sweep: a slept machine sends no close frame, so the
+    // relay must close the socket and push the offline registry on its own.
+    expect(await daemon.waitClosed(10_000)).toBe(1000);
+    const entry = await waitForEntry(app, deviceId, (candidate) => !candidate.connected);
+
+    // lastSeen is the last proof of life (accept time — it never pinged), not
+    // the moment the sweep happened to run. Bounded by registration rather
+    // than the silence limit so a loaded CI machine cannot flake it.
+    expect(entry.lastSeen).toBeGreaterThanOrEqual(before);
+    expect(entry.lastSeen).toBeLessThanOrEqual(registeredAt);
+    app.close();
+  });
+
+  test("a heartbeating daemon is never swept, then is once it falls silent", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(sweeping);
+    const daemon = await connectDaemon(sweeping);
+    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+
+    const heartbeat = setInterval(() => daemon.sendRaw("ping"), HEARTBEAT_MS);
+    // Outlives the silence limit twice over while pinging — waitClosed
+    // rejecting is the socket staying open.
+    await expect(daemon.waitClosed(SILENCE_LIMIT_MS * 2.5)).rejects.toThrow();
+    clearInterval(heartbeat);
+
+    expect(await daemon.waitClosed(10_000)).toBe(1000);
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+    app.close();
+  }, 20_000);
+});

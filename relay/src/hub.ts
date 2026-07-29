@@ -9,6 +9,7 @@ import {
   type UndeliverableCode,
 } from "@seance/shared";
 import { roleForPath, type Role } from "./auth.ts";
+import type { Env } from "./env.ts";
 import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
@@ -40,10 +41,32 @@ const REGISTER_WINDOW_MS = 60_000;
 const MAX_REGISTERS_PER_WINDOW = 10;
 
 /**
- * Attached to a daemon socket at register time. Survives hibernation, which is
+ * The daemon heartbeats every 30s and its pings are answered at the edge, so
+ * the object never sees them — but each one stamps the socket's auto-response
+ * timestamp, which the sweep alarm reads. Three missed beats is a dead peer,
+ * not a hiccup. Env-overridable so tests need not wait a minute.
+ */
+const SWEEP_INTERVAL_MS = 60_000;
+const SWEEP_SILENCE_LIMIT_MS = 90_000;
+
+/** Vars arrive as strings; anything unparsable falls back to the default. */
+function msOverride(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * Attached to every daemon socket at accept. Survives hibernation, which is
  * why routing needs no class fields: `getWebSockets()` plus storage are truth.
  * The register counter rides along for the same reason.
  */
+interface SocketAttachment {
+  /** Accept time, ms — the sweep's liveness floor until the first heartbeat lands. */
+  readonly connectedAt: number;
+  /** Present once the socket has registered. */
+  readonly identity?: SocketIdentity;
+}
+
 interface SocketIdentity {
   readonly deviceId: string;
   /** Start of the current register-rate window, ms. */
@@ -58,11 +81,15 @@ interface SocketIdentity {
  */
 export class Hub implements DurableObject {
   readonly #ctx: DurableObjectState;
+  readonly #sweepIntervalMs: number;
+  readonly #silenceLimitMs: number;
 
-  constructor(ctx: DurableObjectState) {
+  constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
-    // Re-applied on every wake. Heartbeats are answered without waking the object,
-    // which is also why `lastSeen` can only move on register and on close.
+    this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
+    this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
+    // Re-applied on every wake. Heartbeats are answered without waking the object;
+    // only the sweep alarm reads their timestamps.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
@@ -72,6 +99,10 @@ export class Hub implements DurableObject {
 
     const pair = new WebSocketPair();
     this.#ctx.acceptWebSocket(pair[1], [role]);
+    if (role === "daemon") {
+      pair[1].serializeAttachment({ connectedAt: Date.now() } satisfies SocketAttachment);
+      await this.#armSweep();
+    }
     // Presence needs no polling: the app gets the registry before its first send.
     if (role === "app") await this.#pushRegistry([pair[1]]);
     return new Response(null, { status: 101, webSocket: pair[0] });
@@ -96,13 +127,59 @@ export class Hub implements DurableObject {
     await this.#onSocketGone(ws);
   }
 
+  /**
+   * The 30s daemon heartbeat protects the daemon from a dead relay; this alarm
+   * is the reverse. An abruptly slept machine sends no close frame, so its
+   * socket stays in `getWebSockets()` — reading as online — until Cloudflare
+   * notices the dead TCP peer, which is unbounded. Sweeping bounds it: silence
+   * past the limit is closed and reported offline. Armed only while daemon
+   * sockets exist, so an idle hub never wakes.
+   */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const swept = new Map<WebSocket, number>();
+    for (const ws of this.#ctx.getWebSockets("daemon")) {
+      const lastAlive = this.#lastAliveOf(ws, now);
+      if (now - lastAlive > this.#silenceLimitMs) swept.set(ws, lastAlive);
+    }
+    await Promise.all([...swept].map(([ws, lastAlive]) => this.#sweep(ws, lastAlive, now)));
+    if (swept.size > 0) await this.#pushRegistry(undefined, [...swept.keys()]);
+    if (this.#ctx.getWebSockets("daemon").some((ws) => !swept.has(ws))) {
+      await this.#ctx.storage.setAlarm(now + this.#sweepIntervalMs);
+    }
+  }
+
+  async #armSweep(): Promise<void> {
+    if ((await this.#ctx.storage.getAlarm()) === null) {
+      await this.#ctx.storage.setAlarm(Date.now() + this.#sweepIntervalMs);
+    }
+  }
+
+  /** Heartbeats are the liveness signal; routed traffic doesn't count and needn't — a live daemon always pings. */
+  #lastAliveOf(ws: WebSocket, fallback: number): number {
+    const pinged = this.#ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    return Math.max(pinged, attachment?.connectedAt ?? fallback);
+  }
+
+  async #sweep(ws: WebSocket, lastAlive: number, now: number): Promise<void> {
+    const deviceId = this.#deviceIdOf(ws);
+    console.log(`swept ${deviceId ?? "unregistered daemon"}: no heartbeat for ${now - lastAlive}ms`);
+    ws.close(1000, "no heartbeat");
+    if (deviceId === null) return;
+    const key = ENTRY_PREFIX + deviceId;
+    const entry = await this.#ctx.storage.get<RegistryEntry>(key);
+    // Stamped with the last heartbeat, not sweep time: the machine has been gone since then.
+    if (entry !== undefined) await this.#put(key, { ...entry, lastSeen: lastAlive });
+  }
+
   #roleOf(ws: WebSocket): Role {
     return this.#ctx.getTags(ws).includes("daemon") ? "daemon" : "app";
   }
 
   #deviceIdOf(ws: WebSocket): string | null {
-    const identity = ws.deserializeAttachment() as SocketIdentity | null;
-    return identity?.deviceId ?? null;
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    return attachment?.identity?.deviceId ?? null;
   }
 
   async #onDaemonMessage(ws: WebSocket, text: string): Promise<void> {
@@ -150,9 +227,10 @@ export class Hub implements DurableObject {
    */
   async #register(ws: WebSocket, deviceId: string, info: Envelope): Promise<void> {
     const now = Date.now();
-    const prior = ws.deserializeAttachment() as SocketIdentity | null;
+    const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
+    const prior = attachment.identity;
     const rate =
-      prior === null || now - prior.windowStart >= REGISTER_WINDOW_MS
+      prior === undefined || now - prior.windowStart >= REGISTER_WINDOW_MS
         ? { windowStart: now, registers: 1 }
         : { windowStart: prior.windowStart, registers: prior.registers + 1 };
     if (rate.registers > MAX_REGISTERS_PER_WINDOW) {
@@ -171,7 +249,7 @@ export class Hub implements DurableObject {
       return;
     }
 
-    ws.serializeAttachment({ deviceId, ...rate } satisfies SocketIdentity);
+    ws.serializeAttachment({ ...attachment, identity: { deviceId, ...rate } } satisfies SocketAttachment);
     // Two open sockets for one machine would deliver a spawn twice, so the older
     // one loses. Attaching first keeps the loser's close handler from reporting
     // the machine as disconnected.
@@ -243,15 +321,15 @@ export class Hub implements DurableObject {
     if (entry !== undefined) {
       await this.#put(key, { ...entry, lastSeen: Date.now() });
     }
-    await this.#pushRegistry(undefined, ws);
+    await this.#pushRegistry(undefined, [ws]);
   }
 
   /**
-   * `exclude` is the socket whose loss triggered the push — it may still appear
-   * in `getWebSockets()` while its close handler runs, and counting it would
-   * report a machine online moments after it went away.
+   * `exclude` holds sockets whose loss triggered the push — they may still
+   * appear in `getWebSockets()` while their close handlers run, and counting
+   * them would report a machine online moments after it went away.
    */
-  async #pushRegistry(targets?: readonly WebSocket[], exclude: WebSocket | null = null): Promise<void> {
+  async #pushRegistry(targets?: readonly WebSocket[], exclude: readonly WebSocket[] = []): Promise<void> {
     const apps = targets ?? this.#ctx.getWebSockets("app");
     if (apps.length === 0) return;
     const frame: RelayToAppFrame = { t: "registry", entries: await this.#views(exclude) };
@@ -259,7 +337,7 @@ export class Hub implements DurableObject {
     for (const app of apps) app.send(text);
   }
 
-  async #views(exclude: WebSocket | null): Promise<RegistryView[]> {
+  async #views(exclude: readonly WebSocket[]): Promise<RegistryView[]> {
     const stored = await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX });
     const connected = this.#connectedIds(exclude);
     // Spelled out rather than spread: this is the wire projection of an entry.
@@ -272,10 +350,10 @@ export class Hub implements DurableObject {
   }
 
   /** Derived at read time and never persisted, so an eviction cannot leave a stale `true` on disk. */
-  #connectedIds(exclude: WebSocket | null): ReadonlySet<string> {
+  #connectedIds(exclude: readonly WebSocket[]): ReadonlySet<string> {
     const ids = new Set<string>();
     for (const ws of this.#ctx.getWebSockets("daemon")) {
-      if (ws === exclude) continue;
+      if (exclude.includes(ws)) continue;
       const deviceId = this.#deviceIdOf(ws);
       if (deviceId !== null) ids.add(deviceId);
     }

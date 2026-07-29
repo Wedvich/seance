@@ -251,16 +251,27 @@ The Durable Object persists a machine registry:
 - `connected` is **not persisted** — it's derived from `state.getWebSockets()`
   when the registry is read, so an eviction or crash can never leave a stale
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
-- `lastSeen` is written on register and on `webSocketClose` — the only
-  liveness events the DO observes, since auto-response heartbeats
-  deliberately never wake it. An abruptly-slept Mac can therefore read
-  `connected: true` until Cloudflare notices the dead socket; the
-  `undeliverable` frame below is the backstop.
+- `lastSeen` is written on register, on `webSocketClose`, and by the sweep —
+  which stamps the last heartbeat rather than sweep time, since the machine
+  has been gone since then.
+- **Silent daemon sockets are swept.** An abruptly-slept Mac sends no close
+  frame, so its socket would read `connected: true` until Cloudflare noticed
+  the dead TCP peer — unbounded, hours in practice. A storage alarm runs
+  every 60s while daemon sockets exist and closes any socket silent past 90s
+  (three missed heartbeats), stamping `lastSeen` and pushing the registry.
+  Heartbeats still never wake the object: the sweep reads
+  `getWebSocketAutoResponseTimestamp()`, with the socket's accept time as the
+  floor before its first ping. Accepted cost: the hub wakes every 60s while
+  any daemon is connected (wake is milliseconds, ~1.4k alarms/day); the
+  alternative was presence that lies for hours. The `undeliverable` frame
+  below remains the backstop for the residual ≤ ~2.5 min window.
 - Offline machines stay listed with last-seen (an asleep PC is actionable;
   a vanished one is confusing). Entries are permanent, overwritten only by a
   later register. **No forget verb and no TTL in v1** — deliberately, so the
   bearer token authorizes nothing destructive (see below).
-- Online = WebSocket open, with heartbeat pings to catch silent drops.
+- Online = WebSocket open. Heartbeats catch silent drops from both ends: a
+  missed pong makes the daemon close and redial; a daemon socket that stops
+  pinging is swept by the relay's alarm.
 - Daemon sockets use DO WebSocket hibernation. No connection state in class
   fields (`state.getWebSockets()` + DO storage are truth), heartbeats via
   `setWebSocketAutoResponse()` so pings don't wake the DO. Wake is
@@ -281,7 +292,8 @@ on connect and whenever the repo set changes; `msg { envelope }` for routed
 traffic; literal `"ping"`/`"pong"` strings for heartbeats (bare strings, not
 JSON, so DO auto-response can answer without waking — daemon pings every 30s,
 expects pong within 10s, else closes and redials with 1→60s jittered
-exponential backoff, reset on successful register). The daemon authenticates
+exponential backoff, reset on successful register; the relay in turn sweeps
+sockets that stop pinging — see Presence & identity). The daemon authenticates
 with an `Authorization: Bearer` header.
 
 Layer 1 (plaintext, PWA↔relay): `msg { envelope }` outbound. Inbound:
