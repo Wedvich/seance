@@ -76,7 +76,7 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
   if (kind === "machine") {
     return (
       <Sheet title={SHEET_TITLES.machine} onClose={close}>
-        {state.relay.machines.map((machine) => (
+        {[...state.relay.machines].sort((a, b) => a.name.localeCompare(b.name)).map((machine) => (
           <SheetItem
             key={machine.deviceId}
             label={machine.name}
