@@ -120,9 +120,9 @@ export function abbreviatePath(path: string, siblings: readonly string[]): strin
 export function failureBody(code: SpawnErrorCode, repo: string, machine: string): string {
   switch (code) {
     case "claude_died":
-      return "tmux opened the window, but claude exited before the session started. Nothing is running.";
-    case "tmux_error":
-      return "tmux refused to open the window. Nothing is running.";
+      return "The window opened, but claude exited before the session started. Nothing is running.";
+    case "launch_error":
+      return "The daemon couldn't open a window for the session. Nothing is running.";
     case "repo_not_found":
       return `${repo} isn't on ${machine} anymore. Rescan its repos and try again.`;
     case "fetch_failed":

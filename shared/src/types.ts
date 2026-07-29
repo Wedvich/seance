@@ -156,7 +156,7 @@ export const SPAWN_ERROR_CODES = [
   "repo_not_found",
   "fetch_failed",
   "no_default_branch",
-  "tmux_error",
+  "launch_error",
   "claude_died",
   "timeout",
   "internal_error",

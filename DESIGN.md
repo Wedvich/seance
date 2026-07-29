@@ -453,7 +453,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   remain-on-exit, not a success). `--here` mode
   spawns at the repo root (no remote "current directory" exists).
   Failures return structured codes (`repo_not_found`, `fetch_failed`,
-  `no_default_branch`, `tmux_error`, `claude_died` + captured pane output,
+  `no_default_branch`, `launch_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust

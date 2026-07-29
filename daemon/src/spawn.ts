@@ -228,7 +228,7 @@ export async function spawnSession(
         ])
       ).trim();
     } catch (err) {
-      throw new SpawnFailure("tmux_error", err instanceof TmuxError ? err.message : String(err));
+      throw new SpawnFailure("launch_error", err instanceof TmuxError ? err.message : String(err));
     }
 
     await verifyPaneAlive(windowId, opts.waitMs ?? 3_000);

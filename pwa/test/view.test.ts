@@ -255,8 +255,8 @@ describe("worktree hint", () => {
 
 describe("failureBody", () => {
   test("only claude_died describes a window that opened", () => {
-    expect(failureBody("claude_died", "seance", "MacBook Pro")).toContain("tmux opened the window");
-    expect(failureBody("tmux_error", "seance", "MacBook Pro")).toContain("refused to open");
+    expect(failureBody("claude_died", "seance", "MacBook Pro")).toContain("The window opened");
+    expect(failureBody("launch_error", "seance", "MacBook Pro")).toContain("couldn't open a window");
   });
 
   test("names the repo and machine where that is the actionable part", () => {
@@ -270,7 +270,7 @@ describe("failureBody", () => {
   test("never claims a worktree was left behind", () => {
     const codes = [
       "claude_died",
-      "tmux_error",
+      "launch_error",
       "repo_not_found",
       "fetch_failed",
       "timeout",
