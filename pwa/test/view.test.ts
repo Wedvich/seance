@@ -110,7 +110,7 @@ describe("banner and button", () => {
     expect(view.banner).toBeNull();
     expect(view.meta).toBe("connecting…");
     expect(view.relayLine).toBe("connecting…");
-    expect(view.relayDot).toBeNull();
+    expect(view.relayState).toBe("connecting");
     expect(view.button).toEqual({ label: "Connecting…", enabled: false });
   });
 

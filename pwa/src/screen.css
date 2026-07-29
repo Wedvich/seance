@@ -11,7 +11,7 @@
 
 .header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px 12px;
@@ -49,27 +49,52 @@
   gap: 6px;
 }
 
-/* Visually 24px tall as designed; the ::after inset lifts the hit area to 44px. */
-.relay-chip {
-  position: relative;
-  display: inline-flex;
+/*
+ * Settings control group: a flat track carrying the passive relay dot beside a
+ * raised cog, same track/face idiom as .seg. 4px around a 36px face makes the
+ * whole pill a 44px tap target.
+ */
+.relay-group {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  padding: 4px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 999px;
   background: var(--sur2);
-  font-family: var(--mono);
-  font-variant-ligatures: none;
-  font-size: 12px;
-  color: var(--fg2);
   flex: none;
 }
 
-.relay-chip::after {
-  content: "";
-  position: absolute;
-  inset: -10px;
+.relay-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px 0 12px;
+}
+
+.relay-cog {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--sur3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  color: var(--fg2);
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+@media (hover: hover) {
+  .relay-group:hover .relay-cog {
+    background: color-mix(in oklab, var(--sur3) 88%, var(--fg));
+    color: var(--fg);
+  }
+}
+
+.relay-group:active .relay-cog {
+  background: color-mix(in oklab, var(--sur3) 76%, var(--fg));
 }
 
 .dot {
@@ -88,9 +113,63 @@
   background: var(--err);
 }
 
-.relay-chip .dot {
-  width: 6px;
-  height: 6px;
+/* Sized off .dot so the relay reads at the same weight as the MACHINE card's dot. */
+.relay-dot-wrap {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  flex: none;
+}
+
+.relay-dot,
+.relay-sonar {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.relay-dot-connected {
+  background: var(--ok);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.relay-dot-connecting {
+  background: var(--warn);
+}
+
+/* Hollow, so the failed state differs from connected by shape and not only hue. */
+.relay-dot-offline {
+  background: transparent;
+  border: 2px solid var(--err);
+}
+
+/* Sonar ring behind the steady dot — it precedes it in the DOM, so it paints under. */
+.relay-sonar {
+  background: color-mix(in srgb, var(--warn) 50%, transparent);
+  animation: relay-sonar 1.4s ease-out infinite;
+}
+
+/*
+ * The global reduced-motion rule clamps this to one instant iteration, which
+ * would leave the ring frozen at full size over the dot. Drop it entirely and
+ * the fallback is the steady amber dot on its own.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .relay-sonar {
+    display: none;
+  }
+}
+
+@keyframes relay-sonar {
+  from {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  70%,
+  to {
+    transform: scale(2.4);
+    opacity: 0;
+  }
 }
 
 /* ---- scrolling middle ---- */

@@ -15,6 +15,7 @@ html[data-theme="light"] {
   --acc: #6a4bd0;
   --acc-fg: #ffffff;
   --ok: #2e8a63;
+  --warn: #b0761b;
   --err: #c2452f;
 }
 
@@ -29,6 +30,7 @@ html[data-theme="dark"] {
   --acc: #bda6f5;
   --acc-fg: #120a22;
   --ok: #54c08f;
+  --warn: #e8c268;
   --err: #f39383;
 }
 

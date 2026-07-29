@@ -2,6 +2,8 @@ import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { Store } from "../store.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
+import type { ConnectionState } from "../view.ts";
+import { RelayDot } from "./relay-dot.tsx";
 import { CredentialFields, useCredentials } from "./setup.tsx";
 
 /** Matches the client's settle hold-back: a dial that hasn't resolved by then has failed. */
@@ -23,10 +25,10 @@ export function Settings(props: {
   store: Store;
   relayUrl: string;
   relayLine: string;
-  relayDot: "ok" | "err" | null;
+  relayState: ConnectionState;
   connected: boolean;
 }): JSX.Element {
-  const { store, relayLine, relayDot, connected } = props;
+  const { store, relayLine, relayState, connected } = props;
   // Both secrets are known to exist: the app only mounts once they load.
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
@@ -71,7 +73,7 @@ export function Settings(props: {
           <div>
             <h1 className="header-title">Settings</h1>
             <p className="header-meta header-status">
-              <span className={relayDot === null ? "dot" : `dot dot-${relayDot}`} />
+              <RelayDot state={relayState} />
               {relayLine}
             </p>
           </div>

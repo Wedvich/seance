@@ -58,7 +58,7 @@ export function App(props: { store: Store }): JSX.Element {
             store={store}
             relayUrl={readRelayUrl()}
             relayLine={view.relayLine}
-            relayDot={view.relayDot}
+            relayState={view.relayState}
             connected={state.relay.status === "open"}
           />
         </main>

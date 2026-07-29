@@ -586,7 +586,7 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   scratch, and the resume above re-dials unconditionally — so rendering the status
   as it stands flashed "Relay unreachable" for a frame or two on every refresh and
   every foregrounding. `RelayState.settling` marks that window: the screen reads
-  "connecting…" with a muted dot and no banner, and anything that recovers inside
+  "connecting…" with the pulsing amber dot and no banner, and anything that recovers inside
   it is never reported at all. The window opens only on leaving `open`, so the
   backoff retries after a real outage keep the banner up rather than blinking it.
 - **The service worker's update lifecycle is configured explicitly, not inherited
@@ -602,7 +602,19 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict and the Settings screen all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
-- **Settings is one screen, reached straight from the relay pill.** It absorbed
+- **Relay status is a passive dot, settings is the button, and they share one
+  pill.** The header control is a segmented pill on the `.seg` track/face idiom:
+  a flat left area holding the status dot and a raised cog on the right. The
+  whole pill is a single `<button>`, so the 4px padding around a 36px face gives
+  a 44px tap target without the old hit-area overlay, and the split makes plain
+  that the dot reports and the cog acts. The three states differ by shape as well
+  as hue — solid green with a glow, steady amber behind an expanding sonar ring,
+  hollow red ring — so the failed state is not carried by colour alone. The ring
+  is dropped outright under `prefers-reduced-motion` rather than left to the
+  global clamp, which would freeze it at full size over the dot. The settings
+  header's own status line renders the same three dots from the same component:
+  one state must never read two ways.
+- **Settings is one screen, reached straight from the header's relay pill.** It absorbed
   what used to be a bottom-sheet drawer plus a separate Relay & keys screen:
   credentials, connection status and theme in one place. The drawer's
   entry-replacing history special case went with it, and its "Reconnect now" row

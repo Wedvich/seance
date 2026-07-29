@@ -17,6 +17,8 @@ import {
 
 export type Tone = "fg2" | "err";
 
+export type ConnectionState = "connected" | "connecting" | "offline";
+
 export interface Tile {
   readonly label: string;
   readonly value: string;
@@ -39,8 +41,8 @@ export interface PrimaryButton {
 
 export interface ViewModel {
   readonly meta: string;
-  /** null is the muted dot: connected state not known yet, rather than known bad. */
-  readonly relayDot: "ok" | "err" | null;
+  /** "connecting" is the settle window: not known yet, rather than known bad. */
+  readonly relayState: ConnectionState;
   /** Bare connection state for the settings screen; meta carries the machine counts. */
   readonly relayLine: string;
   readonly banner: Banner | null;
@@ -257,7 +259,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
 
   return {
     meta: deriveMeta(state),
-    relayDot: state.relay.status === "open" ? "ok" : state.relay.settling ? null : "err",
+    relayState: state.relay.status === "open" ? "connected" : state.relay.settling ? "connecting" : "offline",
     relayLine: deriveRelayLine(state.relay),
     banner: deriveBanner(state, machine),
     machineTile: {
