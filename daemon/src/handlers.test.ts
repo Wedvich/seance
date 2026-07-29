@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { OpName, Plain, RepoEntry } from "@seance/shared";
+import type { OpName, Plain, RepoEntry, SessionEntry, SpawnResponse } from "@seance/shared";
 import { createBackend } from "./backend-default.ts";
+import type { SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 
@@ -77,4 +78,54 @@ describe("relay ops are audited", () => {
     expect(logged()).not.toContain('window="gotcha"');
     expect(logged()).toContain("\\n");
   });
+});
+
+const SPAWNED: SessionEntry = { window: "late-riser", repo: "myrepo", path: "/repos/myrepo" };
+
+/**
+ * A backend whose spawn succeeds but whose session list only admits the new
+ * window after `blindCalls` looks — the real shape of detection keying off a
+ * process title claude sets on its own schedule. Implementing the seam rather
+ * than mocking past it: an alternative backend is what `SessionBackend` is for.
+ */
+function lateTitlingBackend(blindCalls: number): { readonly backend: SessionBackend; readonly calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    backend: {
+      spawn: () => Promise.resolve({ window: SPAWNED.window, path: SPAWNED.path }),
+      sessions: () => {
+        calls += 1;
+        return Promise.resolve(calls > blindCalls ? [SPAWNED] : []);
+      },
+      doctor: () => Promise.resolve([]),
+    },
+  };
+}
+
+async function spawnReply(backend: SessionBackend): Promise<SpawnResponse> {
+  const reply = await createHandler({ ...ctx, backend })(request("spawn", { repo: "myrepo", mode: "here" }));
+  if (reply === null) throw new Error("spawn produced no reply");
+  return reply.payload as SpawnResponse;
+}
+
+describe("the spawn ack carries the window it announced", () => {
+  test("the session list is polled until the new window appears, not sampled once", async () => {
+    const late = lateTitlingBackend(2);
+    const payload = await spawnReply(late.backend);
+    if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
+    // The app writes this list straight into its cache: short by one here and
+    // the machine reads as idle until something else refreshes it.
+    expect(payload.sessions).toEqual([SPAWNED]);
+    expect(late.calls()).toBe(3);
+  });
+
+  test("a session that never titles still answers, with the list as it stands", async () => {
+    const never = lateTitlingBackend(Number.POSITIVE_INFINITY);
+    const payload = await spawnReply(never.backend);
+    if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
+    expect(payload.sessions).toEqual([]);
+    // Bounded: a late ack is worse than an incomplete one.
+    expect(never.calls()).toBeGreaterThan(1);
+  }, 10_000);
 });

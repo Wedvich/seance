@@ -26,7 +26,10 @@ export class Store {
   readonly #client: RelayClient;
   readonly #listeners = new Set<() => void>();
   #state: AppState;
-  /** Previous connected set, so a machine waking triggers exactly one refresh. */
+  /**
+   * Previous connected set, so a machine waking triggers exactly one refresh.
+   * Emptied whenever the socket isn't open, which makes every re-dial a wake.
+   */
   #wasConnected = new Set<string>();
   #pending: PendingSpawn | null = null;
 
@@ -76,7 +79,14 @@ export class Store {
   #onRelay(): void {
     const relay = this.#client.getState();
     this.#patch({ relay });
-    if (relay.status !== "open") return;
+    if (relay.status !== "open") {
+      // Forgotten rather than kept: a resume re-dials unconditionally and the
+      // registry that follows names the same machines, so leaving the set in
+      // place means nothing ever counts as woken again and the session lists
+      // stay at whatever the very first connect saw.
+      this.#wasConnected = new Set();
+      return;
+    }
 
     const connected = new Set(relay.machines.filter((machine) => machine.connected).map((m) => m.deviceId));
     const woken = [...connected].filter((deviceId) => !this.#wasConnected.has(deviceId));
@@ -99,11 +109,6 @@ export class Store {
         }
       }),
     );
-  }
-
-  refreshSessions(): void {
-    const connected = this.#state.relay.machines.filter((machine) => machine.connected);
-    void this.#fetchSessions(connected.map((machine) => machine.deviceId));
   }
 
   /**

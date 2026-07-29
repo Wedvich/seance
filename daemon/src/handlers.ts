@@ -3,6 +3,7 @@ import type {
   Plain,
   RepoEntry,
   RescanResponse,
+  SessionEntry,
   SessionsResponse,
   SpawnRequest,
   SpawnResponse,
@@ -32,6 +33,32 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   return true;
 }
 
+/**
+ * How long the ack waits for the window it just created to show up in the
+ * session list. Detection keys off claude having retitled its process, which
+ * can land after the spawn returns — `verifyPaneAlive` proves the pane is
+ * alive, not that it is titled yet.
+ */
+const ACK_SETTLE_MS = 2_000;
+
+/**
+ * The app writes this list straight into its cache, so an ack short by the
+ * window it just reported would render as "nothing running on that machine"
+ * until something else refreshed it. A session that never titles still answers,
+ * just with the short list — a late ack is worse than an incomplete one.
+ */
+async function sessionsIncluding(ctx: HandlerContext, window: string): Promise<readonly SessionEntry[]> {
+  const deadline = Bun.nanoseconds() + ACK_SETTLE_MS * 1e6;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next, nothing to parallelize
+    const sessions = await ctx.backend.sessions(ctx.getRepos());
+    if (sessions.some((entry) => entry.window === window)) return sessions;
+    if (Bun.nanoseconds() >= deadline) return sessions;
+    // oxlint-disable-next-line no-await-in-loop
+    await Bun.sleep(100);
+  }
+}
+
 async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
@@ -41,7 +68,7 @@ async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<Spawn
   try {
     const outcome = await ctx.backend.spawn(payload, ctx.getRepos());
     await audit.ok(outcome);
-    const sessions = await ctx.backend.sessions(ctx.getRepos());
+    const sessions = await sessionsIncluding(ctx, outcome.window);
     return { ok: true, ...outcome, sessions };
   } catch (err) {
     if (err instanceof SpawnFailure) {

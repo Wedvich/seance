@@ -365,7 +365,10 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 - `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
   verdict embeds a refreshed session list so the PWA updates without a
-  second round trip.
+  second round trip. That list is polled (2s cap) until it holds the window
+  just announced: detection keys off claude's process title, which it can set
+  after the spawn returns, and the PWA adopts this list verbatim — an ack
+  short by its own window renders the machine as idle.
 - `rescan {}` → fresh repo list; daemon re-registers if the set changed.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so

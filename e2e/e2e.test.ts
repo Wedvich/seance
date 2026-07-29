@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEntry } from "@seance/shared";
+import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { killWindow, listWindows, ownMachine, startApp, startStack, type Stack } from "./harness.ts";
@@ -189,6 +189,38 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
+  test("resume: re-dialling re-asks every machine, so a session started elsewhere is picked up", async () => {
+    const app = startApp(stack, { machineId: stack.deviceId });
+    let window: string | null = null;
+    try {
+      await app.waitForApp((s) => typeof s.sessions[stack.deviceId] === "object", "sessions answered");
+
+      // Straight down the transport, bypassing the Store: what a `seanced spawn`
+      // at the machine, or another device's session, looks like from here.
+      const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
+        repo: "myrepo",
+        mode: "here",
+        title: "elsewhere",
+      });
+      if (!reply.ok) throw new Error(`spawn failed: ${reply.message}`);
+      window = reply.window;
+      expect(sessionsView(app.store.getState(), stack.deviceId).some((s) => s.window === window)).toBe(false);
+
+      // attach()'s visibilitychange handler does exactly this: an installed PWA
+      // is suspended constantly and the socket dies without a close frame, so a
+      // resume re-dials whether or not the old one looked alive.
+      app.client.reconnect();
+      const state = await app.waitForApp(
+        (s) => sessionsFor(s, stack.deviceId).some((entry) => entry.window === window),
+        "sessions re-asked after re-dialling",
+      );
+      expect(sessionsFor(state, stack.deviceId).find((s) => s.window === window)?.repo).toBe("myrepo");
+    } finally {
+      if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  });
+
   test("rescan: a new clone reaches the app through re-register and a registry push", async () => {
     const app = startApp(stack, { machineId: stack.deviceId });
     const clonePath = join(stack.fixture.root, "newrepo");
@@ -250,4 +282,10 @@ function sessionsView(state: AppState, deviceId: string): readonly SessionEntry[
   const view = state.sessions[deviceId];
   if (view === undefined || view === "unknown") throw new Error(`no sessions view for ${deviceId}`);
   return view.sessions;
+}
+
+/** As above but tolerant, for predicates that run while an answer is still outstanding. */
+function sessionsFor(state: AppState, deviceId: string): readonly SessionEntry[] {
+  const view = state.sessions[deviceId];
+  return view === undefined || view === "unknown" ? [] : view.sessions;
 }

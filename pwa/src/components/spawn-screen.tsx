@@ -76,21 +76,23 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
   if (kind === "machine") {
     return (
       <Sheet title={SHEET_TITLES.machine} onClose={close}>
-        {[...state.relay.machines].sort((a, b) => a.name.localeCompare(b.name)).map((machine) => (
-          <SheetItem
-            key={machine.deviceId}
-            label={machine.name}
-            sub={
-              machine.connected
-                ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"}`
-                : `offline · last seen ${formatSeen(machine.lastSeen, now)}`
-            }
-            dot={machine.connected ? "ok" : "off"}
-            selected={machine.deviceId === view.machine?.deviceId}
-            disabled={!machine.connected}
-            onClick={() => store.selectMachine(machine.deviceId)}
-          />
-        ))}
+        {state.relay.machines
+          .toSorted((a, b) => a.name.localeCompare(b.name))
+          .map((machine) => (
+            <SheetItem
+              key={machine.deviceId}
+              label={machine.name}
+              sub={
+                machine.connected
+                  ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"}`
+                  : `offline · last seen ${formatSeen(machine.lastSeen, now)}`
+              }
+              dot={machine.connected ? "ok" : "off"}
+              selected={machine.deviceId === view.machine?.deviceId}
+              disabled={!machine.connected}
+              onClick={() => store.selectMachine(machine.deviceId)}
+            />
+          ))}
       </Sheet>
     );
   }
