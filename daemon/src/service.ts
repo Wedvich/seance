@@ -1,15 +1,15 @@
 import * as launchd from "./launchd.ts";
+import type { InstallResult, ServiceCheck } from "./service-types.ts";
 import * as systemd from "./systemd.ts";
+import { isWsl } from "./wsl.ts";
 
 // One dispatch point per lifecycle action: cli.ts stays platform-blind, and a
 // future platform is a new module here, not edits across the CLI. Linux means
-// systemd.ts on WSL and plain distros alike — WSL's extras are gated inside it.
+// systemd.ts on WSL and plain distros alike — WSL's extras are gated inside it,
+// and systemd.ts's entry points all self-guard on systemdRunning(), so a
+// systemd-less box gets its WSL-aware message rather than a raw spawn error.
 
-export interface InstallResult {
-  readonly target: string;
-  /** Non-fatal steps that need a hand — each carries the manual command. */
-  readonly notes: readonly string[];
-}
+export type { InstallResult, ServiceCheck } from "./service-types.ts";
 
 function unsupported(action: string): Error {
   return new Error(
@@ -19,7 +19,7 @@ function unsupported(action: string): Error {
 
 export function servicePath(): string {
   if (process.platform === "darwin") return launchd.plistPath();
-  if (process.platform === "linux") return systemd.unitPath();
+  if (process.platform === "linux" && systemd.systemdRunning()) return systemd.unitPath();
   return "(no service manager)";
 }
 
@@ -48,4 +48,18 @@ export async function restartService(): Promise<void> {
   if (process.platform === "darwin") return launchd.restartService();
   if (process.platform === "linux") return systemd.restartService();
   throw unsupported("seanced restart");
+}
+
+export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
+  if (process.platform === "darwin") {
+    return (await launchd.serviceLoaded())
+      ? [{ ok: true, message: "launchd agent loaded" }]
+      : [{ ok: false, message: "launchd agent not loaded — run `seanced install`" }];
+  }
+  if (process.platform === "linux") {
+    return systemd.systemdRunning()
+      ? systemd.doctorServiceChecks()
+      : [{ ok: false, message: systemd.noSystemdMessage(isWsl()) }];
+  }
+  return [{ ok: false, message: "no service manager integration here — run seanced under your own supervisor" }];
 }

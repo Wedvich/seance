@@ -15,8 +15,14 @@ import {
 import { dpapiPskPath, dpapiRoundTrip, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
 import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
-import { installService, restartService, serviceLoaded, servicePath, uninstallService } from "./service.ts";
-import { doctorServiceChecks } from "./systemd.ts";
+import {
+  doctorServiceChecks,
+  installService,
+  restartService,
+  serviceLoaded,
+  servicePath,
+  uninstallService,
+} from "./service.ts";
 import { scanRepos } from "./scan.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
@@ -285,23 +291,16 @@ export async function cmdDoctor(): Promise<void> {
   }
 
   console.log("service");
-  if (process.platform === "darwin") {
-    if (await serviceLoaded()) ok("launchd agent loaded");
-    else warn("launchd agent not loaded — run `seanced install`");
-  } else if (process.platform === "linux" && Bun.which("systemctl") !== null) {
-    for (const check of await doctorServiceChecks()) {
-      if (check.ok) ok(check.message);
-      else warn(check.message);
-    }
-    if (isWsl()) {
-      // Broken interop surfaces here as a warning, and as a FAIL above only
-      // when the PSK actually lives in the blob and could not be read.
-      const interop = await dpapiRoundTrip();
-      if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
-      else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
-    }
-  } else {
-    warn("no service manager integration here — run seanced under your own supervisor");
+  for (const check of await doctorServiceChecks()) {
+    if (check.ok) ok(check.message);
+    else warn(check.message);
+  }
+  if (isWsl()) {
+    // Broken interop surfaces here as a warning, and as a FAIL above only
+    // when the PSK actually lives in the blob and could not be read.
+    const interop = await dpapiRoundTrip();
+    if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
+    else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
   }
 
   if (failed) process.exit(1);

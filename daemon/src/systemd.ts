@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { logPath } from "./paths.ts";
-import type { InstallResult } from "./service.ts";
+import type { InstallResult, ServiceCheck } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
@@ -83,14 +83,20 @@ export function noSystemdMessage(wsl: boolean): string {
     : "this system is not running systemd — run seanced under your own supervisor";
 }
 
+/** sd_booted(3)'s check: /run/systemd/system exists iff systemd is PID 1. */
+export function systemdRunning(): boolean {
+  return existsSync("/run/systemd/system");
+}
+
 async function assertSystemdRunning(): Promise<void> {
-  if (Bun.which("systemctl") === null) throw new Error(noSystemdMessage(isWsl()));
+  if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
+  // A reachable user manager reports its state on stdout (`running`, `degraded`,
+  // …) even when it exits nonzero; no state at all means the bus connect failed.
+  // Don't parse the stderr wording — systemd 257 rephrased it.
   const result = await exec(["systemctl", "--user", "is-system-running"]);
-  if (!result.stderr.includes("Failed to connect to bus")) return;
-  if (existsSync("/run/systemd/system")) {
+  if (result.exitCode !== 0 && result.stdout.trim() === "") {
     throw new Error(userInstanceMissingMessage(isWsl(), userInfo().username));
   }
-  throw new Error(noSystemdMessage(isWsl()));
 }
 
 export async function installService(): Promise<InstallResult> {
@@ -111,11 +117,17 @@ export async function installService(): Promise<InstallResult> {
   }
 
   const username = userInfo().username;
-  const linger = await exec(["loginctl", "enable-linger", username]);
-  if (linger.exitCode !== 0) {
+  if (Bun.which("loginctl") === null) {
     notes.push(
-      `loginctl enable-linger failed (${linger.stderr.trim() || "denied"}) — without it the daemon dies with your last session; run: sudo loginctl enable-linger ${username}`,
+      `loginctl not found — without linger the daemon dies with your last session; run: sudo loginctl enable-linger ${username}`,
     );
+  } else {
+    const linger = await exec(["loginctl", "enable-linger", username]);
+    if (linger.exitCode !== 0) {
+      notes.push(
+        `loginctl enable-linger failed (${linger.stderr.trim() || "denied"}) — without it the daemon dies with your last session; run: sudo loginctl enable-linger ${username}`,
+      );
+    }
   }
 
   if (isWsl()) {
@@ -147,6 +159,7 @@ export async function installService(): Promise<InstallResult> {
 }
 
 export async function uninstallService(): Promise<readonly string[]> {
+  if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
   const notes: string[] = [];
   await exec(["systemctl", "--user", "disable", "--now", UNIT_NAME]); // ignore failure: not installed
   await rm(unitPath(), { force: true });
@@ -164,22 +177,17 @@ export async function uninstallService(): Promise<readonly string[]> {
 }
 
 export async function serviceLoaded(): Promise<boolean> {
-  if (Bun.which("systemctl") === null) return false;
+  if (!systemdRunning()) return false;
   const result = await exec(["systemctl", "--user", "is-active", UNIT_NAME]);
   return result.exitCode === 0;
 }
 
 export async function restartService(): Promise<void> {
-  if (Bun.which("systemctl") === null) throw new Error(noSystemdMessage(isWsl()));
+  if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
   const result = await exec(["systemctl", "--user", "restart", UNIT_NAME]);
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --user restart failed: ${result.stderr.trim()}`);
   }
-}
-
-export interface ServiceCheck {
-  readonly ok: boolean;
-  readonly message: string;
 }
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */
@@ -194,14 +202,21 @@ export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
     });
   }
   const username = userInfo().username;
-  const linger = await exec(["loginctl", "show-user", username, "--property=Linger"]);
-  if (linger.stdout.trim() === "Linger=yes") {
-    checks.push({ ok: true, message: "linger enabled — unit starts without a login session" });
-  } else {
+  if (Bun.which("loginctl") === null) {
     checks.push({
       ok: false,
-      message: `linger off — daemon dies with your last session: sudo loginctl enable-linger ${username}`,
+      message: "loginctl not found — can't check linger; without it the daemon dies with your last session",
     });
+  } else {
+    const linger = await exec(["loginctl", "show-user", username, "--property=Linger"]);
+    if (linger.stdout.trim() === "Linger=yes") {
+      checks.push({ ok: true, message: "linger enabled — unit starts without a login session" });
+    } else {
+      checks.push({
+        ok: false,
+        message: `linger off — daemon dies with your last session: sudo loginctl enable-linger ${username}`,
+      });
+    }
   }
   if (isWsl()) {
     const task = await exec([schtasksExe(), "/Query", "/TN", PIN_TASK_NAME]);
