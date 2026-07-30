@@ -22,6 +22,12 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - `bun run dev` in `relay/` and `pwa/` for local dev; needs a gitignored `relay/.dev.vars` with
   `BEARER_TOKEN` (see `.dev.vars.example`)
 - `bun run deploy` in `relay/` and `pwa/`; the pwa build fails without `VITE_RELAY_URL` by design
+- Before any deploy or other Cloudflare operation (both `relay/` and `pwa/` deploy via wrangler),
+  confirm auth with `bun run wrangler whoami` from inside `relay/` or `pwa/`. Wrangler is a
+  per-workspace devDependency, not on PATH and not hoisted to the root — bare `wrangler` and
+  `bun run wrangler` from the repo root both fail. Auth is global (`~/Library/Preferences/.wrangler`
+  on macOS), so either workspace answers for both. If the output doesn't name an authenticated
+  account, stop and ask the user to run `wrangler login` rather than discovering it mid-deploy.
 - Daemon CLI: `bun daemon/src/main.ts <command>` (`help` lists them)
 
 ## Testing
