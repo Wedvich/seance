@@ -26,7 +26,9 @@ export async function exec(
     // its exit code and stderr already tell that story, so a write failure
     // must degrade to a non-zero result, not throw past the caller.
     try {
-      sink.write(opts.stdin);
+      // write() returns a promise under backpressure — unawaited, its EPIPE
+      // rejection escapes this guard as an unhandled rejection.
+      await sink.write(opts.stdin);
       await sink.end();
     } catch {
       // reported via exitCode/stderr
