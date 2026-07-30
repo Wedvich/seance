@@ -96,18 +96,18 @@ token is not an asset in the same sense — see its blast radius above.
 **Séance's own footprint.** The daemon is structurally a remote access tool and
 reads as one to any EDR:
 
-| Behaviour                                            | ATT&CK                            |
-| ---------------------------------------------------- | --------------------------------- |
-| launchd agent runs `seanced`                         | T1543.001 Launch Agent            |
-| systemd user unit + Windows logon task run it on WSL | T1543.002, T1053.005              |
-| persistent outbound WSS to the relay                 | T1071.001, T1102.002              |
-| AES-256-GCM under a PSK                              | T1573.001 Symmetric Cryptography  |
-| remotely starting an interactive coding agent        | **T1219.001 IDE Tunneling**       |
-| pre-answering claude's trust dialog in its config    | T1562.001 Disable or Modify Tools |
-| `caffeinate -is` per spawn + the AC-power hold       | T1653 Power Settings              |
-| depth-2 `.git` scan of `repoRoots`                   | T1083                             |
-| tmux pane enumeration                                | T1057                             |
-| `git pull` + service kickstart as the update path    | T1195.001                         |
+| Behaviour                                                            | ATT&CK                            |
+| -------------------------------------------------------------------- | --------------------------------- |
+| launchd agent runs `seanced`                                         | T1543.001 Launch Agent            |
+| systemd user unit runs it on Linux/WSL (+ Windows logon task on WSL) | T1543.002, T1053.005 (WSL)        |
+| persistent outbound WSS to the relay                                 | T1071.001, T1102.002              |
+| AES-256-GCM under a PSK                                              | T1573.001 Symmetric Cryptography  |
+| remotely starting an interactive coding agent                        | **T1219.001 IDE Tunneling**       |
+| pre-answering claude's trust dialog in its config                    | T1562.001 Disable or Modify Tools |
+| `caffeinate -is` per spawn + the AC-power hold                       | T1653 Power Settings              |
+| depth-2 `.git` scan of `repoRoots`                                   | T1083                             |
+| tmux pane enumeration                                                | T1057                             |
+| `git pull` + service kickstart as the update path                    | T1195.001                         |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
 and JetBrains Gateway, i.e. this exact shape. Consequence: those persistence
@@ -154,8 +154,12 @@ Séance's noise is cover for a real intruder.
    storing — circular), systemd-creds (no TPM device in the WSL VM, so it
    falls back to a host key on the same disk), kernel keyring (not
    persistent across VM restart), DPAPI's optional entropy parameter (a
-   second secret with nowhere to live — the same circle). A plain Linux
-   box — neither darwin nor WSL — still has only the config field.
+   second secret with nowhere to live — the same circle). Reconsidered for
+   plain Linux (2026-07-30, adding LXC-friendly support): the rejections
+   transfer — a headless box has the same no-login-ceremony circularity for
+   secret-service, and an unprivileged container has no TPM for
+   systemd-creds — so a plain Linux box — neither darwin nor WSL — still
+   has only the config field.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
@@ -389,7 +393,7 @@ together (re-sends registry data on every poll, useless offline).
   step per machine, and every machine already runs Bun).
 - **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
   (write config skeleton + deviceId), `install`/`uninstall` (launchd plist on
-  macOS; systemd unit + linger + Windows logon task on WSL),
+  macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
   `doctor` (preflight: tmux/claude/git/roots/relay/config), `status`,
   `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
   relay, the SSH-debuggability hook.
@@ -405,8 +409,14 @@ together (re-sends registry data on every poll, useless offline).
   the state dir) as the fallback behind `loadPsk()`, with a non-empty
   config field still winning, so `psk-import` never rewrites config.json
   and a plain Linux box keeps the file path. See threat-model item 2.
-- **Lifecycle**: launchd agent on macOS. On WSL (resolved 2026-07-28 at the
-  actual machine): **systemd user unit + linger + a Windows logon task**.
+- **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
+  Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
+  logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger
+  with the WSL pieces gated behind `isWsl()` — no pin-task counterpart
+  because nothing idles an LXC container or server out, linger alone covers
+  reboots. Linux without systemd stays a manual supervisor with a clear
+  error — a service-manager abstraction for init systems nobody here runs
+  isn't worth carrying.
   The unit (`seanced.service`, `Restart=on-failure`) appends stdout/stderr
   to the same `seanced.log` path launchd redirects to
   (`StandardOutput=append:`), so the audit trail, the CLI's second writer,

@@ -12,21 +12,22 @@ awkward. Séance replaces it with a per-machine daemon that's always ready.
 
 ## Components
 
-| Component | Where it runs                                                      | What it does                                                                                 |
-| --------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `relay/`  | Cloudflare Worker + Durable Object                                 | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery) |
-| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session          |
-| `pwa/`    | Cloudflare Worker (static assets)                                  | Machine list, repo picker, spawn form, spawn verdict, read-only session list                 |
+| Component | Where it runs                                                            | What it does                                                                                 |
+| --------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery) |
+| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session          |
+| `pwa/`    | Cloudflare Worker (static assets)                                        | Machine list, repo picker, spawn form, spawn verdict, read-only session list                 |
 
 See [DESIGN.md](DESIGN.md) for the full architecture and every decision with
 its rationale.
 
 ## Status
 
-Daemon (`seanced`) implemented for macOS and WSL: relay client with encrypted
-op dispatch, repo scanning, tmux spawning, service install (launchd / systemd
-user unit + Windows logon task), a platform PSK store (login keychain / DPAPI
-blob), and a CLI
+Daemon (`seanced`) implemented for macOS, Linux (systemd), and WSL: relay
+client with encrypted op dispatch, repo scanning, tmux spawning, service
+install (launchd / systemd user unit, plus a Windows logon task on WSL), a
+platform PSK store (macOS login keychain / WSL DPAPI blob; plain Linux keeps
+the PSK in `config.json`), and a CLI
 (`init` / `install` / `doctor` / `status` / `scan` / `sessions` / `spawn`).
 
 Relay implemented: Worker + hibernating Durable Object with path-based roles,
@@ -56,11 +57,13 @@ anything exists, and the only other shared value (the relay URL) is _produced_
 by step 2 and consumed by steps 3 and 4.
 
 Prerequisites: [Bun](https://bun.sh), a Cloudflare account, and this repo
-cloned with `bun install` run at the root. Each daemon machine (macOS or WSL)
-additionally needs `tmux`, `git`, and `claude` on PATH. A WSL machine also
-needs `systemd=true` under `[boot]` in `/etc/wsl.conf` — flipping it takes a
-`wsl.exe --shutdown`, which kills every session on the box, so do it before
-anything else.
+cloned with `bun install` run at the root. Each daemon machine (macOS, Linux,
+or WSL) additionally needs `tmux`, `git`, and `claude` on PATH. Linux machines
+need systemd for `seanced install` — a standard Debian/Ubuntu box, VM, or LXC
+container (unprivileged is fine) qualifies; without systemd, run `seanced`
+under your own supervisor. A WSL machine also needs `systemd=true` under
+`[boot]` in `/etc/wsl.conf` — flipping it takes a `wsl.exe --shutdown`, which
+kills every session on the box, so do it before anything else.
 
 ### 1. Mint the shared secrets
 
@@ -110,7 +113,7 @@ applies again.
 
 ### 4. Install seanced on each machine
 
-Distribution is the git checkout itself: the launchd agent runs
+Distribution is the git checkout itself: the service runs
 `bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. Run
 the CLI the same way from the checkout root (`alias seanced='bun
 <checkout>/daemon/src/main.ts'` if you like).
@@ -136,8 +139,12 @@ app's refresh, picks it up; only `repoRoots` itself is sticky.
 ```sh
 bun daemon/src/main.ts doctor    # preflight: config, tmux/git/claude, relay reachability
 bun daemon/src/main.ts install   # macOS: launchd agent (RunAtLoad + KeepAlive)
-                                 # WSL: systemd user unit + linger + a Windows logon task
+                                 # Linux/WSL: systemd user unit + linger (+ a Windows logon task on WSL)
 ```
+
+On a fresh headless Linux box the systemd user instance may not exist until
+linger is enabled — if `install`'s preflight says so, run
+`sudo loginctl enable-linger <user>` once and re-run it.
 
 On WSL, `install` also registers a `SeanceWslPin` scheduled task via
 `schtasks.exe` — it starts the distro at Windows logon and pins the VM so the
@@ -155,7 +162,9 @@ the app; there is no pairing step.
 On macOS and WSL the PSK belongs in the platform store, not `config.json`:
 the login keychain on macOS, a DPAPI (CurrentUser) blob under
 `~/.local/state/seance/` on WSL — either way decryptable only in your own
-user context, so a filesystem sweep gets ciphertext. Run `seanced psk-import`
+user context, so a filesystem sweep gets ciphertext. (Plain Linux has no such
+store — there the PSK stays in `config.json`, which `init` creates 0600, and
+`psk-import` exits with an explanation.) Run `seanced psk-import`
 bare and it prompts on the terminal (no echo), or pipe it straight from
 1Password — the key never lands in argv or shell history:
 
