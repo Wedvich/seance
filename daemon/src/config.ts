@@ -1,7 +1,10 @@
+import { watch } from "node:fs";
+import { dirname } from "node:path";
 import { fromBase64 } from "@seance/shared";
 import { readDpapiPsk } from "./dpapi.ts";
 import { fingerprint } from "./hash.ts";
 import { readKeychainPsk } from "./keychain.ts";
+import { log } from "./log.ts";
 import { configPath, expandTilde } from "./paths.ts";
 import { readTpmPsk } from "./tpmcreds.ts";
 
@@ -168,4 +171,40 @@ export function bearerTokenWarnings(token: string): readonly string[] {
     warnings.push(`bearerToken is only ${token.length} characters — use at least ${MIN_BEARER_LENGTH}`);
   }
   return warnings;
+}
+
+/** Editors and shell redirects both burst several fs events per save; one reload is enough. */
+const WATCH_DEBOUNCE_MS = 250;
+
+/**
+ * Watches the config's *directory*, not the file: a tool that writes
+ * temp-plus-rename replaces the inode, which a file-level watch stops
+ * following after the first save. Unfiltered on purpose — Bun's `fs.watch`
+ * reports that rename under the *temp* file's name, on macOS and Linux both,
+ * so filtering by filename would miss the case the directory watch exists for.
+ * Neighbours in `~/.config/seance` are rare and the caller re-reads and
+ * compares anyway. Watcher errors are logged, not thrown — a daemon that can
+ * no longer see edits must still relay.
+ */
+export function watchConfigFile(
+  onChange: () => void,
+  path: string = configPath(),
+  debounceMs: number = WATCH_DEBOUNCE_MS,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let watcher: ReturnType<typeof watch>;
+  try {
+    watcher = watch(dirname(path), () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(onChange, debounceMs);
+    });
+  } catch (err) {
+    log.warn(`cannot watch ${path} for changes (${err instanceof Error ? err.message : String(err)})`);
+    return (): void => {};
+  }
+  watcher.on("error", (err: Error) => log.warn(`config watch error: ${err.message}`));
+  return (): void => {
+    if (timer !== null) clearTimeout(timer);
+    watcher.close();
+  };
 }

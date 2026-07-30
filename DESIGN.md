@@ -422,6 +422,27 @@ together (re-sends registry data on every poll, useless offline).
   `loadPsk()`, with a non-empty config field still winning, so `psk-import`
   never rewrites config.json and a TPM-less Linux box keeps the file path.
   See threat-model item 2.
+- **Config hot reload** (added 2026-07-30): the daemon _watches_ config.json and
+  reloads on change — still never writes it, so the invariant above is intact.
+  Two cases motivated it: editing config on a machine you are only reachable on
+  through the app, and letting a Claude Code session on the box adjust it; both
+  otherwise need a shell to run `seanced restart`. Reload rebuilds the whole
+  `startDaemon` handle (key import, backend, relay client) rather than diffing
+  fields into the live objects — every field is read exactly once, at start, and
+  a full swap keeps it that way; the cost is one reconnect, which a changed
+  relayUrl/bearerToken/psk forces regardless. tmux sessions live outside the
+  process, so nothing spawned is disturbed. The new config is validated
+  (`loadConfig` + `loadPsk` + `runnableProblems`) _before_ the running daemon is
+  stopped: a broken hand edit logs and is ignored, because a typo must not take
+  the machine offline until someone notices. Watching is directory-level and
+  unfiltered — Bun's `fs.watch` reports an atomic replace under the temp file's
+  name on both macOS and Linux, so filename filtering would miss exactly the
+  write pattern editors use; a deep-equal against the running config absorbs
+  the extra wakeups and keeps identical rewrites from churning the connection.
+  Rejected: re-exec or `systemctl restart` on change (loses the
+  keep-running-on-a-bad-edit property and burns the supervisor's restart
+  budget), and per-field reload (four call sites to keep in sync with every
+  future config field).
 - **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
   Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
   logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger
