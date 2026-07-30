@@ -23,6 +23,7 @@ import {
   servicePath,
   uninstallService,
 } from "./service.ts";
+import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
 import { scanRepos } from "./scan.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
@@ -228,8 +229,8 @@ export async function cmdDoctor(): Promise<void> {
         // Printed on every device so a mismatched paste is one glance away,
         // rather than surfacing later as "nothing decrypts".
         ok(`psk from ${resolved.source}, fingerprint ${await pskFingerprint(resolved.psk)} — same on every device`);
-        if (resolved.source === "config" && (process.platform === "darwin" || isWsl())) {
-          const store = process.platform === "darwin" ? "the keychain" : "a DPAPI blob";
+        if (resolved.source === "config" && (process.platform === "darwin" || isWsl() || (await tpmAvailable()))) {
+          const store = process.platform === "darwin" ? "the keychain" : isWsl() ? "a DPAPI blob" : "a TPM-sealed blob";
           warn(
             `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store}`,
           );
@@ -301,6 +302,28 @@ export async function cmdDoctor(): Promise<void> {
     const interop = await dpapiRoundTrip();
     if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
     else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
+  } else if (await tpmAvailable()) {
+    // Same shape as the WSL interop probe: a broken TPM path warns here,
+    // and FAILs above only when the PSK actually lives in the blob.
+    if (await Bun.file(tpmPskPath()).exists()) {
+      if ((await readTpmPsk()) !== null) ok("TPM-sealed PSK blob decrypts via systemd-creds");
+      else
+        warn(
+          `sealed blob at ${tpmPskPath()} does not decrypt here — blobs are machine-bound by design; re-run \`seanced psk-import\` on this machine`,
+        );
+    } else {
+      const probe = await tpmRoundTrip();
+      if (probe === null) ok("TPM seal/unseal via systemd-creds (no PSK blob yet — `seanced psk-import` creates it)");
+      else warn(`${probe} — psk-import and a TPM-sealed PSK won't work`);
+    }
+  } else if (process.platform === "linux") {
+    if (await Bun.file(tpmPskPath()).exists()) {
+      warn(
+        `sealed PSK blob at ${tpmPskPath()} but no usable TPM here — machine-bound by design; re-run \`seanced psk-import\` on this machine`,
+      );
+    } else {
+      ok("no usable TPM — psk stays in config.json");
+    }
   }
 
   if (failed) process.exit(1);
@@ -406,13 +429,20 @@ async function cmdPskImportMacos(): Promise<void> {
 }
 
 /**
- * WSL counterpart. DPAPI has no prompt of its own, so unlike macOS the key
- * passes through this process on both paths — tty read or pipe — before
- * crossing to powershell as stdin data (never argv, never script text).
+ * Shared flow for the promptless blob stores (DPAPI on WSL, TPM-sealed
+ * systemd-creds on plain Linux). Neither tool has a prompt of its own, so
+ * unlike macOS the key passes through this process on both paths — tty read
+ * or pipe — before crossing to the store as stdin data (never argv).
  * Validated up front on both paths for the same clobber reason as above.
  */
-async function cmdPskImportWsl(): Promise<void> {
-  console.log(`storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`);
+async function cmdPskImportBlob(store: {
+  readonly intro: string;
+  readonly importValue: (psk: string) => Promise<void>;
+  readonly readBack: () => Promise<string | null>;
+  readonly readBackHint: string;
+  readonly clearHint: string;
+}): Promise<void> {
+  console.log(store.intro);
   let psk: string;
   if (process.stdin.isTTY) {
     console.log("paste the base64 value (it will not echo):");
@@ -425,20 +455,43 @@ async function cmdPskImportWsl(): Promise<void> {
     console.error(`value ${problem} — nothing stored`);
     process.exit(1);
   }
-  await importDpapiPskValue(psk);
+  await store.importValue(psk);
 
-  const stored = await readDpapiPsk();
+  const stored = await store.readBack();
   if (stored !== psk) {
-    console.error("\nstored, but reading it back failed — check powershell.exe interop (`seanced doctor`)");
+    console.error(`\nstored, but reading it back failed — ${store.readBackHint}`);
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads the DPAPI blob, then \`seanced restart\``);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seanced restart\``);
+}
+
+function cmdPskImportWsl(): Promise<void> {
+  return cmdPskImportBlob({
+    intro: `storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`,
+    importValue: importDpapiPskValue,
+    readBack: readDpapiPsk,
+    readBackHint: "check powershell.exe interop (`seanced doctor`)",
+    clearHint: "the DPAPI blob",
+  });
+}
+
+function cmdPskImportTpm(): Promise<void> {
+  return cmdPskImportBlob({
+    intro: `storing the PSK as a TPM2-sealed systemd-creds blob at ${tpmPskPath()}.`,
+    importValue: importTpmPskValue,
+    readBack: readTpmPsk,
+    readBackHint: "check the TPM device (`seanced doctor`)",
+    clearHint: "the sealed blob",
+  });
 }
 
 export async function cmdPskImport(): Promise<void> {
   if (process.platform === "darwin") return cmdPskImportMacos();
   if (isWsl()) return cmdPskImportWsl();
-  console.error("no platform key store here — keep the psk in config.json on plain Linux");
-  process.exit(1);
+  if (process.platform === "linux" && (await tpmAvailable())) return cmdPskImportTpm();
+  console.error(`no platform key store here (no usable TPM) — the psk stays in ${configPath()}, keep it mode 0600`);
+  // A piped value is an explicit request to store a secret, so losing it must
+  // not look like success; an interactive invocation has read nothing yet.
+  process.exit(process.stdin.isTTY ? 0 : 1);
 }

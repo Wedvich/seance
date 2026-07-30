@@ -159,7 +159,19 @@ Séance's noise is cover for a real intruder.
    transfer — a headless box has the same no-login-ceremony circularity for
    secret-service, and an unprivileged container has no TPM for
    systemd-creds — so a plain Linux box — neither darwin nor WSL — still
-   has only the config field.
+   has only the config field. Revised once more (2026-07-30, same day) for
+   boxes that do have a TPM: where `/dev/tpmrm0` exists — bare metal, or a
+   Proxmox LXC with the device passed through — `systemd-creds encrypt
+--with-key=tpm2` seals the PSK at `~/.local/state/seance/psk.cred`,
+   behind the same `loadPsk()` and the same `seanced psk-import`. Sealed to
+   the TPM alone, deliberately no PCR binding: a PCR-bound blob dies on the
+   next firmware update, and the threat here is at-rest exfiltration
+   (container backups, ZFS snapshots, stolen disks), not a tampered boot
+   chain. Machine-bound by design — a blob restored from backup onto other
+   hardware fails closed (daemon reports no psk, doctor names the cause).
+   Like DPAPI it does not subtract the user's own session: any process
+   running as the user on the same machine can drive the same unseal. Linux
+   without a usable TPM keeps only the config field, as decided above.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
@@ -406,9 +418,10 @@ together (re-sends registry data on every poll, useless offline).
   the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
   rejected here as having no clean WSL counterpart; both halves of that are
   now revised — each platform has a store (login keychain / DPAPI blob in
-  the state dir) as the fallback behind `loadPsk()`, with a non-empty
-  config field still winning, so `psk-import` never rewrites config.json
-  and a plain Linux box keeps the file path. See threat-model item 2.
+  the state dir / TPM-sealed systemd-creds blob) as the fallback behind
+  `loadPsk()`, with a non-empty config field still winning, so `psk-import`
+  never rewrites config.json and a TPM-less Linux box keeps the file path.
+  See threat-model item 2.
 - **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
   Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
   logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger
@@ -767,3 +780,11 @@ CSP items landed with the app (see the PWA section).
   `/usr/bin/security`, so the entry recorded on create should be the one
   presented on read, but confirming the launchd agent is never prompted needs
   one real `psk-import` + `restart` on a machine.
+- The TPM path is likewise unverified from CI (no TPM in test runners). Needs
+  one real `psk-import` + `restart` on a TPM machine: the non-root
+  `systemd-creds encrypt/decrypt --with-key=tpm2` invocation (if plain-user
+  decrypt is refused, add `--user` — systemd ≥ 254 — and pin the version in
+  the availability probe), `has-tpm2` semantics inside an LXC guest (it may
+  report partial support when /sys firmware info is masked even though
+  sealing works — the probe requires exit 0 today), and the passthrough
+  uid/gid mapping for an unprivileged container.

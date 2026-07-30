@@ -3,12 +3,13 @@ import { readDpapiPsk } from "./dpapi.ts";
 import { fingerprint } from "./hash.ts";
 import { readKeychainPsk } from "./keychain.ts";
 import { configPath, expandTilde } from "./paths.ts";
+import { readTpmPsk } from "./tpmcreds.ts";
 
 export interface Config {
   readonly name: string;
   readonly relayUrl: string;
   readonly bearerToken: string;
-  /** Empty is legitimate on macOS and WSL: `loadPsk` then reads the platform store. */
+  /** Empty is legitimate on macOS, WSL, and Linux with a TPM: `loadPsk` then reads the platform store. */
   readonly psk: string;
   /** Tilde-expanded parent roots scanned for repos at depth 2. */
   readonly repoRoots: readonly string[];
@@ -66,7 +67,7 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   };
 }
 
-export type PskSource = "config" | "keychain" | "dpapi";
+export type PskSource = "config" | "keychain" | "dpapi" | "tpm";
 
 export interface ResolvedPsk {
   readonly psk: string;
@@ -74,22 +75,26 @@ export interface ResolvedPsk {
 }
 
 /**
- * The config field wins, so a plain Linux box keeps one code path; an empty
- * field falls back to the platform store — macOS login keychain or WSL DPAPI
- * blob, each self-gated on its platform. Null when nothing holds it, which
- * `runnableProblems` reports rather than throwing. `keychainService` and
- * `dpapiPath` exist so tests can point at a name/path that cannot exist.
+ * The config field wins, so every box keeps one code path; an empty field
+ * falls back to the platform store — macOS login keychain, WSL DPAPI blob, or
+ * Linux TPM-sealed blob, each self-gated on its platform. Null when nothing
+ * holds it, which `runnableProblems` reports rather than throwing.
+ * `keychainService`, `dpapiPath`, and `tpmPath` exist so tests can point at a
+ * name/path that cannot exist.
  */
 export async function loadPsk(
   config: Config,
   keychainService?: string,
   dpapiPath?: string,
+  tpmPath?: string,
 ): Promise<ResolvedPsk | null> {
   if (config.psk !== "") return { psk: config.psk, source: "config" };
   const keychain = await readKeychainPsk(keychainService);
   if (keychain !== null) return { psk: keychain, source: "keychain" };
   const dpapi = await readDpapiPsk(dpapiPath);
-  return dpapi === null ? null : { psk: dpapi, source: "dpapi" };
+  if (dpapi !== null) return { psk: dpapi, source: "dpapi" };
+  const tpm = await readTpmPsk(tpmPath);
+  return tpm === null ? null : { psk: tpm, source: "tpm" };
 }
 
 /**

@@ -1,5 +1,6 @@
-import { chmod, mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { exec, type ExecResult, execFailure } from "./exec.ts";
 import { stateDir } from "./paths.ts";
 import { isWsl, powershellExe } from "./wsl.ts";
 
@@ -22,29 +23,11 @@ const UNPROTECT_SCRIPT =
   "$c = [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); " +
   "[Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($c, $null, 'CurrentUser')))";
 
-interface PowershellResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-/** Not exec(): that pins stdin to "ignore", and stdin is the whole point here. */
-async function runPowershell(script: string, stdinData: string, timeoutMs = 15_000): Promise<PowershellResult> {
-  const proc = Bun.spawn([powershellExe(), "-NoProfile", "-NonInteractive", "-Command", script], {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
+function runPowershell(script: string, stdinData: string): Promise<ExecResult> {
+  return exec([powershellExe(), "-NoProfile", "-NonInteractive", "-Command", script], {
+    stdin: stdinData,
+    timeoutMs: 15_000,
   });
-  proc.stdin.write(stdinData);
-  await proc.stdin.end();
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  clearTimeout(timer);
-  return { exitCode, stdout, stderr };
 }
 
 /**
@@ -74,11 +57,11 @@ export async function importDpapiPskValue(psk: string, path: string = dpapiPskPa
   const result = await runPowershell(PROTECT_SCRIPT, psk);
   const blob = result.stdout.trim();
   if (result.exitCode !== 0 || blob === "") {
-    throw new Error(`DPAPI encrypt failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+    throw new Error(`DPAPI encrypt failed (${execFailure(result)})`);
   }
   await mkdir(dirname(path), { recursive: true });
-  await Bun.write(path, `${blob}\n`);
-  await chmod(path, 0o600);
+  // Created 0600 outright — write-then-chmod would leave a umask-mode window.
+  await writeFile(path, `${blob}\n`, { mode: 0o600 });
 }
 
 /**
@@ -90,8 +73,8 @@ export async function importDpapiPskValue(psk: string, path: string = dpapiPskPa
 export async function dpapiRoundTrip(): Promise<string | null> {
   const probe = "seance-doctor-probe";
   const enc = await runPowershell(PROTECT_SCRIPT, probe);
-  if (enc.exitCode !== 0) return `DPAPI encrypt failed: ${enc.stderr.trim()}`;
+  if (enc.exitCode !== 0) return `DPAPI encrypt failed: ${execFailure(enc)}`;
   const dec = await runPowershell(UNPROTECT_SCRIPT, enc.stdout.trim());
-  if (dec.exitCode !== 0) return `DPAPI decrypt failed: ${dec.stderr.trim()}`;
+  if (dec.exitCode !== 0) return `DPAPI decrypt failed: ${execFailure(dec)}`;
   return dec.stdout.trim() === probe ? null : "DPAPI round-trip returned a different value";
 }

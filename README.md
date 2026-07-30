@@ -26,8 +26,8 @@ its rationale.
 Daemon (`seanced`) implemented for macOS, Linux (systemd), and WSL: relay
 client with encrypted op dispatch, repo scanning, tmux spawning, service
 install (launchd / systemd user unit, plus a Windows logon task on WSL), a
-platform PSK store (macOS login keychain / WSL DPAPI blob; plain Linux keeps
-the PSK in `config.json`), and a CLI
+platform PSK store (macOS login keychain / WSL DPAPI blob / TPM-sealed blob
+on Linux with a TPM 2.0; TPM-less Linux keeps the PSK in `config.json`), and a CLI
 (`init` / `install` / `doctor` / `status` / `scan` / `sessions` / `spawn`).
 
 Relay implemented: Worker + hibernating Durable Object with path-based roles,
@@ -129,7 +129,8 @@ Edit `~/.config/seance/config.json`:
   in `/daemon`)
 - `bearerToken` — from step 1
 - `psk` — from step 1, or leave empty and run `seanced psk-import` to keep it
-  in the platform store instead (macOS login keychain / WSL DPAPI blob)
+  in the platform store instead (macOS login keychain / WSL DPAPI blob / Linux
+  TPM-sealed blob)
 - `repoRoots` — directories to scan for repos
 
 Config is read once at startup, so `seanced restart` after any edit here. A repo
@@ -159,20 +160,40 @@ the app; there is no pairing step.
 
 #### Storing the PSK
 
-On macOS and WSL the PSK belongs in the platform store, not `config.json`:
-the login keychain on macOS, a DPAPI (CurrentUser) blob under
-`~/.local/state/seance/` on WSL — either way decryptable only in your own
-user context, so a filesystem sweep gets ciphertext. (Plain Linux has no such
+The PSK belongs in the platform store, not `config.json`: the login keychain
+on macOS, a DPAPI (CurrentUser) blob under `~/.local/state/seance/` on WSL,
+and on Linux with a TPM 2.0 a `systemd-creds` blob sealed to the TPM at
+`~/.local/state/seance/psk.cred` — in every case a filesystem sweep, backup,
+or stolen disk gets ciphertext. (Linux without a usable TPM has no such
 store — there the PSK stays in `config.json`, which `init` creates 0600, and
-`psk-import` exits with an explanation.) Run `seanced psk-import`
-bare and it prompts on the terminal (no echo), or pipe it straight from
-1Password — the key never lands in argv or shell history:
+`psk-import` says so and stores nothing.) Run `seanced psk-import` bare and
+it prompts on the terminal (no echo), or pipe it straight from 1Password —
+the key never lands in argv or shell history:
 
 ```sh
 op item get Séance --fields password --reveal --account my | seanced psk-import
 ```
 
 Then clear `psk` in `config.json` and `seanced restart`.
+
+The Linux path needs `/dev/tpmrm0` and `systemd-creds` on PATH (systemd
+≥ 250 — Debian 12+/Ubuntu 24.04+). The blob is sealed to the TPM alone, with
+no PCR binding, so firmware updates don't invalidate it — but it is
+machine-bound by design: restore a container backup or copy the blob to other
+hardware and it will not decrypt. The daemon fails closed with "no psk" and
+`doctor` explains why; re-run `psk-import` on the new machine. This protects
+the key at rest (container backups, ZFS snapshots, stolen disks) — not
+against root on the host or other processes running as your user.
+
+In a Proxmox LXC container, pass the TPM through once on the host:
+
+```sh
+pct set <ctid> --dev0 path=/dev/tpmrm0,uid=<uid>,gid=<gid>,mode=0660
+```
+
+In an unprivileged container, `uid=`/`gid=` are the container-side ids the
+device maps to — set them to the daemon's user so it can open the device; the
+daemon never needs root.
 
 ### 5. Set up the phone
 
