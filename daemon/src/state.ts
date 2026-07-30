@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { log } from "./log.ts";
@@ -41,9 +41,36 @@ export async function loadOrInitState(path: string = statePath()): Promise<State
   return state;
 }
 
-export async function saveState(state: State, path: string = statePath()): Promise<void> {
+let tempSeq = 0;
+
+/**
+ * Temp-plus-rename, because state.json is read while a writer is mid-flight:
+ * config hot reload restarts `startDaemon` in-process, so `loadOrInitState`
+ * can land while the outgoing daemon's background rescan is still writing. An
+ * in-place `Bun.write` truncates first, and a reader that catches the gap sees
+ * a partial file — indistinguishable from corruption, so `loadOrInitState`
+ * mints a new deviceId and the machine re-registers as a stranger.
+ *
+ * The tear needs a payload big enough to split across write syscalls (measured
+ * at roughly half a megabyte on macOS, a few thousand repos), which is why
+ * `writeRuntime` below stays a plain write.
+ */
+async function saveStateAtomic(path: string, state: State): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await Bun.write(path, `${JSON.stringify(state, null, 2)}\n`);
+  // Per call, not per process: overlapping writers would otherwise share a temp
+  // name, and the loser would rename a file the winner already moved.
+  const temp = `${path}.${process.pid}.${tempSeq++}.tmp`;
+  try {
+    await Bun.write(temp, `${JSON.stringify(state, null, 2)}\n`);
+    await rename(temp, path);
+  } catch (err) {
+    await unlink(temp).catch(() => {});
+    throw err;
+  }
+}
+
+export async function saveState(state: State, path: string = statePath()): Promise<void> {
+  await saveStateAtomic(path, state);
 }
 
 /** Written by the running daemon; read by `seanced status`. */
@@ -54,6 +81,7 @@ export interface Runtime {
   readonly connectedSince: number | null;
 }
 
+/** Fixed-size and well under one write syscall, so an in-place write cannot be read torn. */
 export async function writeRuntime(runtime: Runtime, path: string = runtimePath()): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await Bun.write(path, `${JSON.stringify(runtime, null, 2)}\n`);

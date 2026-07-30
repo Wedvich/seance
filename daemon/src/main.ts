@@ -13,7 +13,7 @@ import {
 } from "./cli.ts";
 import { log } from "./log.ts";
 import { startPowerLoop } from "./power.ts";
-import { startDaemon } from "./run.ts";
+import { startSupervisor } from "./supervise.ts";
 
 const USAGE = `seanced — séance daemon
 
@@ -34,7 +34,7 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
-  const daemon = await startDaemon();
+  const daemon = await startSupervisor();
   const stopPower = startPowerLoop();
   const shutdown = (signal: string): void => {
     log.info(`${signal} — shutting down`);

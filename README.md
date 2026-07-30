@@ -133,9 +133,12 @@ Edit `~/.config/seance/config.json`:
   TPM-sealed blob)
 - `repoRoots` — directories to scan for repos
 
-Config is read once at startup, so `seanced restart` after any edit here. A repo
-added _inside_ an existing root needs no restart — the hourly rescan, or the
-app's refresh, picks it up; only `repoRoots` itself is sticky.
+A running daemon watches this file and reloads within a second of a save, so
+edits need no restart — including ones made by a Claude Code session on the
+box. A bad edit is refused with the reason in the log and the previous config
+keeps running, so the machine never drops offline over a typo. Only a code
+change still needs `seanced restart`. A repo added _inside_ an existing root
+needs nothing at all — the hourly rescan, or the app's refresh, picks it up.
 
 ```sh
 bun daemon/src/main.ts doctor    # preflight: config, tmux/git/claude, relay reachability
@@ -174,7 +177,8 @@ the key never lands in argv or shell history:
 op item get Séance --fields password --reveal --account my | seanced psk-import
 ```
 
-Then clear `psk` in `config.json` and `seanced restart`.
+Then clear `psk` in `config.json`; the daemon reloads and logs the fingerprint
+it came up with, so you can see which store answered.
 
 The Linux path needs `/dev/tpmrm0` and `systemd-creds` on PATH (systemd
 ≥ 250 — Debian 12+/Ubuntu 24.04+). The blob is sealed to the TPM alone, with

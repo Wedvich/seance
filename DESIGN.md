@@ -422,6 +422,44 @@ together (re-sends registry data on every poll, useless offline).
   `loadPsk()`, with a non-empty config field still winning, so `psk-import`
   never rewrites config.json and a TPM-less Linux box keeps the file path.
   See threat-model item 2.
+- **Config hot reload** (added 2026-07-30): the daemon _watches_ config.json and
+  reloads on change — still never writes it, so the invariant above is intact.
+  Two cases motivated it: editing config on a machine you are only reachable on
+  through the app, and letting a Claude Code session on the box adjust it; both
+  otherwise need a shell to run `seanced restart`. Reload rebuilds the whole
+  `startDaemon` handle (key import, backend, relay client) rather than diffing
+  fields into the live objects — every field is read exactly once, at start, and
+  a full swap keeps it that way; the cost is one reconnect, which a changed
+  relayUrl/bearerToken/psk forces regardless. tmux sessions live outside the
+  process, so nothing spawned is disturbed. The new config is validated
+  (`loadConfig` + `loadPsk` + `runnableProblems`) _before_ the running daemon is
+  stopped: a broken hand edit logs and is ignored, because a typo must not take
+  the machine offline until someone notices. Watching is directory-level and
+  unfiltered — Bun's `fs.watch` reports an atomic replace under the temp file's
+  name on both macOS and Linux, so filename filtering would miss exactly the
+  write pattern editors use; a deep-equal against the running config absorbs
+  the extra wakeups and keeps identical rewrites from churning the connection —
+  except while nothing is running, when the guard yields, because reverting a
+  bad edit rewrites bytes the supervisor already holds and that is precisely
+  the edit that has to be allowed to restart. Validation only covers what a
+  config can be blamed for; `startDaemon` can still throw on something else (an
+  unreadable state dir), so a failed swap rolls back onto the old config and
+  the key it had already imported, rather than re-reading a store that may be
+  half-rotated. If the rollback fails too the daemon is down, and every later
+  save is a fresh attempt to come back — the swap's outcome is what decides
+  whether "reloaded as …" is logged at all, since a rollback readopts a config
+  that was already running. The watcher re-arms itself: the runtime closes it
+  after an `error` event, so an inotify limit or a wholesale directory replace
+  would otherwise end hot reload for the life of the process while the README
+  promises the opposite. Restarting `startDaemon` in-process is also what makes
+  state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
+  background rescan can be writing while the incoming one reads, and a torn
+  read is indistinguishable from corruption, which mints a new deviceId and
+  re-registers the machine as a stranger. runtime.json stays an in-place write:
+  it is fixed-size and cannot tear. Rejected: re-exec or `systemctl restart` on
+  change (loses the keep-running-on-a-bad-edit property and burns the
+  supervisor's restart budget), and per-field reload (four call sites to keep
+  in sync with every future config field).
 - **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
   Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
   logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger
