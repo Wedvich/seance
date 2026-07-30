@@ -176,6 +176,9 @@ export function bearerTokenWarnings(token: string): readonly string[] {
 /** Editors and shell redirects both burst several fs events per save; one reload is enough. */
 const WATCH_DEBOUNCE_MS = 250;
 
+/** How long to wait before re-arming a watch that errored or could not be established. */
+const WATCH_RETRY_MS = 5_000;
+
 /**
  * Watches the config's *directory*, not the file: a tool that writes
  * temp-plus-rename replaces the inode, which a file-level watch stops
@@ -184,27 +187,64 @@ const WATCH_DEBOUNCE_MS = 250;
  * so filtering by filename would miss the case the directory watch exists for.
  * Neighbours in `~/.config/seance` are rare and the caller re-reads and
  * compares anyway. Watcher errors are logged, not thrown — a daemon that can
- * no longer see edits must still relay.
+ * no longer see edits must still relay — but they are also retried: the runtime
+ * closes the watcher after an `error` event, so hitting an inotify limit or
+ * having the directory replaced wholesale would otherwise end hot reload for
+ * the rest of the process while the README still promises it. Repeat failures
+ * log once per outage, not once per retry.
  */
 export function watchConfigFile(
   onChange: () => void,
   path: string = configPath(),
   debounceMs: number = WATCH_DEBOUNCE_MS,
+  retryMs: number = WATCH_RETRY_MS,
 ): () => void {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let watcher: ReturnType<typeof watch>;
-  try {
-    watcher = watch(dirname(path), () => {
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(onChange, debounceMs);
+  let debounce: ReturnType<typeof setTimeout> | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let watcher: ReturnType<typeof watch> | null = null;
+  let closed = false;
+  let degraded = false;
+
+  const scheduleRetry = (reason: string): void => {
+    if (closed) return;
+    watcher = null;
+    if (!degraded) {
+      degraded = true;
+      log.error(
+        `cannot watch ${path} for changes (${reason}) — config hot reload is off; retrying every ${retryMs / 1000}s`,
+      );
+    }
+    retry = setTimeout(arm, retryMs);
+  };
+
+  function arm(): void {
+    if (closed) return;
+    retry = null;
+    try {
+      watcher = watch(dirname(path), () => {
+        if (debounce !== null) clearTimeout(debounce);
+        debounce = setTimeout(onChange, debounceMs);
+      });
+    } catch (err) {
+      scheduleRetry(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    watcher.on("error", (err: Error) => {
+      watcher?.close();
+      scheduleRetry(err.message);
     });
-  } catch (err) {
-    log.warn(`cannot watch ${path} for changes (${err instanceof Error ? err.message : String(err)})`);
-    return (): void => {};
+    if (degraded) {
+      degraded = false;
+      log.info(`watching ${path} for changes again`);
+    }
   }
-  watcher.on("error", (err: Error) => log.warn(`config watch error: ${err.message}`));
+
+  arm();
+
   return (): void => {
-    if (timer !== null) clearTimeout(timer);
-    watcher.close();
+    closed = true;
+    if (debounce !== null) clearTimeout(debounce);
+    if (retry !== null) clearTimeout(retry);
+    watcher?.close();
   };
 }

@@ -136,13 +136,13 @@ describe("config hot reload", () => {
     await Bun.write(path, "{ this is not json");
     await settle();
     expect(relay.connectionCount()).toBe(connectionsBefore);
-    expect(supervisor?.current().client.connected).toBe(true);
+    expect((await supervisor!.current()).client.connected).toBe(true);
 
     // An unrunnable but parseable config is refused the same way.
     await Bun.write(path, `${JSON.stringify({ ...validShape(relay.url), relayUrl: "http://nope" }, null, 2)}\n`);
     await settle();
     expect(relay.connectionCount()).toBe(connectionsBefore);
-    expect(supervisor?.current().client.connected).toBe(true);
+    expect((await supervisor!.current()).client.connected).toBe(true);
 
     await writeConfig(path, "Fixed", relay.url);
     await registerAs(relay, "Fixed");

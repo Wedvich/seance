@@ -1,7 +1,7 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
-import { loadConfig, loadPsk, runnableProblems, type Config } from "./config.ts";
+import { loadConfig, loadPsk, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
 import { createHandler } from "./handlers.ts";
 import { log } from "./log.ts";
 import { RelayClient } from "./relay-client.ts";
@@ -23,12 +23,19 @@ export interface RunOpts {
   /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
   readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
+  /**
+   * A psk the caller already resolved, to skip re-reading the platform store.
+   * The supervisor passes it so a reload spawns one `security`/DPAPI read
+   * instead of three, and so a rollback restores the exact key the running
+   * daemon imported rather than whatever the store holds mid-failure.
+   */
+  readonly resolvedPsk?: ResolvedPsk;
 }
 
 /** Wires config/state/scan/handlers into a running relay client. */
 export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const config = opts.config ?? (await loadConfig());
-  const resolved = await loadPsk(config);
+  const resolved = opts.resolvedPsk ?? (await loadPsk(config));
   const problems = runnableProblems(config, resolved?.psk ?? null);
   // `resolved === null` is already in `problems`; naming it here narrows the
   // type so the import below needs no assertion.

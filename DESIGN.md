@@ -438,11 +438,28 @@ together (re-sends registry data on every poll, useless offline).
   unfiltered — Bun's `fs.watch` reports an atomic replace under the temp file's
   name on both macOS and Linux, so filename filtering would miss exactly the
   write pattern editors use; a deep-equal against the running config absorbs
-  the extra wakeups and keeps identical rewrites from churning the connection.
-  Rejected: re-exec or `systemctl restart` on change (loses the
-  keep-running-on-a-bad-edit property and burns the supervisor's restart
-  budget), and per-field reload (four call sites to keep in sync with every
-  future config field).
+  the extra wakeups and keeps identical rewrites from churning the connection —
+  except while nothing is running, when the guard yields, because reverting a
+  bad edit rewrites bytes the supervisor already holds and that is precisely
+  the edit that has to be allowed to restart. Validation only covers what a
+  config can be blamed for; `startDaemon` can still throw on something else (an
+  unreadable state dir), so a failed swap rolls back onto the old config and
+  the key it had already imported, rather than re-reading a store that may be
+  half-rotated. If the rollback fails too the daemon is down, and every later
+  save is a fresh attempt to come back — the swap's outcome is what decides
+  whether "reloaded as …" is logged at all, since a rollback readopts a config
+  that was already running. The watcher re-arms itself: the runtime closes it
+  after an `error` event, so an inotify limit or a wholesale directory replace
+  would otherwise end hot reload for the life of the process while the README
+  promises the opposite. Restarting `startDaemon` in-process is also what makes
+  state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
+  background rescan can be writing while the incoming one reads, and a torn
+  read is indistinguishable from corruption, which mints a new deviceId and
+  re-registers the machine as a stranger. runtime.json stays an in-place write:
+  it is fixed-size and cannot tear. Rejected: re-exec or `systemctl restart` on
+  change (loses the keep-running-on-a-bad-edit property and burns the
+  supervisor's restart budget), and per-field reload (four call sites to keep
+  in sync with every future config field).
 - **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
   Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
   logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger
