@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { logPath } from "./paths.ts";
-import { pinTaskCommand, unitContent, unitPath } from "./systemd.ts";
+import { noSystemdMessage, pinTaskCommand, unitContent, unitPath, userInstanceMissingMessage } from "./systemd.ts";
 
 describe("unitContent", () => {
   test("runs the checkout via the installing bun, with captured PATH and the shared log file", () => {
@@ -26,6 +26,25 @@ describe("pin task", () => {
   });
 });
 
+describe("preflight messages", () => {
+  test("missing user instance names linger on both platforms, WSL cause only on WSL", () => {
+    const wsl = userInstanceMissingMessage(true, "ada");
+    const linux = userInstanceMissingMessage(false, "ada");
+    for (const msg of [wsl, linux]) {
+      expect(msg).toContain("sudo loginctl enable-linger ada");
+      expect(msg).toContain("re-run `seanced install`");
+    }
+    expect(wsl).toContain("don't register with logind");
+    expect(linux).toContain("headless box");
+    expect(linux).not.toContain("WSL");
+  });
+
+  test("no systemd points WSL at wsl.conf and plain Linux at a manual supervisor", () => {
+    expect(noSystemdMessage(true)).toContain("[boot] systemd=true");
+    expect(noSystemdMessage(false)).toContain("your own supervisor");
+    expect(noSystemdMessage(false)).not.toContain("wsl");
+  });
+});
 describe("unitPath", () => {
   test("lands in the XDG systemd user directory", () => {
     expect(unitPath()).toMatch(/\/systemd\/user\/seanced\.service$/u);

@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { logPath } from "./paths.ts";
-import { schtasksExe } from "./wsl.ts";
+import type { InstallResult } from "./service.ts";
+import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
 
@@ -60,34 +61,39 @@ function manualTaskCommand(distro: string): string {
 /**
  * `is-system-running` answers over the bus even when degraded; a missing bus
  * has two distinct causes worth naming. No `/run/systemd/system` (sd_booted's
- * check) means the distro runs WSL's own init — only wsl.conf fixes that.
- * With systemd as PID 1 the culprit is user@<uid> never starting: WSL shells
- * skip PAM, so no logind session exists to start it and linger is the only
- * trigger. Flipping wsl.conf is never done here — it restarts the distro,
- * killing every session on the box.
+ * check) means the box doesn't run systemd — on WSL only wsl.conf fixes that
+ * (never flipped here: it restarts the distro, killing every session on the
+ * box); elsewhere seanced needs a manual supervisor. With systemd as PID 1
+ * the culprit is user@<uid> never starting: WSL shells skip PAM and headless
+ * boxes (LXC, containers) never log in, so no logind session exists to start
+ * it and linger is the only trigger. Message builders are exported for tests.
  */
-async function assertSystemdRunning(): Promise<void> {
-  const result = await exec(["systemctl", "--user", "is-system-running"]);
-  if (!result.stderr.includes("Failed to connect to bus")) return;
-  if (existsSync("/run/systemd/system")) {
-    throw new Error(
-      "systemd is running but the user instance is not — WSL sessions don't register with logind, " +
-        `so only linger starts it: run \`sudo loginctl enable-linger ${userInfo().username}\`, then re-run \`seanced install\``,
-    );
-  }
-  throw new Error(
-    "systemd is not running in this distro — add [boot] systemd=true to /etc/wsl.conf, " +
-      "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seanced install`",
+export function userInstanceMissingMessage(wsl: boolean, username: string): string {
+  const why = wsl ? "WSL sessions don't register with logind" : "a headless box has no logind session";
+  return (
+    `systemd is running but the user instance is not — ${why}, so only linger starts it: ` +
+    `run \`sudo loginctl enable-linger ${username}\`, then re-run \`seanced install\``
   );
 }
 
-export interface WslInstallResult {
-  readonly target: string;
-  /** Non-fatal steps that need a hand — each carries the manual command. */
-  readonly notes: readonly string[];
+export function noSystemdMessage(wsl: boolean): string {
+  return wsl
+    ? "systemd is not running in this distro — add [boot] systemd=true to /etc/wsl.conf, " +
+        "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seanced install`"
+    : "this system is not running systemd — run seanced under your own supervisor";
 }
 
-export async function installService(): Promise<WslInstallResult> {
+async function assertSystemdRunning(): Promise<void> {
+  if (Bun.which("systemctl") === null) throw new Error(noSystemdMessage(isWsl()));
+  const result = await exec(["systemctl", "--user", "is-system-running"]);
+  if (!result.stderr.includes("Failed to connect to bus")) return;
+  if (existsSync("/run/systemd/system")) {
+    throw new Error(userInstanceMissingMessage(isWsl(), userInfo().username));
+  }
+  throw new Error(noSystemdMessage(isWsl()));
+}
+
+export async function installService(): Promise<InstallResult> {
   await assertSystemdRunning();
   const notes: string[] = [];
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
@@ -112,27 +118,29 @@ export async function installService(): Promise<WslInstallResult> {
     );
   }
 
-  const distro = process.env["WSL_DISTRO_NAME"];
-  if (distro === undefined) {
-    notes.push(
-      `WSL_DISTRO_NAME not set — register the logon pin task from a Windows shell yourself: ${manualTaskCommand("<distro>")}`,
-    );
-  } else {
-    const task = await exec([
-      schtasksExe(),
-      "/Create",
-      "/F",
-      "/SC",
-      "ONLOGON",
-      "/TN",
-      PIN_TASK_NAME,
-      "/TR",
-      pinTaskCommand(distro),
-    ]);
-    if (task.exitCode !== 0) {
+  if (isWsl()) {
+    const distro = process.env["WSL_DISTRO_NAME"];
+    if (distro === undefined) {
       notes.push(
-        `scheduled-task registration failed (${task.stderr.trim() || "denied"}) — without it a Windows reboot leaves the machine offline; run from a Windows shell: ${manualTaskCommand(distro)}`,
+        `WSL_DISTRO_NAME not set — register the logon pin task from a Windows shell yourself: ${manualTaskCommand("<distro>")}`,
       );
+    } else {
+      const task = await exec([
+        schtasksExe(),
+        "/Create",
+        "/F",
+        "/SC",
+        "ONLOGON",
+        "/TN",
+        PIN_TASK_NAME,
+        "/TR",
+        pinTaskCommand(distro),
+      ]);
+      if (task.exitCode !== 0) {
+        notes.push(
+          `scheduled-task registration failed (${task.stderr.trim() || "denied"}) — without it a Windows reboot leaves the machine offline; run from a Windows shell: ${manualTaskCommand(distro)}`,
+        );
+      }
     }
   }
   return { target, notes };
@@ -143,9 +151,11 @@ export async function uninstallService(): Promise<readonly string[]> {
   await exec(["systemctl", "--user", "disable", "--now", UNIT_NAME]); // ignore failure: not installed
   await rm(unitPath(), { force: true });
   await exec(["systemctl", "--user", "daemon-reload"]);
-  const task = await exec([schtasksExe(), "/Delete", "/F", "/TN", PIN_TASK_NAME]);
-  if (task.exitCode !== 0) {
-    notes.push(`pin task not removed — from a Windows shell: schtasks /Delete /F /TN ${PIN_TASK_NAME}`);
+  if (isWsl()) {
+    const task = await exec([schtasksExe(), "/Delete", "/F", "/TN", PIN_TASK_NAME]);
+    if (task.exitCode !== 0) {
+      notes.push(`pin task not removed — from a Windows shell: schtasks /Delete /F /TN ${PIN_TASK_NAME}`);
+    }
   }
   notes.push(
     `linger left enabled (it may serve other units) — sudo loginctl disable-linger ${userInfo().username} to revert`,
@@ -154,11 +164,13 @@ export async function uninstallService(): Promise<readonly string[]> {
 }
 
 export async function serviceLoaded(): Promise<boolean> {
+  if (Bun.which("systemctl") === null) return false;
   const result = await exec(["systemctl", "--user", "is-active", UNIT_NAME]);
   return result.exitCode === 0;
 }
 
 export async function restartService(): Promise<void> {
+  if (Bun.which("systemctl") === null) throw new Error(noSystemdMessage(isWsl()));
   const result = await exec(["systemctl", "--user", "restart", UNIT_NAME]);
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --user restart failed: ${result.stderr.trim()}`);
@@ -170,7 +182,7 @@ export interface ServiceCheck {
   readonly message: string;
 }
 
-/** Doctor's WSL service section — kept here so cli.ts doesn't grow schtasks plumbing. */
+/** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */
 export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
   const checks: ServiceCheck[] = [];
   if (await serviceLoaded()) {
@@ -191,17 +203,19 @@ export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
       message: `linger off — daemon dies with your last session: sudo loginctl enable-linger ${username}`,
     });
   }
-  const task = await exec([schtasksExe(), "/Query", "/TN", PIN_TASK_NAME]);
-  if (task.exitCode === 0) {
-    checks.push({ ok: true, message: `logon pin task ${PIN_TASK_NAME} registered` });
-  } else {
-    // install's own registration may be denied (interop schtasks runs non-elevated), so point at the manual command directly
-    checks.push({
-      ok: false,
-      message:
-        `no ${PIN_TASK_NAME} scheduled task — a Windows reboot leaves the machine offline; ` +
-        `from a Windows shell: ${manualTaskCommand(process.env["WSL_DISTRO_NAME"] ?? "<distro>")}`,
-    });
+  if (isWsl()) {
+    const task = await exec([schtasksExe(), "/Query", "/TN", PIN_TASK_NAME]);
+    if (task.exitCode === 0) {
+      checks.push({ ok: true, message: `logon pin task ${PIN_TASK_NAME} registered` });
+    } else {
+      // install's own registration may be denied (interop schtasks runs non-elevated), so point at the manual command directly
+      checks.push({
+        ok: false,
+        message:
+          `no ${PIN_TASK_NAME} scheduled task — a Windows reboot leaves the machine offline; ` +
+          `from a Windows shell: ${manualTaskCommand(process.env["WSL_DISTRO_NAME"] ?? "<distro>")}`,
+      });
+    }
   }
   return checks;
 }

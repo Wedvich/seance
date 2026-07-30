@@ -288,18 +288,20 @@ export async function cmdDoctor(): Promise<void> {
   if (process.platform === "darwin") {
     if (await serviceLoaded()) ok("launchd agent loaded");
     else warn("launchd agent not loaded — run `seanced install`");
-  } else if (isWsl()) {
+  } else if (process.platform === "linux" && Bun.which("systemctl") !== null) {
     for (const check of await doctorServiceChecks()) {
       if (check.ok) ok(check.message);
       else warn(check.message);
     }
-    // Broken interop surfaces here as a warning, and as a FAIL above only
-    // when the PSK actually lives in the blob and could not be read.
-    const interop = await dpapiRoundTrip();
-    if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
-    else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
+    if (isWsl()) {
+      // Broken interop surfaces here as a warning, and as a FAIL above only
+      // when the PSK actually lives in the blob and could not be read.
+      const interop = await dpapiRoundTrip();
+      if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
+      else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
+    }
   } else {
-    warn("plain Linux — no service manager integration; run seanced under your own supervisor");
+    warn("no service manager integration here — run seanced under your own supervisor");
   }
 
   if (failed) process.exit(1);

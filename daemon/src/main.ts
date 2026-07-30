@@ -22,7 +22,7 @@ usage: seanced [command]
   (none)      run the daemon in the foreground (launchd/systemd supervises)
   init        write config skeleton + generate deviceId (never the PSK)
   psk-import  store the PSK in the platform store — macOS login keychain or WSL DPAPI blob (prompts, or reads a pipe; never argv)
-  install     install and start the service (macOS launchd plist; WSL systemd unit + linger + logon pin task)
+  install     install and start the service (macOS launchd plist; Linux/WSL systemd user unit + linger, plus a logon pin task on WSL)
   uninstall   stop the service and remove it
   restart     restart the service (after git pull)
   doctor      preflight checks: config, binaries, roots, relay, service
