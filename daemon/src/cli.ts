@@ -429,13 +429,20 @@ async function cmdPskImportMacos(): Promise<void> {
 }
 
 /**
- * WSL counterpart. DPAPI has no prompt of its own, so unlike macOS the key
- * passes through this process on both paths — tty read or pipe — before
- * crossing to powershell as stdin data (never argv, never script text).
+ * Shared flow for the promptless blob stores (DPAPI on WSL, TPM-sealed
+ * systemd-creds on plain Linux). Neither tool has a prompt of its own, so
+ * unlike macOS the key passes through this process on both paths — tty read
+ * or pipe — before crossing to the store as stdin data (never argv).
  * Validated up front on both paths for the same clobber reason as above.
  */
-async function cmdPskImportWsl(): Promise<void> {
-  console.log(`storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`);
+async function cmdPskImportBlob(store: {
+  readonly intro: string;
+  readonly importValue: (psk: string) => Promise<void>;
+  readonly readBack: () => Promise<string | null>;
+  readonly readBackHint: string;
+  readonly clearHint: string;
+}): Promise<void> {
+  console.log(store.intro);
   let psk: string;
   if (process.stdin.isTTY) {
     console.log("paste the base64 value (it will not echo):");
@@ -448,46 +455,35 @@ async function cmdPskImportWsl(): Promise<void> {
     console.error(`value ${problem} — nothing stored`);
     process.exit(1);
   }
-  await importDpapiPskValue(psk);
+  await store.importValue(psk);
 
-  const stored = await readDpapiPsk();
+  const stored = await store.readBack();
   if (stored !== psk) {
-    console.error("\nstored, but reading it back failed — check powershell.exe interop (`seanced doctor`)");
+    console.error(`\nstored, but reading it back failed — ${store.readBackHint}`);
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads the DPAPI blob, then \`seanced restart\``);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seanced restart\``);
 }
 
-/**
- * Plain-Linux counterpart, sealed to the TPM via systemd-creds. Like DPAPI
- * there is no prompt of its own, so the key passes through this process on
- * both paths — tty read or pipe — before crossing to systemd-creds as stdin
- * data (never argv). Validated up front for the same clobber reason as above.
- */
-async function cmdPskImportTpm(): Promise<void> {
-  console.log(`storing the PSK as a TPM2-sealed systemd-creds blob at ${tpmPskPath()}.`);
-  let psk: string;
-  if (process.stdin.isTTY) {
-    console.log("paste the base64 value (it will not echo):");
-    psk = (await readLineNoEcho()).trim();
-  } else {
-    psk = (await new Response(Bun.stdin.stream()).text()).trim();
-  }
-  const problem = pskShapeProblem(psk);
-  if (problem !== null) {
-    console.error(`value ${problem} — nothing stored`);
-    process.exit(1);
-  }
-  await importTpmPskValue(psk);
+function cmdPskImportWsl(): Promise<void> {
+  return cmdPskImportBlob({
+    intro: `storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`,
+    importValue: importDpapiPskValue,
+    readBack: readDpapiPsk,
+    readBackHint: "check powershell.exe interop (`seanced doctor`)",
+    clearHint: "the DPAPI blob",
+  });
+}
 
-  const stored = await readTpmPsk();
-  if (stored !== psk) {
-    console.error("\nstored, but reading it back failed — check the TPM device (`seanced doctor`)");
-    process.exit(1);
-  }
-  console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads the sealed blob, then \`seanced restart\``);
+function cmdPskImportTpm(): Promise<void> {
+  return cmdPskImportBlob({
+    intro: `storing the PSK as a TPM2-sealed systemd-creds blob at ${tpmPskPath()}.`,
+    importValue: importTpmPskValue,
+    readBack: readTpmPsk,
+    readBackHint: "check the TPM device (`seanced doctor`)",
+    clearHint: "the sealed blob",
+  });
 }
 
 export async function cmdPskImport(): Promise<void> {
