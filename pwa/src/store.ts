@@ -150,6 +150,14 @@ export class Store {
     this.dismissLayer();
   }
 
+  /**
+   * Drops an offline machine from the list. The sheet stays open: removing several
+   * stale machines in a row is the normal case, and the list re-renders under it.
+   */
+  removeMachine(machineId: string): void {
+    this.#client.hide(machineId);
+  }
+
   selectRepo(repo: string): void {
     const { form, relay } = this.#state;
     // Keyed by the resolved machine, not form.machineId, which is null until picked.

@@ -58,10 +58,13 @@ export interface RelayState {
   readonly status: RelayStatus;
   /** Set only for a permanent close; the client stops reconnecting. */
   readonly rejection: "unauthorized" | "bad-request" | null;
+  /** Decrypting entries, minus any removed by hand while offline. */
   readonly machines: readonly Machine[];
   /** Total entries the relay holds, including any that did not decrypt. */
   readonly registrySize: number;
-  /** registrySize minus machines.length — a stale PSK somewhere. */
+  /** deviceIds removed by hand; they come back the moment they connect again. */
+  readonly hidden: readonly string[];
+  /** registrySize minus machines.length and hidden.length — a stale PSK somewhere. */
   readonly ignored: number;
   /**
    * The socket is not open, but too briefly to be worth reporting yet. Set from the
@@ -89,6 +92,7 @@ const INITIAL_STATE: RelayState = {
   rejection: null,
   machines: [],
   registrySize: 0,
+  hidden: [],
   ignored: 0,
   settling: true,
 };
@@ -131,6 +135,12 @@ export class RelayClient {
    * machine registers again.
    */
   readonly #provenOffline = new Map<string, number>();
+  /**
+   * deviceIds removed from the list by hand. Held here rather than in the store so
+   * `machines` stays "what to show" for every reader, and dropped again the moment
+   * the machine connects — a removal hides an absence, it does not forget a machine.
+   */
+  readonly #hidden: Set<string>;
 
   #entries: readonly RegistryView[] = [];
   #state: RelayState = INITIAL_STATE;
@@ -154,6 +164,8 @@ export class RelayClient {
     readonly createSocket?: (url: string) => WebSocket;
     /** Override for SETTLE_MS; tests use it to avoid a real 1.5s wait. */
     readonly settleMs?: number;
+    /** deviceIds removed in an earlier run; a reload must not resurrect them. */
+    readonly hidden?: readonly string[];
   }) {
     this.#url = opts.url;
     this.#token = opts.token;
@@ -161,6 +173,7 @@ export class RelayClient {
     this.#timeouts = opts.timeouts ?? {};
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
     this.#settleMs = opts.settleMs ?? SETTLE_MS;
+    this.#hidden = new Set(opts.hidden ?? []);
   }
 
   #timeoutFor(op: RequestOp): number {
@@ -168,6 +181,16 @@ export class RelayClient {
   }
 
   getState = (): RelayState => this.#state;
+
+  /**
+   * Drops an offline machine from the list until it connects again. Connected ones
+   * are unhidden by the very next rebuild, so calling this on one is a no-op.
+   */
+  hide(deviceId: string): void {
+    if (this.#hidden.has(deviceId)) return;
+    this.#hidden.add(deviceId);
+    this.#rebuildMachines();
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.#listeners.add(listener);
@@ -413,6 +436,7 @@ export class RelayClient {
 
   #rebuildMachines(): void {
     const machines: Machine[] = [];
+    let hiddenHere = 0;
     for (const entry of this.#entries) {
       const info = this.#infoCache.get(entry.info.iv) ?? null;
       if (info === null) continue;
@@ -420,6 +444,12 @@ export class RelayClient {
       // Cleared by a later register, which is the one event that moves lastSeen up.
       const stillProvenOffline = markedAt !== undefined && entry.lastSeen <= markedAt;
       if (!stillProvenOffline) this.#provenOffline.delete(entry.deviceId);
+      const connected = entry.connected && !stillProvenOffline;
+      if (connected) this.#hidden.delete(entry.deviceId);
+      else if (this.#hidden.has(entry.deviceId)) {
+        hiddenHere += 1;
+        continue;
+      }
       machines.push({
         deviceId: entry.deviceId,
         name: info.name,
@@ -427,13 +457,15 @@ export class RelayClient {
         repos: info.repos,
         scannedAt: info.scannedAt,
         lastSeen: entry.lastSeen,
-        connected: entry.connected && !stillProvenOffline,
+        connected,
       });
     }
     this.#patch({
       machines,
       registrySize: this.#entries.length,
-      ignored: this.#entries.length - machines.length,
+      hidden: [...this.#hidden],
+      // Counted off entries the registry actually holds, so a removal never reads as a key mismatch.
+      ignored: this.#entries.length - machines.length - hiddenHere,
     });
   }
 

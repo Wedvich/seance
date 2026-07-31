@@ -55,6 +55,7 @@ export function App(props: { store: Store }): JSX.Element {
               form={state.form}
               sheet={state.sheet}
               machines={state.relay.machines}
+              hidden={state.relay.hidden}
               now={now}
             />
           )}
@@ -124,6 +125,7 @@ function useSpawnActions(store: Store): SpawnActions {
       spawn: () => void store.spawn(),
       dismissLayer: () => store.dismissLayer(),
       selectMachine: (deviceId) => store.selectMachine(deviceId),
+      removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
       rescan: () => void store.rescan(),
       setModel: (model) => store.setModel(model),

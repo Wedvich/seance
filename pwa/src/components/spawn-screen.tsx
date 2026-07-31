@@ -35,6 +35,7 @@ export interface SpawnActions {
   readonly spawn: () => void;
   readonly dismissLayer: () => void;
   readonly selectMachine: (deviceId: string) => void;
+  readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: () => void;
   readonly setModel: (model: Model) => void;
@@ -102,14 +103,17 @@ function ActiveSheet(props: {
   view: ViewModel;
   kind: SheetKind;
   machines: readonly Machine[];
+  /** deviceIds removed while offline; only their count is rendered. */
+  hidden: readonly string[];
   model: Model;
   effort: Effort;
   now: number;
 }): JSX.Element {
-  const { actions, view, kind, machines, model: selectedModel, effort: selectedEffort, now } = props;
+  const { actions, view, kind, machines, hidden, model: selectedModel, effort: selectedEffort, now } = props;
   const close = actions.dismissLayer;
 
   if (kind === "machine") {
+    const hiddenCount = hidden.length;
     return (
       <Sheet title={SHEET_TITLES.machine} onClose={close}>
         {machines
@@ -126,9 +130,17 @@ function ActiveSheet(props: {
               dot={machine.connected ? "ok" : "off"}
               selected={machine.deviceId === view.machine?.deviceId}
               disabled={!machine.connected}
+              // Only offered while offline: a connected machine would reappear at once.
+              onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
+              removeLabel={`Hide ${machine.name} until it connects`}
               onClick={() => actions.selectMachine(machine.deviceId)}
             />
           ))}
+        {hiddenCount > 0 && (
+          <p className="sheet-note">
+            {hiddenCount} removed · {hiddenCount === 1 ? "it comes" : "they come"} back on connecting
+          </p>
+        )}
       </Sheet>
     );
   }
@@ -197,9 +209,10 @@ export function SpawnScreen(props: {
   form: PersistedForm;
   sheet: SheetKind | null;
   machines: readonly Machine[];
+  hidden: readonly string[];
   now: number;
 }): JSX.Element {
-  const { actions, view, form, sheet, machines, now } = props;
+  const { actions, view, form, sheet, machines, hidden, now } = props;
   const offline = view.machine !== null && !view.machine.connected;
 
   return (
@@ -297,6 +310,7 @@ export function SpawnScreen(props: {
           view={view}
           kind={sheet}
           machines={machines}
+          hidden={hidden}
           model={form.model}
           effort={form.effort}
           now={now}

@@ -17,7 +17,7 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { readForm, readPending, writeForm, writePending } = await import("../src/persist.ts");
+const { readForm, readHidden, readPending, writeForm, writeHidden, writePending } = await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -77,5 +77,23 @@ describe("pending spawn persistence", () => {
   test("rejects an incomplete entry", () => {
     store.set("seance:pending", JSON.stringify({ machineId: "dev-1" }));
     expect(readPending()).toBeNull();
+  });
+});
+
+describe("removed machine persistence", () => {
+  test("round-trips and empties", () => {
+    writeHidden(["dev-1", "dev-2"]);
+    expect(readHidden()).toEqual(["dev-1", "dev-2"]);
+    writeHidden([]);
+    expect(readHidden()).toEqual([]);
+  });
+
+  test("reads nothing stored as nothing removed", () => {
+    expect(readHidden()).toEqual([]);
+  });
+
+  test("drops entries that are not deviceIds", () => {
+    store.set("seance:hidden", JSON.stringify(["dev-1", 7, null]));
+    expect(readHidden()).toEqual(["dev-1"]);
   });
 });

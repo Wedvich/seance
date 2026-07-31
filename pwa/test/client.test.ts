@@ -49,7 +49,13 @@ function machineInfo(name: string): MachineInfo {
   };
 }
 
-function startClient(opts: { readonly token?: string; readonly timeouts?: { readonly sessions?: number } } = {}): {
+function startClient(
+  opts: {
+    readonly token?: string;
+    readonly timeouts?: { readonly sessions?: number };
+    readonly hidden?: readonly string[];
+  } = {},
+): {
   client: RelayClient;
   waitFor: (predicate: (state: RelayState) => boolean, label: string) => Promise<RelayState>;
 } {
@@ -63,6 +69,7 @@ function startClient(opts: { readonly token?: string; readonly timeouts?: { read
     // offer keeps these tests measuring the relay instead of that bug.
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
     ...(opts.timeouts === undefined ? {} : { timeouts: opts.timeouts }),
+    ...(opts.hidden === undefined ? {} : { hidden: opts.hidden }),
   });
   const waitFor = (predicate: (state: RelayState) => boolean, label: string): Promise<RelayState> =>
     new Promise((resolve, reject) => {
@@ -213,6 +220,49 @@ describe("registry", () => {
       expect(state.registrySize).toBeGreaterThan(state.machines.length);
     } finally {
       daemon.close();
+      client.stop();
+    }
+  });
+
+  test("drops a removed offline machine from the list and brings it back when it connects", async () => {
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone Fishing"));
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      daemon.close();
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+
+      // The registry is shared across this file, so it is the delta that matters:
+      // a removal is not a key mismatch and must never be counted as one.
+      const ignoredBefore = client.getState().ignored;
+      client.hide(deviceId);
+      const removed = client.getState();
+      expect(removed.machines.some((m) => m.deviceId === deviceId)).toBe(false);
+      expect(removed.hidden).toContain(deviceId);
+      expect(removed.ignored).toBe(ignoredBefore);
+
+      const back = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone Fishing"));
+      try {
+        const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "machine is back");
+        expect(state.hidden).not.toContain(deviceId);
+      } finally {
+        back.close();
+      }
+    } finally {
+      client.stop();
+    }
+  });
+
+  test("keeps a machine removed in an earlier run removed", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Stale"));
+    daemon.close();
+    const { client, waitFor } = startClient({ hidden: [deviceId] });
+    try {
+      await waitFor((s) => s.registrySize > 0, "registry arrived");
+      expect(client.getState().machines.some((m) => m.deviceId === deviceId)).toBe(false);
+    } finally {
       client.stop();
     }
   });

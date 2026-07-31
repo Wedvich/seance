@@ -515,6 +515,33 @@
   min-width: 0;
 }
 
+/* A remove button cannot nest inside the row's button, so the two sit side by side. */
+.sheet-item-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sheet-item-row .sheet-item {
+  flex: 1;
+}
+
+.sheet-item-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  /* Same weight as the offline row it sits beside (.sheet-item-disabled): picking a
+     machine is the sheet's job, and this must not out-shout the names. */
+  color: var(--fg2);
+  opacity: 0.55;
+}
+
 .sheet-item-selected {
   background: var(--sur2);
 }
@@ -573,6 +600,13 @@
   margin-left: auto;
   color: var(--acc);
   flex: none;
+}
+
+.sheet-note {
+  margin: 6px 0 0;
+  padding: 0 13px;
+  font-size: 12.5px;
+  color: var(--fg2);
 }
 
 /* ---- verdict ---- */

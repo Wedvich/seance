@@ -197,14 +197,22 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       opensSettings: false,
     };
   }
-  // Entries exist but none decrypt: a fresh install and a wrong PSK look
-  // identical unless they are split apart here.
   if (relay.machines.length === 0) {
+    // Entries exist but none show. A fresh install, a wrong PSK and a list emptied
+    // by hand look identical unless they are split apart here.
+    if (relay.ignored > 0) {
+      return {
+        title: "Key mismatch",
+        body: `${relay.ignored} ${relay.ignored === 1 ? "machine is" : "machines are"} registered, but none decrypt with this key. Check the pre-shared key.`,
+        tone: "err",
+        opensSettings: true,
+      };
+    }
     return {
-      title: "Key mismatch",
-      body: `${relay.registrySize} ${relay.registrySize === 1 ? "machine is" : "machines are"} registered, but none decrypt with this key. Check the pre-shared key.`,
-      tone: "err",
-      opensSettings: true,
+      title: "No machines listed",
+      body: "Every machine was removed while offline. Each comes back on its own the next time it connects.",
+      tone: "fg2",
+      opensSettings: false,
     };
   }
   if (machine !== null && !machine.connected) {
@@ -230,7 +238,7 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.rejection !== null) return blocked("Bearer token rejected");
   if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
-  if (relay.machines.length === 0) return blocked("Check your key");
+  if (relay.machines.length === 0) return blocked(relay.ignored > 0 ? "Check your key" : "No machines listed");
   if (state.spawning) return blocked("Summoning…");
   if (machine === null) return blocked("Pick a machine");
   if (!machine.connected) return blocked(`${machine.name} is asleep`);

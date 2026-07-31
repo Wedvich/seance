@@ -668,7 +668,7 @@ that silently blocks the only socket the app has. HSTS rides in the same file
 not apply), without `includeSubDomains`/`preload` — that hostname is not ours to
 make claims about, and `.dev` is preloaded at the TLD anyway.
 
-V1 surface: machine list (online/offline + last-seen), per-machine repo
+V1 surface: machine list (online/offline + last-seen, offline ones removable), per-machine repo
 picker, spawn form (prompt optional, worktree/`--here` toggle, model and
 effort as first-class tiles, defaults opus/medium), spawn verdict (daemon
 relays tmux window name or the captured error), and a **read-only** list of
@@ -750,6 +750,19 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   but two empty inputs read as "credentials lost" on a working install. So
   Settings is editable without being a re-entry chore, and only a field
   actually typed into is written.
+- **An offline machine can be removed from the list, and comes back on its own.**
+  The DO's registry is permanent by design (`Presence & identity`), so a machine
+  retired, renamed or reinstalled sits in the picker forever with a stale
+  last-seen. The ✕ on an offline row hides it until that deviceId connects
+  again — a removal states "not this one, for now", never "forget this machine",
+  which is the only claim an app-side list is entitled to make against a
+  registry it does not own. It lives in `RelayClient` beside `#provenOffline`
+  rather than in the store, so `machines` stays "what to show" for every reader,
+  and the set is persisted (`seance:hidden`) because a reload would otherwise
+  resurrect exactly what was just dismissed. Connected rows get no ✕: the next
+  rebuild would undo it. The empty-list banner splits three ways as a result —
+  nothing registered, nothing decrypting, and nothing left after removals — so a
+  list emptied by hand never reads as a wrong PSK.
 - **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
   mid-spawn loses the reply (a blind relay cannot queue it), so the pending
   spawn is persisted and the machine is asked what is running once there is a

@@ -28,6 +28,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     rejection: null,
     machines,
     registrySize: machines.length,
+    hidden: [],
     ignored: 0,
     settling: false,
     ...overrides,
@@ -145,6 +146,38 @@ describe("banner and button", () => {
     expect(view.ignoredNote).toBe("1 entry ignored (key mismatch)");
     expect(view.relayLine).toBe("connected");
     expect(view.button.enabled).toBe(true);
+  });
+
+  // Removing the last offline machine must not read as a wrong key: nothing is
+  // undecryptable, the list is simply empty by choice.
+  test("a list emptied by removals is not reported as a key mismatch", () => {
+    const view = deriveView(
+      state({ relay: relay({ machines: [], registrySize: 2, hidden: ["dev-1", "dev-2"], ignored: 0 }) }),
+      NOW,
+    );
+    expect(view.banner?.title).toBe("No machines listed");
+    expect(view.banner?.tone).toBe("fg2");
+    expect(view.banner?.opensSettings).toBe(false);
+    expect(view.button.label).toBe("No machines listed");
+  });
+
+  test("removals alongside an undecryptable entry still read as a key mismatch", () => {
+    const view = deriveView(
+      state({ relay: relay({ machines: [], registrySize: 2, hidden: ["dev-1"], ignored: 1 }) }),
+      NOW,
+    );
+    expect(view.banner?.title).toBe("Key mismatch");
+    expect(view.banner?.body).toContain("1 machine is registered");
+  });
+
+  test("a removed machine leaves the counts and the selection to the rest", () => {
+    const studio = machine({ deviceId: "dev-2", name: "Mac Studio", connected: false });
+    const view = deriveView(
+      state({ relay: relay({ machines: [studio], registrySize: 2, hidden: ["dev-1"] }) }, { machineId: "dev-1" }),
+      NOW,
+    );
+    expect(view.machine?.deviceId).toBe("dev-2");
+    expect(view.meta).toBe("0 online · 1 asleep · 0 sessions");
   });
 
   test("no footnote when every entry decrypts", () => {

@@ -13,6 +13,7 @@ import { DEFAULT_FORM, isEffort, isModel, type PendingSpawn, type PersistedForm 
 
 const FORM_KEY = "seance:form";
 const PENDING_KEY = "seance:pending";
+const HIDDEN_KEY = "seance:hidden";
 
 function readJson(key: string): unknown {
   try {
@@ -73,4 +74,17 @@ export function readPending(): PendingSpawn | null {
 
 export function writePending(pending: PendingSpawn | null): void {
   writeJson(PENDING_KEY, pending);
+}
+
+/**
+ * Removed machines outlive a reload: the registry still lists them, so without
+ * this every refresh would bring back the entries just dismissed.
+ */
+export function readHidden(): readonly string[] {
+  const raw = readJson(HIDDEN_KEY);
+  return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+}
+
+export function writeHidden(hidden: readonly string[]): void {
+  writeJson(HIDDEN_KEY, hidden);
 }
