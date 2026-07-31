@@ -1,27 +1,19 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import type { OpName, Plain, RepoEntry, SessionEntry, SpawnResponse } from "@seance/shared";
+import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 
-// stdout is the daemon's audit transport (launchd redirects it into
-// seanced.log), so capturing the console is capturing the artifact under test.
+// The audit trail is what's under test, so collect it at the seam the daemon
+// injects rather than off stdout, which is only where daemonSink happens to
+// put it.
 const lines: string[] = [];
-let realLog: typeof console.log;
-let realError: typeof console.error;
+const collect: AuditSink = (line) => void lines.push(line);
 
 beforeEach(() => {
   lines.length = 0;
-  realLog = console.log;
-  realError = console.error;
-  console.log = (line: string): void => void lines.push(line);
-  console.error = (line: string): void => void lines.push(line);
-});
-
-afterEach(() => {
-  console.log = realLog;
-  console.error = realError;
 });
 
 const REPOS: readonly RepoEntry[] = [{ name: "myrepo", path: "/repos/myrepo", defaultBranch: "main" }];
@@ -41,6 +33,7 @@ const ctx: HandlerContext = {
   backend: createBackend(CONFIG),
   getRepos: () => REPOS,
   rescan: () => Promise.resolve(REPOS),
+  auditSink: collect,
 };
 
 const request = (op: OpName, payload: unknown): Plain => ({ id: "req-1", ts: Date.now(), op, payload });

@@ -1,4 +1,5 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
+import { daemonSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import { loadConfig, loadPsk, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
@@ -98,6 +99,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       backend: opts.backend ?? createBackend(config),
       getRepos: () => state.repos,
       rescan,
+      auditSink: daemonSink,
     }),
     onConnect: () => updateRuntime(true),
     onDisconnect: () => updateRuntime(false),

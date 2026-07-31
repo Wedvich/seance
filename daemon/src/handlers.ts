@@ -9,7 +9,7 @@ import type {
   SpawnResponse,
 } from "@seance/shared";
 import { quote } from "@seance/shared";
-import { daemonSink, spawnAudit } from "./audit.ts";
+import { spawnAudit, type AuditSink, type SpawnAudit } from "./audit.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
 
@@ -18,9 +18,14 @@ export interface HandlerContext {
   readonly getRepos: () => readonly RepoEntry[];
   /** Scan now, persist, re-register if the set changed; returns the fresh list. */
   readonly rescan: () => Promise<readonly RepoEntry[]>;
+  /**
+   * Where the audit trail goes — the daemon's stdout in production. Only the
+   * transport is injectable: the formatter and the `origin=relay` tag are
+   * applied below, so nothing a caller supplies can make a spawn quiet or
+   * relabel it as the human at the keyboard.
+   */
+  readonly auditSink: AuditSink;
 }
-
-const audit = spawnAudit("relay", daemonSink);
 
 function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (typeof payload !== "object" || payload === null) return false;
@@ -59,7 +64,7 @@ async function sessionsIncluding(ctx: HandlerContext, window: string): Promise<r
   }
 }
 
-async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<SpawnResponse> {
+async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unknown): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
@@ -82,10 +87,11 @@ async function handleSpawn(ctx: HandlerContext, payload: unknown): Promise<Spawn
 
 /** Routes decrypted request ops to their implementations and wraps the reply. */
 export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Plain | null> {
+  const audit = spawnAudit("relay", ctx.auditSink);
   return async (plain: Plain): Promise<Plain | null> => {
     // Every op, not just spawn: with a stolen PSK, "something enumerated my
     // sessions at 3am" is the same signal as "something spawned".
-    log.info(`audit request op=${quote(plain.op)} id=${quote(plain.id)}`);
+    await ctx.auditSink(`audit request op=${quote(plain.op)} id=${quote(plain.id)}`);
 
     const reply = (payload: unknown): Plain => ({
       id: crypto.randomUUID(),
@@ -103,7 +109,7 @@ export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Pl
           return reply(payload);
         }
         case "spawn":
-          return reply(await handleSpawn(ctx, plain.payload));
+          return reply(await handleSpawn(ctx, audit, plain.payload));
         case "rescan": {
           const repos = await ctx.rescan();
           const payload: RescanResponse = { repos, scannedAt: Date.now() };

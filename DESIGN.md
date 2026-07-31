@@ -501,7 +501,12 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   pane-death budget, and the only mention of tmux above
   `spawn.ts`/`sessions.ts`. Two things sit above the seam on purpose. The
   audit: handlers and the CLI wrap every backend call in the one formatter, so
-  a swapped backend cannot make a spawn quiet. And repo resolution: the
+  a swapped backend cannot make a spawn quiet. `HandlerContext` carries an
+  `AuditSink` — the transport, so a test can read the trail without patching
+  stdout — but never the `SpawnAudit` itself: the formatter and the
+  `origin=relay` tag are applied inside `handlers.ts`, where nothing a caller
+  supplies can drop a line or relabel it as the human at the keyboard. And
+  repo resolution: the
   frontend hands over the cached scan set, never a path, and the contract is
   that the wire string is only ever matched against it by name. A backend's
   internal names and free-text messages may be tmux-specific — its `doctor()`
