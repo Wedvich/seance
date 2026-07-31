@@ -1,12 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { watchConfigFile } from "../src/config.ts";
 import { startDaemon, type DaemonHandle, type RunOpts } from "../src/run.ts";
 import { startSupervisor, type SuperviseOpts, type SupervisorHandle } from "../src/supervise.ts";
-import { makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { awaitWatcherLive, makeGitFixture, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 /**
@@ -79,6 +79,9 @@ async function startSupervised(path: string, extra: Partial<SuperviseOpts> = {})
     ...extra,
   });
   supervisor = handle;
+  // Every test below edits within milliseconds of this returning, which is the
+  // one window where the watch can silently miss a write.
+  await awaitWatcherLive(dirname(path));
   return handle;
 }
 
@@ -137,6 +140,21 @@ async function waitForConnections(testRelay: TestRelay, atLeast: number): Promis
   throw new Error(`only ${testRelay.connectionCount()} connections, wanted ${atLeast}`);
 }
 
+/**
+ * `connectionCount()` is the relay's view and rises when it accepts the socket,
+ * which can precede the client's own open handler by a tick. Asserting
+ * `client.connected` off the back of it is therefore a race — poll the flag the
+ * assertion is actually about.
+ */
+async function waitForConnected(handle: SupervisorHandle): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if ((await handle.current()).client.connected) return;
+    await Bun.sleep(10);
+  }
+  throw new Error("daemon did not report a connected client");
+}
+
 describe("config reload failure paths", () => {
   test("reverting the config recovers a daemon left down by a failed rollback", async () => {
     const testRelay = startTestRelay(TOKEN);
@@ -162,7 +180,7 @@ describe("config reload failure paths", () => {
     failing = false;
     await writeConfig(path, "Healthy", testRelay.url);
     await waitForConnections(testRelay, connectionsBefore + 1);
-    expect((await supervisor!.current()).client.connected).toBe(true);
+    await waitForConnected(supervisor!);
   });
 
   test("a rolled-back swap does not log a reload", async () => {
@@ -188,7 +206,7 @@ describe("config reload failure paths", () => {
     expect(lines.some((line) => line.includes("reloaded as"))).toBe(false);
     // The rollback really did restart on the old config, rather than leaving nothing.
     await waitForConnections(testRelay, connectionsBefore + 1);
-    expect((await supervisor!.current()).client.connected).toBe(true);
+    await waitForConnected(supervisor!);
   });
 
   test("a reload that throws leaves the supervisor able to reload again", async () => {

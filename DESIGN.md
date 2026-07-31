@@ -456,10 +456,19 @@ together (re-sends registry data on every poll, useless offline).
   background rescan can be writing while the incoming one reads, and a torn
   read is indistinguishable from corruption, which mints a new deviceId and
   re-registers the machine as a stranger. runtime.json stays an in-place write:
-  it is fixed-size and cannot tear. Rejected: re-exec or `systemctl restart` on
-  change (loses the keep-running-on-a-bad-edit property and burns the
-  supervisor's restart budget), and per-field reload (four call sites to keep
-  in sync with every future config field).
+  it is fixed-size and cannot tear. One accepted gap, found 2026-07-31 while
+  chasing a flaky test: macOS brings an `fs.watch` FSEvents stream up
+  asynchronously, so an edit landing in the window between `watch()` returning
+  and the stream going live is dropped outright — never delivered, so no
+  amount of waiting recovers it. Measured at ~20% when the write follows
+  arming immediately on a saturated machine, 0% otherwise. Untouched because
+  the daemon arms its watch at startup and real edits arrive minutes or hours
+  later; the exposure is an edit within milliseconds of `seanced restart`, and
+  the next save is picked up normally. Tests do write that fast, so they wait
+  for the stream (`awaitWatcherLive` in `daemon/test/fixtures.ts`). Rejected:
+  re-exec or `systemctl restart` on change (loses the keep-running-on-a-bad-edit
+  property and burns the supervisor's restart budget), and per-field reload
+  (four call sites to keep in sync with every future config field).
 - **Lifecycle**: launchd agent on macOS; **systemd user unit + linger** on
   Linux. WSL (resolved 2026-07-28 at the actual machine) adds **a Windows
   logon task**; plain Linux (resolved 2026-07-30) is the same unit + linger

@@ -1,4 +1,5 @@
-import { chmod, mkdir, realpath } from "node:fs/promises";
+import { watch } from "node:fs";
+import { chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { exec } from "../src/exec.ts";
 
@@ -93,4 +94,45 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await chmod(failing, 0o755);
 
   return { ok, failing, version: "9.9.9" };
+}
+
+/**
+ * Blocks until a directory watch armed on `dir` is actually delivering events.
+ *
+ * macOS brings an `fs.watch` FSEvents stream up asynchronously, so `watch()`
+ * returning does not mean it is live — a write landing in that window is
+ * dropped outright, measured at ~20% under a saturated `--parallel` run and 0%
+ * unloaded. No deadline recovers it: the event is never delivered at all, which
+ * is what made these look like slow tests rather than lost ones. The daemon
+ * never meets this in production (it arms the watch at startup and edits arrive
+ * long afterwards); tests edit microseconds later, so they wait here first.
+ *
+ * A second watcher on the same directory is the signal: it is armed after the
+ * one under test, so once it delivers, the earlier one is live too. Its own
+ * sentinel writes reach the supervisor as changes it deep-equals away.
+ */
+export async function awaitWatcherLive(dir: string): Promise<void> {
+  const sentinel = join(dir, ".watch-probe");
+  const poke = (): void => void writeFile(sentinel, String(Date.now())).catch(() => {});
+  let probe: ReturnType<typeof watch> | null = null;
+  // Poked repeatedly rather than once: the stream comes up at some unobservable
+  // point, and only a change *after* that is delivered.
+  const poking = setInterval(poke, 10);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`no watch event from ${dir} in 5s — fs.watch is not working here`)),
+        5_000,
+      );
+      probe = watch(dir, () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      poke();
+    });
+  } finally {
+    clearInterval(poking);
+    (probe as ReturnType<typeof watch> | null)?.close();
+    await rm(sentinel, { force: true });
+  }
 }

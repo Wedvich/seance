@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
-import { makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { awaitWatcherLive, makeGitFixture, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -76,6 +76,9 @@ async function startSupervised(path: string): Promise<SupervisorHandle> {
     baseBackoffMs: 20,
   });
   supervisor = handle;
+  // Every test below edits within milliseconds of this returning, which is the
+  // one window where the watch can silently miss a write.
+  await awaitWatcherLive(dirname(path));
   return handle;
 }
 
