@@ -1,6 +1,5 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import type { Store } from "../store.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
@@ -22,13 +21,14 @@ const THEME_LABELS: Record<ThemePref, string> = {
  * one here would quietly undo that.
  */
 export function Settings(props: {
-  store: Store;
   relayUrl: string;
   relayLine: string;
   relayState: ConnectionState;
   connected: boolean;
+  onDismiss: () => void;
+  onReconnect: () => void;
 }): JSX.Element {
-  const { store, relayLine, relayState, connected } = props;
+  const { relayLine, relayState, connected, onDismiss, onReconnect } = props;
   // Both secrets are known to exist: the app only mounts once they load.
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
@@ -55,19 +55,19 @@ export function Settings(props: {
       return;
     }
     if (connected) {
-      store.dismissLayer();
+      onDismiss();
       return;
     }
     if (reconnecting) return;
     setReconnecting(true);
-    store.reconnect();
+    onReconnect();
   };
 
   return (
     <>
       <header className="header">
         <div className="header-lead">
-          <button type="button" className="header-back" onClick={() => store.dismissLayer()} aria-label="Back">
+          <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
             ‹
           </button>
           <div>

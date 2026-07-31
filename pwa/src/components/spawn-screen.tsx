@@ -1,6 +1,15 @@
 import type { JSX } from "preact";
-import { EFFORTS, EFFORT_LABELS, MODELS, MODEL_LABELS, type SheetKind } from "../state.ts";
-import type { Store } from "../store.ts";
+import type { Machine } from "../relay/client.ts";
+import {
+  EFFORTS,
+  EFFORT_LABELS,
+  MODELS,
+  MODEL_LABELS,
+  type Effort,
+  type Model,
+  type PersistedForm,
+  type SheetKind,
+} from "../state.ts";
 import { abbreviatePath, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
 import { Sheet, SheetItem } from "./sheet.tsx";
@@ -11,6 +20,26 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   model: "Model",
   effort: "Thinking effort",
 };
+
+/**
+ * What this screen can ask the app to do. A callback set rather than the store
+ * itself: the sheets pick, the store decides what picking means — and in
+ * particular it, not a component, owns the history push each layer needs to
+ * keep Android back symmetrical.
+ */
+export interface SpawnActions {
+  readonly setPrompt: (prompt: string) => void;
+  readonly openSettings: () => void;
+  readonly openSheet: (sheet: SheetKind) => void;
+  readonly toggleWorktree: () => void;
+  readonly spawn: () => void;
+  readonly dismissLayer: () => void;
+  readonly selectMachine: (deviceId: string) => void;
+  readonly selectRepo: (repo: string) => void;
+  readonly rescan: () => void;
+  readonly setModel: (model: Model) => void;
+  readonly setEffort: (effort: Effort) => void;
+}
 
 /**
  * Segmented pill: the flat track carries passive relay status, the raised face
@@ -68,15 +97,22 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
   );
 }
 
-function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; now: number }): JSX.Element {
-  const { store, view, kind, now } = props;
-  const close = (): void => store.dismissLayer();
-  const state = store.getState();
+function ActiveSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  kind: SheetKind;
+  machines: readonly Machine[];
+  model: Model;
+  effort: Effort;
+  now: number;
+}): JSX.Element {
+  const { actions, view, kind, machines, model: selectedModel, effort: selectedEffort, now } = props;
+  const close = actions.dismissLayer;
 
   if (kind === "machine") {
     return (
       <Sheet title={SHEET_TITLES.machine} onClose={close}>
-        {state.relay.machines
+        {machines
           .toSorted((a, b) => a.name.localeCompare(b.name))
           .map((machine) => (
             <SheetItem
@@ -90,7 +126,7 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
               dot={machine.connected ? "ok" : "off"}
               selected={machine.deviceId === view.machine?.deviceId}
               disabled={!machine.connected}
-              onClick={() => store.selectMachine(machine.deviceId)}
+              onClick={() => actions.selectMachine(machine.deviceId)}
             />
           ))}
       </Sheet>
@@ -110,7 +146,7 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
             label={label}
             mono
             selected={repo.name === view.repo?.name}
-            onClick={() => store.selectRepo(repo.name)}
+            onClick={() => actions.selectRepo(repo.name)}
           />
         ))}
         <SheetItem
@@ -118,8 +154,8 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
           action
           sub={view.machine === null ? null : `last scanned ${formatSeen(view.machine.scannedAt, now)}`}
           onClick={() => {
-            store.dismissLayer();
-            void store.rescan();
+            actions.dismissLayer();
+            actions.rescan();
           }}
         />
       </Sheet>
@@ -133,8 +169,8 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
           <SheetItem
             key={model}
             label={MODEL_LABELS[model]}
-            selected={model === state.form.model}
-            onClick={() => store.setModel(model)}
+            selected={model === selectedModel}
+            onClick={() => actions.setModel(model)}
           />
         ))}
       </Sheet>
@@ -147,17 +183,23 @@ function ActiveSheet(props: { store: Store; view: ViewModel; kind: SheetKind; no
         <SheetItem
           key={effort}
           label={EFFORT_LABELS[effort]}
-          selected={effort === state.form.effort}
-          onClick={() => store.setEffort(effort)}
+          selected={effort === selectedEffort}
+          onClick={() => actions.setEffort(effort)}
         />
       ))}
     </Sheet>
   );
 }
 
-export function SpawnScreen(props: { store: Store; view: ViewModel; now: number }): JSX.Element {
-  const { store, view, now } = props;
-  const state = store.getState();
+export function SpawnScreen(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  form: PersistedForm;
+  sheet: SheetKind | null;
+  machines: readonly Machine[];
+  now: number;
+}): JSX.Element {
+  const { actions, view, form, sheet, machines, now } = props;
   const offline = view.machine !== null && !view.machine.connected;
 
   return (
@@ -167,7 +209,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
           <h1 className="header-title">Séance</h1>
           <p className="header-meta">{view.meta}</p>
         </div>
-        <RelaySettings state={view.relayState} onClick={() => store.openSettings()} />
+        <RelaySettings state={view.relayState} onClick={actions.openSettings} />
       </header>
 
       <div className="column">
@@ -179,13 +221,13 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
             className="prompt-input"
             aria-labelledby="prompt-label"
             placeholder="Describe the work — or leave it blank and start empty."
-            value={state.form.prompt}
-            onInput={(event) => store.setPrompt(event.currentTarget.value)}
+            value={form.prompt}
+            onInput={(event) => actions.setPrompt(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
               if (!view.button.enabled) return;
               event.preventDefault();
-              void store.spawn();
+              actions.spawn();
             }}
           />
         </div>
@@ -195,7 +237,7 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
             <button
               type="button"
               className={view.banner.tone === "err" ? "banner card banner-err" : "banner card"}
-              onClick={() => store.openSettings()}
+              onClick={actions.openSettings}
             >
               <span className="banner-rule" />
               <span className="banner-text">
@@ -217,10 +259,10 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
           ))}
 
         <div className="grid">
-          <TileButton tile={view.machineTile} offline={offline} onClick={() => store.openSheet("machine")} />
-          <TileButton tile={view.repoTile} onClick={() => store.openSheet("repo")} />
-          <TileButton tile={view.modelTile} onClick={() => store.openSheet("model")} />
-          <TileButton tile={view.effortTile} onClick={() => store.openSheet("effort")} />
+          <TileButton tile={view.machineTile} offline={offline} onClick={() => actions.openSheet("machine")} />
+          <TileButton tile={view.repoTile} onClick={() => actions.openSheet("repo")} />
+          <TileButton tile={view.modelTile} onClick={() => actions.openSheet("model")} />
+          <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
@@ -228,15 +270,15 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
         <button
           type="button"
           className="worktree card"
-          onClick={() => store.toggleWorktree()}
+          onClick={actions.toggleWorktree}
           role="switch"
-          aria-checked={state.form.worktree}
+          aria-checked={form.worktree}
         >
           <span className="worktree-text">
             <span className="worktree-title">Fresh worktree</span>
             <span className="worktree-hint">{view.worktreeHint}</span>
           </span>
-          <span className={state.form.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+          <span className={form.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
             <span className="toggle-knob" />
           </span>
         </button>
@@ -244,12 +286,22 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
 
       <footer className="footer">
         <p className="footer-status">{view.footerStatus}</p>
-        <button type="button" className="primary" disabled={!view.button.enabled} onClick={() => void store.spawn()}>
+        <button type="button" className="primary" disabled={!view.button.enabled} onClick={actions.spawn}>
           {view.button.label}
         </button>
       </footer>
 
-      {state.sheet !== null && <ActiveSheet store={store} view={view} kind={state.sheet} now={now} />}
+      {sheet !== null && (
+        <ActiveSheet
+          actions={actions}
+          view={view}
+          kind={sheet}
+          machines={machines}
+          model={form.model}
+          effort={form.effort}
+          now={now}
+        />
+      )}
     </>
   );
 }

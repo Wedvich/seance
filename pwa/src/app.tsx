@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
-import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Settings } from "./components/settings.tsx";
-import { SpawnScreen } from "./components/spawn-screen.tsx";
+import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
@@ -14,6 +14,7 @@ export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
   const [anim, clearAnim] = useScreenTransition(state.settings);
+  const actions = useSpawnActions(store);
 
   useEffect(() => store.attach(), [store]);
 
@@ -48,18 +49,26 @@ export function App(props: { store: Store }): JSX.Element {
               onBack={() => store.dismissLayer()}
             />
           ) : (
-            <SpawnScreen store={store} view={view} now={now} />
+            <SpawnScreen
+              actions={actions}
+              view={view}
+              form={state.form}
+              sheet={state.sheet}
+              machines={state.relay.machines}
+              now={now}
+            />
           )}
         </main>
       )}
       {(anim !== null || state.settings) && (
         <main key="settings" className={panelClass(anim, "push-in", "pop-out")}>
           <Settings
-            store={store}
             relayUrl={readRelayUrl()}
             relayLine={view.relayLine}
             relayState={view.relayState}
             connected={state.relay.status === "open"}
+            onDismiss={actions.dismissLayer}
+            onReconnect={() => store.reconnect()}
           />
         </main>
       )}
@@ -97,6 +106,31 @@ function useScreenTransition(settings: boolean): [ScreenAnim | null, () => void]
   }, [anim]);
 
   return [anim, () => setAnim(null)];
+}
+
+/**
+ * The store's own methods are unbound prototype members, so each one is wrapped
+ * here rather than handed over directly. Memoized on the store so the spawn
+ * screen's props stay referentially stable across the renders every keystroke
+ * causes.
+ */
+function useSpawnActions(store: Store): SpawnActions {
+  return useMemo(
+    () => ({
+      setPrompt: (prompt) => store.setPrompt(prompt),
+      openSettings: () => store.openSettings(),
+      openSheet: (sheet) => store.openSheet(sheet),
+      toggleWorktree: () => store.toggleWorktree(),
+      spawn: () => void store.spawn(),
+      dismissLayer: () => store.dismissLayer(),
+      selectMachine: (deviceId) => store.selectMachine(deviceId),
+      selectRepo: (repo) => store.selectRepo(repo),
+      rescan: () => void store.rescan(),
+      setModel: (model) => store.setModel(model),
+      setEffort: (effort) => store.setEffort(effort),
+    }),
+    [store],
+  );
 }
 
 /**
