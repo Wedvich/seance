@@ -181,6 +181,12 @@ export function SpawnScreen(props: { store: Store; view: ViewModel; now: number 
             placeholder="Describe the work — or leave it blank and start empty."
             value={state.form.prompt}
             onInput={(event) => store.setPrompt(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+              if (!view.button.enabled) return;
+              event.preventDefault();
+              void store.spawn();
+            }}
           />
         </div>
 
