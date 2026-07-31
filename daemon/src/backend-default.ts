@@ -1,4 +1,5 @@
-import type { BackendCheck, SessionBackend } from "./backend.ts";
+import type { SessionBackend } from "./backend.ts";
+import type { Check } from "./check.ts";
 import type { Config } from "./config.ts";
 import { listClaudeSessions } from "./sessions.ts";
 import { spawnSession } from "./spawn.ts";
@@ -20,10 +21,10 @@ export function createBackend(config: Config, opts: { readonly waitMs?: number }
 }
 
 /** `git` is absent on purpose: it belongs to repo scanning, which is frontend-side. */
-async function tmuxChecks(): Promise<readonly BackendCheck[]> {
+async function tmuxChecks(): Promise<readonly Check[]> {
   const tmuxBin = Bun.which("tmux");
   const claudeBin = Bun.which("claude");
-  const checks: BackendCheck[] = [
+  const checks: Check[] = [
     tmuxBin === null ? { level: "fail", message: "tmux not on PATH" } : { level: "ok", message: `tmux at ${tmuxBin}` },
     claudeBin === null
       ? { level: "fail", message: "claude not on PATH" }

@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { logPath } from "./paths.ts";
-import type { InstallResult, ServiceCheck } from "./service-types.ts";
+import type { Check } from "./check.ts";
+import type { InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
@@ -191,29 +192,29 @@ export async function restartService(): Promise<void> {
 }
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */
-export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
-  const checks: ServiceCheck[] = [];
+export async function doctorServiceChecks(): Promise<readonly Check[]> {
+  const checks: Check[] = [];
   if (await serviceLoaded()) {
-    checks.push({ ok: true, message: `systemd unit ${UNIT_NAME} active` });
+    checks.push({ level: "ok", message: `systemd unit ${UNIT_NAME} active` });
   } else {
     checks.push({
-      ok: false,
+      level: "warn",
       message: "systemd unit not active — run `seanced install` (its preflight names what's missing)",
     });
   }
   const username = userInfo().username;
   if (Bun.which("loginctl") === null) {
     checks.push({
-      ok: false,
+      level: "warn",
       message: "loginctl not found — can't check linger; without it the daemon dies with your last session",
     });
   } else {
     const linger = await exec(["loginctl", "show-user", username, "--property=Linger"]);
     if (linger.stdout.trim() === "Linger=yes") {
-      checks.push({ ok: true, message: "linger enabled — unit starts without a login session" });
+      checks.push({ level: "ok", message: "linger enabled — unit starts without a login session" });
     } else {
       checks.push({
-        ok: false,
+        level: "warn",
         message: `linger off — daemon dies with your last session: sudo loginctl enable-linger ${username}`,
       });
     }
@@ -221,11 +222,11 @@ export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
   if (isWsl()) {
     const task = await exec([schtasksExe(), "/Query", "/TN", PIN_TASK_NAME]);
     if (task.exitCode === 0) {
-      checks.push({ ok: true, message: `logon pin task ${PIN_TASK_NAME} registered` });
+      checks.push({ level: "ok", message: `logon pin task ${PIN_TASK_NAME} registered` });
     } else {
       // install's own registration may be denied (interop schtasks runs non-elevated), so point at the manual command directly
       checks.push({
-        ok: false,
+        level: "warn",
         message:
           `no ${PIN_TASK_NAME} scheduled task — a Windows reboot leaves the machine offline; ` +
           `from a Windows shell: ${manualTaskCommand(process.env["WSL_DISTRO_NAME"] ?? "<distro>")}`,

@@ -6,8 +6,3 @@ export interface InstallResult {
   /** Non-fatal steps that need a hand — each carries the manual command. */
   readonly notes: readonly string[];
 }
-
-export interface ServiceCheck {
-  readonly ok: boolean;
-  readonly message: string;
-}

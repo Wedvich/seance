@@ -1,4 +1,5 @@
 import type { RepoEntry, SessionEntry, SpawnErrorCode, SpawnRequest } from "@seance/shared";
+import type { Check } from "./check.ts";
 
 /**
  * The seam between the daemon's protocol frontend (relay client, handlers,
@@ -25,12 +26,6 @@ export interface SpawnOutcome {
   readonly note?: string;
 }
 
-/** `doctor`'s three outcomes; `fail` is what makes it exit nonzero. */
-export interface BackendCheck {
-  readonly level: "ok" | "warn" | "fail";
-  readonly message: string;
-}
-
 export interface SessionBackend {
   /**
    * Resolves `request.repo` by name against `repos` — the cached scan set, never
@@ -39,5 +34,5 @@ export interface SessionBackend {
   readonly spawn: (request: SpawnRequest, repos: readonly RepoEntry[]) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
-  readonly doctor: () => Promise<readonly BackendCheck[]>;
+  readonly doctor: () => Promise<readonly Check[]>;
 }

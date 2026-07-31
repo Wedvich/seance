@@ -1,5 +1,6 @@
+import type { Check } from "./check.ts";
 import * as launchd from "./launchd.ts";
-import type { InstallResult, ServiceCheck } from "./service-types.ts";
+import type { InstallResult } from "./service-types.ts";
 import * as systemd from "./systemd.ts";
 import { isWsl } from "./wsl.ts";
 
@@ -9,7 +10,7 @@ import { isWsl } from "./wsl.ts";
 // and systemd.ts's entry points all self-guard on systemdRunning(), so a
 // systemd-less box gets its WSL-aware message rather than a raw spawn error.
 
-export type { InstallResult, ServiceCheck } from "./service-types.ts";
+export type { InstallResult } from "./service-types.ts";
 
 function unsupported(action: string): Error {
   return new Error(
@@ -50,16 +51,16 @@ export async function restartService(): Promise<void> {
   throw unsupported("seanced restart");
 }
 
-export async function doctorServiceChecks(): Promise<readonly ServiceCheck[]> {
+export async function doctorServiceChecks(): Promise<readonly Check[]> {
   if (process.platform === "darwin") {
     return (await launchd.serviceLoaded())
-      ? [{ ok: true, message: "launchd agent loaded" }]
-      : [{ ok: false, message: "launchd agent not loaded — run `seanced install`" }];
+      ? [{ level: "ok", message: "launchd agent loaded" }]
+      : [{ level: "warn", message: "launchd agent not loaded — run `seanced install`" }];
   }
   if (process.platform === "linux") {
     return systemd.systemdRunning()
       ? systemd.doctorServiceChecks()
-      : [{ ok: false, message: systemd.noSystemdMessage(isWsl()) }];
+      : [{ level: "warn", message: systemd.noSystemdMessage(isWsl()) }];
   }
-  return [{ ok: false, message: "no service manager integration here — run seanced under your own supervisor" }];
+  return [{ level: "warn", message: "no service manager integration here — run seanced under your own supervisor" }];
 }

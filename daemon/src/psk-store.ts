@@ -1,6 +1,7 @@
-import { dpapiPskPath, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
+import type { Check } from "./check.ts";
+import { dpapiPskPath, dpapiRoundTrip, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
 import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
-import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmPskPath } from "./tpmcreds.ts";
+import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
 import { isWsl } from "./wsl.ts";
 
 /**
@@ -35,6 +36,12 @@ export interface PskStore {
     readonly notice: string;
     readonly run: () => Promise<void>;
   };
+  /**
+   * Health probe for `doctor`, empty when this store has nothing to say. Runs
+   * whether or not the store is available: a blob stranded on a machine that
+   * can no longer unseal it is exactly what needs reporting.
+   */
+  readonly doctor: () => Promise<readonly Check[]>;
 }
 
 export function keychainStore(service: string = PSK_SERVICE): PskStore {
@@ -51,6 +58,9 @@ export function keychainStore(service: string = PSK_SERVICE): PskStore {
       notice: "security will prompt below — paste the base64 value (it will not echo).\n",
       run: () => importKeychainPsk(service),
     },
+    // `security` reads and writes through the same ACL, so there is nothing to
+    // probe that a failed read wouldn't already have reported.
+    doctor: () => Promise.resolve([]),
   };
 }
 
@@ -64,7 +74,20 @@ export function dpapiStore(path: string = dpapiPskPath()): PskStore {
     available: () => Promise.resolve(isWsl()),
     read: () => readDpapiPsk(path),
     importValue: (psk) => importDpapiPskValue(psk, path),
+    doctor: dpapiChecks,
   };
+}
+
+/**
+ * Broken interop surfaces here as a warning, and as a FAIL in the config
+ * section only when the PSK actually lives in the blob and could not be read.
+ */
+async function dpapiChecks(): Promise<readonly Check[]> {
+  if (!isWsl()) return [];
+  const interop = await dpapiRoundTrip();
+  return interop === null
+    ? [{ level: "ok", message: "DPAPI round-trip via powershell.exe interop" }]
+    : [{ level: "warn", message: `${interop} — psk-import and a DPAPI-stored PSK won't work` }];
 }
 
 export function tpmStore(path: string = tpmPskPath()): PskStore {
@@ -77,7 +100,52 @@ export function tpmStore(path: string = tpmPskPath()): PskStore {
     available: tpmAvailable,
     read: () => readTpmPsk(path),
     importValue: (psk) => importTpmPskValue(psk, path),
+    doctor: () => tpmChecks(path),
   };
+}
+
+/**
+ * Same shape as the DPAPI probe: a broken TPM path warns here and FAILs in the
+ * config section only when the PSK actually lives in the blob. Gated off WSL —
+ * that box is the DPAPI store's, and `readTpmPsk` declines it for the same
+ * reason — so exactly one blob store reports per machine.
+ */
+async function tpmChecks(path: string): Promise<readonly Check[]> {
+  if (process.platform !== "linux" || isWsl()) return [];
+  const stored = await Bun.file(path).exists();
+  if (await tpmAvailable()) {
+    if (!stored) {
+      const probe = await tpmRoundTrip();
+      return probe === null
+        ? [
+            {
+              level: "ok",
+              message: "TPM seal/unseal via systemd-creds (no PSK blob yet — `seanced psk-import` creates it)",
+            },
+          ]
+        : [{ level: "warn", message: `${probe} — psk-import and a TPM-sealed PSK won't work` }];
+    }
+    return (await readTpmPsk(path)) !== null
+      ? [{ level: "ok", message: "TPM-sealed PSK blob decrypts via systemd-creds" }]
+      : [
+          {
+            level: "warn",
+            message:
+              `sealed blob at ${path} does not decrypt here — blobs are machine-bound by design; ` +
+              "re-run `seanced psk-import` on this machine",
+          },
+        ];
+  }
+  return stored
+    ? [
+        {
+          level: "warn",
+          message:
+            `sealed PSK blob at ${path} but no usable TPM here — machine-bound by design; ` +
+            "re-run `seanced psk-import` on this machine",
+        },
+      ]
+    : [{ level: "ok", message: "no usable TPM — psk stays in config.json" }];
 }
 
 /**
@@ -94,6 +162,12 @@ export function pskStores(): readonly PskStore[] {
  * config.json. Availability is mutually exclusive by platform, so first-wins
  * matches the hand-written chains this replaced.
  */
+/** Doctor's key-store section. At most one store answers per machine. */
+export async function pskStoreChecks(stores: readonly PskStore[] = pskStores()): Promise<readonly Check[]> {
+  const checks = await Promise.all(stores.map((store) => store.doctor()));
+  return checks.flat();
+}
+
 export async function availablePskStore(stores: readonly PskStore[] = pskStores()): Promise<PskStore | null> {
   for (const store of stores) {
     // oxlint-disable-next-line no-await-in-loop -- probes spawn; the first hit is the answer, so run them in order

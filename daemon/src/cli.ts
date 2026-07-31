@@ -12,9 +12,9 @@ import {
   pskFingerprint,
   runnableProblems,
 } from "./config.ts";
-import { dpapiRoundTrip } from "./dpapi.ts";
+import type { Check } from "./check.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
-import { availablePskStore, type PskStore } from "./psk-store.ts";
+import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
   doctorServiceChecks,
   installService,
@@ -23,10 +23,8 @@ import {
   servicePath,
   uninstallService,
 } from "./service.ts";
-import { readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
 import { scanRepos } from "./scan.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
-import { isWsl } from "./wsl.ts";
 
 export async function cmdInit(): Promise<void> {
   const path = configPath();
@@ -208,6 +206,15 @@ export async function cmdDoctor(): Promise<void> {
     failed = true;
     console.log(`  FAIL  ${msg}`);
   };
+  // Every section that can produce checks produces the same shape, so doctor
+  // renders and never branches on where a check came from.
+  const render = (checks: readonly Check[]): void => {
+    for (const check of checks) {
+      if (check.level === "ok") ok(check.message);
+      else if (check.level === "warn") warn(check.message);
+      else fail(check.message);
+    }
+  };
 
   console.log("config");
   let config;
@@ -263,11 +270,7 @@ export async function cmdDoctor(): Promise<void> {
     // The backend owns its own preflight — the tmux one checks its binaries and
     // probes the server; a replacement reports whatever it depends on instead.
     console.log("backend");
-    for (const check of await createBackend(config).doctor()) {
-      if (check.level === "ok") ok(check.message);
-      else if (check.level === "warn") warn(check.message);
-      else fail(check.message);
-    }
+    render(await createBackend(config).doctor());
 
     console.log("relay");
     if (/^wss?:\/\/.+/u.test(config.relayUrl)) {
@@ -292,39 +295,8 @@ export async function cmdDoctor(): Promise<void> {
   }
 
   console.log("service");
-  for (const check of await doctorServiceChecks()) {
-    if (check.ok) ok(check.message);
-    else warn(check.message);
-  }
-  if (isWsl()) {
-    // Broken interop surfaces here as a warning, and as a FAIL above only
-    // when the PSK actually lives in the blob and could not be read.
-    const interop = await dpapiRoundTrip();
-    if (interop === null) ok("DPAPI round-trip via powershell.exe interop");
-    else warn(`${interop} — psk-import and a DPAPI-stored PSK won't work`);
-  } else if (await tpmAvailable()) {
-    // Same shape as the WSL interop probe: a broken TPM path warns here,
-    // and FAILs above only when the PSK actually lives in the blob.
-    if (await Bun.file(tpmPskPath()).exists()) {
-      if ((await readTpmPsk()) !== null) ok("TPM-sealed PSK blob decrypts via systemd-creds");
-      else
-        warn(
-          `sealed blob at ${tpmPskPath()} does not decrypt here — blobs are machine-bound by design; re-run \`seanced psk-import\` on this machine`,
-        );
-    } else {
-      const probe = await tpmRoundTrip();
-      if (probe === null) ok("TPM seal/unseal via systemd-creds (no PSK blob yet — `seanced psk-import` creates it)");
-      else warn(`${probe} — psk-import and a TPM-sealed PSK won't work`);
-    }
-  } else if (process.platform === "linux") {
-    if (await Bun.file(tpmPskPath()).exists()) {
-      warn(
-        `sealed PSK blob at ${tpmPskPath()} but no usable TPM here — machine-bound by design; re-run \`seanced psk-import\` on this machine`,
-      );
-    } else {
-      ok("no usable TPM — psk stays in config.json");
-    }
-  }
+  render(await doctorServiceChecks());
+  render(await pskStoreChecks());
 
   if (failed) process.exit(1);
 }
