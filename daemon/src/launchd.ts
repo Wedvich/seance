@@ -2,12 +2,14 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Check } from "./check.ts";
 import { exec } from "./exec.ts";
 import { logPath } from "./paths.ts";
+import type { InstallResult } from "./service-types.ts";
 
 export const LAUNCHD_LABEL = "io.seance.seanced";
 
-export function plistPath(): string {
+export function servicePath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 }
 
@@ -54,10 +56,11 @@ export function assertMacos(action: string): void {
   }
 }
 
-export async function installService(): Promise<string> {
+/** `notes` is always empty: launchd needs no step the user has to finish by hand. */
+export async function installService(): Promise<InstallResult> {
   assertMacos("seanced install");
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
-  const target = plistPath();
+  const target = servicePath();
   await mkdir(dirname(target), { recursive: true });
   await mkdir(dirname(logPath()), { recursive: true });
   await Bun.write(target, plistContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
@@ -66,13 +69,15 @@ export async function installService(): Promise<string> {
   if (bootstrap.exitCode !== 0) {
     throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim()}`);
   }
-  return target;
+  return { target, notes: [] };
 }
 
-export async function uninstallService(): Promise<void> {
+/** Nothing is left behind, so there is never a note — unlike systemd's linger. */
+export async function uninstallService(): Promise<readonly string[]> {
   assertMacos("seanced uninstall");
   await exec(["launchctl", "bootout", `${gui()}/${LAUNCHD_LABEL}`]);
-  await exec(["rm", "-f", plistPath()]);
+  await exec(["rm", "-f", servicePath()]);
+  return [];
 }
 
 export async function serviceLoaded(): Promise<boolean> {
@@ -87,4 +92,11 @@ export async function restartService(): Promise<void> {
   if (result.exitCode !== 0) {
     throw new Error(`launchctl kickstart failed: ${result.stderr.trim()}`);
   }
+}
+
+/** Doctor's macOS service section. One check — launchd needs no linger or pin task. */
+export async function doctorServiceChecks(): Promise<readonly Check[]> {
+  return (await serviceLoaded())
+    ? [{ level: "ok", message: "launchd agent loaded" }]
+    : [{ level: "warn", message: "launchd agent not loaded — run `seanced install`" }];
 }

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { logPath } from "./paths.ts";
 import type { Check } from "./check.ts";
-import type { InstallResult } from "./service-types.ts";
+import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
@@ -16,6 +16,15 @@ export const PIN_TASK_NAME = "SeanceWslPin";
 
 export function unitPath(): string {
   return join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "systemd", "user", UNIT_NAME);
+}
+
+/**
+ * The unit path only where systemd could load it. A box without a running
+ * instance has no service to point at, and naming the file there would read
+ * as "installed" in `seanced status`.
+ */
+export function servicePath(): string {
+  return systemdRunning() ? unitPath() : NO_SERVICE_MANAGER;
 }
 
 /** systemd expands % specifiers inside unit values; paths and PATH must stay literal. */
@@ -193,6 +202,7 @@ export async function restartService(): Promise<void> {
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
+  if (!systemdRunning()) return [{ level: "warn", message: noSystemdMessage(isWsl()) }];
   const checks: Check[] = [];
   if (await serviceLoaded()) {
     checks.push({ level: "ok", message: `systemd unit ${UNIT_NAME} active` });

@@ -467,7 +467,15 @@ together (re-sends registry data on every poll, useless offline).
   because nothing idles an LXC container or server out, linger alone covers
   reboots. Linux without systemd stays a manual supervisor with a clear
   error — a service-manager abstraction for init systems nobody here runs
-  isn't worth carrying.
+  isn't worth carrying. Revised 2026-07-31, and only in the narrow sense:
+  there is still no third init system and no plugin seam, but launchd.ts and
+  systemd.ts had drifted into different return shapes for the same actions
+  (`Promise<string>` vs `InstallResult`, `Promise<void>` vs the notes list),
+  which `service.ts` paid for by adapting at two call sites. Both now satisfy
+  one `ServiceManager` type and the dispatcher picks a module per platform
+  instead of branching per action. The type is a drift guard, not an
+  extension point — adding a platform is still a module plus a line in
+  `manager()`.
   The unit (`seanced.service`, `Restart=on-failure`) appends stdout/stderr
   to the same `seanced.log` path launchd redirects to
   (`StandardOutput=append:`), so the audit trail, the CLI's second writer,
