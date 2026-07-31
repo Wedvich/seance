@@ -1,12 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { watchConfigFile } from "../src/config.ts";
 import { startDaemon, type DaemonHandle, type RunOpts } from "../src/run.ts";
 import { startSupervisor, type SuperviseOpts, type SupervisorHandle } from "../src/supervise.ts";
-import { awaitWatcherLive, makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { makeConfigTrigger, makeGitFixture, pollUntil, type ConfigTrigger, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 /**
@@ -25,6 +25,7 @@ let base: string;
 let fixture: GitFixture;
 let appKey: CryptoKey;
 let supervisor: SupervisorHandle | null = null;
+let trigger: ConfigTrigger | null = null;
 let relay: TestRelay | null = null;
 
 beforeAll(async () => {
@@ -42,6 +43,7 @@ afterAll(async () => {
 afterEach(() => {
   supervisor?.stop();
   supervisor = null;
+  trigger = null;
   relay?.stop();
   relay = null;
 });
@@ -69,20 +71,29 @@ async function registerAs(testRelay: TestRelay, name: string): Promise<MachineIn
   throw new Error(`no register frame named ${name}`);
 }
 
+/** Reloads arrive through the injected trigger, so nothing below depends on fs.watch firing. */
 async function startSupervised(path: string, extra: Partial<SuperviseOpts> = {}): Promise<SupervisorHandle> {
+  trigger = makeConfigTrigger();
   const handle = await startSupervisor({
     configPath: path,
-    debounceMs: DEBOUNCE_MS,
+    watch: trigger.watch,
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
     ...extra,
   });
   supervisor = handle;
-  // Every test below edits within milliseconds of this returning, which is the
-  // one window where the watch can silently miss a write.
-  await awaitWatcherLive(dirname(path));
   return handle;
+}
+
+/**
+ * Delivers one config change and resolves once the supervisor has finished
+ * reacting to it — `current()` awaits the reload chain the trigger just
+ * extended, which is what leaves these tests with no timing in them.
+ */
+async function reload(): Promise<void> {
+  trigger!.fire();
+  await supervisor!.current();
 }
 
 /**
@@ -119,10 +130,6 @@ async function captureLog(body: () => Promise<void>): Promise<string[]> {
 /** One config file per test: the watcher is per-directory, so shared dirs cross-talk. */
 async function configFile(): Promise<string> {
   return join(await mkdtemp(join(base, "cfg-")), "config.json");
-}
-
-async function settle(): Promise<void> {
-  await Bun.sleep(DEBOUNCE_MS + 250);
 }
 
 /**
@@ -171,7 +178,7 @@ describe("config reload failure paths", () => {
 
     failing = true;
     await writeConfig(path, "Doomed", testRelay.url);
-    await settle();
+    await reload();
     expect(testRelay.connectionCount()).toBe(connectionsBefore);
 
     // The obvious recovery: put back exactly the config that was working. It is
@@ -179,6 +186,7 @@ describe("config reload failure paths", () => {
     // yield to the fact that nothing is running.
     failing = false;
     await writeConfig(path, "Healthy", testRelay.url);
+    await reload();
     await waitForConnections(testRelay, connectionsBefore + 1);
     await waitForConnected(supervisor!);
   });
@@ -197,7 +205,7 @@ describe("config reload failure paths", () => {
 
     const lines = await captureLog(async () => {
       await writeConfig(path, "Rejected", testRelay.url);
-      await settle();
+      await reload();
     });
 
     expect(lines.some((line) => line.includes("rolling back"))).toBe(true);
@@ -236,10 +244,11 @@ describe("config reload failure paths", () => {
 
     poisoned = true;
     await writeConfig(path, "Poisoned", testRelay.url);
-    await settle();
+    await reload();
 
     poisoned = false;
     await writeConfig(path, "Recovered", testRelay.url);
+    await reload();
     await registerAs(testRelay, "Recovered");
   });
 
@@ -256,15 +265,20 @@ describe("config reload failure paths", () => {
       const unwatch = watchConfigFile(() => changes++, path, DEBOUNCE_MS, 20);
       try {
         await mkdir(dir, { recursive: true });
-        await Bun.sleep(120);
-        await Bun.write(path, "{}");
-        await settle();
+        // The retry arms ~20ms out and its FSEvents stream comes up
+        // asynchronously after that, so a single write can land while nothing
+        // is listening yet and be dropped outright. Rewrite until one is
+        // delivered, pausing past the debounce that every write restarts.
+        await pollUntil(async () => {
+          await Bun.write(path, "{}");
+          await Bun.sleep(DEBOUNCE_MS + 40);
+          return changes > 0;
+        }, "the re-armed watch to deliver a change");
       } finally {
         unwatch();
       }
     });
 
-    expect(changes).toBeGreaterThan(0);
     expect(lines.some((line) => line.includes("config hot reload is off"))).toBe(true);
     expect(lines.some((line) => line.includes("for changes again"))).toBe(true);
   });

@@ -36,6 +36,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - Daemon integration tests need real `tmux` and `git` on PATH. They isolate via a private tmux
   server (`SEANCE_TMUX_SOCKET`) and a stub claude binary (`SEANCE_CLAUDE_BIN`) — set in the tests,
   useful to know when debugging.
+- A fixed sleep before a _positive_ assertion is a latent flake: it has to outlast the slowest
+  machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
+  in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
+  legitimate — a non-event can't be polled — so leave those alone.
 - `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.

@@ -84,6 +84,21 @@ function startClient(opts: { readonly token?: string; readonly timeouts?: { read
   return { client, waitFor };
 }
 
+/**
+ * Waits for a positive assertion's subject instead of sleeping a fixed span,
+ * which has to outlast the slowest machine and still reports a timeout rather
+ * than the line that never arrived. A copy of `daemon/test/fixtures.ts`'s, on
+ * purpose: a pwa suite has no business importing the daemon's fixtures.
+ */
+async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (ready()) return;
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    await Bun.sleep(10);
+  }
+}
+
 describe("connection", () => {
   test("reaches open and receives the registry", async () => {
     const { client, waitFor } = startClient();
@@ -291,7 +306,7 @@ describe("requests", () => {
           payload: { sessions: [], at: Date.now() },
         };
         daemon.client.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, reply) });
-        await Bun.sleep(300);
+        await pollUntil(() => lines.some((line) => line.startsWith("wire recv ")), "the orphan reply to be logged");
         console.log = realLog;
 
         const received = lines.find((line) => line.startsWith("wire recv "));

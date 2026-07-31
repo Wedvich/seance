@@ -7,7 +7,7 @@ import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { makeClaudeStub, makeGitFixture, pollUntil, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 /**
@@ -139,7 +139,7 @@ describe("wire correlation logging", () => {
       const { env } = await appRequest(relay, deviceId, "sessions", {});
       await relay.messages.next(3_000);
       relay.sendToDaemon(env); // byte-identical replay
-      await Bun.sleep(200);
+      await pollUntil(() => logged().includes("wire dropped iv="), "the dropped envelope to be logged");
 
       // Same `wire ` prefix as the success paths, so one grep covers both.
       expect(logged()).toContain(`wire dropped iv=${JSON.stringify(env.iv)}`);

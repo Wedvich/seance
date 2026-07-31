@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
+import { pollUntil } from "../daemon/test/fixtures.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { killWindow, listWindows, ownMachine, startApp, startStack, type Stack } from "./harness.ts";
 
@@ -167,9 +168,10 @@ describe("daemon ↔ relay ↔ app", () => {
 
       // Let the daemon finish the spawn nobody heard the answer to (its
       // window exists from new-window time, well before the verdict).
-      await Bun.sleep(1_500);
-      window = (await listWindows()).find((name) => name === "recover-me") ?? null;
-      expect(window).not.toBeNull();
+      await pollUntil(async () => {
+        window = (await listWindows()).find((name) => name === "recover-me") ?? null;
+        return window !== null;
+      }, "the recover-me window on the tmux server");
 
       // Relaunch: a fresh client + Store seeded with the persisted pending
       // spawn, exactly main.tsx's readPending() path.

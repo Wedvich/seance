@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { watchConfigFile } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
 
 async function run(argv: readonly string[], cwd?: string): Promise<void> {
@@ -135,4 +136,57 @@ export async function awaitWatcherLive(dir: string): Promise<void> {
     (probe as ReturnType<typeof watch> | null)?.close();
     await rm(sentinel, { force: true });
   }
+}
+
+/**
+ * Replaces a fixed sleep before a *positive* assertion, which is a latent flake:
+ * the sleep has to outlast the slowest machine, asserts nothing about what it
+ * waited for, and reports a timeout rather than the thing that never happened.
+ * A sleep before a *negative* assertion is fine — a non-event can't be polled.
+ */
+export async function pollUntil(
+  ready: () => boolean | Promise<boolean>,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await ready()) return;
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    await Bun.sleep(10);
+  }
+}
+
+export interface ConfigTrigger {
+  /** Stands in for `watchConfigFile`: keeps the callback instead of arming `fs.watch`. */
+  readonly watch: typeof watchConfigFile;
+  /** Delivers one change, as the real watcher would once its debounce elapsed. */
+  readonly fire: () => void;
+  /** False before the supervisor arms and after it unwatches. */
+  readonly watching: () => boolean;
+}
+
+/**
+ * The supervisor's config-watch seam, driven by the test instead of by the
+ * filesystem. Everything about *reacting* to a config change — the deep-equal
+ * guard, the bad-edit and rollback paths — is then exercised with no timing at
+ * all: write the file, fire, and `current()` resolves when the reload is done.
+ * Only tests about the watcher itself need the real thing (and
+ * `awaitWatcherLive` with it).
+ */
+export function makeConfigTrigger(): ConfigTrigger {
+  let onChange: (() => void) | null = null;
+  return {
+    watch: (cb) => {
+      onChange = cb;
+      return (): void => {
+        onChange = null;
+      };
+    },
+    fire: (): void => {
+      if (onChange === null) throw new Error("fire() before the supervisor armed its watch");
+      onChange();
+    },
+    watching: (): boolean => onChange !== null,
+  };
 }

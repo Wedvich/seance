@@ -16,6 +16,8 @@ export interface SuperviseOpts extends Omit<RunOpts, "config"> {
   readonly debounceMs?: number;
   /** Defaults to `startDaemon`; tests wrap it to inject startup failures. */
   readonly startDaemon?: (opts: RunOpts) => Promise<DaemonHandle>;
+  /** Defaults to `watchConfigFile`; tests substitute a trigger they drive directly. */
+  readonly watch?: typeof watchConfigFile;
 }
 
 export interface SupervisorHandle {
@@ -70,7 +72,13 @@ type SwapResult = "swapped" | "rolled-back" | "down";
  * anyway; tmux sessions live outside the process and are untouched.
  */
 export async function startSupervisor(opts: SuperviseOpts = {}): Promise<SupervisorHandle> {
-  const { configPath: path = configPath(), debounceMs, startDaemon: start = startDaemon, ...runOpts } = opts;
+  const {
+    configPath: path = configPath(),
+    debounceMs,
+    startDaemon: start = startDaemon,
+    watch = watchConfigFile,
+    ...runOpts
+  } = opts;
 
   // Null only when nothing holds a psk, which `start` then refuses on its own.
   const startWith = (cfg: Config, psk: ResolvedPsk | null): Promise<DaemonHandle> =>
@@ -152,7 +160,7 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
   // Serialized: a burst of saves must not run two swaps against one handle.
   // Both arms on purpose — a one-arm `.then` would leave a rejected link
   // poisoning every later reload, and `.finally` would re-raise it at each one.
-  const unwatch = watchConfigFile(
+  const unwatch = watch(
     () => {
       reloading = reloading.then(safeReload, safeReload);
     },

@@ -18,7 +18,7 @@ import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { makeClaudeStub, makeGitFixture, pollUntil, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(3));
@@ -135,9 +135,9 @@ describe("daemon ↔ relay integration", () => {
     const relay = startTestRelay("a-different-token");
     const daemon = await startTestDaemon(relay.url);
     try {
-      await Bun.sleep(200);
+      await pollUntil(() => relay.rejectedCount() > 0, "the relay to reject the bad token");
+      // Stable once rejected: there is no accepted socket left to register over.
       expect(relay.registers.size).toBe(0);
-      expect(relay.rejectedCount()).toBeGreaterThan(0);
     } finally {
       daemon.stop();
       relay.stop();

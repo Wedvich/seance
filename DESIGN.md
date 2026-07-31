@@ -464,8 +464,11 @@ together (re-sends registry data on every poll, useless offline).
   arming immediately on a saturated machine, 0% otherwise. Untouched because
   the daemon arms its watch at startup and real edits arrive minutes or hours
   later; the exposure is an edit within milliseconds of `seanced restart`, and
-  the next save is picked up normally. Tests do write that fast, so they wait
-  for the stream (`awaitWatcherLive` in `daemon/test/fixtures.ts`). Rejected:
+  the next save is picked up normally. Tests do write that fast: the two that
+  are about the watcher itself wait for the stream (`awaitWatcherLive` in
+  `daemon/test/fixtures.ts`), and the rest substitute `SuperviseOpts.watch`
+  with a trigger they fire directly, so nothing about _reacting_ to a config
+  change depends on FSEvents at all. Rejected:
   re-exec or `systemctl restart` on change (loses the keep-running-on-a-bad-edit
   property and burns the supervisor's restart budget), and per-field reload
   (four call sites to keep in sync with every future config field).

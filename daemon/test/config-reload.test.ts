@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
-import { awaitWatcherLive, makeGitFixture, type GitFixture } from "./fixtures.ts";
+import {
+  awaitWatcherLive,
+  makeConfigTrigger,
+  makeGitFixture,
+  type ConfigTrigger,
+  type GitFixture,
+} from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -16,6 +22,7 @@ let base: string;
 let fixture: GitFixture;
 let appKey: CryptoKey;
 let supervisor: SupervisorHandle | null = null;
+let trigger: ConfigTrigger | null = null;
 let relay: TestRelay | null = null;
 
 beforeAll(async () => {
@@ -33,6 +40,7 @@ afterAll(async () => {
 afterEach(() => {
   supervisor?.stop();
   supervisor = null;
+  trigger = null;
   relay?.stop();
   relay = null;
 });
@@ -56,40 +64,57 @@ async function writeConfigAtomically(path: string, name: string, relayUrl: strin
   await rename(temp, path);
 }
 
-/** Registers arrive for rescans too, so wait for the one carrying the expected name. */
-async function registerAs(testRelay: TestRelay, name: string): Promise<MachineInfo> {
+/**
+ * Registers arrive for rescans too, so wait for the one carrying the expected
+ * name — and, when asked, the repo with it. A daemon registers its *cached*
+ * repo set immediately and only re-registers once the background scan has
+ * landed and been saved, so the first frame under a fresh state dir names no
+ * repos at all.
+ */
+async function registerAs(testRelay: TestRelay, name: string, repo?: string): Promise<MachineInfo> {
   for (let i = 0; i < 6; i++) {
     const frame = await testRelay.registers.next(5_000);
     const plain = await open(appKey, frame.info);
     const info = plain.payload as MachineInfo;
-    if (info.name === name) return info;
+    if (info.name !== name) continue;
+    if (repo === undefined || info.repos.some((r) => r.name === repo)) return info;
   }
   throw new Error(`no register frame named ${name}`);
 }
 
+const RUN_OPTS = { pingIntervalMs: 60_000, pongTimeoutMs: 1_000, baseBackoffMs: 20 } as const;
+
+/** Reloads arrive through the injected trigger, so nothing below depends on fs.watch firing. */
 async function startSupervised(path: string): Promise<SupervisorHandle> {
-  const handle = await startSupervisor({
-    configPath: path,
-    debounceMs: DEBOUNCE_MS,
-    pingIntervalMs: 60_000,
-    pongTimeoutMs: 1_000,
-    baseBackoffMs: 20,
-  });
+  trigger = makeConfigTrigger();
+  const handle = await startSupervisor({ configPath: path, watch: trigger.watch, ...RUN_OPTS });
   supervisor = handle;
-  // Every test below edits within milliseconds of this returning, which is the
-  // one window where the watch can silently miss a write.
+  return handle;
+}
+
+/** For the one test that is about the watcher itself: the real one, and the barrier it needs. */
+async function startWatched(path: string): Promise<SupervisorHandle> {
+  const handle = await startSupervisor({ configPath: path, debounceMs: DEBOUNCE_MS, ...RUN_OPTS });
+  supervisor = handle;
+  // It edits within milliseconds of this returning, which is the one window
+  // where the watch can silently miss a write.
   await awaitWatcherLive(dirname(path));
   return handle;
+}
+
+/**
+ * Delivers one config change and resolves once the supervisor has finished
+ * reacting to it — `current()` awaits the reload chain the trigger just
+ * extended, which is what leaves these tests with no timing in them.
+ */
+async function reload(): Promise<void> {
+  trigger!.fire();
+  await supervisor!.current();
 }
 
 /** One config file per test: the watcher is per-directory, so shared dirs cross-talk. */
 async function configFile(): Promise<string> {
   return join(await mkdtemp(join(base, "cfg-")), "config.json");
-}
-
-/** Long enough for a debounced reload to have happened if it were going to. */
-async function settle(): Promise<void> {
-  await Bun.sleep(DEBOUNCE_MS + 250);
 }
 
 describe("config hot reload", () => {
@@ -99,10 +124,13 @@ describe("config hot reload", () => {
     await writeConfig(path, "BeforeEdit", relay.url);
 
     await startSupervised(path);
-    await registerAs(relay, "BeforeEdit");
+    // The scan has to have landed before the edit: the reloaded daemon reads
+    // its repo set from the state file the first one wrote.
+    await registerAs(relay, "BeforeEdit", "myrepo");
 
     const pid = process.pid;
     await writeConfig(path, "AfterEdit", relay.url);
+    await reload();
 
     const info = await registerAs(relay, "AfterEdit");
     expect(info.repos.some((r) => r.name === "myrepo")).toBe(true);
@@ -114,7 +142,7 @@ describe("config hot reload", () => {
     const path = await configFile();
     await writeConfig(path, "First", relay.url);
 
-    await startSupervised(path);
+    await startWatched(path);
     await registerAs(relay, "First");
 
     // Guards two ways this breaks: a file-level watch dies on the first rename,
@@ -137,17 +165,18 @@ describe("config hot reload", () => {
     const connectionsBefore = relay.connectionCount();
 
     await Bun.write(path, "{ this is not json");
-    await settle();
+    await reload();
     expect(relay.connectionCount()).toBe(connectionsBefore);
     expect((await supervisor!.current()).client.connected).toBe(true);
 
     // An unrunnable but parseable config is refused the same way.
     await Bun.write(path, `${JSON.stringify({ ...validShape(relay.url), relayUrl: "http://nope" }, null, 2)}\n`);
-    await settle();
+    await reload();
     expect(relay.connectionCount()).toBe(connectionsBefore);
     expect((await supervisor!.current()).client.connected).toBe(true);
 
     await writeConfig(path, "Fixed", relay.url);
+    await reload();
     await registerAs(relay, "Fixed");
   });
 
@@ -161,7 +190,7 @@ describe("config hot reload", () => {
     const connectionsBefore = relay.connectionCount();
 
     await writeConfig(path, "Unchanged", relay.url);
-    await settle();
+    await reload();
 
     expect(relay.connectionCount()).toBe(connectionsBefore);
   });
@@ -176,12 +205,11 @@ describe("config hot reload", () => {
 
     handle.stop();
     supervisor = null;
-    const connectionsBefore = relay.connectionCount();
 
-    await writeConfig(path, "AfterStop", relay.url);
-    await settle();
-
-    expect(relay.connectionCount()).toBe(connectionsBefore);
+    // With the seam this is the whole claim: the supervisor released the
+    // watcher, so no later edit can reach it. Writing one and failing to
+    // observe a reconnect would only prove the sleep was long enough.
+    expect(trigger!.watching()).toBe(false);
   });
 });
 
