@@ -12,9 +12,9 @@ import {
   pskFingerprint,
   runnableProblems,
 } from "./config.ts";
-import { dpapiPskPath, dpapiRoundTrip, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
-import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
+import { dpapiRoundTrip } from "./dpapi.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
+import { availablePskStore, type PskStore } from "./psk-store.ts";
 import {
   doctorServiceChecks,
   installService,
@@ -23,7 +23,7 @@ import {
   servicePath,
   uninstallService,
 } from "./service.ts";
-import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
+import { readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
 import { scanRepos } from "./scan.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
@@ -229,10 +229,10 @@ export async function cmdDoctor(): Promise<void> {
         // Printed on every device so a mismatched paste is one glance away,
         // rather than surfacing later as "nothing decrypts".
         ok(`psk from ${resolved.source}, fingerprint ${await pskFingerprint(resolved.psk)} — same on every device`);
-        if (resolved.source === "config" && (process.platform === "darwin" || isWsl() || (await tpmAvailable()))) {
-          const store = process.platform === "darwin" ? "the keychain" : isWsl() ? "a DPAPI blob" : "a TPM-sealed blob";
+        const store = resolved.source === "config" ? await availablePskStore() : null;
+        if (store !== null) {
           warn(
-            `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store}`,
+            `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store.nag}`,
           );
         }
       }
@@ -390,33 +390,38 @@ async function readLineNoEcho(): Promise<string> {
 }
 
 /**
- * One-time setup, at the machine or over SSH: `security` prompts for the key on
- * the terminal, so it lands in neither argv nor shell history. With stdin piped
- * (e.g. from `op item get`), the value is read from the pipe instead — same
- * guarantee, since it crosses to `security` over stdin, never argv.
+ * One-time setup, at the machine or over SSH. Where the store owns a prompt
+ * (macOS `security`) an interactive run hands it the terminal, so the key
+ * lands in neither argv nor shell history and never transits this process.
+ * Otherwise — a pipe, or a promptless blob store — the value passes through
+ * here before crossing to the store as stdin data, still never argv.
+ *
+ * Validated before storing on every path: an import updates in place, and a
+ * bad pipe (empty output, an `op` error message) must not clobber a good entry.
  */
-async function cmdPskImportMacos(): Promise<void> {
-  console.log(`storing the PSK as generic password "${PSK_SERVICE}" in the login keychain.`);
-  if (process.stdin.isTTY) {
-    console.log("security will prompt below — paste the base64 value (it will not echo).\n");
-    await importKeychainPsk();
+async function runPskImport(store: PskStore): Promise<void> {
+  const tty = process.stdin.isTTY === true;
+  console.log(store.intro);
+  let psk: string | null = null;
+  if (store.prompted !== undefined && tty) {
+    console.log(store.prompted.notice);
+    await store.prompted.run();
   } else {
-    const piped = (await new Response(Bun.stdin.stream()).text()).trim();
-    // Validate before storing: -U updates in place, and a bad pipe (empty
-    // output, an op error message) must not clobber a good keychain entry.
-    const problem = pskShapeProblem(piped);
+    if (tty) console.log("paste the base64 value (it will not echo):");
+    psk = tty ? (await readLineNoEcho()).trim() : (await new Response(Bun.stdin.stream()).text()).trim();
+    const problem = pskShapeProblem(psk);
     if (problem !== null) {
-      console.error(`piped value ${problem} — nothing stored`);
+      console.error(`${tty ? "value" : "piped value"} ${problem} — nothing stored`);
       process.exit(1);
     }
-    await importKeychainPskValue(piped);
+    await store.importValue(psk);
   }
 
-  const stored = await readKeychainPsk();
-  if (stored === null) {
-    console.error(
-      `\nstored, but reading it back failed — check \`security find-generic-password -s ${PSK_SERVICE} -w\``,
-    );
+  // The store's own prompt swallows the value, so a prompted import can only
+  // check what came back is a usable key; the rest also check it is *the* key.
+  const stored = await store.read();
+  if (stored === null || (psk !== null && stored !== psk)) {
+    console.error(`\nstored, but reading it back failed — ${store.readBackHint}`);
     process.exit(1);
   }
   const storedProblem = pskShapeProblem(stored);
@@ -425,71 +430,12 @@ async function cmdPskImportMacos(): Promise<void> {
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads the keychain, then \`seanced restart\``);
-}
-
-/**
- * Shared flow for the promptless blob stores (DPAPI on WSL, TPM-sealed
- * systemd-creds on plain Linux). Neither tool has a prompt of its own, so
- * unlike macOS the key passes through this process on both paths — tty read
- * or pipe — before crossing to the store as stdin data (never argv).
- * Validated up front on both paths for the same clobber reason as above.
- */
-async function cmdPskImportBlob(store: {
-  readonly intro: string;
-  readonly importValue: (psk: string) => Promise<void>;
-  readonly readBack: () => Promise<string | null>;
-  readonly readBackHint: string;
-  readonly clearHint: string;
-}): Promise<void> {
-  console.log(store.intro);
-  let psk: string;
-  if (process.stdin.isTTY) {
-    console.log("paste the base64 value (it will not echo):");
-    psk = (await readLineNoEcho()).trim();
-  } else {
-    psk = (await new Response(Bun.stdin.stream()).text()).trim();
-  }
-  const problem = pskShapeProblem(psk);
-  if (problem !== null) {
-    console.error(`value ${problem} — nothing stored`);
-    process.exit(1);
-  }
-  await store.importValue(psk);
-
-  const stored = await store.readBack();
-  if (stored !== psk) {
-    console.error(`\nstored, but reading it back failed — ${store.readBackHint}`);
-    process.exit(1);
-  }
-  console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
   console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seanced restart\``);
 }
 
-function cmdPskImportWsl(): Promise<void> {
-  return cmdPskImportBlob({
-    intro: `storing the PSK as a DPAPI (CurrentUser) blob at ${dpapiPskPath()}.`,
-    importValue: importDpapiPskValue,
-    readBack: readDpapiPsk,
-    readBackHint: "check powershell.exe interop (`seanced doctor`)",
-    clearHint: "the DPAPI blob",
-  });
-}
-
-function cmdPskImportTpm(): Promise<void> {
-  return cmdPskImportBlob({
-    intro: `storing the PSK as a TPM2-sealed systemd-creds blob at ${tpmPskPath()}.`,
-    importValue: importTpmPskValue,
-    readBack: readTpmPsk,
-    readBackHint: "check the TPM device (`seanced doctor`)",
-    clearHint: "the sealed blob",
-  });
-}
-
 export async function cmdPskImport(): Promise<void> {
-  if (process.platform === "darwin") return cmdPskImportMacos();
-  if (isWsl()) return cmdPskImportWsl();
-  if (process.platform === "linux" && (await tpmAvailable())) return cmdPskImportTpm();
+  const store = await availablePskStore();
+  if (store !== null) return runPskImport(store);
   console.error(`no platform key store here (no usable TPM) — the psk stays in ${configPath()}, keep it mode 0600`);
   // A piped value is an explicit request to store a secret, so losing it must
   // not look like success; an interactive invocation has read nothing yet.

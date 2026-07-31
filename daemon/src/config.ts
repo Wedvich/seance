@@ -1,12 +1,10 @@
 import { watch } from "node:fs";
 import { dirname } from "node:path";
 import { fromBase64 } from "@seance/shared";
-import { readDpapiPsk } from "./dpapi.ts";
 import { fingerprint } from "./hash.ts";
-import { readKeychainPsk } from "./keychain.ts";
 import { log } from "./log.ts";
 import { configPath, expandTilde } from "./paths.ts";
-import { readTpmPsk } from "./tpmcreds.ts";
+import { pskStores, type PskStore, type PskStoreSource } from "./psk-store.ts";
 
 export interface Config {
   readonly name: string;
@@ -70,7 +68,7 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   };
 }
 
-export type PskSource = "config" | "keychain" | "dpapi" | "tpm";
+export type PskSource = "config" | PskStoreSource;
 
 export interface ResolvedPsk {
   readonly psk: string;
@@ -78,26 +76,24 @@ export interface ResolvedPsk {
 }
 
 /**
- * The config field wins, so every box keeps one code path; an empty field
- * falls back to the platform store — macOS login keychain, WSL DPAPI blob, or
- * Linux TPM-sealed blob, each self-gated on its platform. Null when nothing
- * holds it, which `runnableProblems` reports rather than throwing.
- * `keychainService`, `dpapiPath`, and `tpmPath` exist so tests can point at a
- * name/path that cannot exist.
+ * The config field wins, so every box keeps one code path; an empty field falls
+ * back to the platform stores in order, each self-gated on its platform. Null
+ * when nothing holds it, which `runnableProblems` reports rather than throwing.
+ * `stores` exists so tests can point at names/paths that cannot exist.
+ *
+ * Every store is *read* regardless of `available()`: the TPM store's read gate
+ * is deliberately weaker than its availability probe (DESIGN.md's open item on
+ * `has-tpm2` under LXC), so a box where sealing works but the probe says no
+ * must still resolve its key.
  */
-export async function loadPsk(
-  config: Config,
-  keychainService?: string,
-  dpapiPath?: string,
-  tpmPath?: string,
-): Promise<ResolvedPsk | null> {
+export async function loadPsk(config: Config, stores: readonly PskStore[] = pskStores()): Promise<ResolvedPsk | null> {
   if (config.psk !== "") return { psk: config.psk, source: "config" };
-  const keychain = await readKeychainPsk(keychainService);
-  if (keychain !== null) return { psk: keychain, source: "keychain" };
-  const dpapi = await readDpapiPsk(dpapiPath);
-  if (dpapi !== null) return { psk: dpapi, source: "dpapi" };
-  const tpm = await readTpmPsk(tpmPath);
-  return tpm === null ? null : { psk: tpm, source: "tpm" };
+  for (const store of stores) {
+    // oxlint-disable-next-line no-await-in-loop -- ordered fallback: the first store holding a key wins
+    const psk = await store.read();
+    if (psk !== null) return { psk, source: store.source };
+  }
+  return null;
 }
 
 /**
@@ -112,7 +108,7 @@ export async function pskFingerprint(psk: string): Promise<string> {
 /**
  * Everything `seanced` (run) needs beyond shape. Returns problems instead of
  * throwing so doctor can list them all. `psk` is the *resolved* key from
- * `loadPsk` — config field or keychain — not `config.psk`.
+ * `loadPsk` — config field or a platform store — not `config.psk`.
  */
 export function runnableProblems(config: Config, psk: string | null): readonly string[] {
   const problems: string[] = [];

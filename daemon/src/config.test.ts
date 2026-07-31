@@ -16,6 +16,7 @@ import {
 import { importDpapiPskValue } from "./dpapi.ts";
 import { importTpmPskValue, tpmAvailable } from "./tpmcreds.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
+import { dpapiStore, keychainStore, tpmStore, type PskStore } from "./psk-store.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
 
@@ -109,6 +110,12 @@ describe("psk resolution", () => {
   const ABSENT_KEYCHAIN = "seance-psk-absent-in-tests";
   const ABSENT_DPAPI = "/nonexistent/seance-tests/psk.dpapi";
   const ABSENT_TPM = "/nonexistent/seance-tests/psk.cred";
+  /** The real store set, every location swapped for one that cannot hold a key. */
+  const absentStores = (overrides: { dpapi?: string; tpm?: string } = {}): readonly PskStore[] => [
+    keychainStore(ABSENT_KEYCHAIN),
+    dpapiStore(overrides.dpapi ?? ABSENT_DPAPI),
+    tpmStore(overrides.tpm ?? ABSENT_TPM),
+  ];
 
   test("a non-empty config field wins over any platform store", async () => {
     expect(await loadPsk(base)).toEqual({ psk: VALID.psk, source: "config" });
@@ -121,7 +128,7 @@ describe("psk resolution", () => {
   });
 
   test("an empty field with nothing in any store resolves to null", async () => {
-    expect(await loadPsk({ ...base, psk: "" }, ABSENT_KEYCHAIN, ABSENT_DPAPI, ABSENT_TPM)).toBeNull();
+    expect(await loadPsk({ ...base, psk: "" }, absentStores())).toBeNull();
   });
 
   test.skipIf(!isWsl())(
@@ -130,7 +137,7 @@ describe("psk resolution", () => {
       const dir = await tempDir();
       const path = join(dir, "psk.dpapi");
       await importDpapiPskValue(VALID.psk, path);
-      expect(await loadPsk({ ...base, psk: "" }, ABSENT_KEYCHAIN, path)).toEqual({
+      expect(await loadPsk({ ...base, psk: "" }, absentStores({ dpapi: path }))).toEqual({
         psk: VALID.psk,
         source: "dpapi",
       });
@@ -144,7 +151,7 @@ describe("psk resolution", () => {
       const dir = await tempDir();
       const path = join(dir, "psk.cred");
       await importTpmPskValue(VALID.psk, path);
-      expect(await loadPsk({ ...base, psk: "" }, ABSENT_KEYCHAIN, ABSENT_DPAPI, path)).toEqual({
+      expect(await loadPsk({ ...base, psk: "" }, absentStores({ tpm: path }))).toEqual({
         psk: VALID.psk,
         source: "tpm",
       });
