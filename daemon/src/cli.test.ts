@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseSpawnArgs } from "./cli.ts";
+import { cliOnPathCheck, parseSpawnArgs } from "./cli.ts";
 import { LAUNCHD_LABEL, plistContent } from "./launchd.ts";
 
 describe("parseSpawnArgs", () => {
@@ -28,6 +28,31 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--nope"])).toThrow("usage:");
     expect(() => parseSpawnArgs([])).toThrow("usage:");
     expect(() => parseSpawnArgs(["--here"])).toThrow("usage:");
+  });
+});
+
+describe("cliOnPathCheck", () => {
+  const main = "/repo/daemon/src/main.ts";
+
+  test("not on PATH is a warn carrying both remedies, never a fail", () => {
+    const check = cliOnPathCheck(null, null, main);
+    expect(check.level).toBe("warn");
+    expect(check.message).toContain("cd /repo/daemon && bun link");
+    expect(check.message).toContain(`alias seanced='bun ${main}'`);
+  });
+
+  test("resolving to this checkout is ok", () => {
+    expect(cliOnPathCheck("/home/u/.bun/bin/seanced", main, main)).toEqual({
+      level: "ok",
+      message: "seanced on PATH at /home/u/.bun/bin/seanced",
+    });
+  });
+
+  test("resolving to another checkout warns with both paths", () => {
+    const check = cliOnPathCheck("/home/u/.bun/bin/seanced", "/old-clone/daemon/src/main.ts", main);
+    expect(check.level).toBe("warn");
+    expect(check.message).toContain("/old-clone/daemon/src/main.ts");
+    expect(check.message).toContain(main);
   });
 });
 

@@ -1,5 +1,7 @@
-import { chmod, mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, realpath, stat } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { cliSink, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
@@ -200,6 +202,41 @@ async function checkRelayReachable(url: string, bearerToken: string): Promise<st
 const ok = (msg: string): void => console.log(`  ok    ${msg}`);
 const warn = (msg: string): void => console.log(`  warn  ${msg}`);
 
+/**
+ * init, scan, and doctor itself all print `seanced …` follow-ups, but nothing
+ * installs the name — distribution is the bare checkout (README) — so this says
+ * whether it resolves, and to *this* checkout rather than a stale `bun link`
+ * from an old clone. Never a fail: `bun main.ts` and shell aliases are the
+ * documented defaults, and an alias is invisible to a PATH probe — which is
+ * also why a miss hedges instead of asserting. Exported for tests; the caller
+ * realpaths both sides so the comparison survives symlinked checkouts.
+ */
+export function cliOnPathCheck(found: string | null, target: string | null, mainPath: string): Check {
+  if (found === null) {
+    return {
+      level: "warn",
+      message: `seanced not on PATH — \`cd ${dirname(dirname(mainPath))} && bun link\` adds it, or alias seanced='bun ${mainPath}' (a shell alias won't show here)`,
+    };
+  }
+  if (target !== mainPath) {
+    return {
+      level: "warn",
+      message: `seanced on PATH is ${found} → ${target}, not this checkout's ${mainPath} — stale \`bun link\` from another clone?`,
+    };
+  }
+  return { level: "ok", message: `seanced on PATH at ${found}` };
+}
+
+async function cliOnPath(): Promise<Check> {
+  const found = Bun.which("seanced");
+  const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
+  return cliOnPathCheck(
+    found,
+    found === null ? null : await realpath(found).catch(() => found),
+    await realpath(mainPath).catch(() => mainPath),
+  );
+}
+
 export async function cmdDoctor(): Promise<void> {
   let failed = false;
   const fail = (msg: string): void => {
@@ -253,6 +290,7 @@ export async function cmdDoctor(): Promise<void> {
   const gitBin = Bun.which("git");
   if (gitBin === null) fail("git not on PATH");
   else ok(`git at ${gitBin}`);
+  render([await cliOnPath()]);
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -305,6 +343,11 @@ export async function cmdInstall(): Promise<void> {
   const result = await installService();
   console.log(`installed and started the service (${result.target})`);
   for (const note of result.notes) console.log(`note: ${note}`);
+  // The service embeds the absolute main.ts path, so it never needs the name —
+  // but every follow-up this CLI prints does, so say so now rather than let
+  // `seanced restart` be the first discovery.
+  const onPath = await cliOnPath();
+  if (onPath.level !== "ok") console.log(`note: ${onPath.message}`);
   console.log(`logs: ${logPath()}`);
 }
 
