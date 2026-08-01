@@ -58,11 +58,15 @@ export async function makeGitFixture(base: string): Promise<GitFixture> {
 }
 
 export interface ClaudeStub {
-  /** Wrapper that ignores claude's args and stays alive — pane shows comm "9.9.9". */
+  /** Wrapper that records its argv to `argvFile` and stays alive — pane shows comm "9.9.9". */
   readonly ok: string;
   /** Wrapper that prints an error and exits nonzero — the claude_died case. */
   readonly failing: string;
   readonly version: string;
+  /** Overwritten on every `ok` launch — rm it before a spawn whose argv the test reads. */
+  readonly argvFile: string;
+  /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
+  readonly argv: () => Promise<readonly string[]>;
 }
 
 /**
@@ -85,7 +89,9 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await Bun.write(sleeper, "await Bun.sleep(120_000);\n");
 
   const ok = join(dir, "claude");
-  await Bun.write(ok, `#!/bin/bash\nexec "${versioned}" "${sleeper}"\n`);
+  const argvFile = `${ok}.argv`;
+  // NUL separators: seed prompts carry newlines, so a line-based record would lie
+  await Bun.write(ok, `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\nexec "${versioned}" "${sleeper}"\n`);
   await chmod(ok, 0o755);
 
   const failing = join(dir, "claude-failing");
@@ -94,7 +100,11 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await Bun.write(failing, `#!/bin/bash\nsleep 0.3\necho "boom: untrusted workspace"\nexit 2\n`);
   await chmod(failing, 0o755);
 
-  return { ok, failing, version: "9.9.9" };
+  const argv = async (): Promise<readonly string[]> => {
+    await pollUntil(() => Bun.file(argvFile).exists(), `claude stub argv at ${argvFile}`);
+    return (await Bun.file(argvFile).text()).split("\0").slice(0, -1);
+  };
+  return { ok, failing, version: "9.9.9", argvFile, argv };
 }
 
 /**

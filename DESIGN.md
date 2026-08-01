@@ -562,7 +562,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   (`~/.claude/commands/spawn.md`): ff-only fast-forward of the default
   branch before `claude --worktree`, worktree/window naming
   (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
-  `--remote-control` always, **opus**/medium defaults (revised from
+  `--remote-control` always — kept off the argv tail with the seed prompt
+  behind a `--` terminator, because the flag takes an _optional_ value and,
+  adjacent, it swallows the prompt as the session's name while the session
+  starts idle — **opus**/medium defaults (revised from
   sonnet), per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
   and the pane-death verification (remain-on-exit, then poll `pane_dead`

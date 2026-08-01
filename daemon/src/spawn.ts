@@ -123,10 +123,15 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   // No `--permission-mode`: the flag would override whatever the machine's
   // settings.json chose, so the session inherits the same default an
   // in-terminal `claude` would get on that box.
+  //
+  // `--remote-control [name]` takes an optional value, so it sits before the
+  // other flags: trailing, it swallowed a here-mode seed prompt as the session
+  // name and the session started idle. The `--` guard below is the second,
+  // independent defence.
   const base =
-    `exec ${caffeinate}${claude} -n ${shq(windowName)} ` +
-    `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)} ` +
-    `--remote-control${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
+    `exec ${caffeinate}${claude} -n ${shq(windowName)} --remote-control ` +
+    `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
+    `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
   if (request.prompt === undefined || request.prompt === "") {
     return { command: base, seedDir: null };
   }
@@ -134,8 +139,10 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
   await Bun.write(seedFile, `${prepared.preamble}\n\nTask: ${request.prompt}\n`);
-  // the substitution runs before exec, so the file is consumed at shell start
-  return { command: `${base} "$(cat ${shq(seedFile)})"`, seedDir };
+  // the substitution runs before exec, so the file is consumed at shell start;
+  // `--` ends option parsing, keeping the seed an operand rather than some
+  // flag's optional value
+  return { command: `${base} -- "$(cat ${shq(seedFile)})"`, seedDir };
 }
 
 /**

@@ -179,17 +179,24 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("seed prompt file reaches the pane command", async () => {
-    // The inner command embeds $(cat seedfile) — verify the spawned pane's
-    // start command references the seed, i.e. prompts don't get shell-mangled.
+  test("seed prompt reaches claude as the final operand, quotes and all", async () => {
+    await rm(stub.argvFile, { force: true });
     const outcome = await spawnSession(
       { repo: "myrepo", mode: "here", title: "Seeded", prompt: "tricky 'quoted' $prompt" },
       repos,
       "main",
       WAIT,
     );
-    expect(outcome.window).toBe("Seeded");
-    await tmux(["kill-window", "-t", "main:Seeded"]);
+    try {
+      const argv = await stub.argv();
+      // Pinned behind `--`: `--remote-control [name]` takes an optional value,
+      // and a here-mode seed adjacent to it became the session's *name* — the
+      // session started idle with the prompt in the title.
+      expect(argv.at(-2)).toBe("--");
+      expect(argv.at(-1)).toEndWith("Task: tricky 'quoted' $prompt");
+    } finally {
+      await killWindow(outcome.window);
+    }
   });
 });
 
