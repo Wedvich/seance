@@ -290,6 +290,13 @@ The Durable Object persists a machine registry:
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
+- **The app socket heartbeats too**, same 30s ping / 10s pong, answered by the
+  same DO auto-response. It is the app leg's only liveness signal: presence is
+  pushed, not polled, so a silently dead app socket (network switch, mobile
+  doze with the screen on) would otherwise freeze the machine list with no
+  symptom until a spawn failed into it. A missed pong re-dials, and the fresh
+  socket gets a fresh registry. The relay does not sweep app sockets — nothing
+  server-side depends on their liveness.
 - Daemon sockets use DO WebSocket hibernation. No connection state in class
   fields (`state.getWebSockets()` + DO storage are truth), heartbeats via
   `setWebSocketAutoResponse()` so pings don't wake the DO. Wake is
@@ -314,7 +321,9 @@ exponential backoff, reset on successful register; the relay in turn sweeps
 sockets that stop pinging — see Presence & identity). The daemon authenticates
 with an `Authorization: Bearer` header.
 
-Layer 1 (plaintext, PWA↔relay): `msg { envelope }` outbound. Inbound:
+Layer 1 (plaintext, PWA↔relay): `msg { envelope }` outbound, plus the same
+bare `"ping"`/`"pong"` heartbeat as the daemon leg (30s beat, 10s pong
+deadline, a miss re-dials — see Presence & identity). Inbound:
 `registry { entries }` pushed on connect **and on every change** (so presence
 needs no polling); `msg { envelope }` for daemon replies; and
 `undeliverable { to, iv, code }` when the target daemon has no open socket.
@@ -354,6 +363,27 @@ needs no polling); `msg { envelope }` for daemon replies; and
   also refuses to send when `connected === false`; the frame exists for the
   stale-presence race, where the alternative is a 90s spinner that ends in
   "timed out" when the truth was "that Mac is asleep".
+- **Delivery outcomes outrank the `connected` flag.** The PWA marks a machine
+  proven-offline on an `undeliverable offline` refusal _and_ on a request
+  timeout (a dead-but-unswept daemon socket swallows the request without a
+  refusal — the sweep's residual window). A timeout blames the machine only
+  with positive uplink evidence: same socket as the send, and at least one
+  frame received since it. Each request sends a probe `"ping"` alongside the
+  envelope, so a healthy socket produces that evidence within an RTT while a
+  dead one produces nothing. A silently dead app socket looks
+  exactly like a silent machine from the timer's side, and blaming on that
+  guess would paint every polled machine asleep at once — with nothing left to
+  clear the marks, since a connected daemon's `lastSeen` never advances and the
+  clearing replies were lost with the socket. The mark clears on a later
+  register — or on any message from that device that decrypts (`from` is
+  AAD-bound, so decryption alone authenticates the sender). The clear is
+  deliberately ahead of the replay guard: a phone off NTP rejects every reply
+  as replay, and gating the clear on the guard would turn "every request times
+  out" into "every machine sticks asleep". A replayed frame can at worst fake
+  presence for a moment; the next failed delivery re-marks it. The store's
+  wake-driven session refresh keys on `lastSeen`, not the `connected` flag, so
+  a mark clearing is not a "wake" — otherwise a machine answering slower than
+  its op timeout enters a permanent mark → clear → re-poll flap loop.
 - **`iv` is also the cross-tier debug join key**, for the same reason it carries
   `undeliverable`: it is the only per-message identifier a blind relay can name.
   All three tiers emit `wire <event> iv=… ` lines through one `quote()` in

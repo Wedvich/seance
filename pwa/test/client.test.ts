@@ -54,6 +54,8 @@ function startClient(
     readonly token?: string;
     readonly timeouts?: { readonly sessions?: number };
     readonly hidden?: readonly string[];
+    readonly pingIntervalMs?: number;
+    readonly pongTimeoutMs?: number;
   } = {},
 ): {
   client: RelayClient;
@@ -70,6 +72,8 @@ function startClient(
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
     ...(opts.timeouts === undefined ? {} : { timeouts: opts.timeouts }),
     ...(opts.hidden === undefined ? {} : { hidden: opts.hidden }),
+    ...(opts.pingIntervalMs === undefined ? {} : { pingIntervalMs: opts.pingIntervalMs }),
+    ...(opts.pongTimeoutMs === undefined ? {} : { pongTimeoutMs: opts.pongTimeoutMs }),
   });
   const waitFor = (predicate: (state: RelayState) => boolean, label: string): Promise<RelayState> =>
     new Promise((resolve, reject) => {
@@ -405,6 +409,71 @@ describe("requests", () => {
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
       await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      // The request's probe ping was ponged, so the uplink provably worked while
+      // the machine stayed silent — a timeout is then evidence about the machine,
+      // same as a relay refusal, and the connected flag is the staler claim.
+      expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.connected).toBe(false);
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  // The inverse of the timeout mark: any decrypted message from the machine is
+  // proof of life, so a slow answer must not strand it offline until it happens
+  // to re-register.
+  test("a decrypted message from the machine clears a timeout's offline mark", async () => {
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Slow Mac"));
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.connected).toBe(false);
+
+      const late: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "sessions",
+        re: crypto.randomUUID(),
+        payload: { sessions: [], at: Date.now() },
+      };
+      daemon.client.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, late) });
+      await waitFor(
+        (s) => s.machines.find((m) => m.deviceId === deviceId)?.connected === true,
+        "the late answer proves it alive",
+      );
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  // The clear sits ahead of the replay guard on purpose: decryption alone
+  // authenticates the sender, and a reply outside the ±60s window (skewed phone
+  // clock, very late answer) still proves the machine alive. Gating it on the
+  // guard would turn "every request times out" into "every machine sticks asleep".
+  test("a reply outside the replay window still clears the offline mark", async () => {
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Skewed"));
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.connected).toBe(false);
+
+      const stale: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now() - 10 * 60 * 1000,
+        op: "sessions",
+        re: crypto.randomUUID(),
+        payload: { sessions: [], at: Date.now() },
+      };
+      daemon.client.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, stale) });
+      await waitFor(
+        (s) => s.machines.find((m) => m.deviceId === deviceId)?.connected === true,
+        "the out-of-window reply still proves it alive",
+      );
     } finally {
       daemon.close();
       client.stop();
@@ -423,6 +492,62 @@ describe("requests", () => {
       await expect(inFlight).rejects.toMatchObject({ reason: "disconnected" });
     } finally {
       daemon.close();
+    }
+  });
+});
+
+// The relay pushes presence rather than being polled, so a dead app socket
+// freezes the machine list with no other symptom — the pings below bound that.
+describe("heartbeat", () => {
+  test("relay pongs keep a healthy socket open across many beats", async () => {
+    const { client, waitFor } = startClient({ pingIntervalMs: 30, pongTimeoutMs: 500 });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const drops: string[] = [];
+      const unsubscribe = client.subscribe(() => {
+        const { status } = client.getState();
+        if (status !== "open") drops.push(status);
+      });
+      // Negative assertion: a spurious re-dial cannot be polled for, so several
+      // beats get room to misfire before the check.
+      await Bun.sleep(300);
+      unsubscribe();
+      expect(drops).toEqual([]);
+    } finally {
+      client.stop();
+    }
+  });
+
+  test("a missed pong re-dials instead of trusting the dead socket", async () => {
+    // A bare websocket server that never answers pings stands in for a dead
+    // relay path; the real relay always pongs at the edge.
+    let dials = 0;
+    const mute = Bun.serve({
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("expected websocket upgrade", { status: 426 });
+      },
+      websocket: {
+        open() {
+          dials += 1;
+        },
+        message() {},
+      },
+    });
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${mute.port}/app`,
+      token: TOKEN,
+      key,
+      pingIntervalMs: 40,
+      pongTimeoutMs: 80,
+    });
+    try {
+      client.start();
+      await pollUntil(() => dials >= 2, "a second dial after the missed pong");
+    } finally {
+      client.stop();
+      mute.stop(true);
     }
   });
 });

@@ -27,10 +27,14 @@ export class Store {
   readonly #listeners = new Set<() => void>();
   #state: AppState;
   /**
-   * Previous connected set, so a machine waking triggers exactly one refresh.
-   * Emptied whenever the socket isn't open, which makes every re-dial a wake.
+   * deviceId -> lastSeen when its sessions were last requested. Keyed on
+   * lastSeen (advanced only by a register at the relay) rather than the
+   * connected flag, so a proven-offline mark clearing does not read as a wake —
+   * blaming a slow machine, re-polling it, and timing out again is a loop.
+   * Entries survive a machine going offline for the same reason. Emptied
+   * whenever the socket isn't open, which keeps every re-dial a full refresh.
    */
-  #wasConnected = new Set<string>();
+  #wokenAt = new Map<string, number>();
   #pending: PendingSpawn | null = null;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
@@ -81,17 +85,17 @@ export class Store {
     this.#patch({ relay });
     if (relay.status !== "open") {
       // Forgotten rather than kept: a resume re-dials unconditionally and the
-      // registry that follows names the same machines, so leaving the set in
+      // registry that follows names the same machines, so leaving the map in
       // place means nothing ever counts as woken again and the session lists
       // stay at whatever the very first connect saw.
-      this.#wasConnected = new Set();
+      this.#wokenAt = new Map();
       return;
     }
 
-    const connected = new Set(relay.machines.filter((machine) => machine.connected).map((m) => m.deviceId));
-    const woken = [...connected].filter((deviceId) => !this.#wasConnected.has(deviceId));
-    this.#wasConnected = connected;
-    if (woken.length > 0) void this.#fetchSessions(woken);
+    const connected = relay.machines.filter((machine) => machine.connected);
+    const woken = connected.filter((machine) => this.#wokenAt.get(machine.deviceId) !== machine.lastSeen);
+    for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
+    if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
     if (this.#pending !== null) void this.#reconcile();
   }
 

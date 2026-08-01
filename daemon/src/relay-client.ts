@@ -1,4 +1,6 @@
 import {
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_PONG_TIMEOUT_MS,
   ReplayError,
   ReplayGuard,
   open,
@@ -49,8 +51,8 @@ export class RelayClient {
 
   constructor(opts: RelayClientOpts) {
     this.#opts = {
-      pingIntervalMs: 30_000,
-      pongTimeoutMs: 10_000,
+      pingIntervalMs: HEARTBEAT_INTERVAL_MS,
+      pongTimeoutMs: HEARTBEAT_PONG_TIMEOUT_MS,
       baseBackoffMs: 1_000,
       maxBackoffMs: 60_000,
       ...opts,

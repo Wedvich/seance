@@ -1,5 +1,7 @@
 import {
   APP_ID,
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
   open as openEnvelope,
@@ -129,10 +131,11 @@ export class RelayClient {
   /** Decrypted `info` by envelope IV; blobs are re-sent verbatim on every push. */
   readonly #infoCache = new Map<string, MachineInfo | null>();
   /**
-   * deviceId -> the lastSeen we held when the relay called it undeliverable.
-   * `connected` is derived from live sockets and can read true over an abruptly
-   * slept machine, so a refused delivery is the better evidence until that
-   * machine registers again.
+   * deviceId -> the lastSeen we held when delivery failed (an `undeliverable`
+   * refusal or a request timeout). `connected` is derived from live sockets and
+   * can read true over an abruptly slept machine, so a failed delivery is the
+   * better evidence — until the machine registers again, or answers, which any
+   * decrypted message from it proves.
    */
   readonly #provenOffline = new Map<string, number>();
   /**
@@ -148,11 +151,17 @@ export class RelayClient {
   #attempt = 0;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #settleTimer: ReturnType<typeof setTimeout> | null = null;
+  #pingTimer: ReturnType<typeof setInterval> | null = null;
+  #pongDeadline: ReturnType<typeof setTimeout> | null = null;
+  /** When the current socket last delivered anything — pong or frame. Uplink evidence for timeout blame. */
+  #lastFrameAt = 0;
   #stopped = false;
 
   readonly #timeouts: Partial<Record<RequestOp, number>>;
   readonly #createSocket: (url: string) => WebSocket;
   readonly #settleMs: number;
+  readonly #pingIntervalMs: number;
+  readonly #pongTimeoutMs: number;
 
   constructor(opts: {
     readonly url: string;
@@ -164,6 +173,9 @@ export class RelayClient {
     readonly createSocket?: (url: string) => WebSocket;
     /** Override for SETTLE_MS; tests use it to avoid a real 1.5s wait. */
     readonly settleMs?: number;
+    /** Overrides for the shared heartbeat cadence; tests use them to avoid real 30s beats. */
+    readonly pingIntervalMs?: number;
+    readonly pongTimeoutMs?: number;
     /** deviceIds removed in an earlier run; a reload must not resurrect them. */
     readonly hidden?: readonly string[];
   }) {
@@ -173,6 +185,8 @@ export class RelayClient {
     this.#timeouts = opts.timeouts ?? {};
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
     this.#settleMs = opts.settleMs ?? SETTLE_MS;
+    this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+    this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#hidden = new Set(opts.hidden ?? []);
   }
 
@@ -207,6 +221,7 @@ export class RelayClient {
     if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
     this.#retryTimer = null;
     this.#clearSettle();
+    this.#teardownHeartbeat();
     // Leaving the settle window set would strand the screen on "connecting…" for as
     // long as the client stays stopped, which is the one thing it is certainly not.
     this.#patch({ settling: false });
@@ -220,6 +235,7 @@ export class RelayClient {
     if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
     this.#retryTimer = null;
     this.#attempt = 0;
+    this.#teardownHeartbeat();
     // Detached before closing, or a close dispatched synchronously still passes the
     // identity guard and runs the backoff path — arming a second retry chain and
     // reporting the deliberate swap as a drop.
@@ -246,9 +262,16 @@ export class RelayClient {
 
     return new Promise<T>((resolve, reject) => {
       const limit = this.#timeoutFor(op);
+      const sentAt = Date.now();
       const timer = setTimeout(() => {
         wireLog("timeout", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
         this.#discard(id);
+        // Blame the machine only when the uplink demonstrably worked while the
+        // request was out: same socket, and at least one frame (a pong counts)
+        // received since the send. A silently dead app socket looks exactly like
+        // a silent machine from here, and marking on that guess paints every
+        // polled machine asleep at once.
+        if (this.#socket === socket && this.#lastFrameAt >= sentAt) this.#markProvenOffline(deviceId);
         reject(new RequestFailure("timeout", `${op} timed out after ${limit}ms`));
       }, limit);
 
@@ -263,6 +286,10 @@ export class RelayClient {
       });
       this.#idByIv.set(env.iv, id);
       socket.send(JSON.stringify({ t: "msg", env }));
+      // A probe: its pong (answered at the edge) is the uplink evidence the blame
+      // check above needs, without waiting for the next 30s heartbeat beat. A
+      // healthy socket produces it within an RTT; a dead one produces nothing.
+      socket.send("ping");
       wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
   }
@@ -295,14 +322,24 @@ export class RelayClient {
     socket.addEventListener("open", () => {
       this.#attempt = 0;
       this.#clearSettle();
+      this.#startHeartbeat(socket);
       this.#patch({ status: "open", rejection: null, settling: false });
     });
     socket.addEventListener("message", (event) => {
-      if (typeof event.data === "string") void this.#onFrame(event.data);
+      if (typeof event.data !== "string") return;
+      // Stale sockets don't count: their late frames say nothing about this one.
+      if (this.#socket === socket) this.#lastFrameAt = Date.now();
+      if (event.data === "pong") {
+        if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
+        this.#pongDeadline = null;
+        return;
+      }
+      void this.#onFrame(event.data);
     });
     socket.addEventListener("close", (event) => {
       if (this.#socket !== socket) return;
       this.#socket = null;
+      this.#teardownHeartbeat();
       this.#failAllPending(new RequestFailure("disconnected", "the relay socket closed"));
       this.#onClose(event.code);
     });
@@ -347,6 +384,35 @@ export class RelayClient {
     this.#settleTimer = null;
   }
 
+  /**
+   * The relay pushes presence rather than being polled, so a silently dead app
+   * socket freezes the machine list with no other symptom. Pings bound that: a
+   * missed pong re-dials, and the fresh socket gets a fresh registry.
+   */
+  #startHeartbeat(socket: WebSocket): void {
+    this.#teardownHeartbeat();
+    this.#pingTimer = setInterval(() => {
+      if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send("ping");
+      this.#pongDeadline ??= setTimeout(() => {
+        this.#pongDeadline = null;
+        if (this.#socket !== socket) return;
+        wireLog("heartbeat", `no pong within ${this.#pongTimeoutMs}ms`);
+        // reconnect() rather than close(): closing a dead peer waits out the
+        // closing handshake, and pending requests can still complete over the
+        // new socket — replies fan out to every open app socket.
+        this.reconnect();
+      }, this.#pongTimeoutMs);
+    }, this.#pingIntervalMs);
+  }
+
+  #teardownHeartbeat(): void {
+    if (this.#pingTimer !== null) clearInterval(this.#pingTimer);
+    if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
+    this.#pingTimer = null;
+    this.#pongDeadline = null;
+  }
+
   async #onFrame(text: string): Promise<void> {
     const frame = parseFrame(text);
     if (frame === null) return;
@@ -362,11 +428,7 @@ export class RelayClient {
   }
 
   #onUndeliverable(to: string, iv: string, code: UndeliverableCode): void {
-    if (code === "offline") {
-      const entry = this.#entries.find((candidate) => candidate.deviceId === to);
-      this.#provenOffline.set(to, entry?.lastSeen ?? 0);
-      this.#rebuildMachines();
-    }
+    if (code === "offline") this.#markProvenOffline(to);
     const id = this.#idByIv.get(iv);
     // `code` is relay-supplied and `parseFrame` does not narrow it, so it is quoted
     // like every other wire value rather than trusted to be one of the two codes.
@@ -378,6 +440,12 @@ export class RelayClient {
     });
   }
 
+  #markProvenOffline(deviceId: string): void {
+    const entry = this.#entries.find((candidate) => candidate.deviceId === deviceId);
+    this.#provenOffline.set(deviceId, entry?.lastSeen ?? 0);
+    this.#rebuildMachines();
+  }
+
   async #onMessage(env: Envelope): Promise<void> {
     let plain: Plain;
     try {
@@ -387,6 +455,13 @@ export class RelayClient {
       wireLog("dropped", `iv=${quote(env.iv)} reason=unopenable`);
       return;
     }
+    // Decryption authenticates the sender — `from` is AAD-bound — so this alone
+    // proves the machine is alive: fresher evidence than any mark a timeout left.
+    // Deliberately ahead of the replay guard. A phone off NTP rejects every reply
+    // below as replay; gating the clear on that check would strand every machine
+    // it touches offline instead of merely timing out. A replayed frame can at
+    // worst fake presence for a moment, and the next failed delivery re-marks it.
+    if (this.#provenOffline.delete(env.from)) this.#rebuildMachines();
     try {
       this.#guard.check(env.iv, plain.ts);
     } catch {

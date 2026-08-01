@@ -1,5 +1,7 @@
 import {
   APP_ID,
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_MISSES_TO_SWEEP,
   quote,
   type Envelope,
   type RegistryEntry,
@@ -41,13 +43,15 @@ const REGISTER_WINDOW_MS = 60_000;
 const MAX_REGISTERS_PER_WINDOW = 10;
 
 /**
- * The daemon heartbeats every 30s and its pings are answered at the edge, so
- * the object never sees them — but each one stamps the socket's auto-response
- * timestamp, which the sweep alarm reads. Three missed beats is a dead peer,
- * not a hiccup. Env-overridable so tests need not wait a minute.
+ * Daemon pings are answered at the edge, so the object never sees them — but
+ * each one stamps the socket's auto-response timestamp, which the sweep alarm
+ * reads. The silence limit is derived from the shared beat: three missed
+ * heartbeats is a dead peer, not a hiccup, and deriving it means slowing the
+ * beat can never silently outpace the sweep. Env-overridable so tests need
+ * not wait a minute.
  */
 const SWEEP_INTERVAL_MS = 60_000;
-const SWEEP_SILENCE_LIMIT_MS = 90_000;
+const SWEEP_SILENCE_LIMIT_MS = HEARTBEAT_MISSES_TO_SWEEP * HEARTBEAT_INTERVAL_MS;
 
 /** Vars arrive as strings; anything unparsable falls back to the default. */
 function msOverride(value: string | undefined): number | null {

@@ -107,6 +107,17 @@ export const OP_TIMEOUT_MS = {
 } as const satisfies Record<RequestOp, number>;
 
 /**
+ * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
+ * a bare "ping" every interval, "pong" expected within the deadline, a miss
+ * closes/redials. The relay sweeps a daemon socket silent for
+ * HEARTBEAT_MISSES_TO_SWEEP beats — derived from the interval there, so
+ * slowing the beat can never silently outpace the sweep.
+ */
+export const HEARTBEAT_INTERVAL_MS = 30_000;
+export const HEARTBEAT_PONG_TIMEOUT_MS = 10_000;
+export const HEARTBEAT_MISSES_TO_SWEEP = 3;
+
+/**
  * Decrypted message body. `ts` feeds the ±60s replay window; `re` correlates
  * a response to its request `id`. `machine-info` blobs are data at rest in
  * the registry — receivers skip the replay check for them.
