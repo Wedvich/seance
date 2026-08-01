@@ -202,7 +202,7 @@ describe("banner and button", () => {
 
   test("pending outranks the prompt-dependent labels", () => {
     const view = deriveView(state({ spawning: true }, { prompt: "hi" }), NOW);
-    expect(view.button).toEqual({ label: "Summoning…", enabled: false });
+    expect(view.button).toEqual({ label: "Starting…", enabled: false });
   });
 
   test("the label follows whether a prompt was typed", () => {
