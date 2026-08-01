@@ -116,10 +116,16 @@ applies again.
 Distribution is the git checkout itself: the service runs
 `bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. Run
 the CLI the same way from the checkout root, or put a real `seanced` on PATH
-with `bun link` from `daemon/` (it lands in bun's global bin dir and follows
-`git pull` automatically, being a symlink into the checkout); a shell alias
-(`alias seanced='bun <checkout>/daemon/src/main.ts'`) works too. `doctor` and
-`install` warn when the name doesn't resolve — though they can't see an alias.
+with a plain symlink — `main.ts` is executable with a `bun` shebang, so
+
+```sh
+ln -s <checkout>/daemon/src/main.ts ~/.local/bin/seanced   # any dir on your PATH
+```
+
+is the whole install, and it tracks `git pull` and source edits with nothing
+to re-run. A shell alias (`alias seanced='bun <checkout>/daemon/src/main.ts'`)
+works too. `doctor` and `install` warn when the name doesn't resolve — or
+resolves into a different checkout — though they can't see an alias.
 
 ```sh
 git clone <this repo> && cd seance && bun install

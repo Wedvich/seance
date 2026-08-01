@@ -37,7 +37,7 @@ describe("cliOnPathCheck", () => {
   test("not on PATH is a warn carrying both remedies, never a fail", () => {
     const check = cliOnPathCheck(null, null, main);
     expect(check.level).toBe("warn");
-    expect(check.message).toContain("cd /repo/daemon && bun link");
+    expect(check.message).toContain(`ln -s ${main} ~/.local/bin/seanced`);
     expect(check.message).toContain(`alias seanced='bun ${main}'`);
   });
 

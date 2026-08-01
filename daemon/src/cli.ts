@@ -1,6 +1,5 @@
 import { chmod, mkdir, realpath, stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { cliSink, spawnAudit } from "./audit.ts";
@@ -205,8 +204,11 @@ const warn = (msg: string): void => console.log(`  warn  ${msg}`);
 /**
  * init, scan, and doctor itself all print `seanced …` follow-ups, but nothing
  * installs the name — distribution is the bare checkout (README) — so this says
- * whether it resolves, and to *this* checkout rather than a stale `bun link`
- * from an old clone. Never a fail: `bun main.ts` and shell aliases are the
+ * whether it resolves, and to *this* checkout rather than a stale link to an
+ * old clone. The remedy is a plain symlink, not `bun link` or a wrapper script:
+ * bun's link registry is per-name indirection another clone can silently steal,
+ * and a wrapper's realpath doesn't lead back here, which would blind the
+ * mismatch arm below. Never a fail: `bun main.ts` and shell aliases are the
  * documented defaults, and an alias is invisible to a PATH probe — which is
  * also why a miss hedges instead of asserting. Exported for tests; the caller
  * realpaths both sides so the comparison survives symlinked checkouts.
@@ -215,13 +217,13 @@ export function cliOnPathCheck(found: string | null, target: string | null, main
   if (found === null) {
     return {
       level: "warn",
-      message: `seanced not on PATH — \`cd ${dirname(dirname(mainPath))} && bun link\` adds it, or alias seanced='bun ${mainPath}' (a shell alias won't show here)`,
+      message: `seanced not on PATH — ln -s ${mainPath} ~/.local/bin/seanced (any dir on your PATH), or alias seanced='bun ${mainPath}' (a shell alias won't show here)`,
     };
   }
   if (target !== mainPath) {
     return {
       level: "warn",
-      message: `seanced on PATH is ${found} → ${target}, not this checkout's ${mainPath} — stale \`bun link\` from another clone?`,
+      message: `seanced on PATH is ${found} → ${target}, not this checkout's ${mainPath} — stale link to another clone?`,
     };
   }
   return { level: "ok", message: `seanced on PATH at ${found}` };
