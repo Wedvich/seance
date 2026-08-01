@@ -239,7 +239,7 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) return blocked(relay.ignored > 0 ? "Check your key" : "No machines listed");
-  if (state.spawning) return blocked("Summoning…");
+  if (state.spawning) return blocked("Starting…");
   if (machine === null) return blocked("Pick a machine");
   if (!machine.connected) return blocked(`${machine.name} is asleep`);
   return {
