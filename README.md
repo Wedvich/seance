@@ -114,18 +114,20 @@ applies again.
 ### 4. Install seanced on each machine
 
 Distribution is the git checkout itself: the service runs
-`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. Run
-the CLI the same way from the checkout root, or put a real `seanced` on PATH
-with a plain symlink — `main.ts` is executable with a `bun` shebang, so
+`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. The
+CLI runs the same way, and to spare the typing:
 
 ```sh
-ln -s <checkout>/daemon/src/main.ts ~/.local/bin/seanced   # any dir on your PATH
+bun daemon/src/main.ts link      # symlinks `seanced` into a dir on your PATH
 ```
 
-is the whole install, and it tracks `git pull` and source edits with nothing
-to re-run. A shell alias (`alias seanced='bun <checkout>/daemon/src/main.ts'`)
-works too. `doctor` and `install` warn when the name doesn't resolve — or
-resolves into a different checkout — though they can't see an alias.
+The link is a plain symlink to `main.ts` (executable, `bun` shebang), so it
+tracks `git pull` and source edits with nothing to re-run. It prefers
+`~/.local/bin`, or takes a dir explicitly (`link <dir>`); `seanced unlink`
+removes it, as does `uninstall`. A shell alias (`alias seanced='bun
+<checkout>/daemon/src/main.ts'`) works too. `doctor` and `install` warn when
+the name doesn't resolve — or resolves into a different checkout, which
+`link` repoints — though they can't see an alias.
 
 ```sh
 git clone <this repo> && cd seance && bun install

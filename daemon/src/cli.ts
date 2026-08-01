@@ -1,6 +1,5 @@
-import { chmod, mkdir, realpath, stat } from "node:fs/promises";
-import { hostname } from "node:os";
-import { fileURLToPath } from "node:url";
+import { chmod, mkdir, stat } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { cliSink, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
@@ -14,6 +13,7 @@ import {
   runnableProblems,
 } from "./config.ts";
 import type { Check } from "./check.ts";
+import { cliOnPath, createLink, removeLinks, resolvedMain } from "./link.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -201,44 +201,6 @@ async function checkRelayReachable(url: string, bearerToken: string): Promise<st
 const ok = (msg: string): void => console.log(`  ok    ${msg}`);
 const warn = (msg: string): void => console.log(`  warn  ${msg}`);
 
-/**
- * init, scan, and doctor itself all print `seanced …` follow-ups, but nothing
- * installs the name — distribution is the bare checkout (README) — so this says
- * whether it resolves, and to *this* checkout rather than a stale link to an
- * old clone. The remedy is a plain symlink, not `bun link` or a wrapper script:
- * bun's link registry is per-name indirection another clone can silently steal,
- * and a wrapper's realpath doesn't lead back here, which would blind the
- * mismatch arm below. Never a fail: `bun main.ts` and shell aliases are the
- * documented defaults, and an alias is invisible to a PATH probe — which is
- * also why a miss hedges instead of asserting. Exported for tests; the caller
- * realpaths both sides so the comparison survives symlinked checkouts.
- */
-export function cliOnPathCheck(found: string | null, target: string | null, mainPath: string): Check {
-  if (found === null) {
-    return {
-      level: "warn",
-      message: `seanced not on PATH — ln -s ${mainPath} ~/.local/bin/seanced (any dir on your PATH), or alias seanced='bun ${mainPath}' (a shell alias won't show here)`,
-    };
-  }
-  if (target !== mainPath) {
-    return {
-      level: "warn",
-      message: `seanced on PATH is ${found} → ${target}, not this checkout's ${mainPath} — stale link to another clone?`,
-    };
-  }
-  return { level: "ok", message: `seanced on PATH at ${found}` };
-}
-
-async function cliOnPath(): Promise<Check> {
-  const found = Bun.which("seanced");
-  const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
-  return cliOnPathCheck(
-    found,
-    found === null ? null : await realpath(found).catch(() => found),
-    await realpath(mainPath).catch(() => mainPath),
-  );
-}
-
 export async function cmdDoctor(): Promise<void> {
   let failed = false;
   const fail = (msg: string): void => {
@@ -357,6 +319,28 @@ export async function cmdUninstall(): Promise<void> {
   const notes = await uninstallService();
   console.log("service stopped and removed");
   for (const note of notes) console.log(`note: ${note}`);
+  // link is opt-in, unlinking is not: a name left behind would outlive the
+  // checkout the user is presumably about to delete.
+  const { removed } = await removeLinks(process.env.PATH ?? "", await resolvedMain());
+  for (const file of removed) console.log(`unlinked ${file}`);
+}
+
+export async function cmdLink(argv: readonly string[]): Promise<void> {
+  const main = await resolvedMain();
+  const result = await createLink(process.env.PATH ?? "", homedir(), main, argv[0]);
+  if (result.status === "already") console.log(`already linked: ${result.file} → ${main}`);
+  else if (result.status === "repointed") console.log(`repointed ${result.file}: was ${result.previous}, now ${main}`);
+  else console.log(`linked ${result.file} → ${main}`);
+  if (Bun.which("seanced") === null) {
+    console.log(`note: ${result.file} still doesn't resolve — is its dir actually on PATH in this shell?`);
+  }
+}
+
+export async function cmdUnlink(): Promise<void> {
+  const { removed, kept } = await removeLinks(process.env.PATH ?? "", await resolvedMain());
+  for (const file of removed) console.log(`removed ${file}`);
+  for (const entry of kept) console.log(`left ${entry.file} → ${entry.target} — not this checkout's, remove it there`);
+  if (removed.length === 0 && kept.length === 0) console.log("nothing linked");
 }
 
 export async function cmdRestart(): Promise<void> {
