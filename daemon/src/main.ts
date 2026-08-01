@@ -3,6 +3,7 @@ import {
   cmdDoctor,
   cmdInit,
   cmdInstall,
+  cmdLink,
   cmdPskImport,
   cmdRestart,
   cmdScan,
@@ -10,6 +11,7 @@ import {
   cmdSpawn,
   cmdStatus,
   cmdUninstall,
+  cmdUnlink,
 } from "./cli.ts";
 import { log } from "./log.ts";
 import { startPowerLoop } from "./power.ts";
@@ -23,7 +25,9 @@ usage: seanced [command]
   init        write config skeleton + generate deviceId (never the PSK)
   psk-import  store the PSK in the platform store — macOS login keychain, WSL DPAPI blob, or Linux TPM-sealed blob (prompts, or reads a pipe; never argv)
   install     install and start the service (macOS launchd plist; Linux/WSL systemd user unit + linger, plus a logon pin task on WSL)
-  uninstall   stop the service and remove it
+  uninstall   stop the service and remove it, plus any symlink from link
+  link        put seanced on PATH — a symlink to this file, so it tracks git pull: seanced link [dir]
+  unlink      remove the PATH symlink (only ones pointing at this checkout)
   restart     restart the service (after git pull)
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
@@ -65,6 +69,12 @@ try {
       break;
     case "uninstall":
       await cmdUninstall();
+      break;
+    case "link":
+      await cmdLink(rest);
+      break;
+    case "unlink":
+      await cmdUnlink();
       break;
     case "restart":
       await cmdRestart();

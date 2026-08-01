@@ -1,5 +1,5 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { cliSink, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
@@ -13,6 +13,7 @@ import {
   runnableProblems,
 } from "./config.ts";
 import type { Check } from "./check.ts";
+import { cliOnPath, createLink, removeLinks, resolvedMain } from "./link.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -253,6 +254,7 @@ export async function cmdDoctor(): Promise<void> {
   const gitBin = Bun.which("git");
   if (gitBin === null) fail("git not on PATH");
   else ok(`git at ${gitBin}`);
+  render([await cliOnPath()]);
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -305,6 +307,11 @@ export async function cmdInstall(): Promise<void> {
   const result = await installService();
   console.log(`installed and started the service (${result.target})`);
   for (const note of result.notes) console.log(`note: ${note}`);
+  // The service embeds the absolute main.ts path, so it never needs the name —
+  // but every follow-up this CLI prints does, so say so now rather than let
+  // `seanced restart` be the first discovery.
+  const onPath = await cliOnPath();
+  if (onPath.level !== "ok") console.log(`note: ${onPath.message}`);
   console.log(`logs: ${logPath()}`);
 }
 
@@ -312,6 +319,28 @@ export async function cmdUninstall(): Promise<void> {
   const notes = await uninstallService();
   console.log("service stopped and removed");
   for (const note of notes) console.log(`note: ${note}`);
+  // link is opt-in, unlinking is not: a name left behind would outlive the
+  // checkout the user is presumably about to delete.
+  const { removed } = await removeLinks(process.env.PATH ?? "", await resolvedMain());
+  for (const file of removed) console.log(`unlinked ${file}`);
+}
+
+export async function cmdLink(argv: readonly string[]): Promise<void> {
+  const main = await resolvedMain();
+  const result = await createLink(process.env.PATH ?? "", homedir(), main, argv[0]);
+  if (result.status === "already") console.log(`already linked: ${result.file} → ${main}`);
+  else if (result.status === "repointed") console.log(`repointed ${result.file}: was ${result.previous}, now ${main}`);
+  else console.log(`linked ${result.file} → ${main}`);
+  if (Bun.which("seanced") === null) {
+    console.log(`note: ${result.file} still doesn't resolve — is its dir actually on PATH in this shell?`);
+  }
+}
+
+export async function cmdUnlink(): Promise<void> {
+  const { removed, kept } = await removeLinks(process.env.PATH ?? "", await resolvedMain());
+  for (const file of removed) console.log(`removed ${file}`);
+  for (const entry of kept) console.log(`left ${entry.file} → ${entry.target} — not this checkout's, remove it there`);
+  if (removed.length === 0 && kept.length === 0) console.log("nothing linked");
 }
 
 export async function cmdRestart(): Promise<void> {

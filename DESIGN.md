@@ -406,7 +406,15 @@ together (re-sends registry data on every poll, useless offline).
 - **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
   (write config skeleton + deviceId), `install`/`uninstall` (launchd plist on
   macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
-  `doctor` (preflight: tmux/claude/git/roots/relay/config), `status`,
+  `link`/`unlink` (opt-in `seanced` name on PATH — a plain symlink to
+  `main.ts`, which is executable with a bun shebang, so it tracks the checkout
+  with nothing to re-run; `uninstall` also unlinks, so a torn-down machine
+  never keeps a name into a deleted checkout. Rejected: `bun link` — its
+  global registry is per-name indirection a second clone silently steals; a
+  wrapper script — its realpath doesn't lead back to `main.ts`, blinding
+  doctor's stale-clone detection),
+  `doctor` (preflight: tmux/claude/git/roots/relay/config, plus whether the
+  `seanced` name resolves to this checkout), `status`,
   `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
   relay, the SSH-debuggability hook.
 - **Config split**: `~/.config/seance/config.json` (hand-edited, 0600,
