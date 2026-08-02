@@ -6,17 +6,9 @@ import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
+import { installBrowserGlobals } from "./stubs.ts";
 
-// Store touches exactly these browser globals (visibilitychange in attach(),
-// history for layer symmetry); no-ops suffice, as in e2e/harness.ts.
-Object.defineProperty(globalThis, "document", {
-  value: { visibilityState: "visible", addEventListener(): void {}, removeEventListener(): void {} },
-  configurable: true,
-});
-Object.defineProperty(globalThis, "history", {
-  value: { pushState(): void {}, replaceState(): void {}, back(): void {} },
-  configurable: true,
-});
+installBrowserGlobals();
 
 const TOKEN = "test-bearer-token";
 const PSK = toBase64(new Uint8Array(32).fill(7));

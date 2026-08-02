@@ -2,21 +2,9 @@ import { importPsk, toBase64 } from "@seance/shared";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { RelayClient } from "../src/relay/client.ts";
 import { Store } from "../src/store.ts";
+import { installBrowserGlobals } from "./stubs.ts";
 
-/**
- * The browser globals store.ts touches, stubbed rather than injected — they are
- * an external boundary Bun does not provide. Types come from test/globals.d.ts;
- * these are the runtime half, identical to client.test.ts's so that whichever
- * file a shard loads first, the other still finds the shape it expects.
- */
-Object.defineProperty(globalThis, "document", {
-  value: { visibilityState: "visible", addEventListener(): void {}, removeEventListener(): void {} },
-  configurable: true,
-});
-Object.defineProperty(globalThis, "history", {
-  value: { pushState(): void {}, replaceState(): void {}, back(): void {} },
-  configurable: true,
-});
+installBrowserGlobals();
 
 let key: CryptoKey;
 
