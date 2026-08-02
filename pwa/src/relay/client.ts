@@ -528,6 +528,10 @@ export class RelayClient {
 
   #rebuildMachines(): void {
     const previous = this.#state.machines;
+    // Keyed, not positional: the relay lists entries in lexicographic deviceId
+    // order, so a machine registering for the first time can land anywhere in
+    // the list and shift every one after it.
+    const priorById = new Map(previous.map((machine) => [machine.deviceId, machine]));
     const machines: Machine[] = [];
     let reused = 0;
     let hiddenHere = 0;
@@ -553,10 +557,12 @@ export class RelayClient {
         lastSeen: entry.lastSeen,
         connected,
       };
-      const prior = previous[machines.length];
+      const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {
+        // Counted only where it also lands on its old index, so the array below
+        // is reused for an unchanged list and never for a merely reordered one.
+        if (prior === previous[machines.length]) reused += 1;
         machines.push(prior);
-        reused += 1;
       } else machines.push(built);
     }
     const hidden = [...this.#hidden];

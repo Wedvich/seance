@@ -301,21 +301,35 @@ describe("registry", () => {
   // What the above rides on, and with it every resume: the relay re-sends the
   // whole registry on each app connect, and an entry that did not change has to
   // survive the rebuild by identity or the list is a fresh array every time.
+  //
+  // The newcomer deliberately sorts *ahead* of the machine under test: the relay
+  // lists entries by deviceId (storage.list over a "device:" prefix), so a first
+  // registration lands anywhere in the list, and matching the previous entries by
+  // position would re-allocate every machine behind the insertion point. Ids are
+  // minted here rather than from nextDeviceId(), whose counter puts their relative
+  // order at the mercy of how many tests run before this one ("…-10" < "…-9").
   test("a registry push leaves the entries it did not change identical", async () => {
-    const first = nextDeviceId();
-    const second = nextDeviceId();
+    const run = crypto.randomUUID();
+    const inserted = `pwa-device-a-${run}`;
+    const settled = `pwa-device-b-${run}`;
+    expect(inserted < settled).toBe(true);
+
     const { client, waitFor } = startClient();
-    const one = await startFakeDaemon(relay, key, first, machineInfo("First"));
+    const one = await startFakeDaemon(relay, key, settled, machineInfo("Settled"));
     try {
-      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === first && m.connected), "first online");
-      const entry = before.machines.find((m) => m.deviceId === first);
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === settled && m.connected), "online");
+      const entry = before.machines.find((m) => m.deviceId === settled);
       expect(entry).toBeDefined();
 
-      const two = await startFakeDaemon(relay, key, second, machineInfo("Second"));
+      const two = await startFakeDaemon(relay, key, inserted, machineInfo("Inserted"));
       try {
-        const after = await waitFor((s) => s.machines.some((m) => m.deviceId === second), "second online");
+        const after = await waitFor((s) => s.machines.some((m) => m.deviceId === inserted), "newcomer online");
+        const shown = after.machines.map((m) => m.deviceId);
+        // The point of the fixed ids: without an insertion ahead of it, this
+        // would only ever exercise the append case.
+        expect(shown.indexOf(inserted)).toBeLessThan(shown.indexOf(settled));
         expect(after.machines).not.toBe(before.machines);
-        expect(after.machines.find((m) => m.deviceId === first)).toBe(entry);
+        expect(after.machines.find((m) => m.deviceId === settled)).toBe(entry);
       } finally {
         two.close();
       }
