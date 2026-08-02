@@ -234,7 +234,10 @@ describe("daemon ↔ relay ↔ app", () => {
       const cloned = await exec(["git", "clone", stack.fixture.barePath, clonePath]);
       expect(cloned.exitCode).toBe(0);
 
-      await app.store.rescan();
+      // The raw request, not store.rescan(): the store folds the reply into the
+      // machine itself, which would satisfy the assertion below without the
+      // re-register and registry push this test exists to measure.
+      await app.client.request(stack.deviceId, "rescan", {});
       await app.waitForApp(
         (s) => ownMachine(s, stack.deviceId)?.repos.some((r) => r.name === "newrepo") ?? false,
         "machine with newrepo",
@@ -242,7 +245,7 @@ describe("daemon ↔ relay ↔ app", () => {
     } finally {
       await rm(clonePath, { recursive: true, force: true });
       // Rescan again so later tests see the fixture's real repo set.
-      await app.store.rescan().catch(() => {});
+      await app.client.request(stack.deviceId, "rescan", {}).catch(() => {});
       app.stop();
     }
   });

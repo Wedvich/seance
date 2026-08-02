@@ -139,6 +139,13 @@ export class RelayClient {
    */
   readonly #provenOffline = new Map<string, number>();
   /**
+   * deviceId -> the repo list and scan time a `rescan` reply carried. The daemon
+   * re-registers only when the set changed, so without this a scan that found
+   * nothing new leaves the machine asserting the old `scannedAt` — and the app
+   * looks like it did nothing. Spent by the register that overtakes it.
+   */
+  readonly #scans = new Map<string, { readonly repos: readonly RepoEntry[]; readonly scannedAt: number }>();
+  /**
    * deviceIds removed from the list by hand. Held here rather than in the store so
    * `machines` stays "what to show" for every reader, and dropped again the moment
    * the machine connects — a removal hides an absence, it does not forget a machine.
@@ -203,6 +210,16 @@ export class RelayClient {
   hide(deviceId: string): void {
     if (this.#hidden.has(deviceId)) return;
     this.#hidden.add(deviceId);
+    this.#rebuildMachines();
+  }
+
+  /**
+   * Folds a `rescan` reply into the machine it came from. Sealed with the same
+   * key as the `machine-info` blob and strictly fresher than it, so it stands in
+   * for that blob's repo list until a register carries the scan itself.
+   */
+  applyScan(deviceId: string, repos: readonly RepoEntry[], scannedAt: number): void {
+    this.#scans.set(deviceId, { repos, scannedAt });
     this.#rebuildMachines();
   }
 
@@ -515,6 +532,10 @@ export class RelayClient {
     for (const entry of this.#entries) {
       const info = this.#infoCache.get(entry.info.iv) ?? null;
       if (info === null) continue;
+      const scan = this.#scans.get(entry.deviceId);
+      // A register that carries the scan (or a later one) makes the override spent.
+      if (scan !== undefined && scan.scannedAt <= info.scannedAt) this.#scans.delete(entry.deviceId);
+      const scanned = scan !== undefined && scan.scannedAt > info.scannedAt ? scan : info;
       const markedAt = this.#provenOffline.get(entry.deviceId);
       // Cleared by a later register, which is the one event that moves lastSeen up.
       const stillProvenOffline = markedAt !== undefined && entry.lastSeen <= markedAt;
@@ -529,8 +550,8 @@ export class RelayClient {
         deviceId: entry.deviceId,
         name: info.name,
         platform: info.platform,
-        repos: info.repos,
-        scannedAt: info.scannedAt,
+        repos: scanned.repos,
+        scannedAt: scanned.scannedAt,
         lastSeen: entry.lastSeen,
         connected,
       });

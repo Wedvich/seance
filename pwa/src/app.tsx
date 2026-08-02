@@ -29,6 +29,9 @@ export function App(props: { store: Store }): JSX.Element {
   }, [store]);
 
   const now = Date.now();
+  // A local const, not `exit.rendered` inline: the verdict callbacks close over
+  // it, and it is the copy the buttons belong to.
+  const rendered = exit.rendered;
   const view = deriveView(state, now);
 
   // Both screens stay mounted while a transition plays; push and pop are
@@ -42,16 +45,16 @@ export function App(props: { store: Store }): JSX.Element {
     >
       {(anim !== null || !state.settings) && (
         <main key="form" className={`${panelClass(anim, "push-out", "pop-in")}${exit.entering ? " form-enter" : ""}`}>
-          {exit.rendered !== null ? (
+          {rendered !== null ? (
             <VerdictView
-              key={exit.rendered}
-              verdict={exit.rendered}
+              key={rendered}
+              verdict={rendered}
               machineName={view.machine?.name ?? "that machine"}
               closing={exit.closing}
               onExited={exit.onExited}
-              onRetry={() => store.retrySpawn()}
+              onRetry={() => store.retrySpawn(rendered)}
               onAnother={() => store.startAnother()}
-              onReuse={() => store.reusePrompt()}
+              onReuse={() => store.reusePrompt(rendered)}
               onBack={() => store.dismissLayer()}
             />
           ) : (

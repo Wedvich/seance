@@ -625,7 +625,7 @@ describe("store", () => {
       rescan: () => {
         ops.push("rescan");
         rescanned = true;
-        return { repos: machineInfo("Rescanner").repos };
+        return { repos: machineInfo("Rescanner").repos, scannedAt: Date.now() };
       },
       spawn: () => {
         ops.push("spawn");
@@ -646,7 +646,7 @@ describe("store", () => {
       if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
       expect(failed.code).toBe("repo_not_found");
 
-      store.retrySpawn();
+      store.retrySpawn(failed);
       await waitForApp((state) => state.verdict?.kind === "ok", "retry landed");
       expect(ops).toEqual(["spawn", "rescan", "spawn"]);
     } finally {
@@ -661,7 +661,10 @@ describe("store", () => {
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
       // The fresh scan no longer carries the repo the form remembers.
-      rescan: () => ({ repos: [{ name: "pengefix", path: "/Users/m/pengefix", defaultBranch: "main" }] }),
+      rescan: () => ({
+        repos: [{ name: "pengefix", path: "/Users/m/pengefix", defaultBranch: "main" }],
+        scannedAt: Date.now(),
+      }),
       spawn: () => {
         ops.push("spawn");
         return { ok: false, code: "repo_not_found", message: "no repo named seance" };
@@ -671,9 +674,11 @@ describe("store", () => {
     try {
       await waitForApp(online(deviceId), "machine online");
       await store.spawn();
-      store.retrySpawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
+      store.retrySpawn(failed);
       const state = await waitForApp(
-        (s) => s.verdict?.kind === "failed" && s.verdict.rescanned === true,
+        (s) => s.verdict?.kind === "failed" && s.verdict.rescan === "missing",
         "conclusive verdict",
       );
       if (state.verdict?.kind !== "failed") throw new Error("unreachable");
@@ -681,13 +686,77 @@ describe("store", () => {
       // The rescan answered — no second spawn was attempted.
       expect(ops).toEqual(["spawn"]);
       expect(state.spawning).toBe(false);
+      expect(state.rescanning).toBe(false);
     } finally {
       stop();
       daemon.close();
     }
   });
 
-  test("rescan reports scanning and failure inline, and the next open resets it", async () => {
+  test("a retry whose rescan never lands says so instead of spawning into the stale cache", async () => {
+    const deviceId = nextDeviceId();
+    const ops: string[] = [];
+    // Answers the spawn but not the rescan, which can then only time out.
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      spawn: () => {
+        ops.push("spawn");
+        return { ok: false, code: "repo_not_found", message: "no repo named seance" };
+      },
+    });
+    const { store, waitForApp, stop } = startStore(
+      { machineId: deviceId, repos: { [deviceId]: "seance" } },
+      { timeouts: { rescan: 300 } },
+    );
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
+
+      store.retrySpawn(failed);
+      // The rescan is in flight and nothing has been sent to the daemon yet.
+      expect(store.getState().rescanning).toBe(true);
+      expect(store.getState().spawning).toBe(false);
+      const state = await waitForApp(
+        (s) => s.verdict?.kind === "failed" && s.verdict.rescan === "unreachable",
+        "the failed rescan reported",
+      );
+      expect(state.rescanning).toBe(false);
+      // Nothing was retried against the cache the rescan failed to refresh.
+      expect(ops).toEqual(["spawn"]);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a rescan that changes nothing still moves the scan time the row shows", async () => {
+    const deviceId = nextDeviceId();
+    const info = { ...machineInfo("Unchanged"), scannedAt: Date.now() - 2 * 60 * 60 * 1000 };
+    const scannedAt = Date.now();
+    const daemon = await startFakeDaemon(relay, key, deviceId, info, {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      // The set is identical, so a real daemon would not re-register: the reply
+      // is the only report this scan ever gets.
+      rescan: () => ({ repos: info.repos, scannedAt }),
+    });
+    const scanTime = (): number | undefined =>
+      store.getState().relay.machines.find((machine) => machine.deviceId === deviceId)?.scannedAt;
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      expect(scanTime()).toBe(info.scannedAt);
+      await store.rescan();
+      expect(store.getState().rescan).toBe("idle");
+      expect(scanTime()).toBe(scannedAt);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a rescan failure survives another sheet and is cleared once its own closes", async () => {
     const deviceId = nextDeviceId();
     // No rescan handler: the request can only time out.
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mute"), {
@@ -699,8 +768,15 @@ describe("store", () => {
       store.openSheet("repo");
       void store.rescan();
       expect(store.getState().rescan).toBe("scanning");
+      // Backing out into another sheet mid-scan: the failure lands with no repo
+      // sheet to show it, so it has to still be there on the next open.
+      store.onPopState();
+      store.openSheet("model");
       await waitForApp((state) => state.rescan === "failed", "rescan failure surfaced");
+      store.onPopState();
       store.openSheet("repo");
+      expect(store.getState().rescan).toBe("failed");
+      store.onPopState();
       expect(store.getState().rescan).toBe("idle");
     } finally {
       stop();
@@ -728,7 +804,7 @@ describe("store", () => {
       expect(state.form.prompt).toBe("");
       expect(state.verdict.prompt).toBe("resurrect me");
 
-      store.reusePrompt();
+      store.reusePrompt(state.verdict);
       expect(store.getState().form.prompt).toBe("resurrect me");
     } finally {
       stop();

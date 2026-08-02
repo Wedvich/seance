@@ -42,6 +42,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     sheet: null,
     settings: false,
     spawning: false,
+    rescanning: false,
     rescan: "idle",
     verdict: null,
     sessions: {},
@@ -204,6 +205,11 @@ describe("banner and button", () => {
   test("pending outranks the prompt-dependent labels", () => {
     const view = deriveView(state({ spawning: true }, { prompt: "hi" }), NOW);
     expect(view.button).toEqual({ label: "Starting…", enabled: false, busy: true });
+  });
+
+  test("a retry's rescan is named rather than passed off as the spawn it precedes", () => {
+    const view = deriveView(state({ rescanning: true }, { prompt: "hi" }), NOW);
+    expect(view.button).toEqual({ label: "Rescanning…", enabled: false, busy: true });
   });
 
   test("the label follows whether a prompt was typed", () => {

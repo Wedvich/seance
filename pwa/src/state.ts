@@ -34,8 +34,12 @@ export type Verdict =
       readonly code: SpawnErrorCode;
       readonly message: string;
       readonly repo: string;
-      /** Set when a retry's rescan still missed the repo — conclusive, so the verdict stops offering retries. */
-      readonly rescanned?: boolean;
+      /**
+       * What a retry's rescan settled. "missing" is conclusive — the repo is gone,
+       * so the verdict stops offering retries. "unreachable" means the scan never
+       * got through, so nothing was tried and the retry still stands.
+       */
+      readonly rescan?: "missing" | "unreachable";
     }
   /**
    * `dropped` — the reply was lost, usually to a background/suspend mid-spawn, so

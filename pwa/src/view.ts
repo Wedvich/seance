@@ -68,7 +68,9 @@ export interface AppState {
   /** The settings screen, a layer like the sheets so back leaves it instead of the app. */
   readonly settings: boolean;
   readonly spawning: boolean;
-  /** The repo sheet's rescan row; failures reset when a sheet opens. */
+  /** A repo_not_found retry rescans before it spawns; the button names which of the two is running. */
+  readonly rescanning: boolean;
+  /** The repo sheet's rescan row; a failure is cleared once its sheet closes. */
   readonly rescan: RescanState;
   readonly verdict: Verdict | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
@@ -247,6 +249,8 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) return blocked(relay.ignored > 0 ? "Check your key" : "No machines listed");
+  // Ahead of `spawning`, which it precedes: the two are never both set.
+  if (state.rescanning) return { label: "Rescanning…", enabled: false, busy: true };
   if (state.spawning) return { label: "Starting…", enabled: false, busy: true };
   if (machine === null) return blocked("Pick a machine");
   if (!machine.connected) return blocked(`${machine.name} is asleep`);
