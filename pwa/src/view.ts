@@ -97,25 +97,62 @@ function segments(path: string): string[] {
   return path.split("/").filter((part) => part !== "");
 }
 
+interface SplitPath {
+  readonly path: string;
+  readonly own: readonly string[];
+}
+
+function splitDistinct(paths: readonly string[]): SplitPath[] {
+  return [...new Set(paths)].map((path) => ({ path, own: segments(path) }));
+}
+
+function sharedPrefix(distinct: readonly SplitPath[]): number {
+  const first = distinct[0];
+  if (first === undefined) return 0;
+
+  let prefix = first.own.length;
+  for (const { own } of distinct) {
+    let shared = 0;
+    while (shared < prefix && own[shared] === first.own[shared]) shared += 1;
+    prefix = shared;
+  }
+  return prefix;
+}
+
 /**
  * Repo paths are absolute and ellipsise to nothing at 13px in a half-width
  * tile, and the tail is the informative end. Trims the directory prefix the
  * machine's repos share, which recovers the configured repo root without
- * needing it on the wire. With one repo there is no prefix to find, so keep the
- * last two segments.
+ * needing it on the wire. With one distinct repo there is no prefix to find,
+ * so keep the last two segments. Both exported forms label through here — the
+ * rule lives only in this pass.
  */
-export function abbreviatePath(path: string, siblings: readonly string[]): string {
-  const own = segments(path);
+function labelFor({ path, own }: SplitPath, prefix: number, lone: boolean): string {
   if (own.length <= 1) return path;
-  const others = siblings.filter((candidate) => candidate !== path).map(segments);
-  if (others.length === 0) return own.slice(-2).join("/");
-
-  let shared = 0;
+  if (lone) return own.slice(-2).join("/");
   // Never consume the final segment: the repo's own directory name always shows.
-  while (shared < own.length - 1 && others.every((other) => other[shared] === own[shared])) {
-    shared += 1;
-  }
-  return own.slice(shared).join("/");
+  return own.slice(Math.min(prefix, own.length - 1)).join("/");
+}
+
+/**
+ * Labels the whole set in one pass rather than a path at a time: the prefix is
+ * a property of the set, so labelling per path re-splits every sibling on each
+ * call — quadratic across a repo list.
+ */
+export function abbreviatePaths(paths: readonly string[]): ReadonlyMap<string, string> {
+  const distinct = splitDistinct(paths);
+  const prefix = sharedPrefix(distinct);
+  const lone = distinct.length === 1;
+  return new Map(distinct.map((entry) => [entry.path, labelFor(entry, prefix, lone)]));
+}
+
+/**
+ * One label without the batch form's Map and sibling label strings — deriveView
+ * names a single repo tile on every render, keystrokes included.
+ */
+export function abbreviatePath(path: string, paths: readonly string[]): string {
+  const distinct = splitDistinct(paths);
+  return labelFor({ path, own: segments(path) }, sharedPrefix(distinct), distinct.length === 1);
 }
 
 /**
@@ -278,7 +315,13 @@ export function resolveRepo(machine: Machine | null, form: PersistedForm): RepoE
 export function deriveView(state: AppState, now: number): ViewModel {
   const machine = resolveMachine(state.relay, state.form.machineId);
   const repo = resolveRepo(machine, state.form);
-  const paths = machine?.repos.map((entry) => entry.path) ?? [];
+  const repoLabel =
+    machine !== null && repo !== null
+      ? abbreviatePath(
+          repo.path,
+          machine.repos.map((entry) => entry.path),
+        )
+      : null;
 
   return {
     meta: deriveMeta(state),
@@ -293,7 +336,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     },
     repoTile: {
       label: "REPOSITORY",
-      value: repo === null ? "No repos" : abbreviatePath(repo.path, paths),
+      value: repoLabel ?? "No repos",
       mono: true,
       dot: null,
     },

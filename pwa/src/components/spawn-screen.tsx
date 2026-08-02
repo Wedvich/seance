@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useEffect, useLayoutEffect, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useState } from "preact/hooks";
 import type { Machine } from "../relay/client.ts";
 import {
   EFFORTS,
@@ -12,9 +12,12 @@ import {
   type RescanState,
   type SheetKind,
 } from "../state.ts";
-import { abbreviatePath, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
+import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
 import { Sheet, SheetItem } from "./sheet.tsx";
+
+/** One collator for every sheet sort; constructing one per comparison is not free. */
+const collator = new Intl.Collator();
 
 const SHEET_TITLES: Record<SheetKind, string> = {
   machine: "Where should it run?",
@@ -100,6 +103,59 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
   );
 }
 
+/**
+ * Its own component so the labelling can sit behind a hook: the sheet re-renders
+ * on every store patch, but the labels only move when the machine does.
+ */
+function RepoSheet(props: {
+  actions: SpawnActions;
+  machine: Machine | null;
+  selected: string | null;
+  rescan: RescanState;
+  closing: boolean;
+  onExited: () => void;
+  now: number;
+}): JSX.Element {
+  const { actions, machine, selected, rescan, closing, onExited, now } = props;
+  // Keyed on the machine, which every finished rescan replaces (changed or
+  // not) — so rescans relabel, and unrelated store patches do not.
+  const items = useMemo(() => {
+    const repos = machine?.repos ?? [];
+    const labels = abbreviatePaths(repos.map((repo) => repo.path));
+    return repos
+      .map((repo) => ({ repo, label: labels.get(repo.path) ?? repo.path }))
+      .toSorted((a, b) => collator.compare(a.label, b.label));
+  }, [machine]);
+
+  return (
+    <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      {items.map(({ repo, label }) => (
+        <SheetItem
+          key={repo.name}
+          label={label}
+          mono
+          selected={repo.name === selected}
+          onClick={() => actions.selectRepo(repo.name)}
+        />
+      ))}
+      <SheetItem
+        label="↻ Rescan repos"
+        action
+        disabled={rescan === "scanning"}
+        sub={
+          rescan === "scanning"
+            ? "scanning…"
+            : machine === null
+              ? null
+              : `last scanned ${formatSeen(machine.scannedAt, now)}`
+        }
+        onClick={actions.rescan}
+      />
+      {rescan === "failed" && <p className="sheet-note">Couldn't rescan — this is the last known list.</p>}
+    </Sheet>
+  );
+}
+
 function ActiveSheet(props: {
   actions: SpawnActions;
   view: ViewModel;
@@ -135,7 +191,7 @@ function ActiveSheet(props: {
     return (
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         {machines
-          .toSorted((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name))
+          .toSorted((a, b) => Number(b.connected) - Number(a.connected) || collator.compare(a.name, b.name))
           .map((machine) => (
             <SheetItem
               key={machine.deviceId}
@@ -164,36 +220,16 @@ function ActiveSheet(props: {
   }
 
   if (kind === "repo") {
-    const paths = view.machine?.repos.map((repo) => repo.path) ?? [];
-    const items = (view.machine?.repos ?? [])
-      .map((repo) => ({ repo, label: abbreviatePath(repo.path, paths) }))
-      .toSorted((a, b) => a.label.localeCompare(b.label));
     return (
-      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
-        {items.map(({ repo, label }) => (
-          <SheetItem
-            key={repo.name}
-            label={label}
-            mono
-            selected={repo.name === view.repo?.name}
-            onClick={() => actions.selectRepo(repo.name)}
-          />
-        ))}
-        <SheetItem
-          label="↻ Rescan repos"
-          action
-          disabled={rescan === "scanning"}
-          sub={
-            rescan === "scanning"
-              ? "scanning…"
-              : view.machine === null
-                ? null
-                : `last scanned ${formatSeen(view.machine.scannedAt, now)}`
-          }
-          onClick={actions.rescan}
-        />
-        {rescan === "failed" && <p className="sheet-note">Couldn't rescan — this is the last known list.</p>}
-      </Sheet>
+      <RepoSheet
+        actions={actions}
+        machine={view.machine}
+        selected={view.repo?.name ?? null}
+        rescan={rescan}
+        closing={closing}
+        onExited={onExited}
+        now={now}
+      />
     );
   }
 

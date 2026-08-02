@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine, RelayState } from "../src/relay/client.ts";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
-import { abbreviatePath, deriveView, failureBody, formatSeen, resolveMachine, type AppState } from "../src/view.ts";
+import {
+  abbreviatePath,
+  abbreviatePaths,
+  deriveView,
+  failureBody,
+  formatSeen,
+  resolveMachine,
+  type AppState,
+} from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -74,27 +82,82 @@ describe("formatSeen", () => {
   });
 });
 
-describe("abbreviatePath", () => {
+describe("abbreviatePaths", () => {
   test("trims the prefix the machine's repos share", () => {
-    const paths = ["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"];
-    expect(abbreviatePath("/Users/martin/repos/seance", paths)).toBe("seance");
+    const labels = abbreviatePaths(["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"]);
+    expect(labels.get("/Users/martin/repos/seance")).toBe("seance");
+    expect(labels.get("/Users/martin/repos/pengefix")).toBe("pengefix");
   });
 
   test("keeps the diverging segment when repos sit under different roots", () => {
-    const paths = ["/Users/martin/repos/seance", "/Users/martin/pengefix/api"];
-    expect(abbreviatePath("/Users/martin/repos/seance", paths)).toBe("repos/seance");
-    expect(abbreviatePath("/Users/martin/pengefix/api", paths)).toBe("pengefix/api");
+    const labels = abbreviatePaths(["/Users/martin/repos/seance", "/Users/martin/pengefix/api"]);
+    expect(labels.get("/Users/martin/repos/seance")).toBe("repos/seance");
+    expect(labels.get("/Users/martin/pengefix/api")).toBe("pengefix/api");
+  });
+
+  // The prefix belongs to the set, so a shallow repo does not pull the deeper
+  // ones up with it — each keeps everything past the shared root.
+  test("trims every path by the set's prefix, not by its own depth", () => {
+    const labels = abbreviatePaths([
+      "/Users/martin/repos/seance",
+      "/Users/martin/repos/work/api",
+      "/Users/martin/repos/work/deep/nested",
+    ]);
+    expect(labels.get("/Users/martin/repos/seance")).toBe("seance");
+    expect(labels.get("/Users/martin/repos/work/api")).toBe("work/api");
+    expect(labels.get("/Users/martin/repos/work/deep/nested")).toBe("work/deep/nested");
   });
 
   test("falls back to the last two segments with nothing to compare against", () => {
-    expect(abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance"])).toBe("repos/seance");
+    expect(abbreviatePaths(["/Users/martin/repos/seance"]).get("/Users/martin/repos/seance")).toBe("repos/seance");
+  });
+
+  // Two entries but one distinct path is still "nothing to compare against".
+  test("treats a duplicated path as a single repo", () => {
+    const paths = ["/Users/martin/repos/seance", "/Users/martin/repos/seance"];
+    expect(abbreviatePaths(paths).get("/Users/martin/repos/seance")).toBe("repos/seance");
   });
 
   // A repo whose whole path is a prefix of a sibling's would otherwise be
   // trimmed down to nothing.
   test("never swallows the repo's own directory name", () => {
-    const paths = ["/srv/app", "/srv/app/vendor/thing"];
-    expect(abbreviatePath("/srv/app", paths)).toBe("app");
+    const labels = abbreviatePaths(["/srv/app", "/srv/app/vendor/thing"]);
+    expect(labels.get("/srv/app")).toBe("app");
+    expect(labels.get("/srv/app/vendor/thing")).toBe("vendor/thing");
+  });
+
+  test("leaves a path with a single segment as it is", () => {
+    const labels = abbreviatePaths(["/srv", "/srv/app"]);
+    expect(labels.get("/srv")).toBe("/srv");
+    expect(labels.get("/srv/app")).toBe("app");
+  });
+
+  test("labels every path once and leaves an empty list empty", () => {
+    expect([...abbreviatePaths(["/a/one", "/a/two", "/a/three"])]).toEqual([
+      ["/a/one", "one"],
+      ["/a/two", "two"],
+      ["/a/three", "three"],
+    ]);
+    expect(abbreviatePaths([]).size).toBe(0);
+  });
+});
+
+// The single form exists for the repo tile: one label per render without the
+// batch's Map. Same rule, so the same edges apply.
+describe("abbreviatePath", () => {
+  test("labels one path against its siblings", () => {
+    expect(
+      abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"]),
+    ).toBe("seance");
+  });
+
+  test("keeps the last two segments of a lone path, duplicated or not", () => {
+    expect(abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance"])).toBe("repos/seance");
+    expect(abbreviatePath("/a/b/c", ["/a/b/c", "/a/b/c"])).toBe("b/c");
+  });
+
+  test("leaves a single-segment path as it is", () => {
+    expect(abbreviatePath("/srv", ["/srv", "/srv/app"])).toBe("/srv");
   });
 });
 
@@ -298,6 +361,10 @@ describe("selection", () => {
     );
     expect(view.machine?.deviceId).toBe("dev-2");
     expect(view.repo?.name).toBe("pengefix");
+  });
+
+  test("the repo tile carries the abbreviated label", () => {
+    expect(deriveView(state(), NOW).repoTile.value).toBe("seance");
   });
 
   test("reports no repos when the machine has none", () => {
