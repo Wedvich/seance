@@ -12,6 +12,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - **README.md** — setup, deploy, and update walkthrough.
 - **DESIGN.md** — the decision record: architecture, wire protocol spec, threat model, and every
   rejected alternative with rationale. If a change alters decided behavior, update DESIGN.md with it.
+  For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
+  plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
+  of record, so a frame change touches both.
 
 ## Commands
 
