@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { APP_ID, PROTOCOL_VERSION } from "@seance/shared";
+import { APP_ID, MACHINES_ID, PROTOCOL_VERSION } from "@seance/shared";
 import { parseAppFrame, parseDaemonFrame, parseEnvelope } from "../src/wire.ts";
 
 const env = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -59,8 +59,9 @@ describe("parseDaemonFrame", () => {
     expect(parseDaemonFrame(registerFrame({ deviceId: "" }))).toBeNull();
   });
 
-  test("a daemon cannot claim the app's wire address", () => {
+  test("a daemon cannot claim a reserved wire address", () => {
     expect(parseDaemonFrame(registerFrame({ deviceId: APP_ID }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ deviceId: MACHINES_ID }))).toBeNull();
   });
 
   test("malformed JSON and unknown frame types are dropped, not thrown", () => {

@@ -101,11 +101,20 @@ class AsyncQueue<T> {
     const item = this.#items.shift();
     if (item !== undefined) return item;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`nothing arrived in ${timeoutMs}ms`)), timeoutMs);
-      this.#waiters.push((value) => {
+      const waiter = (value: T): void => {
         clearTimeout(timer);
         resolve(value);
-      });
+      };
+      // Unqueue on timeout: a waiter left behind swallows the next frame into
+      // an already-rejected promise, so a later `next()` waits forever for a
+      // frame that did arrive. `expectNo` times out by design, which makes
+      // every drain a chance to eat the frame the next assertion wants.
+      const timer = setTimeout(() => {
+        const index = this.#waiters.indexOf(waiter);
+        if (index !== -1) this.#waiters.splice(index, 1);
+        reject(new Error(`nothing arrived in ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.#waiters.push(waiter);
     });
   }
 }

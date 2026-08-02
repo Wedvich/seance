@@ -355,6 +355,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `register`                          | `daemon/src/relay-client.ts`                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
 | `msg` (app→daemon)                  | `pwa/src/relay/client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
 | `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                     | broadcast by `relay/src/hub.ts`; correlated on `re` in `pwa/src/relay/client.ts`                                |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                   | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
 | `registry`                          | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
 | `undeliverable`                     | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
 | `"ping"` / `"pong"`                 | both socket legs                                 | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
@@ -408,6 +409,23 @@ needs no polling); `msg { envelope }` for daemon replies; and
   (opening the PWA on the laptop kills the phone), per-session `app:<rand>`
   ids (two identities in play, since the register blob is sealed to the bare
   constant before any client exists).
+- **`MACHINES_ID = "machines"` is the daemon-side group address**, the mirror
+  of `"app"`: the relay fans an envelope addressed to it to every _registered_
+  daemon socket except the sender. One seal reaches all machines — the AAD
+  binds `to`, so a group needs one shared address; per-recipient seals would
+  also require the sender to know the registry, which daemons never see.
+  Fire-and-forget: no `undeliverable` (nothing correlates a broadcast — offline
+  machines converge from their own register-time self-check), and no
+  echo-to-sender (every announce would be a self-nudge). `register` refuses
+  both reserved ids, so no machine can squat the group address. Receivers
+  allowlist which ops may arrive group-addressed — `spawn` to `"machines"`
+  must stay structurally impossible, not merely unused, because the group
+  address is an amplification primitive a bearer-token holder can drive
+  (non-decrypting frames drop at each daemon; the cost stays bounded).
+  Rejected: client-side fan-out for daemon-origin messages (daemons don't see
+  the registry), relay-stored "latest" blob pushed on connect (new relay
+  state plus a second at-rest replay exemption, for convergence the startup
+  self-check already provides).
 - **`undeliverable` correlates by `iv`**, not by request `id` — the `id` is
   inside the ciphertext, so a blind relay has nothing else to echo. The PWA
   also refuses to send when `connected === false`; the frame exists for the

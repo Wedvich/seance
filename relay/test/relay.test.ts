@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  MACHINES_ID,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
   type RegistryView,
@@ -197,6 +198,60 @@ describe("routing", () => {
 
     const notice = await app.waitFor<UndeliverableFrame>("undeliverable");
     expect(notice).toEqual({ t: "undeliverable", to: deviceId, iv: env.iv, code: "offline" });
+    app.close();
+  });
+
+  test("fans a machines broadcast to every other registered daemon, never the sender", async () => {
+    const senderId = nextDeviceId();
+    const receiverId = nextDeviceId();
+    const app = await connectApp(relay);
+    const sender = await registeredDaemon(app, senderId);
+    const receiver = await registeredDaemon(app, receiverId);
+    const unregistered = await connectDaemon(relay);
+
+    const env = envelope(MACHINES_ID, senderId);
+    sender.send({ t: "msg", env });
+
+    expect((await receiver.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    // The sender must not be self-nudged, sockets that never registered are
+    // not machines, and a broadcast is daemon-bound — apps never see it.
+    await sender.expectNo("msg");
+    await unregistered.expectNo("msg");
+    await app.expectNo("msg");
+    sender.close();
+    receiver.close();
+    unregistered.close();
+    app.close();
+  });
+
+  test("an app-sent broadcast reaches daemons, with no undeliverable either way", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+
+    const env = envelope(MACHINES_ID, APP_ID);
+    app.send({ t: "msg", env });
+
+    expect((await daemon.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    // Fire-and-forget: nothing correlates a broadcast, so no notice even for
+    // an app sender the relay could answer.
+    await app.expectNo("undeliverable");
+    daemon.close();
+    app.close();
+  });
+
+  test("a broadcast is never answered undeliverable, even with nothing to deliver to", async () => {
+    const app = await connectApp(relay);
+
+    // The unicast fallback would answer `unknown` for an address it cannot
+    // route; a broadcast must not, whether or not anyone is listening.
+    app.send({ t: "msg", env: envelope(MACHINES_ID, APP_ID) });
+
+    await app.expectNo("undeliverable");
+    // The socket still serves, so the frame was handled rather than fatal.
+    const env = envelope("never-registered", APP_ID);
+    app.send({ t: "msg", env });
+    expect((await app.waitFor<UndeliverableFrame>("undeliverable")).iv).toBe(env.iv);
     app.close();
   });
 });

@@ -1,4 +1,4 @@
-import { APP_ID, type AppFrame, type DaemonFrame, type Envelope } from "@seance/shared";
+import { APP_ID, MACHINES_ID, type AppFrame, type DaemonFrame, type Envelope } from "@seance/shared";
 
 /**
  * Bounds, not shapes. `deviceId` is an identifier rather than a credential, so
@@ -54,9 +54,10 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
   if (value["t"] === "register") {
     const info = parseEnvelope(value["info"]);
     if (info === null || !routableId(value["deviceId"])) return null;
-    // APP_ID is the app's wire address: a daemon holding it would show up in
-    // the registry as a machine called "app" and muddy every routing decision.
-    if (value["deviceId"] === APP_ID) return null;
+    // APP_ID and MACHINES_ID are wire addresses, not machines: a daemon
+    // squatting one would show up as a machine called "app" or swallow every
+    // broadcast addressed to the group.
+    if (value["deviceId"] === APP_ID || value["deviceId"] === MACHINES_ID) return null;
     return { t: "register", deviceId: value["deviceId"], info };
   }
   if (value["t"] === "msg") {

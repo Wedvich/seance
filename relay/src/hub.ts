@@ -2,6 +2,7 @@ import {
   APP_ID,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
+  MACHINES_ID,
   quote,
   type Envelope,
   type RegistryEntry,
@@ -290,6 +291,34 @@ export class Hub implements DurableObject {
       for (const app of apps) app.send(text);
       // Zero apps is the lost-reply case DESIGN.md reconciles from the session list.
       wireLog("fanout", env, ` apps=${apps.length}`);
+      return;
+    }
+
+    if (env.to === MACHINES_ID) {
+      // Fan to every registered daemon socket except the sender: echoing back
+      // would make each announce a self-nudge. Exclusion is by deviceId, not
+      // socket identity, so a socket superseded mid-flight cannot deliver the
+      // machine its own announce. Fire-and-forget by design — no undeliverable
+      // notice, because nothing correlates a broadcast and offline machines
+      // converge from their own register-time self-check.
+      const frame: RelayToDaemonFrame = { t: "msg", env };
+      const text = JSON.stringify(frame);
+      let fanned = 0;
+      let failed = 0;
+      for (const daemon of this.#ctx.getWebSockets("daemon")) {
+        const deviceId = this.#deviceIdOf(daemon);
+        if (deviceId === null || deviceId === env.from) continue;
+        // Per-socket, because a broadcast has many recipients: a socket closing
+        // as we write (the sweep and `superseded` both leave one briefly listed)
+        // throws on send, and one throw must not swallow the whole tail.
+        try {
+          daemon.send(text);
+          fanned += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      wireLog("fanout", env, ` daemons=${fanned}${failed > 0 ? ` failed=${failed}` : ""}`);
       return;
     }
 
