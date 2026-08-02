@@ -21,9 +21,16 @@ export function Sheet(props: {
 
   useEffect(() => {
     const previous = document.activeElement;
-    panel.current?.focus();
+    const node = panel.current;
+    node?.focus();
     return () => {
-      if (previous instanceof HTMLElement) previous.focus();
+      // The sheet outlives its dismissal by the exit animation, and the form
+      // beneath is tappable for all of it. Focus that has already moved on is the
+      // user's: taking it back mid-animation closes the keyboard they just opened.
+      if (!(previous instanceof HTMLElement)) return;
+      const active = document.activeElement;
+      if (active !== null && active !== document.body && node?.contains(active) !== true) return;
+      previous.focus();
     };
   }, []);
 

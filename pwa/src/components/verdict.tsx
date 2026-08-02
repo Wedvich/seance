@@ -28,15 +28,28 @@ function describe(verdict: Verdict, machineName: string): Content {
   }
 
   if (verdict.kind === "failed") {
-    if (verdict.code === "repo_not_found" && verdict.rescanned === true) {
+    if (verdict.code === "repo_not_found" && verdict.rescan === "missing") {
       return {
         glyph: "!",
         glyphClass: "verdict-glyph verdict-glyph-err",
         headline: "It didn't take.",
         body: `${verdict.repo} isn't on ${machineName} — a fresh scan doesn't find it either. Pick another repo and try again.`,
-        detail: `${verdict.code}\n${verdict.message}`,
+        // Not the daemon's message: it ends in "try a rescan", the one thing this
+        // verdict has just ruled out. The code alone still carries the record.
+        detail: verdict.code,
         primary: { label: "Back to the form", onClick: "back" },
         showBack: false,
+      };
+    }
+    if (verdict.code === "repo_not_found" && verdict.rescan === "unreachable") {
+      return {
+        glyph: "!",
+        glyphClass: "verdict-glyph verdict-glyph-err",
+        headline: "The rescan didn't get through.",
+        body: `Couldn't reach ${machineName} to rescan its repos, so ${verdict.repo} wasn't tried again.`,
+        detail: `${verdict.code}\n${verdict.message}`,
+        primary: { label: "Rescan and try again", onClick: "retry" },
+        showBack: true,
       };
     }
     return {

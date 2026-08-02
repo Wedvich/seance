@@ -416,7 +416,10 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   just announced: detection keys off claude's process title, which it can set
   after the spawn returns, and the PWA adopts this list verbatim — an ack
   short by its own window renders the machine as idle.
-- `rescan {}` → fresh repo list; daemon re-registers if the set changed.
+- `rescan {}` → `{ repos, scannedAt }`; daemon re-registers if the set changed.
+  The app folds the reply into the machine it came from, overriding that
+  machine's register blob until a later one carries the scan: an unchanged set
+  produces no register, so the reply is the only report the scan ever gets.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -813,8 +816,13 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **A `repo_not_found` retry rescans first.** The verdict's "Rescan and try again"
   awaits a rescan and checks the reply for the repo before spawning again; a repo
   the fresh scan still lacks is reported as conclusively gone (back to the form)
-  instead of looping. The repo sheet's own rescan row shows scanning/failure
-  inline and keeps the sheet open, rather than closing silently.
+  instead of looping. That wait says "Rescanning…", not "Starting…" — nothing has
+  reached the daemon yet — and a rescan that never lands is reported as such
+  rather than spawned through: the daemon would resolve the repo against the very
+  cache the rescan failed to refresh, so the second failure is known in advance.
+  The repo sheet's own rescan row shows scanning/failure inline and keeps the
+  sheet open, rather than closing silently; its failure note clears when that
+  sheet closes, so one landing while another layer is up is not reset unseen.
 - **The success verdict offers "Reuse this prompt", not "Open in Claude".** The
   `claude://code` link opened only the session list, and the Claude app already
   notifies when a remote-control session starts — while spawning the same prompt
