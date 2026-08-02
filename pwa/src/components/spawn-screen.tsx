@@ -190,8 +190,6 @@ function ActiveSheet(props: {
   view: ViewModel;
   kind: SheetKind;
   machines: readonly Machine[];
-  /** deviceIds removed while offline; only their count is rendered. */
-  hidden: readonly string[];
   model: Model;
   effort: Effort;
   rescan: RescanState;
@@ -205,7 +203,6 @@ function ActiveSheet(props: {
     view,
     kind,
     machines,
-    hidden,
     model: selectedModel,
     effort: selectedEffort,
     now,
@@ -216,7 +213,6 @@ function ActiveSheet(props: {
   const close = actions.dismissLayer;
 
   if (kind === "machine") {
-    const hiddenCount = hidden.length;
     return (
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         {machines
@@ -239,11 +235,6 @@ function ActiveSheet(props: {
               onClick={() => actions.selectMachine(machine.deviceId)}
             />
           ))}
-        {hiddenCount > 0 && (
-          <p className="sheet-note">
-            {hiddenCount} removed · {hiddenCount === 1 ? "it comes" : "they come"} back on connecting
-          </p>
-        )}
       </Sheet>
     );
   }
@@ -299,11 +290,10 @@ export function SpawnScreen(props: {
   promptUndo: string | null;
   sheet: SheetKind | null;
   machines: readonly Machine[];
-  hidden: readonly string[];
   now: number;
   rescan: RescanState;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, hidden, now, rescan } = props;
+  const { actions, view, form, promptUndo, sheet, machines, now, rescan } = props;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
@@ -424,7 +414,6 @@ export function SpawnScreen(props: {
           view={view}
           kind={renderedSheet}
           machines={machines}
-          hidden={hidden}
           model={form.model}
           effort={form.effort}
           now={now}

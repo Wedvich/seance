@@ -65,7 +65,6 @@ export function App(props: { store: Store }): JSX.Element {
               promptUndo={state.promptUndo}
               sheet={state.sheet}
               machines={state.relay.machines}
-              hidden={state.relay.hidden}
               now={now}
               rescan={state.rescan}
             />
