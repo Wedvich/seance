@@ -8,8 +8,15 @@ const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:n
  * keyboard use in a desktop browser as much as for assistive tech — the sheet
  * replaces the screen's focus context, so leaving focus behind it strands you.
  */
-export function Sheet(props: { title: string; onClose: () => void; children: ComponentChildren }): JSX.Element {
-  const { title, onClose, children } = props;
+export function Sheet(props: {
+  title: string;
+  /** True while the exit animation plays; unmount follows via onExited. */
+  closing?: boolean;
+  onExited?: () => void;
+  onClose: () => void;
+  children: ComponentChildren;
+}): JSX.Element {
+  const { title, closing = false, onExited, onClose, children } = props;
   const panel = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -45,12 +52,22 @@ export function Sheet(props: { title: string; onClose: () => void; children: Com
 
   return (
     <div
-      className="scrim"
+      className={closing ? "scrim scrim-closing" : "scrim"}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="sheet card" role="dialog" aria-modal="true" aria-label={title} ref={panel} tabIndex={-1}>
+      <div
+        className="sheet card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        ref={panel}
+        tabIndex={-1}
+        onAnimationEnd={(event) => {
+          if (event.animationName === "sheet-out") onExited?.();
+        }}
+      >
         <div className="sheet-head">
           <h2 className="sheet-title">{title}</h2>
           <button type="button" className="sheet-close" onClick={onClose} aria-label="Close">

@@ -42,6 +42,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     sheet: null,
     settings: false,
     spawning: false,
+    rescan: "idle",
     verdict: null,
     sessions: {},
     ...overrides,
@@ -100,7 +101,7 @@ describe("banner and button", () => {
   test("relay down blocks the spawn and keeps the prompt", () => {
     const view = deriveView(state({ relay: relay({ status: "retrying" }) }, { prompt: "do the thing" }), NOW);
     expect(view.banner?.title).toBe("Relay unreachable");
-    expect(view.button).toEqual({ label: "Waiting for the relay", enabled: false });
+    expect(view.button).toEqual({ label: "Waiting for the relay", enabled: false, busy: false });
     expect(view.meta).toBe("relay unreachable · retrying");
     expect(view.relayLine).toBe("relay unreachable · retrying");
   });
@@ -112,7 +113,7 @@ describe("banner and button", () => {
     expect(view.meta).toBe("connecting…");
     expect(view.relayLine).toBe("connecting…");
     expect(view.relayState).toBe("connecting");
-    expect(view.button).toEqual({ label: "Connecting…", enabled: false });
+    expect(view.button).toEqual({ label: "Connecting…", enabled: false, busy: false });
   });
 
   test("a rejected token is reported as such, not as an unreachable relay", () => {
@@ -189,7 +190,7 @@ describe("banner and button", () => {
     const view = deriveView(state({ relay: relay({ machines: [asleep] }) }), NOW);
     expect(view.banner?.title).toBe("MacBook Pro is offline");
     expect(view.banner?.body).toContain("plugged in");
-    expect(view.button).toEqual({ label: "MacBook Pro is asleep", enabled: false });
+    expect(view.button).toEqual({ label: "MacBook Pro is asleep", enabled: false, busy: false });
     expect(view.machineTile.dot).toBe("off");
     expect(view.footerStatus).toBe("Last seen 3d ago · sessions unknown");
   });
@@ -202,7 +203,7 @@ describe("banner and button", () => {
 
   test("pending outranks the prompt-dependent labels", () => {
     const view = deriveView(state({ spawning: true }, { prompt: "hi" }), NOW);
-    expect(view.button).toEqual({ label: "Starting…", enabled: false });
+    expect(view.button).toEqual({ label: "Starting…", enabled: false, busy: true });
   });
 
   test("the label follows whether a prompt was typed", () => {
@@ -237,7 +238,7 @@ describe("sessions", () => {
   });
 
   // A machine whose fetch failed must not be counted as zero in the header total.
-  test("excludes unknown counts from the total rather than treating them as zero", () => {
+  test("marks the total as a floor when a connected machine hasn't answered", () => {
     const second = machine({ deviceId: "dev-2", name: "Mac Studio" });
     const view = deriveView(
       state({
@@ -246,7 +247,16 @@ describe("sessions", () => {
       }),
       NOW,
     );
-    expect(view.meta).toBe("2 online · 0 asleep · 2 sessions");
+    expect(view.meta).toBe("2 online · 0 asleep · 2+ sessions");
+  });
+
+  test("offline machines never mark the total: their sessions are legitimately unknown", () => {
+    const asleep = machine({ deviceId: "dev-2", name: "Mac Studio", connected: false });
+    const view = deriveView(
+      state({ relay: relay({ machines: [machine(), asleep] }), sessions: { "dev-1": sessions(2) } }),
+      NOW,
+    );
+    expect(view.meta).toBe("1 online · 1 asleep · 2 sessions");
   });
 
   test("singularises the header total too", () => {

@@ -712,8 +712,9 @@ make claims about, and `.dev` is preloaded at the TLD anyway.
 V1 surface: machine list (online/offline + last-seen, offline ones removable), per-machine repo
 picker, spawn form (prompt optional, worktree/`--here` toggle, model and
 effort as first-class tiles, defaults opus/medium), spawn verdict (daemon
-relays tmux window name or the captured error), and a **read-only** list of
-running claude tmux windows per machine (avoids spawning duplicates).
+relays tmux window name or the captured error), and per-machine counts of running
+claude sessions (header total + footer line, enough to avoid spawning duplicates —
+a full session list was cut: sessions live in the Claude app).
 Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 
 - **Preact, not React, and without `preact/compat`.** The whole app is two screens,
@@ -809,6 +810,17 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   spawn is persisted and the machine is asked what is running once there is a
   socket again. Reporting a failure there would be a lie: the session may well
   be live. A refused delivery is reported as a known no, separately.
+- **A `repo_not_found` retry rescans first.** The verdict's "Rescan and try again"
+  awaits a rescan and checks the reply for the repo before spawning again; a repo
+  the fresh scan still lacks is reported as conclusively gone (back to the form)
+  instead of looping. The repo sheet's own rescan row shows scanning/failure
+  inline and keeps the sheet open, rather than closing silently.
+- **The success verdict offers "Reuse this prompt", not "Open in Claude".** The
+  `claude://code` link opened only the session list, and the Claude app already
+  notifies when a remote-control session starts — while spawning the same prompt
+  on a second machine meant retyping it. The spawned prompt rides the ok verdict;
+  the form itself is still cleared on success, so a reload cannot resurrect a
+  draft already acted on.
 
 ## Accepted trade-offs
 
@@ -818,8 +830,10 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.
 - Battery-powered Macs show offline when asleep.
-- No deep link from spawn verdict into the _specific_ Claude app session — only the
-  coarse `claude://code` (session list) link; see Problem & scope.
+- No deep link from the spawn verdict into the _specific_ Claude app session. Even
+  the coarse `claude://code` (session list) link was removed from the verdict: it
+  added nothing over the notification the Claude app itself raises when a
+  remote-control session starts; see Problem & scope.
 - A spawn reply lost to a >45s background cannot be recovered exactly, only
   reconciled from the session list. Relay-side buffering of app-bound envelopes
   would fix the short cases, but `ts` lives inside the ciphertext so a blind

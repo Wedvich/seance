@@ -4,6 +4,7 @@ import {
   EFFORT_LABELS,
   MODEL_LABELS,
   type PersistedForm,
+  type RescanState,
   type SessionsView,
   type SheetKind,
   type Verdict,
@@ -37,6 +38,8 @@ export interface Banner {
 export interface PrimaryButton {
   readonly label: string;
   readonly enabled: boolean;
+  /** True while a spawn is in flight; drives the busy shimmer. */
+  readonly busy: boolean;
 }
 
 export interface ViewModel {
@@ -65,6 +68,8 @@ export interface AppState {
   /** The settings screen, a layer like the sheets so back leaves it instead of the app. */
   readonly settings: boolean;
   readonly spawning: boolean;
+  /** The repo sheet's rescan row; failures reset when a sheet opens. */
+  readonly rescan: RescanState;
   readonly verdict: Verdict | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
   readonly sessions: Readonly<Record<string, SessionsView | "unknown">>;
@@ -161,13 +166,16 @@ function deriveMeta(state: AppState): string {
   if (relay.rejection === "bad-request") return "no bearer token";
   if (relay.status !== "open") return relay.settling ? "connecting…" : "relay unreachable · retrying";
 
-  const online = relay.machines.filter((machine) => machine.connected).length;
-  const asleep = relay.machines.length - online;
+  const connected = relay.machines.filter((machine) => machine.connected);
+  const asleep = relay.machines.length - connected.length;
   const counted = relay.machines
     .map((machine) => sessionCount(state, machine.deviceId))
     .filter((count): count is number => count !== null);
   const total = counted.reduce((sum, count) => sum + count, 0);
-  return `${online} online · ${asleep} asleep · ${total} ${total === 1 ? "session" : "sessions"}`;
+  // "3+": a connected machine that hasn't answered makes the total a floor, not a fact.
+  const partial = connected.some((machine) => sessionCount(state, machine.deviceId) === null);
+  const noun = total === 1 && !partial ? "session" : "sessions";
+  return `${connected.length} online · ${asleep} asleep · ${total}${partial ? "+" : ""} ${noun}`;
 }
 
 function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
@@ -230,7 +238,7 @@ function deriveFooterStatus(state: AppState, machine: Machine | null, now: numbe
   return `${count} claude ${count === 1 ? "session" : "sessions"} already on ${machine.name}`;
 }
 
-const blocked = (label: string): PrimaryButton => ({ label, enabled: false });
+const blocked = (label: string): PrimaryButton => ({ label, enabled: false, busy: false });
 
 function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   const { relay } = state;
@@ -239,12 +247,13 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) return blocked(relay.ignored > 0 ? "Check your key" : "No machines listed");
-  if (state.spawning) return blocked("Starting…");
+  if (state.spawning) return { label: "Starting…", enabled: false, busy: true };
   if (machine === null) return blocked("Pick a machine");
   if (!machine.connected) return blocked(`${machine.name} is asleep`);
   return {
     label: state.form.prompt.trim() === "" ? "Start empty session" : "Start with this prompt",
     enabled: true,
+    busy: false,
   };
 }
 

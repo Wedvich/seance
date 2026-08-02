@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import { useEffect, useLayoutEffect, useState } from "preact/hooks";
 import type { Machine } from "../relay/client.ts";
 import {
   EFFORTS,
@@ -8,6 +9,7 @@ import {
   type Effort,
   type Model,
   type PersistedForm,
+  type RescanState,
   type SheetKind,
 } from "../state.ts";
 import { abbreviatePath, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
@@ -17,8 +19,8 @@ import { Sheet, SheetItem } from "./sheet.tsx";
 const SHEET_TITLES: Record<SheetKind, string> = {
   machine: "Where should it run?",
   repo: "Which repo?",
-  model: "Model",
-  effort: "Thinking effort",
+  model: "Which model?",
+  effort: "How much effort?",
 };
 
 /**
@@ -107,17 +109,33 @@ function ActiveSheet(props: {
   hidden: readonly string[];
   model: Model;
   effort: Effort;
+  rescan: RescanState;
+  /** True while the exit animation plays; the sheet is already popped from state. */
+  closing: boolean;
+  onExited: () => void;
   now: number;
 }): JSX.Element {
-  const { actions, view, kind, machines, hidden, model: selectedModel, effort: selectedEffort, now } = props;
+  const {
+    actions,
+    view,
+    kind,
+    machines,
+    hidden,
+    model: selectedModel,
+    effort: selectedEffort,
+    now,
+    rescan,
+    closing,
+    onExited,
+  } = props;
   const close = actions.dismissLayer;
 
   if (kind === "machine") {
     const hiddenCount = hidden.length;
     return (
-      <Sheet title={SHEET_TITLES.machine} onClose={close}>
+      <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         {machines
-          .toSorted((a, b) => a.name.localeCompare(b.name))
+          .toSorted((a, b) => Number(b.connected) - Number(a.connected) || a.name.localeCompare(b.name))
           .map((machine) => (
             <SheetItem
               key={machine.deviceId}
@@ -151,7 +169,7 @@ function ActiveSheet(props: {
       .map((repo) => ({ repo, label: abbreviatePath(repo.path, paths) }))
       .toSorted((a, b) => a.label.localeCompare(b.label));
     return (
-      <Sheet title={SHEET_TITLES.repo} onClose={close}>
+      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
         {items.map(({ repo, label }) => (
           <SheetItem
             key={repo.name}
@@ -164,19 +182,24 @@ function ActiveSheet(props: {
         <SheetItem
           label="↻ Rescan repos"
           action
-          sub={view.machine === null ? null : `last scanned ${formatSeen(view.machine.scannedAt, now)}`}
-          onClick={() => {
-            actions.dismissLayer();
-            actions.rescan();
-          }}
+          disabled={rescan === "scanning"}
+          sub={
+            rescan === "scanning"
+              ? "scanning…"
+              : view.machine === null
+                ? null
+                : `last scanned ${formatSeen(view.machine.scannedAt, now)}`
+          }
+          onClick={actions.rescan}
         />
+        {rescan === "failed" && <p className="sheet-note">Couldn't rescan — this is the last known list.</p>}
       </Sheet>
     );
   }
 
   if (kind === "model") {
     return (
-      <Sheet title={SHEET_TITLES.model} onClose={close}>
+      <Sheet title={SHEET_TITLES.model} closing={closing} onExited={onExited} onClose={close}>
         {MODELS.map((model) => (
           <SheetItem
             key={model}
@@ -190,7 +213,7 @@ function ActiveSheet(props: {
   }
 
   return (
-    <Sheet title={SHEET_TITLES.effort} onClose={close}>
+    <Sheet title={SHEET_TITLES.effort} closing={closing} onExited={onExited} onClose={close}>
       {EFFORTS.map((effort) => (
         <SheetItem
           key={effort}
@@ -211,9 +234,11 @@ export function SpawnScreen(props: {
   machines: readonly Machine[];
   hidden: readonly string[];
   now: number;
+  rescan: RescanState;
 }): JSX.Element {
-  const { actions, view, form, sheet, machines, hidden, now } = props;
+  const { actions, view, form, sheet, machines, hidden, now, rescan } = props;
   const offline = view.machine !== null && !view.machine.connected;
+  const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
 
   return (
     <>
@@ -299,23 +324,54 @@ export function SpawnScreen(props: {
 
       <footer className="footer">
         <p className="footer-status">{view.footerStatus}</p>
-        <button type="button" className="primary" disabled={!view.button.enabled} onClick={actions.spawn}>
+        <button
+          type="button"
+          className={view.button.busy ? "primary primary-busy" : "primary"}
+          disabled={!view.button.enabled}
+          onClick={actions.spawn}
+        >
           {view.button.label}
         </button>
       </footer>
 
-      {sheet !== null && (
+      {renderedSheet !== null && (
         <ActiveSheet
           actions={actions}
           view={view}
-          kind={sheet}
+          kind={renderedSheet}
           machines={machines}
           hidden={hidden}
           model={form.model}
           effort={form.effort}
           now={now}
+          rescan={rescan}
+          closing={sheetClosing}
+          onExited={unmountSheet}
         />
       )}
     </>
   );
+}
+
+/**
+ * Keeps the sheet mounted while its exit animation plays; state has already
+ * dropped it. The timeout backstops a lost animationend, which would otherwise
+ * strand an invisible scrim over the screen.
+ */
+function useSheetExit(sheet: SheetKind | null): [SheetKind | null, boolean, () => void] {
+  const [rendered, setRendered] = useState(sheet);
+
+  useLayoutEffect(() => {
+    if (sheet !== null) setRendered(sheet);
+  }, [sheet]);
+
+  const closing = sheet === null && rendered !== null;
+
+  useEffect(() => {
+    if (!closing) return;
+    const timer = setTimeout(() => setRendered(null), 400);
+    return () => clearTimeout(timer);
+  }, [closing]);
+
+  return [rendered, closing, () => setRendered(null)];
 }

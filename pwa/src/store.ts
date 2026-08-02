@@ -1,4 +1,4 @@
-import type { SessionsResponse, SpawnRequest, SpawnResponse } from "@seance/shared";
+import type { RescanResponse, SessionsResponse, SpawnRequest, SpawnResponse } from "@seance/shared";
 import { RequestFailure, type RelayClient } from "./relay/client.ts";
 import {
   DEFAULT_FORM,
@@ -46,6 +46,7 @@ export class Store {
       sheet: null,
       settings: false,
       spawning: false,
+      rescan: "idle",
       verdict: null,
       sessions: {},
     };
@@ -187,7 +188,8 @@ export class Store {
 
   openSheet(sheet: SheetKind): void {
     history.pushState({ seance: "layer" }, "");
-    this.#patch({ sheet });
+    // A failure note left from last time would read as this open's result.
+    this.#patch({ sheet, rescan: this.#state.rescan === "scanning" ? "scanning" : "idle" });
   }
 
   /** The settings screen is a layer like the sheets: one entry, popped by back. */
@@ -222,13 +224,16 @@ export class Store {
 
   async rescan(): Promise<void> {
     const machine = resolveMachine(this.#state.relay, this.#state.form.machineId);
-    if (machine === null) return;
+    if (machine === null || this.#state.rescan === "scanning") return;
+    this.#patch({ rescan: "scanning" });
     // The daemon re-registers when the set changed, so a fresh registry push
     // carries the new repos; nothing to merge locally.
     try {
       await this.#client.request(machine.deviceId, "rescan", {});
+      this.#patch({ rescan: "idle" });
     } catch {
-      // A failed rescan leaves the previous list in place, which is the truth we had.
+      // The previous list stays in place — the truth we had — with the failure said inline.
+      this.#patch({ rescan: "failed" });
     }
   }
 
@@ -266,6 +271,7 @@ export class Store {
           kind: "ok",
           window: reply.window,
           ...(reply.note === undefined ? {} : { note: reply.note }),
+          ...(prompt === "" ? {} : { prompt }),
         });
       } else {
         this.#showVerdict({ kind: "failed", code: reply.code, message: reply.message, repo: repo.name });
@@ -291,9 +297,47 @@ export class Store {
     this.dismissLayer();
   }
 
-  retrySpawn(): void {
+  /** Restores the spawned prompt to the form and returns to it. */
+  reusePrompt(): void {
+    const verdict = this.#state.verdict;
+    if (verdict?.kind === "ok" && verdict.prompt !== undefined) {
+      this.#patch({ form: { ...this.#state.form, prompt: verdict.prompt } });
+    }
     this.dismissLayer();
+  }
+
+  /**
+   * A repo_not_found retry rescans first — the button says so — and checks the
+   * fresh list before spawning again, so a repo that is really gone gets a
+   * conclusive verdict instead of the same failure in a loop.
+   */
+  retrySpawn(): void {
+    const verdict = this.#state.verdict;
+    this.dismissLayer();
+    if (verdict?.kind === "failed" && verdict.code === "repo_not_found") {
+      void this.#rescanThenRetry(verdict);
+      return;
+    }
     void this.spawn();
+  }
+
+  async #rescanThenRetry(verdict: Extract<Verdict, { kind: "failed" }>): Promise<void> {
+    const machine = resolveMachine(this.#state.relay, this.#state.form.machineId);
+    if (machine === null) return;
+    this.#patch({ spawning: true });
+    let found = true;
+    try {
+      const reply = await this.#client.request<RescanResponse>(machine.deviceId, "rescan", {});
+      found = reply.repos.some((repo) => repo.name === verdict.repo);
+    } catch {
+      // Unknown either way; the spawn below gets the daemon's own answer.
+    }
+    this.#patch({ spawning: false });
+    if (!found) {
+      this.#showVerdict({ ...verdict, rescanned: true });
+      return;
+    }
+    await this.spawn();
   }
 
   reconnect(): void {

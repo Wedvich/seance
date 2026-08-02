@@ -8,7 +8,7 @@ interface Content {
   readonly headline: string;
   readonly body: string;
   readonly detail: string | null;
-  readonly primary: { readonly label: string; readonly onClick: "retry" | "another" };
+  readonly primary: { readonly label: string; readonly onClick: "retry" | "another" | "back" };
   readonly showBack: boolean;
 }
 
@@ -28,6 +28,17 @@ function describe(verdict: Verdict, machineName: string): Content {
   }
 
   if (verdict.kind === "failed") {
+    if (verdict.code === "repo_not_found" && verdict.rescanned === true) {
+      return {
+        glyph: "!",
+        glyphClass: "verdict-glyph verdict-glyph-err",
+        headline: "It didn't take.",
+        body: `${verdict.repo} isn't on ${machineName} — a fresh scan doesn't find it either. Pick another repo and try again.`,
+        detail: `${verdict.code}\n${verdict.message}`,
+        primary: { label: "Back to the form", onClick: "back" },
+        showBack: false,
+      };
+    }
     return {
       glyph: "!",
       glyphClass: "verdict-glyph verdict-glyph-err",
@@ -74,15 +85,28 @@ function describe(verdict: Verdict, machineName: string): Content {
 export function VerdictView(props: {
   verdict: Verdict;
   machineName: string;
+  /** True while the exit animation plays; unmount follows via onExited. */
+  closing?: boolean;
+  onExited?: () => void;
   onRetry: () => void;
   onAnother: () => void;
+  onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
-  const { verdict, machineName, onRetry, onAnother, onBack } = props;
+  const { verdict, machineName, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
   const content = describe(verdict, machineName);
+  const onPrimary =
+    content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
   return (
-    <div className="verdict" role="status" aria-live="polite">
+    <div
+      className={closing ? "verdict verdict-closing" : "verdict"}
+      role="status"
+      aria-live="polite"
+      onAnimationEnd={(event) => {
+        if (event.animationName === "verdict-out") onExited?.();
+      }}
+    >
       <div className={content.glyphClass} aria-hidden="true">
         {content.glyph}
       </div>
@@ -90,13 +114,13 @@ export function VerdictView(props: {
       <p className="verdict-body">{content.body}</p>
       {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
       <div className="verdict-actions">
-        <button type="button" className="primary" onClick={content.primary.onClick === "retry" ? onRetry : onAnother}>
+        <button type="button" className="primary" onClick={onPrimary}>
           {content.primary.label}
         </button>
-        {verdict.kind === "ok" && (
-          <a className="quiet" href="claude://code">
-            Open in Claude
-          </a>
+        {verdict.kind === "ok" && verdict.prompt !== undefined && (
+          <button type="button" className="quiet" onClick={onReuse}>
+            Reuse this prompt
+          </button>
         )}
         {content.showBack && (
           <button type="button" className="quiet" onClick={onBack}>

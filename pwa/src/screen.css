@@ -380,11 +380,11 @@
   height: 24px;
   border-radius: 7px;
   background: #ffffff;
-  transition: left 0.18s ease;
+  transition: transform 0.18s ease;
 }
 
 .toggle-on .toggle-knob {
-  left: 23px;
+  transform: translateX(20px);
 }
 
 /* ---- footer ---- */
@@ -422,6 +422,39 @@
   cursor: default;
 }
 
+/* Alive during a spawn that can take a while: a sheen sweeps the disabled face. */
+.primary-busy {
+  position: relative;
+  overflow: hidden;
+}
+
+.primary-busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 25%,
+    color-mix(in srgb, var(--acc) 14%, transparent) 50%,
+    transparent 75%
+  );
+  transform: translateX(-100%);
+  animation: primary-sheen 1.6s ease-in-out infinite;
+}
+
+/* Like the sonar ring: the global clamp would freeze the sheen mid-face, so drop it. */
+@media (prefers-reduced-motion: reduce) {
+  .primary-busy::after {
+    display: none;
+  }
+}
+
+@keyframes primary-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
 .quiet {
   display: block;
   width: 100%;
@@ -435,6 +468,38 @@
   text-decoration: none;
 }
 
+/* ---- pressed feedback ---- */
+
+/* Tap acknowledgment: a tint plus a slight press-down on every main target. */
+.tile,
+.worktree,
+.sheet-item,
+.sheet-item-remove,
+.primary {
+  transition: transform 0.12s ease;
+}
+
+.tile:active,
+.worktree:active {
+  background: color-mix(in oklab, var(--sur) 93%, var(--fg));
+  transform: scale(0.98);
+}
+
+.sheet-item:enabled:active,
+.sheet-item-remove:active {
+  background: color-mix(in oklab, var(--sur2) 88%, var(--fg));
+  transform: scale(0.98);
+}
+
+.primary:enabled:active {
+  background: color-mix(in oklab, var(--acc) 88%, var(--fg));
+  transform: scale(0.98);
+}
+
+.quiet:active {
+  color: var(--fg);
+}
+
 /* ---- bottom sheet ---- */
 
 .scrim {
@@ -446,6 +511,7 @@
   display: flex;
   align-items: flex-end;
   z-index: 10;
+  animation: scrim-in 0.2s ease-out;
 }
 
 .sheet {
@@ -464,6 +530,34 @@
 
 @keyframes sheet-in {
   from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes scrim-in {
+  from {
+    background-color: transparent;
+  }
+}
+
+/* Mirrored exit: state has already dropped the sheet; the DOM lingers only for this. */
+.scrim-closing {
+  animation: scrim-out 0.2s ease-in both;
+  pointer-events: none;
+}
+
+@keyframes scrim-out {
+  to {
+    background-color: transparent;
+  }
+}
+
+.scrim-closing .sheet {
+  animation: sheet-out 0.2s ease-in both;
+}
+
+@keyframes sheet-out {
+  to {
     transform: translateY(100%);
   }
 }
@@ -684,6 +778,48 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* One-shot entrance: glyph and headline land first, the rest a beat later. */
+.verdict-glyph,
+.verdict-headline {
+  animation: verdict-in 0.22s ease-out both;
+}
+
+.verdict-body,
+.verdict-detail,
+.verdict-actions {
+  animation: verdict-in 0.22s ease-out 0.08s both;
+}
+
+@keyframes verdict-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Fade-through on dismissal: the verdict sinks out, then the form fades in. */
+.verdict-closing {
+  animation: verdict-out 0.15s ease-in both;
+  pointer-events: none;
+}
+
+@keyframes verdict-out {
+  to {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.form-enter {
+  animation: form-in 0.18s ease-out both;
+}
+
+@keyframes form-in {
+  from {
+    opacity: 0;
+  }
 }
 
 /* ---- setup ---- */

@@ -5,6 +5,7 @@ import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
+import type { Verdict } from "./state.ts";
 import type { Store } from "./store.ts";
 import { deriveView, type AppState } from "./view.ts";
 
@@ -14,6 +15,7 @@ export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
   const [anim, clearAnim] = useScreenTransition(state.settings);
+  const exit = useVerdictExit(state.verdict);
   const actions = useSpawnActions(store);
 
   useEffect(() => store.attach(), [store]);
@@ -39,13 +41,17 @@ export function App(props: { store: Store }): JSX.Element {
       }}
     >
       {(anim !== null || !state.settings) && (
-        <main key="form" className={panelClass(anim, "push-out", "pop-in")}>
-          {state.verdict !== null ? (
+        <main key="form" className={`${panelClass(anim, "push-out", "pop-in")}${exit.entering ? " form-enter" : ""}`}>
+          {exit.rendered !== null ? (
             <VerdictView
-              verdict={state.verdict}
+              key={exit.rendered}
+              verdict={exit.rendered}
               machineName={view.machine?.name ?? "that machine"}
+              closing={exit.closing}
+              onExited={exit.onExited}
               onRetry={() => store.retrySpawn()}
               onAnother={() => store.startAnother()}
+              onReuse={() => store.reusePrompt()}
               onBack={() => store.dismissLayer()}
             />
           ) : (
@@ -57,6 +63,7 @@ export function App(props: { store: Store }): JSX.Element {
               machines={state.relay.machines}
               hidden={state.relay.hidden}
               now={now}
+              rescan={state.rescan}
             />
           )}
         </main>
@@ -148,4 +155,45 @@ function useStoreState(store: Store): AppState {
     return store.subscribe(() => setState(store.getState()));
   }, [store]);
   return state;
+}
+
+interface VerdictExit {
+  readonly rendered: Verdict | null;
+  readonly closing: boolean;
+  readonly entering: boolean;
+  readonly onExited: () => void;
+}
+
+/**
+ * Fade-through for verdict dismissal: the verdict stays mounted while its exit
+ * animation plays, then the form fades in — instead of a single-frame swap.
+ * The timeout backstops a lost animationend, as with the sheets.
+ */
+function useVerdictExit(verdict: Verdict | null): VerdictExit {
+  const [rendered, setRendered] = useState(verdict);
+  const [entering, setEntering] = useState(false);
+
+  useLayoutEffect(() => {
+    if (verdict !== null) setRendered(verdict);
+  }, [verdict]);
+
+  const closing = verdict === null && rendered !== null;
+  const exited = (): void => {
+    setRendered(null);
+    setEntering(true);
+  };
+
+  useEffect(() => {
+    if (!closing) return;
+    const timer = setTimeout(exited, 300);
+    return () => clearTimeout(timer);
+  }, [closing]);
+
+  useEffect(() => {
+    if (!entering) return;
+    const timer = setTimeout(() => setEntering(false), 300);
+    return () => clearTimeout(timer);
+  }, [entering]);
+
+  return { rendered, closing, entering, onExited: exited };
 }

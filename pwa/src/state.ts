@@ -24,9 +24,19 @@ export const MODEL_LABELS: Record<Model, string> = {
 
 export type SheetKind = "machine" | "repo" | "model" | "effort";
 
+/** The repo sheet's rescan row: inline scanning/failure state instead of a fire-and-forget close. */
+export type RescanState = "idle" | "scanning" | "failed";
+
 export type Verdict =
-  | { readonly kind: "ok"; readonly window: string; readonly note?: string }
-  | { readonly kind: "failed"; readonly code: SpawnErrorCode; readonly message: string; readonly repo: string }
+  | { readonly kind: "ok"; readonly window: string; readonly note?: string; readonly prompt?: string }
+  | {
+      readonly kind: "failed";
+      readonly code: SpawnErrorCode;
+      readonly message: string;
+      readonly repo: string;
+      /** Set when a retry's rescan still missed the repo — conclusive, so the verdict stops offering retries. */
+      readonly rescanned?: boolean;
+    }
   /**
    * `dropped` — the reply was lost, usually to a background/suspend mid-spawn, so
    * a session may well be running. `undelivered` — the relay refused delivery, so

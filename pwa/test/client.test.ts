@@ -3,6 +3,20 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import { RelayClient, RequestFailure, type RelayState } from "../src/relay/client.ts";
 import { startFakeDaemon } from "./daemon.ts";
+import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
+import { Store } from "../src/store.ts";
+import type { AppState } from "../src/view.ts";
+
+// Store touches exactly these browser globals (visibilitychange in attach(),
+// history for layer symmetry); no-ops suffice, as in e2e/harness.ts.
+Object.defineProperty(globalThis, "document", {
+  value: { visibilityState: "visible", addEventListener(): void {}, removeEventListener(): void {} },
+  configurable: true,
+});
+Object.defineProperty(globalThis, "history", {
+  value: { pushState(): void {}, replaceState(): void {}, back(): void {} },
+  configurable: true,
+});
 
 const TOKEN = "test-bearer-token";
 const PSK = toBase64(new Uint8Array(32).fill(7));
@@ -52,7 +66,7 @@ function machineInfo(name: string): MachineInfo {
 function startClient(
   opts: {
     readonly token?: string;
-    readonly timeouts?: { readonly sessions?: number };
+    readonly timeouts?: { readonly sessions?: number; readonly rescan?: number };
     readonly hidden?: readonly string[];
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
@@ -548,6 +562,177 @@ describe("heartbeat", () => {
     } finally {
       client.stop();
       mute.stop(true);
+    }
+  });
+});
+
+/**
+ * Store orchestration against the real relay. These live here rather than in
+ * their own file: each file booting its own workerd trips the boot-after-dispose
+ * stdio failure scripts/test.ts documents, and the relay above is already paid for.
+ */
+const online =
+  (deviceId: string) =>
+  (state: AppState): boolean =>
+    state.relay.machines.some((machine) => machine.deviceId === deviceId && machine.connected);
+
+describe("store", () => {
+  function startStore(
+    form: Partial<PersistedForm>,
+    opts: Parameters<typeof startClient>[0] = {},
+  ): {
+    store: Store;
+    waitForApp: (predicate: (state: AppState) => boolean, label: string) => Promise<AppState>;
+    stop: () => void;
+  } {
+    const { client } = startClient(opts);
+    const store = new Store(client, { ...DEFAULT_FORM, ...form });
+    const detach = store.attach();
+    const waitForApp = (predicate: (state: AppState) => boolean, label: string): Promise<AppState> =>
+      new Promise((resolve, reject) => {
+        const check = (): boolean => {
+          if (!predicate(store.getState())) return false;
+          clearTimeout(timer);
+          unsubscribe();
+          resolve(store.getState());
+          return true;
+        };
+        const timer = setTimeout(() => {
+          unsubscribe();
+          reject(new Error(`${label}: never satisfied; last verdict ${JSON.stringify(store.getState().verdict)}`));
+        }, 5_000);
+        const unsubscribe = store.subscribe(() => void check());
+        check();
+      });
+    return {
+      store,
+      waitForApp,
+      stop: (): void => {
+        detach();
+        client.stop();
+      },
+    };
+  }
+
+  test("a repo_not_found retry rescans before spawning again", async () => {
+    const deviceId = nextDeviceId();
+    const ops: string[] = [];
+    // The daemon knows the repo again only once it has rescanned — the exact
+    // stale-cache shape the retry exists for.
+    let rescanned = false;
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Rescanner"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      rescan: () => {
+        ops.push("rescan");
+        rescanned = true;
+        return { repos: machineInfo("Rescanner").repos };
+      },
+      spawn: () => {
+        ops.push("spawn");
+        return rescanned
+          ? { ok: true, window: "port-the-pane", path: "/tmp/w", sessions: [] }
+          : { ok: false, code: "repo_not_found", message: "no repo named seance" };
+      },
+    });
+    const { store, waitForApp, stop } = startStore({
+      machineId: deviceId,
+      repos: { [deviceId]: "seance" },
+      prompt: "port the pane",
+    });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
+      expect(failed.code).toBe("repo_not_found");
+
+      store.retrySpawn();
+      await waitForApp((state) => state.verdict?.kind === "ok", "retry landed");
+      expect(ops).toEqual(["spawn", "rescan", "spawn"]);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a repo the rescan still misses lands a conclusive verdict instead of looping", async () => {
+    const deviceId = nextDeviceId();
+    const ops: string[] = [];
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      // The fresh scan no longer carries the repo the form remembers.
+      rescan: () => ({ repos: [{ name: "pengefix", path: "/Users/m/pengefix", defaultBranch: "main" }] }),
+      spawn: () => {
+        ops.push("spawn");
+        return { ok: false, code: "repo_not_found", message: "no repo named seance" };
+      },
+    });
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      store.retrySpawn();
+      const state = await waitForApp(
+        (s) => s.verdict?.kind === "failed" && s.verdict.rescanned === true,
+        "conclusive verdict",
+      );
+      if (state.verdict?.kind !== "failed") throw new Error("unreachable");
+      expect(state.verdict.code).toBe("repo_not_found");
+      // The rescan answered — no second spawn was attempted.
+      expect(ops).toEqual(["spawn"]);
+      expect(state.spawning).toBe(false);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("rescan reports scanning and failure inline, and the next open resets it", async () => {
+    const deviceId = nextDeviceId();
+    // No rescan handler: the request can only time out.
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mute"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+    });
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId }, { timeouts: { rescan: 300 } });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      store.openSheet("repo");
+      void store.rescan();
+      expect(store.getState().rescan).toBe("scanning");
+      await waitForApp((state) => state.rescan === "failed", "rescan failure surfaced");
+      store.openSheet("repo");
+      expect(store.getState().rescan).toBe("idle");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("reusePrompt restores the prompt the success verdict stashed", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Reuser"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      spawn: () => ({ ok: true, window: "resurrect-me", path: "/tmp/w", sessions: [] }),
+    });
+    const { store, waitForApp, stop } = startStore({
+      machineId: deviceId,
+      repos: { [deviceId]: "seance" },
+      prompt: "resurrect me",
+    });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      const state = store.getState();
+      if (state.verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(state.verdict)}`);
+      // Cleared on success as before; the verdict carries the copy to restore.
+      expect(state.form.prompt).toBe("");
+      expect(state.verdict.prompt).toBe("resurrect me");
+
+      store.reusePrompt();
+      expect(store.getState().form.prompt).toBe("resurrect me");
+    } finally {
+      stop();
+      daemon.close();
     }
   });
 });
