@@ -276,7 +276,10 @@
   color: var(--fg2);
 }
 
-.prompt-card:focus-within {
+/* Scoped to the field, not :focus-within: tapping CLEAR moves focus to that
+   button, which sits in this card — the border would stay lit over an empty,
+   blurred textarea. It reads as "you can type here", so it tracks the field. */
+.prompt-card:has(.prompt-input:focus) {
   border-color: var(--acc);
 }
 
