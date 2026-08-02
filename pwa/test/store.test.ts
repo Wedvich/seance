@@ -4,25 +4,17 @@ import { RelayClient } from "../src/relay/client.ts";
 import { Store } from "../src/store.ts";
 
 /**
- * The two browser globals store.ts touches, stubbed rather than injected — they
- * are an external boundary Bun does not provide. Nothing here opens a layer, so
- * no-ops suffice; e2e/harness.ts installs the same pair for the same reason.
+ * The browser globals store.ts touches, stubbed rather than injected — they are
+ * an external boundary Bun does not provide. Types come from test/globals.d.ts;
+ * these are the runtime half, identical to client.test.ts's so that whichever
+ * file a shard loads first, the other still finds the shape it expects.
  */
-declare global {
-  var document: {
-    visibilityState: "visible" | "hidden";
-    addEventListener(type: string, listener: () => void): void;
-    removeEventListener(type: string, listener: () => void): void;
-  };
-  var history: { pushState(data: unknown, unused: string): void; back(): void };
-}
-
 Object.defineProperty(globalThis, "document", {
   value: { visibilityState: "visible", addEventListener(): void {}, removeEventListener(): void {} },
   configurable: true,
 });
 Object.defineProperty(globalThis, "history", {
-  value: { pushState(): void {}, back(): void {} },
+  value: { pushState(): void {}, replaceState(): void {}, back(): void {} },
   configurable: true,
 });
 
