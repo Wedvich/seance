@@ -210,6 +210,54 @@
   border-radius: 16px;
 }
 
+/* Holds its height with the slot empty, so CLEAR appearing never moves the prompt. */
+.prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+}
+
+/*
+ * Small type by design, so the tap target comes from padding that negative
+ * margins take back out of the layout — the row keeps its 28px, the finger gets
+ * 44px.
+ */
+.prompt-action {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg2);
+  background: transparent;
+  border: 0;
+  padding: 12px 4px 12px 16px;
+  margin: -12px -4px;
+  animation: prompt-action-in 150ms ease;
+}
+
+@media (hover: hover) {
+  .prompt-action:hover {
+    color: var(--acc);
+  }
+}
+
+/* Already the accent — it is the offer, not another thing you could do. */
+.prompt-action-undo,
+.prompt-action-undo:hover {
+  color: var(--acc);
+}
+
+@keyframes prompt-action-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .prompt-input {
   flex: 1;
   width: 100%;

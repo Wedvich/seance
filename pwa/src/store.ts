@@ -22,10 +22,14 @@ import { resolveMachine, resolveRepo } from "./view.ts";
  * Keeping that here rather than in a component is what keeps push and pop
  * symmetrical.
  */
+/** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
+export const UNDO_WINDOW_MS = 6000;
+
 export class Store {
   readonly #client: RelayClient;
   readonly #listeners = new Set<() => void>();
   #state: AppState;
+  #undoTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * deviceId -> lastSeen when its sessions were last requested. Keyed on
    * lastSeen (advanced only by a register at the relay) rather than the
@@ -43,6 +47,7 @@ export class Store {
     this.#state = {
       relay: client.getState(),
       form,
+      promptUndo: null,
       sheet: null,
       settings: false,
       spawning: false,
@@ -74,6 +79,7 @@ export class Store {
     return () => {
       unsubscribe();
       document.removeEventListener("visibilitychange", onVisible);
+      this.#disarmUndo();
     };
   }
 
@@ -152,8 +158,38 @@ export class Store {
     this.#patch({ spawning: false });
   }
 
+  /** Typing retires the offer: the stashed text is no longer what the field lost. */
   setPrompt(prompt: string): void {
-    this.#patch({ form: { ...this.#state.form, prompt } });
+    this.#disarmUndo();
+    this.#patch({ form: { ...this.#state.form, prompt }, promptUndo: null });
+  }
+
+  /**
+   * Empties the field at once and stashes what it held — no confirm dialog for
+   * an action this cheap to take back.
+   */
+  clearPrompt(): void {
+    const cleared = this.#state.form.prompt;
+    if (cleared === "") return;
+    this.#disarmUndo();
+    this.#undoTimer = setTimeout(() => {
+      this.#undoTimer = null;
+      this.#patch({ promptUndo: null });
+    }, UNDO_WINDOW_MS);
+    this.#patch({ form: { ...this.#state.form, prompt: "" }, promptUndo: cleared });
+  }
+
+  undoClear(): void {
+    const stashed = this.#state.promptUndo;
+    if (stashed === null) return;
+    this.#disarmUndo();
+    this.#patch({ form: { ...this.#state.form, prompt: stashed }, promptUndo: null });
+  }
+
+  #disarmUndo(): void {
+    if (this.#undoTimer === null) return;
+    clearTimeout(this.#undoTimer);
+    this.#undoTimer = null;
   }
 
   /** Restores that machine's last repo (falling back to its first) and clears any verdict. */
@@ -282,8 +318,10 @@ export class Store {
         // Cleared now rather than on "Start another": the success verdict never
         // shows the prompt and that button clears it anyway, so this only stops a
         // reload hours later from resurrecting a draft already acted on.
+        this.#disarmUndo();
         this.#patch({
           form: { ...this.#state.form, prompt: "" },
+          promptUndo: null,
           sessions: { ...this.#state.sessions, [machine.deviceId]: { sessions: reply.sessions, at: Date.now() } },
         });
         this.#showVerdict({
@@ -312,7 +350,7 @@ export class Store {
 
   /** Clears the prompt and returns to the form. */
   startAnother(): void {
-    this.#patch({ form: { ...this.#state.form, prompt: "" } });
+    this.setPrompt("");
     this.dismissLayer();
   }
 
@@ -323,9 +361,7 @@ export class Store {
    * window would otherwise restore nothing.
    */
   reusePrompt(verdict: Verdict): void {
-    if (verdict.kind === "ok" && verdict.prompt !== undefined) {
-      this.#patch({ form: { ...this.#state.form, prompt: verdict.prompt } });
-    }
+    if (verdict.kind === "ok" && verdict.prompt !== undefined) this.setPrompt(verdict.prompt);
     this.dismissLayer();
   }
 

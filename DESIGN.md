@@ -829,6 +829,15 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   on a second machine meant retyping it. The spawned prompt rides the ok verdict;
   the form itself is still cleared on success, so a reload cannot resurrect a
   draft already acted on.
+- **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
+  header only once there is something to clear — an always-present greyed control
+  is noise — and empties the field on the first tap. It is replaced in the same
+  slot by UNDO for six seconds, which is cheaper than a dialog on an action that
+  costs nothing to take back. The stashed text lives in `AppState.promptUndo`,
+  outside the persisted form: a draft you discarded should not come back on
+  reload, and anything that writes the prompt (typing, a spawn, "Start another",
+  "Reuse this prompt") drops the offer, because the stash would no longer be what
+  the field lost.
 
 ## Accepted trade-offs
 

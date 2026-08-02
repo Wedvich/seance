@@ -34,6 +34,8 @@ const SHEET_TITLES: Record<SheetKind, string> = {
  */
 export interface SpawnActions {
   readonly setPrompt: (prompt: string) => void;
+  readonly clearPrompt: () => void;
+  readonly undoClear: () => void;
   readonly openSettings: () => void;
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
@@ -80,6 +82,28 @@ function RelaySettings(props: { state: ConnectionState; onClick: () => void }): 
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
       </span>
+    </button>
+  );
+}
+
+/**
+ * CLEAR and UNDO share one slot in the prompt header, and it stays empty rather
+ * than showing a greyed CLEAR: an action you cannot take is noise, and clearing
+ * nothing is not an action.
+ */
+function PromptAction(props: { actions: SpawnActions; prompt: string; undo: string | null }): JSX.Element | null {
+  const { actions, prompt, undo } = props;
+  if (undo !== null) {
+    return (
+      <button type="button" className="prompt-action prompt-action-undo" onClick={actions.undoClear}>
+        UNDO
+      </button>
+    );
+  }
+  if (prompt === "") return null;
+  return (
+    <button type="button" className="prompt-action" onClick={actions.clearPrompt}>
+      CLEAR
     </button>
   );
 }
@@ -266,13 +290,15 @@ export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
   form: PersistedForm;
+  /** Text a CLEAR stashed; non-null for as long as UNDO is on offer. */
+  promptUndo: string | null;
   sheet: SheetKind | null;
   machines: readonly Machine[];
   hidden: readonly string[];
   now: number;
   rescan: RescanState;
 }): JSX.Element {
-  const { actions, view, form, sheet, machines, hidden, now, rescan } = props;
+  const { actions, view, form, promptUndo, sheet, machines, hidden, now, rescan } = props;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
 
@@ -288,9 +314,12 @@ export function SpawnScreen(props: {
 
       <div className="column">
         <div className="prompt-card card">
-          <span className="label" id="prompt-label">
-            PROMPT
-          </span>
+          <div className="prompt-head">
+            <span className="label" id="prompt-label">
+              PROMPT
+            </span>
+            <PromptAction actions={actions} prompt={form.prompt} undo={promptUndo} />
+          </div>
           <textarea
             className="prompt-input"
             aria-labelledby="prompt-label"

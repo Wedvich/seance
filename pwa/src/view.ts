@@ -64,6 +64,11 @@ export interface ViewModel {
 export interface AppState {
   readonly relay: RelayState;
   readonly form: PersistedForm;
+  /**
+   * Text a CLEAR took away, offered back for six seconds. Deliberately outside
+   * `form`: a draft you already discarded shouldn't survive a reload.
+   */
+  readonly promptUndo: string | null;
   readonly sheet: SheetKind | null;
   /** The settings screen, a layer like the sheets so back leaves it instead of the app. */
   readonly settings: boolean;

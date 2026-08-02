@@ -47,6 +47,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
   return {
     relay: relay(),
     form: { ...DEFAULT_FORM, ...form },
+    promptUndo: null,
     sheet: null,
     settings: false,
     spawning: false,

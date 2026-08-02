@@ -62,6 +62,7 @@ export function App(props: { store: Store }): JSX.Element {
               actions={actions}
               view={view}
               form={state.form}
+              promptUndo={state.promptUndo}
               sheet={state.sheet}
               machines={state.relay.machines}
               hidden={state.relay.hidden}
@@ -129,6 +130,8 @@ function useSpawnActions(store: Store): SpawnActions {
   return useMemo(
     () => ({
       setPrompt: (prompt) => store.setPrompt(prompt),
+      clearPrompt: () => store.clearPrompt(),
+      undoClear: () => store.undoClear(),
       openSettings: () => store.openSettings(),
       openSheet: (sheet) => store.openSheet(sheet),
       toggleWorktree: () => store.toggleWorktree(),
