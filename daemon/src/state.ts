@@ -82,6 +82,8 @@ export interface Runtime {
   readonly startedAt: number;
   readonly connected: boolean;
   readonly connectedSince: number | null;
+  /** Sha this process started on — not whatever a later `git pull` left on disk. */
+  readonly sha?: string | null;
 }
 
 /** Fixed-size and well under one write syscall, so an in-place write cannot be read torn. */

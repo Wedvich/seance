@@ -19,12 +19,16 @@ export async function readSource(root: string = checkoutRoot()): Promise<SourceI
   const head = await git(root, ["log", "-1", "--format=%H %ct"], 5_000);
   if (head.exitCode !== 0) return null;
   const [sha, seconds] = head.stdout.trim().split(" ");
-  if (sha === undefined || seconds === undefined || !/^[0-9a-f]{40}$/u.test(sha)) return null;
+  if (sha === undefined || !/^[0-9a-f]{40}$/u.test(sha)) return null;
+  // Guarded like the sha: an unparsable timestamp must degrade to "no source",
+  // never ship NaN into a field the wire types declare as a number.
+  const commitTs = Number(seconds) * 1000;
+  if (!Number.isFinite(commitTs)) return null;
   // Fails on detached HEAD; that is a real state worth reporting as branchless.
   const ref = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"], 5_000);
   return {
     sha,
-    commitTs: Number(seconds) * 1000,
+    commitTs,
     branch: ref.exitCode === 0 ? ref.stdout.trim() : null,
   };
 }

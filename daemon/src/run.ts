@@ -97,6 +97,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       startedAt,
       connected,
       connectedSince: connected ? Date.now() : null,
+      sha: source?.sha ?? null,
     });
   };
 
