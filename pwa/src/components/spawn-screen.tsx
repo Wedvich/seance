@@ -117,8 +117,8 @@ function RepoSheet(props: {
   now: number;
 }): JSX.Element {
   const { actions, machine, selected, rescan, closing, onExited, now } = props;
-  // Keyed on the machine, which is also what a finished rescan replaces — so a
-  // scan that found new repos relabels, and a store patch that didn't does not.
+  // Keyed on the machine, which every finished rescan replaces (changed or
+  // not) — so rescans relabel, and unrelated store patches do not.
   const items = useMemo(() => {
     const repos = machine?.repos ?? [];
     const labels = abbreviatePaths(repos.map((repo) => repo.path));

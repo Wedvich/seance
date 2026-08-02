@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine, RelayState } from "../src/relay/client.ts";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
-import { abbreviatePaths, deriveView, failureBody, formatSeen, resolveMachine, type AppState } from "../src/view.ts";
+import {
+  abbreviatePath,
+  abbreviatePaths,
+  deriveView,
+  failureBody,
+  formatSeen,
+  resolveMachine,
+  type AppState,
+} from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -131,6 +139,25 @@ describe("abbreviatePaths", () => {
       ["/a/three", "three"],
     ]);
     expect(abbreviatePaths([]).size).toBe(0);
+  });
+});
+
+// The single form exists for the repo tile: one label per render without the
+// batch's Map. Same rule, so the same edges apply.
+describe("abbreviatePath", () => {
+  test("labels one path against its siblings", () => {
+    expect(
+      abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"]),
+    ).toBe("seance");
+  });
+
+  test("keeps the last two segments of a lone path, duplicated or not", () => {
+    expect(abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance"])).toBe("repos/seance");
+    expect(abbreviatePath("/a/b/c", ["/a/b/c", "/a/b/c"])).toBe("b/c");
+  });
+
+  test("leaves a single-segment path as it is", () => {
+    expect(abbreviatePath("/srv", ["/srv", "/srv/app"])).toBe("/srv");
   });
 });
 
@@ -334,6 +361,10 @@ describe("selection", () => {
     );
     expect(view.machine?.deviceId).toBe("dev-2");
     expect(view.repo?.name).toBe("pengefix");
+  });
+
+  test("the repo tile carries the abbreviated label", () => {
+    expect(deriveView(state(), NOW).repoTile.value).toBe("seance");
   });
 
   test("reports no repos when the machine has none", () => {
