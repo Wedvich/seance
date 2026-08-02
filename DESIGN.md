@@ -993,7 +993,9 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   outside the persisted form: a draft you discarded should not come back on
   reload, and anything that writes the prompt (typing, a spawn, "Start another",
   "Reuse this prompt") drops the offer, because the stash would no longer be what
-  the field lost.
+  the field lost. CLEAR also blurs the textarea — an empty field is nothing to
+  type into, and on a phone the keyboard should go with the text — while UNDO
+  focuses it again, caret at the end, so the draft can be picked back up.
 
 ## Accepted trade-offs
 

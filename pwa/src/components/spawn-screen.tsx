@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useEffect, useLayoutEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Machine } from "../relay/client.ts";
 import {
   EFFORTS,
@@ -91,18 +91,23 @@ function RelaySettings(props: { state: ConnectionState; onClick: () => void }): 
  * than showing a greyed CLEAR: an action you cannot take is noise, and clearing
  * nothing is not an action.
  */
-function PromptAction(props: { actions: SpawnActions; prompt: string; undo: string | null }): JSX.Element | null {
-  const { actions, prompt, undo } = props;
+function PromptAction(props: {
+  onClear: () => void;
+  onUndo: () => void;
+  prompt: string;
+  undo: string | null;
+}): JSX.Element | null {
+  const { onClear, onUndo, prompt, undo } = props;
   if (undo !== null) {
     return (
-      <button type="button" className="prompt-action prompt-action-undo" onClick={actions.undoClear}>
+      <button type="button" className="prompt-action prompt-action-undo" onClick={onUndo}>
         UNDO
       </button>
     );
   }
   if (prompt === "") return null;
   return (
-    <button type="button" className="prompt-action" onClick={actions.clearPrompt}>
+    <button type="button" className="prompt-action" onClick={onClear}>
       CLEAR
     </button>
   );
@@ -301,6 +306,19 @@ export function SpawnScreen(props: {
   const { actions, view, form, promptUndo, sheet, machines, hidden, now, rescan } = props;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
+  const promptInput = useRef<HTMLTextAreaElement>(null);
+
+  // CLEAR leaves nothing to type into, so it drops focus (and the keyboard with
+  // it); UNDO hands the field straight back. Focusing before the restore lands
+  // leaves the caret at the end of the text, ready to keep writing.
+  const clearPrompt = (): void => {
+    actions.clearPrompt();
+    promptInput.current?.blur();
+  };
+  const undoClear = (): void => {
+    promptInput.current?.focus();
+    actions.undoClear();
+  };
 
   return (
     <>
@@ -318,9 +336,10 @@ export function SpawnScreen(props: {
             <span className="label" id="prompt-label">
               PROMPT
             </span>
-            <PromptAction actions={actions} prompt={form.prompt} undo={promptUndo} />
+            <PromptAction onClear={clearPrompt} onUndo={undoClear} prompt={form.prompt} undo={promptUndo} />
           </div>
           <textarea
+            ref={promptInput}
             className="prompt-input"
             aria-labelledby="prompt-label"
             placeholder="Describe the work — or leave it blank and start empty."
