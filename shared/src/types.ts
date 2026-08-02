@@ -3,6 +3,15 @@ export const PROTOCOL_VERSION = 1;
 /** Routing id the app uses on the wire; daemons address responses to it. */
 export const APP_ID = "app";
 
+/**
+ * Broadcast address: the relay fans an envelope addressed here to every
+ * registered daemon socket except the sender. One seal reaches all machines —
+ * the AAD binds `to`, so a group needs one shared address. Fire-and-forget:
+ * no `undeliverable`, nothing correlates a broadcast; receivers allowlist
+ * which ops may arrive group-addressed.
+ */
+export const MACHINES_ID = "machines";
+
 /** WS upgrade paths. Role is fixed by path, so the app sends no register frame. */
 export const DAEMON_PATH = "/daemon";
 export const APP_PATH = "/app";
