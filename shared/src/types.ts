@@ -99,10 +99,13 @@ export interface RegistryEntry {
  */
 export type RegistryView = RegistryEntry & { readonly connected: boolean };
 
-export type OpName = "sessions" | "spawn" | "rescan" | "machine-info";
+export type OpName = "sessions" | "spawn" | "rescan" | "machine-info" | "update-available";
 
-/** Ops that expect a response; `machine-info` is a stored blob, not a request. */
-export type RequestOp = Exclude<OpName, "machine-info">;
+/**
+ * Ops that expect a response; `machine-info` is a stored blob and
+ * `update-available` a fire-and-forget broadcast — neither correlates a reply.
+ */
+export type RequestOp = Exclude<OpName, "machine-info" | "update-available">;
 
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
@@ -174,6 +177,8 @@ export const UPDATE_OUTCOMES = [
   "skipped_diverged",
   "fetch_failed",
   "install_failed",
+  /** Updated on disk, but the restart that would run the new code failed — stranded, visibly. */
+  "restart_failed",
 ] as const;
 
 export type UpdateOutcome = (typeof UPDATE_OUTCOMES)[number];
@@ -183,6 +188,16 @@ export interface UpdateReport {
   readonly at: number;
   readonly outcome: UpdateOutcome;
   readonly detail?: string;
+}
+
+/**
+ * Broadcast payload (`op: "update-available"`, sealed to `"machines"`): the
+ * announcer's new HEAD. Advisory only — receivers verify against their own
+ * origin with ff-only, so a forged sha buys at most one extra fetch.
+ */
+export interface UpdateAvailable {
+  readonly sha: string;
+  readonly commitTs: number;
 }
 
 /**

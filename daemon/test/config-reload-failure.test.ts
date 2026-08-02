@@ -232,6 +232,7 @@ describe("config reload failure paths", () => {
       const handle = await startDaemon(opts);
       return {
         client: handle.client,
+        updater: handle.updater,
         stop: (): void => {
           handle.stop();
           if (poisoned) throw new Error("injected stop failure");

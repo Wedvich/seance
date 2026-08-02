@@ -1,6 +1,7 @@
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
+  MACHINES_ID,
   ReplayError,
   ReplayGuard,
   open,
@@ -8,6 +9,7 @@ import {
   seal,
   type DaemonFrame,
   type Envelope,
+  type OpName,
   type Plain,
   type RelayToDaemonFrame,
 } from "@seance/shared";
@@ -80,6 +82,24 @@ export class RelayClient {
   async reRegister(): Promise<void> {
     if (!this.connected) return;
     await this.#register();
+  }
+
+  /**
+   * Fire-and-forget group send — no reply ever comes back, so nothing
+   * correlates it. Returns whether the frame actually left the socket: the one
+   * announce a process makes must not be marked spent when it never went out.
+   */
+  async broadcast(op: OpName, payload: unknown): Promise<boolean> {
+    if (!this.connected) return false;
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
+    const sealed = await seal(this.#opts.key, { to: MACHINES_ID, from: this.#opts.deviceId }, plain);
+    // Re-checked after the await: sealing is async, and a socket that dropped
+    // meanwhile would swallow the frame silently.
+    const ws = this.#ws;
+    if (ws === null || !this.connected) return false;
+    ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
+    log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(op)} to=${quote(MACHINES_ID)}`);
+    return true;
   }
 
   async #register(): Promise<void> {
@@ -172,7 +192,8 @@ export class RelayClient {
   }
 
   async #onEnvelope(env: Envelope): Promise<void> {
-    if (env.to !== this.#opts.deviceId) {
+    const broadcast = env.to === MACHINES_ID;
+    if (!broadcast && env.to !== this.#opts.deviceId) {
       log.warn(`wire dropped iv=${quote(env.iv)} to=${quote(env.to)} reason=misaddressed`);
       return;
     }
@@ -194,12 +215,21 @@ export class RelayClient {
       return;
     }
 
+    // The broadcast allowlist lives here at the transport, not in the handler
+    // map: a group-addressed `spawn` must be structurally impossible, and a
+    // handler bug must not widen what one seal can make every machine do.
+    if (broadcast && plain.op !== "update-available") {
+      log.warn(`wire dropped iv=${quote(env.iv)} op=${quote(plain.op)} reason=broadcast-op-not-allowed`);
+      return;
+    }
     // The one point where the envelope `iv` and the plaintext `id` are both in
     // scope. Logging the pair here is what lets a relay line — which can only
     // ever name the `iv` — be joined to an op end to end. Never the payload.
     log.info(`wire recv iv=${quote(env.iv)} id=${quote(plain.id)} op=${quote(plain.op)}`);
     const response = await this.#opts.handle(plain);
-    if (response === null) return;
+    // A broadcast is never answered: the sender is not waiting, and the reply
+    // would be daemon→daemon traffic no route is meant to carry.
+    if (broadcast || response === null) return;
     if (!this.connected) {
       // The socket died while the handler ran. The op did happen — a spawn is
       // already spawned — so this line is the only record that its reply is lost.

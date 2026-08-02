@@ -356,6 +356,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `msg` (app→daemon)                  | `pwa/src/relay/client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
 | `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                     | broadcast by `relay/src/hub.ts`; correlated on `re` in `pwa/src/relay/client.ts`                                |
 | `msg` (→`"machines"` broadcast)     | any PSK holder                                   | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`            | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
 | `registry`                          | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
 | `undeliverable`                     | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
 | `"ping"` / `"pong"`                 | both socket legs                                 | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
@@ -484,6 +485,12 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   just announced: detection keys off claude's process title, which it can set
   after the spawn returns, and the PWA adopts this list verbatim — an ack
   short by its own window renders the machine as idle.
+- `update-available { sha, commitTs }` → no reply — the one broadcast op,
+  sealed to `"machines"` (see the group-address bullet above), sent once per
+  process when a daemon starts on a sha different from its last run. Advisory
+  only: receivers verify against their own origin, so the payload authenticates
+  nothing and needs to. The daemon's transport allowlists it — any other op
+  arriving group-addressed is dropped before dispatch.
 - `rescan {}` → `{ repos, scannedAt }`; daemon re-registers if the set changed.
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
@@ -767,6 +774,87 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   not the daemon. Both caffeinate call sites are already platform-gated.
 - Config file: relay URL, bearer token, PSK, deviceId, machine name, repo
   roots.
+
+## Self-update (added 2026-08-02)
+
+Update one machine by hand (`git pull` + restart) and the rest follow. The
+restarted daemon sees its sha changed since the last run (`state.lastRunSha`)
+and broadcasts `update-available` to `"machines"` once per process; every
+other daemon runs the same pipeline it would run anyway. Rejected: polling
+(the announce makes it redundant), app/CLI-triggered waves (a human step the
+sha comparison already eliminates), relay-buffered or relay-stored "latest"
+blobs (see the wire-protocol bullet — the startup convergence below makes
+relay state unnecessary).
+
+- **Origin is the arbiter.** The announce carries a sha but receivers never
+  trust it: they `git fetch` and `merge --ff-only` against their own upstream.
+  A forged or replayed announce — even from a full PSK holder — buys one extra
+  fetch, which is why the broadcast path needs no authenticity story beyond
+  the envelope it already rides in.
+- **The pipeline refuses anything that isn't a clean fast-forward** of the
+  default branch: dirty tree, other branch, local commits origin lacks — each
+  a distinct `skipped_*` outcome, reported and never forced. A checkout being
+  hacked on is someone's work in progress; the dev machine will skip every
+  wave by design and says so. After the ff: `bun install --frozen-lockfile`,
+  then restart. An install failure keeps the daemon running (memory still
+  holds the old code) and deliberately does not rewind HEAD — a rollback would
+  fight whoever fixes the checkout by hand.
+- **The self-check runs on every register, not just boot** — hooked into
+  `onConnect`. A macOS daemon survives sleep (launchd doesn't restart on
+  wake), so a boot-only check would miss the lid-close/wake case entirely;
+  any sleep past the relay's 90s sweep forces a redial, and the fresh register
+  is the moment a woken machine can learn what it missed. Offline machines
+  converge the same way — the broadcast is only a nudge. Checks are
+  single-flight with one coalesced trailing run (an announce landing mid-check
+  is the wave case, not noise). **Only `register` checks are debounced** (30s),
+  because only they repeat on their own; debouncing announces would drop them
+  silently, and nothing re-fires an announce, so the machine that missed one
+  would sit stale until an unrelated later wave. The announce itself is marked
+  spent only once it is on the wire — a socket that drops during the seal must
+  not burn the single announce a process makes. Accepted gap: an announce
+  landing during a sleep shorter than the sweep window (~60–90s, socket
+  survives but the buffered frame goes stale past the replay window) is lost
+  until the next real reconnect or restart.
+- **A run that outlives its daemon reports nothing.** The config-reload
+  supervisor swaps the whole handle, so `stop()` marks the updater stopped: a
+  pipeline still mid-git finishes (interrupting git is worse) but its report is
+  dropped, because the outgoing instance's captured state is stale and writing
+  it would clobber what the incoming one already saved.
+- **Restart is platform-owned** (`selfRestart` on the `ServiceManager`).
+  macOS: exit clean, KeepAlive relaunches — launchd caches job definitions,
+  so rewriting the plist would be inert until the next bootstrap. Linux:
+  rewrite the unit (so definition drift ships with the code that needs it),
+  `daemon-reload`, `restart --no-block`. The unit carries
+  **`KillMode=process`**, without which the default control-group kill takes
+  down a daemon-cold-booted tmux server and every Claude session in it — the
+  one migration that must land before the first automated restart; the first
+  rollout wave is still a manual restart under the old unit. Both systemd
+  steps check their exit codes and a failure is reported as `restart_failed`:
+  the `ok` is already persisted by then, so a silent failure would leave the
+  machine serving old code while every later check reads `current` — stranded
+  and claiming success. Self-update is enabled only when the supervisor
+  actually started this process (`INVOCATION_ID` under systemd,
+  `XPC_SERVICE_NAME` under launchd); a manual foreground `seanced` would
+  otherwise exit with nothing to relaunch it, or bounce the service while the
+  terminal keeps serving old code.
+- **Reporting rides the register blob** (`source`, `lastUpdate` —
+  `Presence & identity`), `current` excluded: the steady state would rewrite
+  state.json and push a registry frame on every reconnect for information
+  nobody reads. No PWA rendering by decision; `seanced doctor`/`status` are
+  the visibility surface.
+- **Rollback is deferred** (the bootstrap paradox: rollback logic would ship
+  inside the very version that is broken; a stable shim is v2 if ever). A
+  machine bricked by an update shows offline in the app with its last-known
+  sha in the registry blob.
+- **Threat-model fit**: the PSK already grants code execution via spawn, and
+  `git pull`-as-update is already accepted (T1195.001) — the broadcast adds a
+  trigger, not a capability, though it does turn "compromise the repo" into
+  "compromise every machine within seconds of the first restart" where it
+  used to take a manual pull per machine. A bearer-token holder can make the
+  relay fan junk to every daemon; non-decrypting frames drop on arrival, and
+  the register rate limit's reasoning covers the cost. Group-addressed
+  `spawn` is refused at the daemon's transport, keeping "one seal spawns
+  everywhere" structurally impossible.
 
 ## PWA (Cloudflare Workers, static assets)
 

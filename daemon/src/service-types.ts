@@ -28,6 +28,8 @@ export interface ServiceManager {
   /** Whether the supervisor currently has the service loaded. False off-platform, never throws. */
   readonly serviceLoaded: () => Promise<boolean>;
   readonly restartService: () => Promise<void>;
+  /** The self-update's restart: refresh the definition where the platform allows, then restart this very process. May not return. */
+  readonly selfRestart: () => Promise<void>;
   /** Doctor's service section for this platform. */
   readonly doctorServiceChecks: () => Promise<readonly Check[]>;
 }

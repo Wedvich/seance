@@ -52,6 +52,27 @@ export async function restartService(): Promise<void> {
   return service.restartService();
 }
 
+/** With no service manager, exit clean and let whatever supervises apply its restart policy. */
+export async function selfRestartService(): Promise<void> {
+  const service = manager();
+  if (service === null) process.exit(0);
+  return service.selfRestart();
+}
+
+/**
+ * Whether the platform supervisor started this process. systemd sets
+ * INVOCATION_ID on every unit start; launchd sets XPC_SERVICE_NAME to the job
+ * label. A manual foreground run has neither — and self-update must stay off
+ * there, because its restart would either exit a process nothing relaunches or
+ * bounce the *service* while this terminal keeps serving old code and reports
+ * success.
+ */
+export function startedBySupervisor(): boolean {
+  if (process.platform === "linux") return (process.env["INVOCATION_ID"] ?? "") !== "";
+  if (process.platform === "darwin") return (process.env["XPC_SERVICE_NAME"] ?? "").includes(launchd.LAUNCHD_LABEL);
+  return false;
+}
+
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   return (
     (await manager()?.doctorServiceChecks()) ?? [

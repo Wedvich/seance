@@ -15,6 +15,7 @@ import {
 } from "./cli.ts";
 import { log } from "./log.ts";
 import { startPowerLoop } from "./power.ts";
+import { startedBySupervisor } from "./service.ts";
 import { startSupervisor } from "./supervise.ts";
 
 const USAGE = `seanced — séance daemon
@@ -38,7 +39,10 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
-  const daemon = await startSupervisor();
+  // Self-update only under the supervisor that can actually relaunch us.
+  const supervised = startedBySupervisor();
+  if (!supervised) log.info("not started by a service manager — self-update is off for this run");
+  const daemon = await startSupervisor(supervised ? { selfUpdate: {} } : {});
   const stopPower = startPowerLoop();
   const shutdown = (signal: string): void => {
     log.info(`${signal} — shutting down`);

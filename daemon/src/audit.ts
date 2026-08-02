@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest, type UpdateOutcome } from "@seance/shared";
 import type { SpawnOutcome } from "./backend.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
@@ -70,5 +70,25 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
     rejected: async (reason: string): Promise<void> => {
       await emit(`rejected ${reason}`);
     },
+  };
+}
+
+/** What triggered a self-update check: a fleet announce, or this daemon's own register. */
+export type UpdateOrigin = "announce" | "register";
+
+export interface UpdateAudit {
+  readonly checking: (sha: string) => Promise<void>;
+  readonly outcome: (outcome: UpdateOutcome, detail?: string) => Promise<void>;
+}
+
+/** Self-updates audit like spawns — same sink, one formatter — so "what changed my machine at 3am" is one grep. */
+export function updateAudit(origin: UpdateOrigin, sink: AuditSink): UpdateAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit update origin=${origin} ${rest}`);
+  };
+  return {
+    checking: (sha: string): Promise<void> => emit(`checking head=${sha.slice(0, 12)}`),
+    outcome: (outcome: UpdateOutcome, detail?: string): Promise<void> =>
+      emit(`outcome=${outcome}${detail === undefined ? "" : ` detail=${quote(detail)}`}`),
   };
 }
