@@ -312,6 +312,50 @@ frame and the DO knows what a socket is before any frame arrives.
 `APP_ID = "app"` is the PWA's only wire address — and it is AAD-bound, so both
 ends must agree byte-for-byte or nothing decrypts.
 
+### The map: one spawn, end to end
+
+`shared/src/types.ts` is the schema of record for every frame and payload —
+this diagram and the table below are orientation, not a second copy of the
+shapes. The prose that follows them holds the decisions.
+
+```mermaid
+sequenceDiagram
+    participant P as PWA
+    participant R as Relay (DO)
+    participant D as Daemon
+
+    D->>R: WSS /daemon (Authorization: Bearer)
+    D->>R: register { deviceId, info: envelope }
+    P->>R: WSS /app?t=token
+    R->>P: registry { entries } — again on every change
+
+    Note over P,D: spawn round trip — seal() mints a fresh iv per envelope,<br/>so the two hops never share one
+    P->>R: msg { env: seal(spawn, to=deviceId) } + probe "ping"
+    alt daemon socket open
+        R->>D: msg { env }
+        D->>D: open(): AAD + replay check, audit, spawn in tmux
+        D->>R: msg { env: seal(verdict, re=id, to="app") }
+        R->>P: msg { env } — broadcast to every app socket
+        P->>P: match re → verdict; other tabs drop it
+    else no open socket
+        R->>P: undeliverable { to, iv, code } — iv, because id is inside the ct
+    end
+```
+
+Who owns each frame in code — the place to change when a frame changes:
+
+| Frame / op                          | Sent from                                        | Handled in                                                                                                      |
+| ----------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts`                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
+| `msg` (app→daemon)                  | `pwa/src/relay/client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                     | broadcast by `relay/src/hub.ts`; correlated on `re` in `pwa/src/relay/client.ts`                                |
+| `registry`                          | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
+| `undeliverable`                     | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
+| `"ping"` / `"pong"`                 | both socket legs                                 | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                           | same file — both ends share it, or nothing decrypts                                                             |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
 on connect and whenever the repo set changes; `msg { envelope }` for routed
 traffic; literal `"ping"`/`"pong"` strings for heartbeats (bare strings, not
