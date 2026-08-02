@@ -239,6 +239,21 @@ describe("routing", () => {
     daemon.close();
     app.close();
   });
+
+  test("a broadcast is never answered undeliverable, even with nothing to deliver to", async () => {
+    const app = await connectApp(relay);
+
+    // The unicast fallback would answer `unknown` for an address it cannot
+    // route; a broadcast must not, whether or not anyone is listening.
+    app.send({ t: "msg", env: envelope(MACHINES_ID, APP_ID) });
+
+    await app.expectNo("undeliverable");
+    // The socket still serves, so the frame was handled rather than fatal.
+    const env = envelope("never-registered", APP_ID);
+    app.send({ t: "msg", env });
+    expect((await app.waitFor<UndeliverableFrame>("undeliverable")).iv).toBe(env.iv);
+    app.close();
+  });
 });
 
 describe("identity", () => {
