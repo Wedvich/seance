@@ -1,3 +1,4 @@
+import type { RepoEntry } from "@seance/shared";
 import type { JSX } from "preact";
 import type { Machine } from "../relay/client.ts";
 import {
@@ -100,7 +101,8 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
 
 function ActiveSheet(props: {
   actions: SpawnActions;
-  view: ViewModel;
+  selectedMachine: Machine | null;
+  selectedRepo: RepoEntry | null;
   kind: SheetKind;
   machines: readonly Machine[];
   /** deviceIds removed while offline; only their count is rendered. */
@@ -109,7 +111,17 @@ function ActiveSheet(props: {
   effort: Effort;
   now: number;
 }): JSX.Element {
-  const { actions, view, kind, machines, hidden, model: selectedModel, effort: selectedEffort, now } = props;
+  const {
+    actions,
+    selectedMachine,
+    selectedRepo,
+    kind,
+    machines,
+    hidden,
+    model: selectedModel,
+    effort: selectedEffort,
+    now,
+  } = props;
   const close = actions.dismissLayer;
 
   if (kind === "machine") {
@@ -128,7 +140,7 @@ function ActiveSheet(props: {
                   : `offline · last seen ${formatSeen(machine.lastSeen, now)}`
               }
               dot={machine.connected ? "ok" : "off"}
-              selected={machine.deviceId === view.machine?.deviceId}
+              selected={machine.deviceId === selectedMachine?.deviceId}
               disabled={!machine.connected}
               // Only offered while offline: a connected machine would reappear at once.
               onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
@@ -146,8 +158,8 @@ function ActiveSheet(props: {
   }
 
   if (kind === "repo") {
-    const paths = view.machine?.repos.map((repo) => repo.path) ?? [];
-    const items = (view.machine?.repos ?? [])
+    const paths = selectedMachine?.repos.map((repo) => repo.path) ?? [];
+    const items = (selectedMachine?.repos ?? [])
       .map((repo) => ({ repo, label: abbreviatePath(repo.path, paths) }))
       .toSorted((a, b) => a.label.localeCompare(b.label));
     return (
@@ -157,14 +169,14 @@ function ActiveSheet(props: {
             key={repo.name}
             label={label}
             mono
-            selected={repo.name === view.repo?.name}
+            selected={repo.name === selectedRepo?.name}
             onClick={() => actions.selectRepo(repo.name)}
           />
         ))}
         <SheetItem
           label="↻ Rescan repos"
           action
-          sub={view.machine === null ? null : `last scanned ${formatSeen(view.machine.scannedAt, now)}`}
+          sub={selectedMachine === null ? null : `last scanned ${formatSeen(selectedMachine.scannedAt, now)}`}
           onClick={() => {
             actions.dismissLayer();
             actions.rescan();
@@ -307,7 +319,8 @@ export function SpawnScreen(props: {
       {sheet !== null && (
         <ActiveSheet
           actions={actions}
-          view={view}
+          selectedMachine={view.machine}
+          selectedRepo={view.repo}
           kind={sheet}
           machines={machines}
           hidden={hidden}
