@@ -220,10 +220,18 @@ PSK. Machines appear as their daemons register.
 ### Updating
 
 ```sh
-git pull && bun daemon/src/main.ts restart    # daemon, on each machine
+git pull && bun daemon/src/main.ts restart    # daemon, on one machine
 bun run --cwd relay deploy                    # relay
 VITE_RELAY_URL=... bun run --cwd pwa deploy   # app
 ```
+
+Daemons self-propagate: the restarted daemon notices its version changed and
+announces it over the relay, and every other machine fetches, fast-forwards
+its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
+A machine that was asleep or offline catches up on its next reconnect. A
+checkout that is dirty, on another branch, or has local commits is skipped —
+never forced — and reports why; `seanced status` shows each machine's version
+and its last update outcome. Relay and app deploys stay manual wrangler steps.
 
 ### Local development
 

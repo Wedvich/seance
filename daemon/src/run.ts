@@ -1,4 +1,4 @@
-import { APP_ID, importPsk, seal, type Envelope, type MachineInfo } from "@seance/shared";
+import { APP_ID, importPsk, seal, type Envelope, type MachineInfo, type UpdateAvailable } from "@seance/shared";
 import { daemonSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
@@ -8,6 +8,7 @@ import { log } from "./log.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
+import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
@@ -32,6 +33,20 @@ export interface RunOpts {
    * daemon imported rather than whatever the store holds mid-failure.
    */
   readonly resolvedPsk?: ResolvedPsk;
+  /**
+   * Enables the self-update protocol: an announce when the sha changed since
+   * the last run, and a checked pipeline on every register. Off unless
+   * supplied — tests and embedders must not reach the network by surprise;
+   * main.ts passes `{}`.
+   */
+  readonly selfUpdate?: SelfUpdateOpts;
+}
+
+export interface SelfUpdateOpts {
+  /** Checkout to announce and update; defaults to this one. Tests point it at a fixture. */
+  readonly root?: string;
+  readonly debounceMs?: number;
+  readonly effects?: UpdateEffects;
 }
 
 /** Wires config/state/scan/handlers into a running relay client. */
@@ -51,9 +66,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const startedAt = Date.now();
 
   // Read once per process: this is the code actually running, not whatever a
-  // later `git pull` puts on disk.
-  const source = await readSource();
-  if (source !== null && state.lastRunSha !== source.sha) {
+  // later `git pull` puts on disk. The previous run's sha decides the announce
+  // below — captured before the stamp overwrites it.
+  const source = await readSource(opts.selfUpdate?.root);
+  const previousSha = state.lastRunSha;
+  if (source !== null && previousSha !== source.sha) {
     state = { ...state, lastRunSha: source.sha };
     await saveState(state);
   }
@@ -101,6 +118,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     });
   };
 
+  // Created after the client (its report re-registers); the closures below
+  // read it late through this let. One announce per process: the wave must
+  // not re-fire on every reconnect.
+  let updater: Updater | null = null;
+  let announcePending =
+    opts.selfUpdate !== undefined && source !== null && previousSha !== undefined && previousSha !== source.sha;
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
@@ -112,13 +135,48 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       getRepos: () => state.repos,
       rescan,
       auditSink: daemonSink,
+      ...(opts.selfUpdate !== undefined && source !== null
+        ? {
+            updateAvailable: (notice: UpdateAvailable): void => {
+              // The sha we already run is the wave stopping, not a nudge.
+              if (notice.sha !== source.sha) updater?.check("announce");
+            },
+          }
+        : {}),
     }),
-    onConnect: () => updateRuntime(true),
+    onConnect: (): void => {
+      updateRuntime(true);
+      if (announcePending && source !== null) {
+        announcePending = false;
+        const notice: UpdateAvailable = { sha: source.sha, commitTs: source.commitTs };
+        void client.broadcast("update-available", notice);
+      }
+      // Every register, not just boot: the daemon survives sleep, and a woken
+      // machine's redial is the only moment it can learn what it missed.
+      updater?.check("register");
+    },
     onDisconnect: () => updateRuntime(false),
     ...(opts.pingIntervalMs !== undefined ? { pingIntervalMs: opts.pingIntervalMs } : {}),
     ...(opts.pongTimeoutMs !== undefined ? { pongTimeoutMs: opts.pongTimeoutMs } : {}),
     ...(opts.baseBackoffMs !== undefined ? { baseBackoffMs: opts.baseBackoffMs } : {}),
   });
+
+  if (opts.selfUpdate !== undefined && source !== null) {
+    const su = opts.selfUpdate;
+    updater = createUpdater({
+      ...(su.root !== undefined ? { root: su.root } : {}),
+      ...(su.debounceMs !== undefined ? { debounceMs: su.debounceMs } : {}),
+      ...(su.effects !== undefined ? { effects: su.effects } : {}),
+      sink: daemonSink,
+      report: async (report) => {
+        state = { ...state, lastUpdate: report };
+        await saveState(state);
+        // The register blob carries lastUpdate, so the app-visible record
+        // refreshes without waiting for the next reconnect.
+        await client.reRegister();
+      },
+    });
+  }
 
   log.info(`seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos`);
   client.start();

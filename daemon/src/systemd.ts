@@ -46,6 +46,10 @@ Description=Seance daemon (seanced)
 ExecStart="${unitEscape(bunPath)}" "${unitEscape(mainPath)}"
 Restart=on-failure
 RestartSec=5
+# process, not the default control-group kill: the daemon may have cold-booted
+# the tmux server as its child, and cgroup teardown would take every Claude
+# session on the box down with a restart.
+KillMode=process
 Environment="PATH=${unitEscape(pathEnv)}"
 StandardOutput=append:${unitEscape(logPath())}
 StandardError=append:${unitEscape(logPath())}
@@ -198,6 +202,20 @@ export async function restartService(): Promise<void> {
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --user restart failed: ${result.stderr.trim()}`);
   }
+}
+
+/**
+ * The self-update's restart. Rewrites the unit first so definition drift
+ * (KillMode above) ships with the code that needs it, reloads, and restarts
+ * without blocking — the caller is inside the process being restarted. Not
+ * running under systemd? Exit clean and let the supervisor apply its policy.
+ */
+export async function selfRestart(): Promise<void> {
+  if (!systemdRunning() || !(await serviceLoaded())) process.exit(0);
+  const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
+  await Bun.write(unitPath(), unitContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
+  await exec(["systemctl", "--user", "daemon-reload"]);
+  await exec(["systemctl", "--user", "restart", "--no-block", UNIT_NAME]);
 }
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */

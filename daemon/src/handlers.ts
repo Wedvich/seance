@@ -7,6 +7,7 @@ import type {
   SessionsResponse,
   SpawnRequest,
   SpawnResponse,
+  UpdateAvailable,
 } from "@seance/shared";
 import { quote } from "@seance/shared";
 import { spawnAudit, type AuditSink, type SpawnAudit } from "./audit.ts";
@@ -25,6 +26,8 @@ export interface HandlerContext {
    * relabel it as the human at the keyboard.
    */
   readonly auditSink: AuditSink;
+  /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
+  readonly updateAvailable?: (notice: UpdateAvailable) => void;
 }
 
 function isSpawnRequest(payload: unknown): payload is SpawnRequest {
@@ -36,6 +39,12 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
   return true;
+}
+
+function isUpdateAvailable(payload: unknown): payload is UpdateAvailable {
+  if (typeof payload !== "object" || payload === null) return false;
+  const obj = payload as Record<string, unknown>;
+  return typeof obj["sha"] === "string" && obj["sha"] !== "" && typeof obj["commitTs"] === "number";
 }
 
 /**
@@ -114,6 +123,13 @@ export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Pl
           const repos = await ctx.rescan();
           const payload: RescanResponse = { repos, scannedAt: Date.now() };
           return reply(payload);
+        }
+        case "update-available": {
+          // Fire-and-forget: never replied to. The payload is advisory — the
+          // updater verifies against its own origin — so shape is all to check.
+          if (isUpdateAvailable(plain.payload)) ctx.updateAvailable?.(plain.payload);
+          else log.warn("dropped malformed update-available payload");
+          return null;
         }
         default:
           log.warn(`ignoring unknown op ${quote(plain.op)}`);

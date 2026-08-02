@@ -94,6 +94,16 @@ export async function restartService(): Promise<void> {
   }
 }
 
+/**
+ * The self-update's restart. launchd caches job definitions, so a plist
+ * rewrite here would not land until the next bootstrap — exiting clean and
+ * letting KeepAlive relaunch on the new code is the whole mechanism.
+ */
+export function selfRestart(): Promise<void> {
+  assertMacos("self-update restart");
+  process.exit(0);
+}
+
 /** Doctor's macOS service section. One check — launchd needs no linger or pin task. */
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   return (await serviceLoaded())

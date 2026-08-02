@@ -52,6 +52,13 @@ export async function restartService(): Promise<void> {
   return service.restartService();
 }
 
+/** With no service manager, exit clean and let whatever supervises apply its restart policy. */
+export async function selfRestartService(): Promise<void> {
+  const service = manager();
+  if (service === null) process.exit(0);
+  return service.selfRestart();
+}
+
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   return (
     (await manager()?.doctorServiceChecks()) ?? [

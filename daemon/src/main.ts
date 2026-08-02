@@ -38,7 +38,7 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
-  const daemon = await startSupervisor();
+  const daemon = await startSupervisor({ selfUpdate: {} });
   const stopPower = startPowerLoop();
   const shutdown = (signal: string): void => {
     log.info(`${signal} — shutting down`);
