@@ -103,26 +103,10 @@ function segments(path: string): string[] {
  * machine's repos share, which recovers the configured repo root without
  * needing it on the wire. With one repo there is no prefix to find, so keep the
  * last two segments.
- */
-export function abbreviatePath(path: string, siblings: readonly string[]): string {
-  const own = segments(path);
-  if (own.length <= 1) return path;
-  const others = siblings.filter((candidate) => candidate !== path).map(segments);
-  if (others.length === 0) return own.slice(-2).join("/");
-
-  let shared = 0;
-  // Never consume the final segment: the repo's own directory name always shows.
-  while (shared < own.length - 1 && others.every((other) => other[shared] === own[shared])) {
-    shared += 1;
-  }
-  return own.slice(shared).join("/");
-}
-
-/**
- * Batch form of {@link abbreviatePath}, byte-identical to calling it once per
- * path with the same list as siblings. The per-path form re-splits every
- * sibling on each call, which is quadratic across a whole repo list; this
- * splits each path once and finds the shared prefix in a single pass.
+ *
+ * Labels the whole set in one pass rather than a path at a time: the prefix is
+ * a property of the set, so a per-path form has to re-split every sibling on
+ * each call — quadratic across a repo list.
  */
 export function abbreviatePaths(paths: readonly string[]): ReadonlyMap<string, string> {
   const labels = new Map<string, string>();
@@ -142,12 +126,11 @@ export function abbreviatePaths(paths: readonly string[]): ReadonlyMap<string, s
       labels.set(path, path);
       continue;
     }
-    // One repo has no prefix to find, matching the per-path form's early return
-    // when every sibling is the path itself.
     if (distinct.length === 1) {
       labels.set(path, own.slice(-2).join("/"));
       continue;
     }
+    // Never consume the final segment: the repo's own directory name always shows.
     labels.set(path, own.slice(Math.min(prefix, own.length - 1)).join("/"));
   }
   return labels;
@@ -313,7 +296,7 @@ export function resolveRepo(machine: Machine | null, form: PersistedForm): RepoE
 export function deriveView(state: AppState, now: number): ViewModel {
   const machine = resolveMachine(state.relay, state.form.machineId);
   const repo = resolveRepo(machine, state.form);
-  const paths = machine?.repos.map((entry) => entry.path) ?? [];
+  const labels = abbreviatePaths(machine?.repos.map((entry) => entry.path) ?? []);
 
   return {
     meta: deriveMeta(state),
@@ -328,7 +311,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     },
     repoTile: {
       label: "REPOSITORY",
-      value: repo === null ? "No repos" : abbreviatePath(repo.path, paths),
+      value: repo === null ? "No repos" : (labels.get(repo.path) ?? repo.path),
       mono: true,
       dot: null,
     },
