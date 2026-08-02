@@ -191,7 +191,7 @@ function ActiveSheet(props: {
     return (
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         {machines
-          .toSorted((a, b) => Number(b.connected) - Number(a.connected) || collator.compare(a.name, b.name))
+          .toSorted((a, b) => collator.compare(a.name, b.name))
           .map((machine) => (
             <SheetItem
               key={machine.deviceId}
