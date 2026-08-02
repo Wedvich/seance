@@ -7,6 +7,7 @@ import { createHandler } from "./handlers.ts";
 import { log } from "./log.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
+import { readSource } from "./selfsource.ts";
 import { loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
@@ -49,12 +50,22 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const key = await importPsk(resolved.psk);
   const startedAt = Date.now();
 
+  // Read once per process: this is the code actually running, not whatever a
+  // later `git pull` puts on disk.
+  const source = await readSource();
+  if (source !== null && state.lastRunSha !== source.sha) {
+    state = { ...state, lastRunSha: source.sha };
+    await saveState(state);
+  }
+
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
       platform: process.platform,
       repos: state.repos,
       scannedAt: state.scannedAt ?? 0,
+      source,
+      lastUpdate: state.lastUpdate ?? null,
     };
     return seal(
       key,

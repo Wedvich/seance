@@ -25,6 +25,7 @@ import {
   uninstallService,
 } from "./service.ts";
 import { scanRepos } from "./scan.ts";
+import { readSource } from "./selfsource.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
 
 export async function cmdInit(): Promise<void> {
@@ -170,6 +171,16 @@ export async function cmdStatus(): Promise<void> {
   console.log(
     `repos:     ${state.repos.length}${state.scannedAt !== null ? ` (scanned ${new Date(state.scannedAt).toISOString()})` : ""}`,
   );
+  const source = await readSource();
+  if (source !== null) {
+    console.log(
+      `source:    ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}, committed ${new Date(source.commitTs).toISOString()}`,
+    );
+  }
+  if (state.lastUpdate !== undefined) {
+    const { outcome, at, detail } = state.lastUpdate;
+    console.log(`update:    ${outcome} at ${new Date(at).toISOString()}${detail !== undefined ? ` — ${detail}` : ""}`);
+  }
   console.log(`defaults:  model=${DEFAULT_MODEL} effort=${DEFAULT_EFFORT}`);
 }
 
@@ -287,6 +298,9 @@ export async function cmdDoctor(): Promise<void> {
   console.log("state");
   const state = await loadOrInitState();
   ok(`deviceId ${state.deviceId} (${statePath()})`);
+  const source = await readSource();
+  if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
+  else ok(`checkout ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}`);
 
   const logFile = Bun.file(logPath());
   if (await logFile.exists()) {

@@ -1,6 +1,6 @@
 import { mkdir, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import type { RepoEntry, UpdateReport } from "@seance/shared";
 import { log } from "./log.ts";
 import { runtimePath, statePath } from "./paths.ts";
 
@@ -8,6 +8,9 @@ export interface State {
   readonly deviceId: string;
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number | null;
+  /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
+  readonly lastRunSha?: string;
+  readonly lastUpdate?: UpdateReport;
 }
 
 function freshState(): State {
