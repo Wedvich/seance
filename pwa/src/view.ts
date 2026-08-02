@@ -119,6 +119,41 @@ export function abbreviatePath(path: string, siblings: readonly string[]): strin
 }
 
 /**
+ * Batch form of {@link abbreviatePath}, byte-identical to calling it once per
+ * path with the same list as siblings. The per-path form re-splits every
+ * sibling on each call, which is quadratic across a whole repo list; this
+ * splits each path once and finds the shared prefix in a single pass.
+ */
+export function abbreviatePaths(paths: readonly string[]): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  const distinct = [...new Set(paths)].map((path) => ({ path, own: segments(path) }));
+  const first = distinct[0];
+  if (first === undefined) return labels;
+
+  let prefix = first.own.length;
+  for (const { own } of distinct) {
+    let shared = 0;
+    while (shared < prefix && own[shared] === first.own[shared]) shared += 1;
+    prefix = shared;
+  }
+
+  for (const { path, own } of distinct) {
+    if (own.length <= 1) {
+      labels.set(path, path);
+      continue;
+    }
+    // One repo has no prefix to find, matching the per-path form's early return
+    // when every sibling is the path itself.
+    if (distinct.length === 1) {
+      labels.set(path, own.slice(-2).join("/"));
+      continue;
+    }
+    labels.set(path, own.slice(Math.min(prefix, own.length - 1)).join("/"));
+  }
+  return labels;
+}
+
+/**
  * The designed failure body describes a dead pane, which is wrong for codes
  * where no window ever opened. Its worktree clause is dropped as well: the
  * daemon passes --worktree to claude, so a claude that died on a bad flag
