@@ -114,6 +114,23 @@ function parseFrame(text: string): RelayToAppFrame | null {
   }
 }
 
+/** No deep walk needed: `repos` comes off the IV-keyed info cache, so it compares by identity. */
+function sameMachine(a: Machine, b: Machine): boolean {
+  return (
+    a.deviceId === b.deviceId &&
+    a.name === b.name &&
+    a.platform === b.platform &&
+    a.repos === b.repos &&
+    a.scannedAt === b.scannedAt &&
+    a.lastSeen === b.lastSeen &&
+    a.connected === b.connected
+  );
+}
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
 /**
  * Transport half of the app: one socket, envelope seal/open, and request
  * correlation. Deliberately knows nothing about the spawn form — that keeps it
@@ -527,7 +544,13 @@ export class RelayClient {
   }
 
   #rebuildMachines(): void {
+    const previous = this.#state.machines;
+    // Keyed, not positional: the relay lists entries in lexicographic deviceId
+    // order, so a machine registering for the first time can land anywhere in
+    // the list and shift every one after it.
+    const priorById = new Map(previous.map((machine) => [machine.deviceId, machine]));
     const machines: Machine[] = [];
+    let reused = 0;
     let hiddenHere = 0;
     for (const entry of this.#entries) {
       const info = this.#infoCache.get(entry.info.iv) ?? null;
@@ -546,7 +569,7 @@ export class RelayClient {
         hiddenHere += 1;
         continue;
       }
-      machines.push({
+      const built: Machine = {
         deviceId: entry.deviceId,
         name: info.name,
         platform: info.platform,
@@ -554,18 +577,32 @@ export class RelayClient {
         scannedAt: scanned.scannedAt,
         lastSeen: entry.lastSeen,
         connected,
-      });
+      };
+      const prior = priorById.get(entry.deviceId);
+      if (prior !== undefined && sameMachine(prior, built)) {
+        // Counted only where it also lands on its old index, so the array below
+        // is reused for an unchanged list and never for a merely reordered one.
+        if (prior === previous[machines.length]) reused += 1;
+        machines.push(prior);
+      } else machines.push(built);
     }
+    const hidden = [...this.#hidden];
     this.#patch({
-      machines,
+      // Every push re-derives the whole list, and the app connect behind every
+      // resume re-sends a registry that is usually identical. Handing back the
+      // previous array is what lets #patch — and Preact — skip the render.
+      machines: reused === machines.length && reused === previous.length ? previous : machines,
       registrySize: this.#entries.length,
-      hidden: [...this.#hidden],
+      hidden: sameIds(hidden, this.#state.hidden) ? this.#state.hidden : hidden,
       // Counted off entries the registry actually holds, so a removal never reads as a key mismatch.
       ignored: this.#entries.length - machines.length - hiddenHere,
     });
   }
 
+  /** Same object back when nothing moved: `useState` bails out on reference equality. */
   #patch(next: Partial<RelayState>): void {
+    const keys = Object.keys(next) as readonly (keyof RelayState)[];
+    if (keys.every((key) => Object.is(this.#state[key], next[key]))) return;
     this.#state = { ...this.#state, ...next };
     for (const listener of this.#listeners) listener();
   }
