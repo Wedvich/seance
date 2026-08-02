@@ -195,4 +195,53 @@ describe("self-update pipeline", () => {
 
     expect(h.lines.filter((l) => l.includes("checking")).length).toBe(2);
   });
+
+  test("an announce is never debounced away — nothing would re-fire it", async () => {
+    const { upstream, checkout } = await makePair();
+    const h = harness();
+
+    const updater = h.make(checkout, 60_000);
+    updater.check("register"); // stamps the debounce window
+    await updater.settled();
+
+    // The wave arrives seconds later: dropping it here strands this machine
+    // until some unrelated future update.
+    const target = await publish(upstream);
+    updater.check("announce");
+    await updater.settled();
+
+    expect(await runGit(checkout, ["rev-parse", "HEAD"])).toBe(target);
+    expect(h.reports.map((r) => r.outcome)).toEqual(["ok"]);
+  });
+
+  test("a restart that fails is reported, so an ok on disk cannot hide it", async () => {
+    const { upstream, checkout } = await makePair();
+    await publish(upstream);
+    const h = harness({
+      restart: () => Promise.reject(new Error("systemctl --user restart failed: unit not found")),
+    });
+
+    const updater = h.make(checkout);
+    updater.check("announce");
+    await updater.settled();
+
+    // Both land: the ok is true of the disk, restart_failed of the process.
+    expect(h.reports.map((r) => r.outcome)).toEqual(["ok", "restart_failed"]);
+    expect(h.reports[1]?.detail).toContain("unit not found");
+    expect(h.lines.some((l) => l.includes("outcome=restart_failed"))).toBe(true);
+  });
+
+  test("a stopped updater neither checks nor reports", async () => {
+    const { upstream, checkout } = await makePair();
+    await publish(upstream);
+    const h = harness();
+
+    const updater = h.make(checkout);
+    updater.stop();
+    updater.check("announce");
+    await updater.settled();
+
+    expect(h.reports).toEqual([]);
+    expect(h.calls.install).toBe(0);
+  });
 });

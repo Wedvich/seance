@@ -16,6 +16,8 @@ const RESCAN_INTERVAL_MS = 3_600_000;
 export interface DaemonHandle {
   readonly client: RelayClient;
   readonly stop: () => void;
+  /** Null unless self-update is wired; tests await its `settled()` instead of sleeping. */
+  readonly updater: Updater | null;
 }
 
 export interface RunOpts {
@@ -147,9 +149,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     onConnect: (): void => {
       updateRuntime(true);
       if (announcePending && source !== null) {
-        announcePending = false;
         const notice: UpdateAvailable = { sha: source.sha, commitTs: source.commitTs };
-        void client.broadcast("update-available", notice);
+        // Spent only once it is actually on the wire: a socket that dropped
+        // during the seal would otherwise burn the single announce this
+        // process ever makes, and no one would re-fire it.
+        void client.broadcast("update-available", notice).then((sent) => {
+          if (sent) announcePending = false;
+        });
       }
       // Every register, not just boot: the daemon survives sleep, and a woken
       // machine's redial is the only moment it can learn what it missed.
@@ -190,8 +196,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     client,
     stop: (): void => {
       clearInterval(rescanTimer);
+      // Before the client: a check racing the swap must not report through a
+      // stale `state` and clobber what the incoming daemon already saved.
+      updater?.stop();
       client.stop();
       updateRuntime(false);
     },
+    updater,
   };
 }

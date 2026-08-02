@@ -172,10 +172,10 @@ describe("self-update over the relay", () => {
     const { daemon, calls } = await startTestDaemon(relay, "own-sha", { root: checkout });
     try {
       const { deviceId } = await relay.registers.next();
-      // Let the register-time check finish while the fixture is still current,
-      // so being behind afterwards can only be seen by a check the broadcast
+      // Drain the register-time check while the fixture is still current, so
+      // being behind afterwards can only be noticed by a check the broadcast
       // would have to trigger — which is exactly what must not happen.
-      await Bun.sleep(500);
+      await daemon.updater?.settled();
       await runGit(upstream, ["commit", "-q", "--allow-empty", "-m", "next"]);
       const ownSha = await runGit(checkout, ["rev-parse", "HEAD"]);
 

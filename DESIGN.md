@@ -806,10 +806,20 @@ relay state unnecessary).
   is the moment a woken machine can learn what it missed. Offline machines
   converge the same way — the broadcast is only a nudge. Checks are
   single-flight with one coalesced trailing run (an announce landing mid-check
-  is the wave case, not noise) and debounced 30s so reconnect flap costs one
-  fetch. Accepted gap: an announce landing during a sleep shorter than the
-  sweep window (~60–90s, socket survives but the buffered frame goes stale
-  past the replay window) is lost until the next real reconnect or restart.
+  is the wave case, not noise). **Only `register` checks are debounced** (30s),
+  because only they repeat on their own; debouncing announces would drop them
+  silently, and nothing re-fires an announce, so the machine that missed one
+  would sit stale until an unrelated later wave. The announce itself is marked
+  spent only once it is on the wire — a socket that drops during the seal must
+  not burn the single announce a process makes. Accepted gap: an announce
+  landing during a sleep shorter than the sweep window (~60–90s, socket
+  survives but the buffered frame goes stale past the replay window) is lost
+  until the next real reconnect or restart.
+- **A run that outlives its daemon reports nothing.** The config-reload
+  supervisor swaps the whole handle, so `stop()` marks the updater stopped: a
+  pipeline still mid-git finishes (interrupting git is worse) but its report is
+  dropped, because the outgoing instance's captured state is stale and writing
+  it would clobber what the incoming one already saved.
 - **Restart is platform-owned** (`selfRestart` on the `ServiceManager`).
   macOS: exit clean, KeepAlive relaunches — launchd caches job definitions,
   so rewriting the plist would be inert until the next bootstrap. Linux:
@@ -818,7 +828,15 @@ relay state unnecessary).
   **`KillMode=process`**, without which the default control-group kill takes
   down a daemon-cold-booted tmux server and every Claude session in it — the
   one migration that must land before the first automated restart; the first
-  rollout wave is still a manual restart under the old unit.
+  rollout wave is still a manual restart under the old unit. Both systemd
+  steps check their exit codes and a failure is reported as `restart_failed`:
+  the `ok` is already persisted by then, so a silent failure would leave the
+  machine serving old code while every later check reads `current` — stranded
+  and claiming success. Self-update is enabled only when the supervisor
+  actually started this process (`INVOCATION_ID` under systemd,
+  `XPC_SERVICE_NAME` under launchd); a manual foreground `seanced` would
+  otherwise exit with nothing to relaunch it, or bounce the service while the
+  terminal keeps serving old code.
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite
   state.json and push a registry frame on every reconnect for information

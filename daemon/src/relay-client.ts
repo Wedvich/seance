@@ -86,17 +86,20 @@ export class RelayClient {
 
   /**
    * Fire-and-forget group send — no reply ever comes back, so nothing
-   * correlates it. Quietly a no-op while disconnected: a broadcast is a nudge,
-   * and the receivers' own register-time checks are what guarantee convergence.
+   * correlates it. Returns whether the frame actually left the socket: the one
+   * announce a process makes must not be marked spent when it never went out.
    */
-  async broadcast(op: OpName, payload: unknown): Promise<void> {
-    const ws = this.#ws;
-    if (ws === null || !this.connected) return;
+  async broadcast(op: OpName, payload: unknown): Promise<boolean> {
+    if (!this.connected) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
     const sealed = await seal(this.#opts.key, { to: MACHINES_ID, from: this.#opts.deviceId }, plain);
-    const frame: DaemonFrame = { t: "msg", env: sealed };
-    ws.send(JSON.stringify(frame));
+    // Re-checked after the await: sealing is async, and a socket that dropped
+    // meanwhile would swallow the frame silently.
+    const ws = this.#ws;
+    if (ws === null || !this.connected) return false;
+    ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
     log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(op)} to=${quote(MACHINES_ID)}`);
+    return true;
   }
 
   async #register(): Promise<void> {

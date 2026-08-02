@@ -214,8 +214,13 @@ export async function selfRestart(): Promise<void> {
   if (!systemdRunning() || !(await serviceLoaded())) process.exit(0);
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
   await Bun.write(unitPath(), unitContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
-  await exec(["systemctl", "--user", "daemon-reload"]);
-  await exec(["systemctl", "--user", "restart", "--no-block", UNIT_NAME]);
+  const reload = await exec(["systemctl", "--user", "daemon-reload"]);
+  if (reload.exitCode !== 0) throw new Error(`systemctl --user daemon-reload failed: ${reload.stderr.trim()}`);
+  // Throwing matters more here than anywhere else in this file: the caller has
+  // already recorded the update as ok, so a silent failure leaves the machine
+  // serving old code while every later check reads `current`.
+  const restart = await exec(["systemctl", "--user", "restart", "--no-block", UNIT_NAME]);
+  if (restart.exitCode !== 0) throw new Error(`systemctl --user restart failed: ${restart.stderr.trim()}`);
 }
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */

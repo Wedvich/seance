@@ -177,6 +177,8 @@ export const UPDATE_OUTCOMES = [
   "skipped_diverged",
   "fetch_failed",
   "install_failed",
+  /** Updated on disk, but the restart that would run the new code failed — stranded, visibly. */
+  "restart_failed",
 ] as const;
 
 export type UpdateOutcome = (typeof UPDATE_OUTCOMES)[number];

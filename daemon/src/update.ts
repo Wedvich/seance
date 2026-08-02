@@ -43,12 +43,21 @@ export interface Updater {
   /**
    * Fire-and-forget. Single-flight with one coalesced trailing run: an
    * announce landing while a check is mid-fetch would otherwise be lost until
-   * the next reconnect — exactly the update-wave case. Idle-time repeats are
-   * debounced so reconnect flap costs one fetch.
+   * the next reconnect — exactly the update-wave case. Only `register` checks
+   * are debounced, because only they repeat on their own (reconnect flap); an
+   * announce is a discrete event that must never be dropped, or the machine
+   * that missed it sits stale until the next wave.
    */
   readonly check: (origin: UpdateOrigin) => void;
   /** Resolves once nothing is in flight — tests await outcomes without polling. */
   readonly settled: () => Promise<void>;
+  /**
+   * Stop reporting. A run already in flight finishes (git is mid-operation on
+   * a real checkout), but its report is dropped: after a config-reload swap
+   * the outgoing instance's captured `state` is stale, and writing it would
+   * clobber what the incoming one already saved.
+   */
+  readonly stop: () => void;
 }
 
 const DEBOUNCE_MS = 30_000;
@@ -93,7 +102,9 @@ async function pipeline(root: string, effects: UpdateEffects, audit: UpdateAudit
   if (behind === 0) return { outcome: "current" };
 
   const ff = await git(root, ["merge", "--ff-only", `origin/${branch}`]);
-  if (ff.exitCode !== 0) return { outcome: "skipped_diverged", detail: execFailure(ff) };
+  // rev-list already proved ahead === 0, so a refusal here is not divergence:
+  // an untracked file in the way, or another git holding the index lock.
+  if (ff.exitCode !== 0) return { outcome: "skipped_dirty", detail: execFailure(ff) };
 
   const install = await effects.install(root);
   if (!install.ok) {
@@ -113,6 +124,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
   const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
   let inflight: Promise<void> | null = null;
   let lastStart = 0;
+  let stopped = false;
 
   const run = async (origin: UpdateOrigin): Promise<void> => {
     const audit = updateAudit(origin, opts.sink);
@@ -120,7 +132,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     await audit.outcome(verdict.outcome, verdict.detail);
     // `current` is the steady state — reporting it would rewrite state.json and
     // push a registry update on every reconnect, for information nobody reads.
-    if (verdict.outcome === "current") return;
+    if (verdict.outcome === "current" || stopped) return;
     await opts.report({
       at: Date.now(),
       outcome: verdict.outcome,
@@ -128,7 +140,17 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     });
     // After the report: the restart ends this process, and the post-restart
     // register must already carry the ok.
-    if (verdict.outcome === "ok") await effects.restart();
+    if (verdict.outcome !== "ok") return;
+    try {
+      await effects.restart();
+    } catch (err) {
+      // The restart is the only step whose failure the `ok` already on disk
+      // would otherwise hide: HEAD is at target, so every later check reads
+      // `current` and this machine serves old code forever, claiming success.
+      const detail = err instanceof Error ? err.message : String(err);
+      await audit.outcome("restart_failed", detail);
+      if (!stopped) await opts.report({ at: Date.now(), outcome: "restart_failed", detail });
+    }
   };
 
   let pending: UpdateOrigin | null = null;
@@ -151,16 +173,24 @@ export function createUpdater(opts: UpdaterOpts): Updater {
 
   return {
     check: (origin: UpdateOrigin): void => {
+      if (stopped) return;
       if (inflight !== null) {
         pending = origin;
         return;
       }
-      if (Date.now() - lastStart < debounceMs) return;
+      // Only register checks are debounced. An announce dropped here would
+      // never be retried — nothing re-fires it — so this machine would sit on
+      // old code until the next unrelated wave.
+      if (origin === "register" && Date.now() - lastStart < debounceMs) return;
       start(origin);
     },
     settled: async (): Promise<void> => {
       // oxlint-disable-next-line no-await-in-loop, no-unmodified-loop-condition -- each trailing run's finally replaces `inflight`
       while (inflight !== null) await inflight;
+    },
+    stop: (): void => {
+      stopped = true;
+      pending = null;
     },
   };
 }
