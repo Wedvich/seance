@@ -272,6 +272,59 @@ describe("registry", () => {
     }
   });
 
+  // Reference identity is the whole render bailout: `useState` skips when the
+  // state object comes back the same, so a rebuild off an unchanged registry has
+  // to hand the previous one back. Hiding a *connected* machine is the one public
+  // way to force that rebuild — it is undone by the very rebuild it triggers.
+  test("a rebuild that changes nothing keeps the state object and notifies nobody", async () => {
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Steady"));
+    try {
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "online");
+      let notifications = 0;
+      // No await from here to the assertions, so no frame can land in between.
+      const unsubscribe = client.subscribe(() => {
+        notifications += 1;
+      });
+      client.hide(deviceId);
+      unsubscribe();
+      expect(notifications).toBe(0);
+      expect(client.getState()).toBe(before);
+      expect(client.getState().machines).toBe(before.machines);
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  // What the above rides on, and with it every resume: the relay re-sends the
+  // whole registry on each app connect, and an entry that did not change has to
+  // survive the rebuild by identity or the list is a fresh array every time.
+  test("a registry push leaves the entries it did not change identical", async () => {
+    const first = nextDeviceId();
+    const second = nextDeviceId();
+    const { client, waitFor } = startClient();
+    const one = await startFakeDaemon(relay, key, first, machineInfo("First"));
+    try {
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === first && m.connected), "first online");
+      const entry = before.machines.find((m) => m.deviceId === first);
+      expect(entry).toBeDefined();
+
+      const two = await startFakeDaemon(relay, key, second, machineInfo("Second"));
+      try {
+        const after = await waitFor((s) => s.machines.some((m) => m.deviceId === second), "second online");
+        expect(after.machines).not.toBe(before.machines);
+        expect(after.machines.find((m) => m.deviceId === first)).toBe(entry);
+      } finally {
+        two.close();
+      }
+    } finally {
+      one.close();
+      client.stop();
+    }
+  });
+
   test("keeps a machine removed in an earlier run removed", async () => {
     const deviceId = nextDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Stale"));

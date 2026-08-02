@@ -76,7 +76,10 @@ export class Store {
     };
   }
 
+  /** Same object back when nothing moved: `useState` bails out on reference equality. */
   #patch(next: Partial<AppState>): void {
+    const keys = Object.keys(next) as readonly (keyof AppState)[];
+    if (keys.every((key) => Object.is(this.#state[key], next[key]))) return;
     this.#state = { ...this.#state, ...next };
     for (const listener of this.#listeners) listener();
   }
@@ -110,6 +113,9 @@ export class Store {
           });
         } catch {
           // "unknown" rather than zero: an unanswered machine is not an idle one.
+          // Skipped once it already reads that, or a machine that keeps timing
+          // out re-renders the app on every attempt to say the same thing.
+          if (this.#state.sessions[deviceId] === "unknown") return;
           this.#patch({ sessions: { ...this.#state.sessions, [deviceId]: "unknown" } });
         }
       }),
