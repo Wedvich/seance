@@ -353,7 +353,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `undeliverable`                     | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
 | `"ping"` / `"pong"`                 | both socket legs                                 | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
 | envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                           | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn` / `rescan` | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
 on connect and whenever the repo set changes; `msg { envelope }` for routed
