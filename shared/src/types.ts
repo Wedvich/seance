@@ -144,12 +144,50 @@ export interface SessionEntry {
   readonly path: string;
 }
 
-/** Payload of the encrypted register blob (`op: "machine-info"`). */
+/** Git identity of a daemon's own checkout. `commitTs` is ms, like every other wire timestamp. */
+export interface SourceInfo {
+  readonly sha: string;
+  readonly commitTs: number;
+  /** Null on detached HEAD. */
+  readonly branch: string | null;
+}
+
+/**
+ * Self-update outcomes. The skips are deliberate refusals — a checkout that is
+ * dirty, off its default branch, or diverged is someone's work in progress, and
+ * an update must never force it.
+ */
+export const UPDATE_OUTCOMES = [
+  "ok",
+  "current",
+  "skipped_dirty",
+  "skipped_branch",
+  "skipped_diverged",
+  "fetch_failed",
+  "install_failed",
+] as const;
+
+export type UpdateOutcome = (typeof UPDATE_OUTCOMES)[number];
+
+/** Last self-update attempt, carried in the register blob so skips aren't silent. */
+export interface UpdateReport {
+  readonly at: number;
+  readonly outcome: UpdateOutcome;
+  readonly detail?: string;
+}
+
+/**
+ * Payload of the encrypted register blob (`op: "machine-info"`). `source` and
+ * `lastUpdate` are optional on the wire — blobs from older daemons lack them,
+ * and the app renders neither in v1 (doctor/status are the visibility surface).
+ */
 export interface MachineInfo {
   readonly name: string;
   readonly platform: string;
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number;
+  readonly source?: SourceInfo | null;
+  readonly lastUpdate?: UpdateReport | null;
 }
 
 export type SpawnMode = "worktree" | "here";

@@ -1,6 +1,6 @@
 import { mkdir, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import type { RepoEntry, UpdateReport } from "@seance/shared";
 import { log } from "./log.ts";
 import { runtimePath, statePath } from "./paths.ts";
 
@@ -8,6 +8,9 @@ export interface State {
   readonly deviceId: string;
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number | null;
+  /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
+  readonly lastRunSha?: string;
+  readonly lastUpdate?: UpdateReport;
 }
 
 function freshState(): State {
@@ -79,6 +82,8 @@ export interface Runtime {
   readonly startedAt: number;
   readonly connected: boolean;
   readonly connectedSince: number | null;
+  /** Sha this process started on — not whatever a later `git pull` left on disk. */
+  readonly sha?: string | null;
 }
 
 /** Fixed-size and well under one write syscall, so an in-place write cannot be read torn. */
