@@ -1038,11 +1038,15 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
   agent, trivial to add. Self-targeting is allowed and just loops through the
   relay: uniform beats a special case.
-- **Protocol implementation: the official TypeScript MCP SDK + zod v4**
-  (spec revision 2026-07-28, stateless stdio) — the daemon's first runtime
-  dependencies. Rejected: hand-rolling the JSON-RPC loop (on-brand with the
-  zero-dep ethos and only ~3 methods, but protocol drift would be owned here,
-  for a protocol that is actively evolving).
+- **Protocol implementation: the official TypeScript MCP SDK v2
+  (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
+  dependencies. Served via `serveStdio`, whose factory-per-connection model is
+  the SDK's stateless shape: the opening exchange picks the protocol era, so
+  one registration serves both a 2026-07-28 client and a legacy 2025-era one
+  (Claude Code today). Rejected: the v1 `@modelcontextprotocol/sdk` package
+  (caps out at the 2025-11-25 revision), hand-rolling the JSON-RPC loop
+  (on-brand with the zero-dep ethos and only ~3 methods, but protocol drift
+  would be owned here, for a protocol that is actively evolving).
 - **Stdout is the protocol channel**, so the MCP path logs to stderr — the
   daemon's stdout logging convention would corrupt frames. The shared client
   takes a `log` sink option (default stdout) for exactly this consumer;

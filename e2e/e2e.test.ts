@@ -6,7 +6,11 @@ import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import type { AppState } from "../pwa/src/view.ts";
-import { killWindow, listWindows, ownMachine, startApp, startStack, type Stack } from "./harness.ts";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { RelayClient } from "@seance/shared";
+import { buildMcpServer, LazyRelay } from "../daemon/src/mcp.ts";
+import { killWindow, listWindows, ownMachine, startApp, startStack, TOKEN, wsUrl, type Stack } from "./harness.ts";
 
 /**
  * The one suite where all three components are real: seanced from daemon/src,
@@ -294,3 +298,56 @@ function sessionsFor(state: AppState, deviceId: string): readonly SessionEntry[]
   const view = state.sessions[deviceId];
   return view === undefined || view === "unknown" ? [] : view.sessions;
 }
+
+describe("mcp ↔ relay ↔ daemon", () => {
+  test("the MCP tools list, spawn, and see the session — over the real relay", async () => {
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    // Pinned so this test also proves the 2026-07-28 era is served; that takes
+    // the serveStdio entry (with an injected transport) — a bare
+    // server.connect() only speaks the 2025 era.
+    const client = new Client(
+      { name: "e2e", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(lazy), { transport: serverTransport });
+    await client.connect(clientTransport);
+
+    const text = async (name: string, args: Record<string, unknown>): Promise<string> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return content.map((entry) => entry.text).join("\n");
+    };
+
+    let window: string | null = null;
+    try {
+      // The daemon registers before its scan finishes, so poll the tool until
+      // the machine's repo list carries the fixture — same race Store.spawn ducks.
+      await pollUntil(async () => (await text("list_machines", {})).includes("myrepo"), "repo visible over MCP");
+
+      const spawned = await text("spawn_session", {
+        machine: "TestMac",
+        repo: "myrepo",
+        prompt: "haunt the relay",
+      });
+      expect(spawned).toContain("spawned window haunt-the-relay on TestMac");
+      window = "haunt-the-relay";
+      expect(await listWindows()).toContain(window);
+
+      const sessions = await text("get_sessions", { machine: "TestMac" });
+      expect(JSON.parse(sessions).map((entry: SessionEntry) => entry.window)).toContain(window);
+    } finally {
+      if (window !== null) await killWindow(window);
+      await client.close();
+      lazy.stop();
+    }
+  });
+});
