@@ -1,4 +1,11 @@
-import type { RepoEntry, RescanResponse, SessionsResponse, SpawnRequest, SpawnResponse } from "@seance/shared";
+import type {
+  RepoEntry,
+  RescanResponse,
+  SessionsResponse,
+  SpawnClient,
+  SpawnRequest,
+  SpawnResponse,
+} from "@seance/shared";
 import { RequestFailure, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
@@ -306,7 +313,7 @@ export class Store {
       mode: form.worktree ? "worktree" : "here",
       model: form.model,
       effort: form.effort,
-      client: "pwa",
+      client: "pwa" satisfies SpawnClient,
       ...(prompt === "" ? {} : { prompt }),
     };
 

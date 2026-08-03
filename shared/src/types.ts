@@ -216,6 +216,16 @@ export interface MachineInfo {
 
 export type SpawnMode = "worktree" | "here";
 
+/**
+ * Client names our own senders stamp into `SpawnRequest.client` — compile-time
+ * discipline on the sending side only. The wire field stays free-text `string`:
+ * a daemon must never reject a spawn over a client name minted after it was
+ * built, so receivers never validate against this list.
+ */
+export const SPAWN_CLIENTS = ["pwa", "mcp"] as const;
+
+export type SpawnClient = (typeof SPAWN_CLIENTS)[number];
+
 export interface SpawnRequest {
   readonly repo: string;
   readonly mode: SpawnMode;
@@ -224,11 +234,11 @@ export interface SpawnRequest {
   readonly model?: string;
   readonly effort?: string;
   /**
-   * Which app-role client formed the request ("pwa", "mcp") — audit trail only,
-   * so `origin=relay` stays separable into "my phone" vs "an agent on my
-   * laptop". Optional on the wire: older clients don't send it, older daemons
-   * ignore it. Free text by design — a daemon must never reject a spawn over a
-   * client name minted after it was built.
+   * Which app-role client formed the request — audit trail only, so
+   * `origin=relay` stays separable into "my phone" vs "an agent on my
+   * laptop". Our senders stamp a `SpawnClient`; the wire keeps `string` so a
+   * daemon never rejects a name minted after it was built. Optional: older
+   * clients don't send it, older daemons ignore it.
    */
   readonly client?: string;
 }
