@@ -304,7 +304,7 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
         model: z.string().optional().describe('Model for the session, e.g. "opus"'),
         effort: z.string().optional().describe('Reasoning effort, e.g. "medium"'),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: false },
     },
     async ({ machine, repo, prompt, title, mode, model, effort }) =>
       withRelay(async (client) => {
@@ -345,10 +345,6 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
 
 /** `seanced mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
-  // stdout carries the protocol frames; everything else that might print —
-  // the shared client's wire log included — must land on stderr instead.
-  console.log = console.error.bind(console);
-
   const config = await loadConfig();
   const resolved = await loadPsk(config);
   if (resolved === null) {
@@ -361,6 +357,8 @@ export async function runMcpServer(): Promise<void> {
         url: appRelayUrl(config.relayUrl),
         token: config.bearerToken,
         key,
+        // stdout carries the protocol frames — the wire log must land on stderr.
+        log: (line) => console.error(line),
         // Bun dialing workerd needs this or frames die with close code 1002.
         createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
       }),
