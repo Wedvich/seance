@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, RelayState } from "../src/relay/client.ts";
+import type { Machine, RelayState } from "@seance/shared";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
   abbreviatePath,

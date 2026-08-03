@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { Machine } from "../relay/client.ts";
+import type { Machine } from "@seance/shared";
 import {
   EFFORTS,
   EFFORT_LABELS,

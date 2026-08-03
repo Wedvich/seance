@@ -4,11 +4,7 @@ import {
   HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
-  open as openEnvelope,
   OP_TIMEOUT_MS,
-  ReplayGuard,
-  quote,
-  seal,
   TOKEN_PARAM,
   type Envelope,
   type MachineInfo,
@@ -18,7 +14,9 @@ import {
   type RepoEntry,
   type RequestOp,
   type UndeliverableCode,
-} from "@seance/shared";
+} from "./types.ts";
+import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
+import { quote } from "./fmt.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 

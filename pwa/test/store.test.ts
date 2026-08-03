@@ -1,6 +1,6 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { RelayClient } from "../src/relay/client.ts";
+import { RelayClient } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { installBrowserGlobals } from "./stubs.ts";

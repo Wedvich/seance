@@ -6,7 +6,7 @@ import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { tmux } from "../daemon/src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "../daemon/test/fixtures.ts";
 import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/state.ts";
-import { RelayClient, type RelayState } from "../pwa/src/relay/client.ts";
+import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { startRelay, type TestRelay } from "../relay/test/harness.ts";

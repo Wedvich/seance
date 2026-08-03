@@ -3,7 +3,7 @@ import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
 import { readForm, readHidden, readPending, writeForm, writeHidden, writePending } from "./persist.ts";
-import { RelayClient } from "./relay/client.ts";
+import { RelayClient } from "@seance/shared";
 import { loadPsk, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import { Store } from "./store.ts";

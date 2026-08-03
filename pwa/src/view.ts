@@ -1,5 +1,5 @@
 import type { RepoEntry, SpawnErrorCode } from "@seance/shared";
-import type { Machine, RelayState } from "./relay/client.ts";
+import type { Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
