@@ -1,3 +1,5 @@
+// Guards shared/src/app-client.ts — the suite lives here because it boots the real
+// relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { startRelay, type TestRelay } from "../../relay/test/harness.ts";

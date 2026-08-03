@@ -1044,11 +1044,13 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   zero-dep ethos and only ~3 methods, but protocol drift would be owned here,
   for a protocol that is actively evolving).
 - **Stdout is the protocol channel**, so the MCP path logs to stderr — the
-  daemon's stdout logging convention would corrupt frames.
-- **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp
-uninstall` shell out to `claude mcp add` / `claude mcp remove` (argv-array,
-  per the exec invariant) rather than editing `~/.claude.json` — Claude Code
-  owns that schema. `doctor` reports whether the entry exists.
+  daemon's stdout logging convention would corrupt frames. The shared client
+  takes a `log` sink option (default stdout) for exactly this consumer;
+  redirecting `console.log` process-wide would silence stdout for everything.
+- **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp uninstall`
+  shell out to `claude mcp add` / `claude mcp remove` (argv-array, per the exec
+  invariant) rather than editing `~/.claude.json` — Claude Code owns that
+  schema. `doctor` reports whether the entry exists.
 
 **Spawn attribution.** A spawn from the MCP server reaches the target daemon
 as an ordinary relay spawn, and the audit tag exists precisely to separate "me
