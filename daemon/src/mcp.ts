@@ -78,12 +78,14 @@ export class LazyRelay {
   #connecting: Promise<AppRelay> | null = null;
   #inFlight = 0;
   #idleTimer: ReturnType<typeof setTimeout> | null = null;
+  #stopped = false;
 
   constructor(opts: LazyRelayOpts) {
     this.#opts = opts;
   }
 
   async acquire(): Promise<AppRelay> {
+    if (this.#stopped) throw new Error("the relay client is stopped");
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
     this.#idleTimer = null;
     this.#inFlight += 1;
@@ -111,6 +113,7 @@ export class LazyRelay {
   }
 
   stop(): void {
+    this.#stopped = true;
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
     this.#idleTimer = null;
     this.#client?.stop();
@@ -123,6 +126,9 @@ export class LazyRelay {
     try {
       await this.#waitOpen(client);
       await this.#settleRegistry(client);
+      // stop() may have raced this connect; adopting the client now would
+      // leak its socket and heartbeat with no owner left to stop them.
+      if (this.#stopped) throw new Error("stopped while connecting to the relay");
     } catch (err) {
       client.stop();
       throw err;
@@ -237,7 +243,8 @@ function failureText(op: string, err: unknown): string {
  * envelope crypto as the PWA — there is no separate MCP wire surface.
  */
 export function buildMcpServer(relay: LazyRelay): McpServer {
-  const server = new McpServer({ name: "seance", version: "1.0.0" });
+  // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
+  const server = new McpServer({ name: "seance", version: "0.0.0" });
 
   // Every tool bumps the idle clock via acquire/release, even ones that fail.
   const withRelay = async (fn: (client: AppRelay) => Promise<ToolResult>): Promise<ToolResult> => {

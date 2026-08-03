@@ -338,8 +338,8 @@ describe("mcp ↔ relay ↔ daemon", () => {
         repo: "myrepo",
         prompt: "haunt the relay",
       });
-      expect(spawned).toContain("spawned window haunt-the-relay on TestMac");
       window = "haunt-the-relay";
+      expect(spawned).toContain("spawned window haunt-the-relay on TestMac");
       expect(await listWindows()).toContain(window);
 
       const sessions = await text("get_sessions", { machine: "TestMac" });

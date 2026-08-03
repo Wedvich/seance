@@ -163,7 +163,7 @@ describe("LazyRelay", () => {
 
   test("a rejected token surfaces as an error instead of a silent retry loop", async () => {
     const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected"), settleMs: 10 });
-    expect(lazy.acquire()).rejects.toThrow("bearer token");
+    await expect(lazy.acquire()).rejects.toThrow("bearer token");
   });
 
   test("a relay that never answers fails the call instead of riding the backoff forever", async () => {
@@ -172,7 +172,23 @@ describe("LazyRelay", () => {
       connectTimeoutMs: 30,
       settleMs: 10,
     });
-    expect(lazy.acquire()).rejects.toThrow("did not answer");
+    await expect(lazy.acquire()).rejects.toThrow("did not answer");
+  });
+
+  test("stop() during a pending connect stops the dialing client instead of adopting it", async () => {
+    let fake: FakeRelay | undefined;
+    const lazy = new LazyRelay({
+      create: () => {
+        fake = fakeRelay([machine()], () => ({}), "connecting");
+        return fake;
+      },
+      settleMs: 10,
+    });
+    const pending = lazy.acquire();
+    lazy.stop();
+    fake?.setState({ status: "open" });
+    await expect(pending).rejects.toThrow("stopped");
+    expect(fake?.stopped).toBe(true);
   });
 });
 
