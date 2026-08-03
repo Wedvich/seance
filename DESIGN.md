@@ -350,19 +350,19 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                        | Handled in                                                                                                      |
-| ----------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts`                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
-| `msg` (app→daemon)                  | `pwa/src/relay/client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                     | broadcast by `relay/src/hub.ts`; correlated on `re` in `pwa/src/relay/client.ts`                                |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                   | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`            | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
-| `registry`                          | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
-| `undeliverable`                     | `relay/src/hub.ts`                               | `pwa/src/relay/client.ts`                                                                                       |
-| `"ping"` / `"pong"`                 | both socket legs                                 | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                           | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
-| op `rescan`                         | `pwa/src/store.ts` via `pwa/src/relay/client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+| Frame / op                          | Sent from                                         | Handled in                                                                                                      |
+| ----------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts`                      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                      | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                    | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`             | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
+| `registry`                          | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
+| `undeliverable`                     | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
+| `"ping"` / `"pong"`                 | both socket legs                                  | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                            | same file — both ends share it, or nothing decrypts                                                             |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
 on connect and whenever the repo set changes; `msg { envelope }` for routed
@@ -996,6 +996,87 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   the field lost. CLEAR also blurs the textarea — an empty field is nothing to
   type into, and on a phone the keyboard should go with the text — while UNDO
   focuses it again, caret at the end, so the draft can be picked back up.
+
+## MCP server (`seanced mcp`) — designed 2026-08-03
+
+A local Claude Code session gets Séance's reach: an MCP stdio server that acts
+as a **third app-role client** — to the relay it is a PWA tab. It dials
+`/app?t=<token>`, seals ops with the PSK as `from="app"`, correlates on `re`,
+and receives registry pushes. Zero relay/DO changes; every channel property
+(AAD binding, replay window, IV dedup, app-socket fan-out) applies unchanged.
+
+- **Ships inside the daemon** as `seanced mcp`, not a separate package: it
+  rides the existing self-update path and its Claude config entry is just the
+  `seanced` binary. Rejected: a new workspace package (a second thing to
+  install and update per machine), a standalone bin over a shared library
+  (same, plus packaging).
+- **Credentials come from the daemon's own config** via `loadConfig()` +
+  `loadPsk()` — relay URL, bearer token, and the PSK including the
+  keychain/DPAPI/TPM stores. No new at-rest copy of the PSK anywhere; the cost
+  is that the MCP server requires a machine that carries a daemon config,
+  accepted because it is colocated by design. The key is imported
+  non-extractable, same as the PWA.
+- **App-role transport is `shared/src/app-client.ts`** — the `RelayClient`
+  extracted verbatim from `pwa/src/relay/` (it was already runtime-agnostic;
+  e2e had been importing it from `pwa/` under Bun, a wrong-direction edge this
+  removes). pwa, e2e and the MCP server consume one implementation. Rejected:
+  daemon importing `pwa/` source (dependency direction), a third
+  backoff/heartbeat/correlation implementation (the drift risk the harness
+  comment already documents once).
+- **Lazy connect, idle disconnect.** The socket dials on the first tool call,
+  stays open under the standard 30s heartbeat, and closes after ~5 minutes
+  idle; the next call redials. A Claude session can sit open for hours doing
+  local work — a permanently open socket per session buys presence freshness
+  nobody is looking at. Rejected: connect-per-call (pays connect latency and
+  the registry settle on every call), always-on (idle sockets × sessions).
+- **Tools**: `list_machines` (registry + presence, works for offline machines
+  because repos ride the register blob), `get_sessions { machine }`, and
+  `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort? }`
+  mapping 1:1 onto the `sessions`/`spawn` ops with the existing
+  `OP_TIMEOUT_MS`. `machine` is the config `name` resolved against the live
+  registry; ambiguity or a miss returns candidates, `deviceId` is the
+  exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
+  agent, trivial to add. Self-targeting is allowed and just loops through the
+  relay: uniform beats a special case.
+- **Protocol implementation: the official TypeScript MCP SDK + zod v4**
+  (spec revision 2026-07-28, stateless stdio) — the daemon's first runtime
+  dependencies. Rejected: hand-rolling the JSON-RPC loop (on-brand with the
+  zero-dep ethos and only ~3 methods, but protocol drift would be owned here,
+  for a protocol that is actively evolving).
+- **Stdout is the protocol channel**, so the MCP path logs to stderr — the
+  daemon's stdout logging convention would corrupt frames. The shared client
+  takes a `log` sink option (default stdout) for exactly this consumer;
+  redirecting `console.log` process-wide would silence stdout for everything.
+- **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp uninstall`
+  shell out to `claude mcp add` / `claude mcp remove` (argv-array, per the exec
+  invariant) rather than editing `~/.claude.json` — Claude Code owns that
+  schema. `doctor` reports whether the entry exists.
+
+**Spawn attribution.** A spawn from the MCP server reaches the target daemon
+as an ordinary relay spawn, and the audit tag exists precisely to separate "me
+at my desk" from "something else drove my machines" — so the spawn payload
+gains an optional `client: "pwa" | "mcp"`, and the audit line becomes
+`origin=relay client=mcp`. Old daemons ignore the unknown field. Rejected:
+accepting an indistinguishable third spawn path (the audit invariant would
+quietly stop meaning what it says).
+
+**Threat-model addendum.**
+
+- New path in: any local Claude session that loads the server — including
+  whatever prompt-injects that session — gains spawn power over every machine,
+  which is arbitrary code execution under their permission modes (see "what
+  structured payloads only does and does not mean"). Accepted: one human owns
+  every device, the PSK is already the sole boundary, and Claude Code's
+  per-tool approval is the gate — read-only tools are safe to allowlist,
+  `spawn_session` is not. Rejected: a server-side `--allow-spawn` flag
+  (friction in the wrong place; the approving human is at the Claude session,
+  not the config file), a read-only server (defers the point of the thing).
+- No new key at rest, but a new _process_ holding the imported PSK — on a
+  machine that already runs one (the daemon).
+- The group address stays out of reach: the MCP server seals only to specific
+  `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
+- Prompt text is never logged on the MCP tier either — the Claude session
+  that issued the spawn is its natural transcript.
 
 ## Accepted trade-offs
 

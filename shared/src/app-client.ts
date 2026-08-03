@@ -4,11 +4,7 @@ import {
   HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
-  open as openEnvelope,
   OP_TIMEOUT_MS,
-  ReplayGuard,
-  quote,
-  seal,
   TOKEN_PARAM,
   type Envelope,
   type MachineInfo,
@@ -18,19 +14,11 @@ import {
   type RepoEntry,
   type RequestOp,
   type UndeliverableCode,
-} from "@seance/shared";
+} from "./types.ts";
+import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
+import { quote } from "./fmt.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
-
-/**
- * Same shape the daemon and relay emit, so one grep spans all three tiers. The
- * `iv` is what the blind relay can name; the `id`/`re` beside it is what only
- * the two encrypting ends can read. Ships in production builds — a phone-only
- * failure is the one that cannot be reproduced at a desk. Never the payload.
- */
-function wireLog(event: string, detail: string): void {
-  console.log(`wire ${event} ${detail}`);
-}
 
 /** Why a request will never get an answer. */
 export type FailureReason = UndeliverableCode | "timeout" | "disconnected";
@@ -186,6 +174,7 @@ export class RelayClient {
   readonly #settleMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
+  readonly #log: (line: string) => void;
 
   constructor(opts: {
     readonly url: string;
@@ -202,6 +191,8 @@ export class RelayClient {
     readonly pongTimeoutMs?: number;
     /** deviceIds removed in an earlier run; a reload must not resurrect them. */
     readonly hidden?: readonly string[];
+    /** Wire-log sink. Defaults to stdout; a consumer whose stdout is spoken for (the MCP server's JSON-RPC) passes its own. */
+    readonly log?: (line: string) => void;
   }) {
     this.#url = opts.url;
     this.#token = opts.token;
@@ -212,6 +203,17 @@ export class RelayClient {
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#hidden = new Set(opts.hidden ?? []);
+    this.#log = opts.log ?? ((line) => console.log(line));
+  }
+
+  /**
+   * Same shape the daemon and relay emit, so one grep spans all three tiers. The
+   * `iv` is what the blind relay can name; the `id`/`re` beside it is what only
+   * the two encrypting ends can read. Ships in production builds — a phone-only
+   * failure is the one that cannot be reproduced at a desk. Never the payload.
+   */
+  #wireLog(event: string, detail: string): void {
+    this.#log(`wire ${event} ${detail}`);
   }
 
   #timeoutFor(op: RequestOp): number {
@@ -298,7 +300,7 @@ export class RelayClient {
       const limit = this.#timeoutFor(op);
       const sentAt = Date.now();
       const timer = setTimeout(() => {
-        wireLog("timeout", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
+        this.#wireLog("timeout", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
         this.#discard(id);
         // Blame the machine only when the uplink demonstrably worked while the
         // request was out: same socket, and at least one frame (a pong counts)
@@ -324,7 +326,7 @@ export class RelayClient {
       // check above needs, without waiting for the next 30s heartbeat beat. A
       // healthy socket produces it within an RTT; a dead one produces nothing.
       socket.send("ping");
-      wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
+      this.#wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
   }
 
@@ -431,7 +433,7 @@ export class RelayClient {
       this.#pongDeadline ??= setTimeout(() => {
         this.#pongDeadline = null;
         if (this.#socket !== socket) return;
-        wireLog("heartbeat", `no pong within ${this.#pongTimeoutMs}ms`);
+        this.#wireLog("heartbeat", `no pong within ${this.#pongTimeoutMs}ms`);
         // reconnect() rather than close(): closing a dead peer waits out the
         // closing handshake, and pending requests can still complete over the
         // new socket — replies fan out to every open app socket.
@@ -466,7 +468,7 @@ export class RelayClient {
     const id = this.#idByIv.get(iv);
     // `code` is relay-supplied and `parseFrame` does not narrow it, so it is quoted
     // like every other wire value rather than trusted to be one of the two codes.
-    wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
+    this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
     if (id === undefined) return;
     this.#pending.get(id)?.settle({
       ok: false,
@@ -486,7 +488,7 @@ export class RelayClient {
       plain = await openEnvelope(this.#key, env);
     } catch {
       // Not ours to read: a stale PSK somewhere, or traffic for another key.
-      wireLog("dropped", `iv=${quote(env.iv)} reason=unopenable`);
+      this.#wireLog("dropped", `iv=${quote(env.iv)} reason=unopenable`);
       return;
     }
     // Decryption authenticates the sender — `from` is AAD-bound — so this alone
@@ -502,7 +504,7 @@ export class RelayClient {
       // A phone more than REPLAY_WINDOW_MS off NTP lands here for every reply
       // while the registry still renders every machine online, so every request
       // ends in `wire timeout`. Without this line that has no other symptom.
-      wireLog("dropped", `iv=${quote(env.iv)} re=${quote(plain.re ?? "")} reason=replay`);
+      this.#wireLog("dropped", `iv=${quote(env.iv)} re=${quote(plain.re ?? "")} reason=replay`);
       return;
     }
     // Replies fan out to every open app socket, so another tab's are expected here.
@@ -511,7 +513,7 @@ export class RelayClient {
     // that already timed out, and "arrived late" vs "never came" is the whole
     // point of the ids. Another tab's reply lands here too, hence `pending`.
     const pending = this.#pending.get(plain.re);
-    wireLog(
+    this.#wireLog(
       "recv",
       `iv=${quote(env.iv)} re=${quote(plain.re)} op=${quote(plain.op)} pending=${pending === undefined ? "no" : "yes"}`,
     );

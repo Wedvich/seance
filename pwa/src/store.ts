@@ -1,5 +1,5 @@
 import type { RepoEntry, RescanResponse, SessionsResponse, SpawnRequest, SpawnResponse } from "@seance/shared";
-import { RequestFailure, type RelayClient } from "./relay/client.ts";
+import { RequestFailure, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
   type Effort,
