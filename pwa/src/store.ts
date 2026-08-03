@@ -306,6 +306,7 @@ export class Store {
       mode: form.worktree ? "worktree" : "here",
       model: form.model,
       effort: form.effort,
+      client: "pwa",
       ...(prompt === "" ? {} : { prompt }),
     };
 

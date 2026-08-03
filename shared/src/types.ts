@@ -223,6 +223,14 @@ export interface SpawnRequest {
   readonly title?: string;
   readonly model?: string;
   readonly effort?: string;
+  /**
+   * Which app-role client formed the request ("pwa", "mcp") — audit trail only,
+   * so `origin=relay` stays separable into "my phone" vs "an agent on my
+   * laptop". Optional on the wire: older clients don't send it, older daemons
+   * ignore it. Free text by design — a daemon must never reject a spawn over a
+   * client name minted after it was built.
+   */
+  readonly client?: string;
 }
 
 export const SPAWN_ERROR_CODES = [

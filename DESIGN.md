@@ -478,7 +478,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows. The one live pull — session
   state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, client? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
   verdict embeds a refreshed session list so the PWA updates without a
   second round trip. That list is polled (2s cap) until it holds the window

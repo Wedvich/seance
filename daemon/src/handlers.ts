@@ -35,7 +35,7 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   const obj = payload as Record<string, unknown>;
   if (typeof obj["repo"] !== "string" || obj["repo"] === "") return false;
   if (obj["mode"] !== "worktree" && obj["mode"] !== "here") return false;
-  for (const key of ["prompt", "title", "model", "effort"]) {
+  for (const key of ["prompt", "title", "model", "effort", "client"]) {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
   return true;

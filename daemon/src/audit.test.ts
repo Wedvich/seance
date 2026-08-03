@@ -64,6 +64,17 @@ describe("spawn audit lines", () => {
     expect(collected[0]).toContain("origin=cli");
     expect(collected[1]).toContain("origin=relay");
   });
+
+  test("client separates which app-role client formed the request, and stays quotable free text", async () => {
+    await audit.request({ repo: "myrepo", mode: "here", client: "mcp" });
+    expect(emitted()).toContain('origin=relay client="mcp" repo="myrepo"');
+  });
+
+  test("a request without a client — an older sender — carries no client field at all", async () => {
+    await audit.request({ repo: "myrepo", mode: "here" });
+    expect(emitted()).not.toContain("client=");
+    expect(emitted()).toContain('origin=relay repo="myrepo"');
+  });
 });
 
 describe("cliSink", () => {
