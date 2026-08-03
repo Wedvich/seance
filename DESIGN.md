@@ -478,7 +478,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows. The one live pull — session
   state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, client? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
   verdict embeds a refreshed session list so the PWA updates without a
   second round trip. That list is polled (2s cap) until it holds the window
@@ -1055,10 +1055,16 @@ and receives registry pushes. Zero relay/DO changes; every channel property
 **Spawn attribution.** A spawn from the MCP server reaches the target daemon
 as an ordinary relay spawn, and the audit tag exists precisely to separate "me
 at my desk" from "something else drove my machines" — so the spawn payload
-gains an optional `client: "pwa" | "mcp"`, and the audit line becomes
-`origin=relay client=mcp`. Old daemons ignore the unknown field. Rejected:
-accepting an indistinguishable third spawn path (the audit invariant would
-quietly stop meaning what it says).
+gains an optional free-text `client` field, and the audit line becomes
+`origin=relay client="mcp"`, quoted through the same escaper as every other
+wire-supplied string. `SPAWN_CLIENTS` in `shared/src/types.ts` names the
+values our own senders stamp ("pwa", "mcp") — sender-side discipline only.
+Old daemons ignore the unknown field. Rejected: accepting an
+indistinguishable third spawn path (the audit invariant would quietly stop
+meaning what it says); validating `client` against a closed union on receive —
+daemons update machine-by-machine behind fast-moving clients, so a daemon must
+never reject a spawn over a client name minted after it was built, and the
+field is display-only, so validation would buy nothing.
 
 **Threat-model addendum.**
 

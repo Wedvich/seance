@@ -55,8 +55,10 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const prompt = request.prompt ?? "";
       const promptNote =
         prompt === "" ? "prompt=none" : `promptLen=${prompt.length} promptSha=${await fingerprintText(prompt)}`;
+      // First when present, so `origin=relay client=…` reads as one attribution.
+      const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
       await emit(
-        `repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
+        `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           promptNote,
       );
