@@ -14,6 +14,8 @@ import {
 } from "./config.ts";
 import type { Check } from "./check.ts";
 import { cliOnPath, createLink, removeLinks, resolvedMain } from "./link.ts";
+import { exec, execFailure } from "./exec.ts";
+import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -274,6 +276,7 @@ export async function cmdDoctor(): Promise<void> {
   if (gitBin === null) fail("git not on PATH");
   else ok(`git at ${gitBin}`);
   render([await cliOnPath()]);
+  render(await mcpChecks());
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -463,4 +466,32 @@ export async function cmdPskImport(): Promise<void> {
   // A piped value is an explicit request to store a secret, so losing it must
   // not look like success; an interactive invocation has read nothing yet.
   process.exit(process.stdin.isTTY ? 0 : 1);
+}
+
+/**
+ * The registration is delegated to `claude mcp add/remove` rather than editing
+ * ~/.claude.json — Claude Code owns that schema. Registered as bun + this
+ * checkout's main.ts (the same target `link` points at), so it tracks git pull
+ * and works whether or not `seanced` is on PATH.
+ */
+export async function cmdMcp(rest: readonly string[]): Promise<void> {
+  const [sub] = rest;
+  if (sub === undefined) return runMcpServer();
+  if (sub !== "install" && sub !== "uninstall") {
+    throw new Error(`unknown mcp subcommand "${sub}" — expected \`seanced mcp\`, \`mcp install\` or \`mcp uninstall\``);
+  }
+  const claude = Bun.which("claude");
+  if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
+  const argv =
+    sub === "install"
+      ? [claude, "mcp", "add", "--scope", "user", "seance", "--", process.execPath, await resolvedMain(), "mcp"]
+      : [claude, "mcp", "remove", "--scope", "user", "seance"];
+  const result = await exec(argv, { timeoutMs: 30_000 });
+  if (result.exitCode !== 0)
+    throw new Error(`claude mcp ${sub === "install" ? "add" : "remove"}: ${execFailure(result)}`);
+  console.log(
+    sub === "install"
+      ? "registered — Claude Code sessions can now list machines, query sessions, and spawn via the relay"
+      : "removed — Claude Code no longer loads the séance MCP server",
+  );
 }

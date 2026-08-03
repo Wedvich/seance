@@ -12,11 +12,11 @@ awkward. Séance replaces it with a per-machine daemon that's always ready.
 
 ## Components
 
-| Component | Where it runs                                                            | What it does                                                                                 |
-| --------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery) |
-| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session          |
-| `pwa/`    | Cloudflare Worker (static assets)                                        | Machine list, repo picker, spawn form, spawn verdict, read-only session list                 |
+| Component | Where it runs                                                            | What it does                                                                                                                                    |
+| --------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery)                                                    |
+| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session; `seanced mcp` serves the same reach to a local Claude Code |
+| `pwa/`    | Cloudflare Worker (static assets)                                        | Machine list, repo picker, spawn form, spawn verdict, read-only session list                                                                    |
 
 See [DESIGN.md](DESIGN.md) for the full architecture and every decision with
 its rationale.
@@ -216,6 +216,21 @@ Open `https://seance-pwa.<subdomain>.workers.dev`, add it to your home screen,
 and in first-run setup enter the relay URL
 (`wss://seance-relay.<subdomain>.workers.dev/app`), the bearer token, and the
 PSK. Machines appear as their daemons register.
+
+### 6. Optional: give a local Claude Code the same reach
+
+On any machine that runs `seanced`:
+
+```sh
+seanced mcp install    # registers the MCP server with Claude Code (user scope)
+```
+
+Claude Code sessions on that machine can then list machines, query running
+sessions, and spawn sessions on other machines through the relay — the server
+reads the daemon's own config and speaks to the relay exactly like the phone
+does. `seanced mcp uninstall` removes it; `seanced doctor` reports whether it
+is registered. Treat `spawn_session` like the remote it is: leave it behind
+Claude Code's per-tool approval rather than allowlisting it.
 
 ### Updating
 

@@ -4,6 +4,7 @@ import {
   cmdInit,
   cmdInstall,
   cmdLink,
+  cmdMcp,
   cmdPskImport,
   cmdRestart,
   cmdScan,
@@ -35,6 +36,7 @@ usage: seanced [command]
   scan        discover repos now; caches for the next start unless a daemon is running
   sessions    list running claude tmux windows
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
+  mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   help        this text
 `;
 
@@ -97,6 +99,9 @@ try {
       break;
     case "spawn":
       await cmdSpawn(rest);
+      break;
+    case "mcp":
+      await cmdMcp(rest);
       break;
     case "help":
     case "--help":
