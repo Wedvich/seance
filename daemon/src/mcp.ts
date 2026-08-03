@@ -11,6 +11,7 @@ import {
   type RelayState,
   type RequestOp,
   type SessionsResponse,
+  type SpawnClient,
   type SpawnRequest,
   type SpawnResponse,
 } from "@seance/shared";
@@ -323,7 +324,7 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
         const request: SpawnRequest = {
           repo,
           mode,
-          client: "mcp",
+          client: "mcp" satisfies SpawnClient,
           ...(prompt === undefined ? {} : { prompt }),
           ...(title === undefined ? {} : { title }),
           ...(model === undefined ? {} : { model }),
