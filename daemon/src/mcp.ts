@@ -18,6 +18,7 @@ import {
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk } from "./config.ts";
 import { exec } from "./exec.ts";
+import { recordedBunCheck } from "./link.ts";
 
 /** The config's relayUrl is the daemon endpoint; this client is app-role. */
 export function appRelayUrl(relayUrl: string): string {
@@ -386,14 +387,24 @@ export async function runMcpServer(): Promise<void> {
   process.exit(0);
 }
 
-/** Whether the local Claude Code knows about `seanced mcp`; renders under doctor's binaries section. */
+/** `Command:` line of `claude mcp get` — the interpreter Claude Code will exec. Null when the output doesn't parse. */
+export function mcpBunPath(output: string): string | null {
+  return /^\s*Command:\s*(.+?)\s*$/mu.exec(output)?.[1] ?? null;
+}
+
+/** Whether the local Claude Code knows about `seanced mcp`, and whether its recorded bun still resolves; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
     return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
   }
   const result = await exec([claude, "mcp", "get", "seance"], { timeoutMs: 15_000 });
-  return result.exitCode === 0
-    ? [{ level: "ok", message: "MCP server registered with Claude Code" }]
-    : [{ level: "warn", message: "MCP server not registered with Claude Code — run `seanced mcp install`" }];
+  if (result.exitCode !== 0) {
+    return [{ level: "warn", message: "MCP server not registered with Claude Code — run `seanced mcp install`" }];
+  }
+  const registered: Check = { level: "ok", message: "MCP server registered with Claude Code" };
+  // Same drift hazard as the plist/unit: `mcp install` records PATH's bun in
+  // Claude's config, and nothing rewrites that entry on its own.
+  const drift = await recordedBunCheck(mcpBunPath(result.stdout), "MCP entry", "seanced mcp install");
+  return drift === null ? [registered] : [registered, drift];
 }

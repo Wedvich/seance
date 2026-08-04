@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseSpawnArgs } from "./cli.ts";
-import { LAUNCHD_LABEL, plistContent } from "./launchd.ts";
+import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 
 describe("parseSpawnArgs", () => {
   test("repo only", () => {
@@ -45,5 +45,16 @@ describe("plistContent", () => {
     const plist = plistContent("/o<p>t/bun", "/a&b/main.ts", "/bin");
     expect(plist).toContain("/o&lt;p&gt;t/bun");
     expect(plist).toContain("/a&amp;b/main.ts");
+  });
+});
+
+describe("plistBunPath", () => {
+  test("round-trips plistContent, XML escaping included", () => {
+    expect(plistBunPath(plistContent("/opt/bun", "/repo/daemon/src/main.ts", "/bin"))).toBe("/opt/bun");
+    expect(plistBunPath(plistContent("/o<p>t/&bun", "/repo/main.ts", "/bin"))).toBe("/o<p>t/&bun");
+  });
+
+  test("null when there are no ProgramArguments — a parse miss must not read as drift", () => {
+    expect(plistBunPath("<plist><dict></dict></plist>")).toBeNull();
   });
 });

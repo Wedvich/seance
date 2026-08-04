@@ -3,7 +3,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type { Machine, RelayState, RequestOp, SpawnRequest } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
-import { appRelayUrl, buildMcpServer, LazyRelay, resolveMachine, type AppRelay } from "./mcp.ts";
+import { appRelayUrl, buildMcpServer, LazyRelay, mcpBunPath, resolveMachine, type AppRelay } from "./mcp.ts";
 
 function machine(overrides: Partial<Machine> = {}): Machine {
   return {
@@ -92,6 +92,27 @@ describe("appRelayUrl", () => {
 
   test("leaves a URL without the daemon suffix alone rather than guessing", () => {
     expect(appRelayUrl("wss://relay.example.dev/other")).toBe("wss://relay.example.dev/other");
+  });
+});
+
+describe("mcpBunPath", () => {
+  test("reads the Command: line out of `claude mcp get` output", () => {
+    const output = [
+      "seance:",
+      "  Scope: User config (available in all your projects)",
+      "  Status: ✔ Connected",
+      "  Type: stdio",
+      "  Command: /opt/homebrew/bin/bun",
+      "  Args: /repos/seance/daemon/src/main.ts mcp",
+      "",
+      "To remove this server, run: claude mcp remove seance -s user",
+    ].join("\n");
+    expect(mcpBunPath(output)).toBe("/opt/homebrew/bin/bun");
+  });
+
+  test("output without a Command line is null, not a finding", () => {
+    expect(mcpBunPath("seance:\n  Type: http\n")).toBeNull();
+    expect(mcpBunPath("")).toBeNull();
   });
 });
 

@@ -20,6 +20,67 @@ export async function resolvedMain(): Promise<string> {
 }
 
 /**
+ * The interpreter half of `resolvedMain`, for everything that records how to
+ * re-launch us: bun by its PATH name, never `process.execPath`. execPath is the
+ * realpath'd binary — on Homebrew `…/Cellar/bun/1.3.14/bin/bun` — and the keg is
+ * deleted on upgrade, orphaning whatever recorded it. Resolving at *use* time is
+ * always fine; the hazard is only in what outlives the process.
+ */
+export function resolvedBun(): string {
+  return bunPathFor(Bun.which("bun"));
+}
+
+/**
+ * execPath is the fallback rather than the default because PATH-less contexts
+ * exist (a launchd agent gets /usr/bin:/bin), and a pinned path still beats none.
+ * Split out for the same reason `cliOnPathCheck` is: nothing here mocks
+ * `Bun.which`, so the decision has to take its result as an argument.
+ */
+export function bunPathFor(found: string | null): string {
+  return found ?? process.execPath;
+}
+
+/**
+ * The recorded interpreter against the one PATH resolves now. Nothing rewrites
+ * an installed macOS plist on its own — launchd caches job definitions, so
+ * `selfRestart` exits instead of rewriting — so a runtime upgrade leaves the
+ * agent pointing at a deleted binary with nothing to notice. This is what makes
+ * that visible while the daemon is still up. `what`/`remedy` vary per record:
+ * the service writers repoint via `seanced install`, the MCP entry via
+ * `seanced mcp install`. Exported for tests.
+ */
+export function bunDriftCheck(
+  recorded: string,
+  current: string,
+  recordedExists: boolean,
+  what = "service",
+  remedy = "seanced install",
+): Check {
+  if (!recordedExists) {
+    return {
+      level: "fail",
+      message: `${what} records bun at ${recorded}, which no longer exists — \`${remedy}\` repoints it`,
+    };
+  }
+  if (recorded !== current) {
+    return {
+      level: "warn",
+      message: `${what} records bun at ${recorded}, PATH now resolves bun to ${current} — \`${remedy}\` repoints it`,
+    };
+  }
+  return { level: "ok", message: `${what} bun path current (${recorded})` };
+}
+
+/** Null when the caller couldn't read a path out of the record: a parse miss must not read as a problem. */
+export async function recordedBunCheck(recorded: string | null, what?: string, remedy?: string): Promise<Check | null> {
+  if (recorded === null) return null;
+  const exists = await access(recorded, constants.X_OK)
+    .then(() => true)
+    .catch(() => false);
+  return bunDriftCheck(recorded, resolvedBun(), exists, what, remedy);
+}
+
+/**
  * init, scan, and doctor itself all print `seanced …` follow-ups, but nothing
  * installs the name unasked — so this says whether it resolves, and to *this*
  * checkout rather than a stale link to an old clone. Never a fail: `bun

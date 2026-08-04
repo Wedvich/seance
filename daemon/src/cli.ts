@@ -13,7 +13,7 @@ import {
   runnableProblems,
 } from "./config.ts";
 import type { Check } from "./check.ts";
-import { cliOnPath, createLink, removeLinks, resolvedMain } from "./link.ts";
+import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
 import { exec, execFailure } from "./exec.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
@@ -470,9 +470,9 @@ export async function cmdPskImport(): Promise<void> {
 
 /**
  * The registration is delegated to `claude mcp add/remove` rather than editing
- * ~/.claude.json — Claude Code owns that schema. Registered as bun + this
- * checkout's main.ts (the same target `link` points at), so it tracks git pull
- * and works whether or not `seanced` is on PATH.
+ * ~/.claude.json — Claude Code owns that schema. Registered as PATH-resolved bun
+ * plus this checkout's main.ts (the same target `link` points at), so it tracks a
+ * git pull and a bun upgrade alike, and works whether or not `seanced` is on PATH.
  */
 export async function cmdMcp(rest: readonly string[]): Promise<void> {
   const [sub] = rest;
@@ -482,9 +482,15 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   }
   const claude = Bun.which("claude");
   if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
+  // `claude mcp add` refuses a name already in the config, and the machines that
+  // most need re-registering — a recorded interpreter that has moved — are exactly
+  // the registered ones. So clear first: the same bootout-before-bootstrap shape
+  // `install` uses for launchd. Failure is ignored (nothing registered yet is the
+  // common case); a failing `add` after a clean remove reports itself below.
+  if (sub === "install") await exec([claude, "mcp", "remove", "--scope", "user", "seance"]);
   const argv =
     sub === "install"
-      ? [claude, "mcp", "add", "--scope", "user", "seance", "--", process.execPath, await resolvedMain(), "mcp"]
+      ? [claude, "mcp", "add", "--scope", "user", "seance", "--", resolvedBun(), await resolvedMain(), "mcp"]
       : [claude, "mcp", "remove", "--scope", "user", "seance"];
   const result = await exec(argv, { timeoutMs: 30_000 });
   if (result.exitCode !== 0)

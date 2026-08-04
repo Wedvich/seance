@@ -2,7 +2,49 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { cliOnPathCheck, createLink, findExisting, rankLinkDirs, removeLinks } from "./link.ts";
+import {
+  bunDriftCheck,
+  bunPathFor,
+  cliOnPathCheck,
+  createLink,
+  findExisting,
+  rankLinkDirs,
+  removeLinks,
+} from "./link.ts";
+
+describe("bunPathFor", () => {
+  test("PATH's bun wins; execPath is only the fallback for a PATH without one", () => {
+    expect(bunPathFor("/opt/homebrew/bin/bun")).toBe("/opt/homebrew/bin/bun");
+    expect(bunPathFor(null)).toBe(process.execPath);
+  });
+});
+
+describe("bunDriftCheck", () => {
+  const shim = "/opt/homebrew/bin/bun";
+  const keg = "/opt/homebrew/Cellar/bun/1.3.14/bin/bun";
+
+  test("a recorded path that's gone is a fail — the service can't start at all", () => {
+    const check = bunDriftCheck(keg, shim, false);
+    expect(check.level).toBe("fail");
+    expect(check.message).toContain("no longer exists");
+  });
+
+  test("live but stale is a warn: it still runs, until the next upgrade removes it", () => {
+    const check = bunDriftCheck(keg, shim, true);
+    expect(check.level).toBe("warn");
+    expect(check.message).toContain(shim);
+  });
+
+  test("recorded path matching PATH's bun is ok", () => {
+    expect(bunDriftCheck(shim, shim, true).level).toBe("ok");
+  });
+
+  test("what/remedy name the record being checked — the MCP entry's fix is mcp install, not install", () => {
+    const check = bunDriftCheck(keg, shim, false, "MCP entry", "seanced mcp install");
+    expect(check.message).toContain("MCP entry records bun");
+    expect(check.message).toContain("`seanced mcp install`");
+  });
+});
 
 describe("cliOnPathCheck", () => {
   const main = "/repo/daemon/src/main.ts";

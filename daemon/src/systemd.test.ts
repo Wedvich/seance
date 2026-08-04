@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { logPath } from "./paths.ts";
-import { noSystemdMessage, pinTaskCommand, unitContent, unitPath, userInstanceMissingMessage } from "./systemd.ts";
+import {
+  noSystemdMessage,
+  pinTaskCommand,
+  unitBunPath,
+  unitContent,
+  unitPath,
+  userInstanceMissingMessage,
+} from "./systemd.ts";
 
 describe("unitContent", () => {
-  test("runs the checkout via the installing bun, with captured PATH and the shared log file", () => {
+  test("runs the checkout via the bun it is given, with captured PATH and the shared log file", () => {
     const unit = unitContent("/opt/bun", "/repo/daemon/src/main.ts", "/usr/bin:/mnt/c/Windows/system32");
     expect(unit).toContain('ExecStart="/opt/bun" "/repo/daemon/src/main.ts"');
     expect(unit).toContain('Environment="PATH=/usr/bin:/mnt/c/Windows/system32"');
@@ -17,6 +24,17 @@ describe("unitContent", () => {
     const unit = unitContent("/opt/bun", "/repo/main.ts", "/path/with%h");
     expect(unit).toContain("/path/with%%h");
     expect(unit).not.toContain("PATH=/path/with%h");
+  });
+});
+
+describe("unitBunPath", () => {
+  test("round-trips unitContent, % escaping included", () => {
+    expect(unitBunPath(unitContent("/opt/bun", "/repo/main.ts", "/bin"))).toBe("/opt/bun");
+    expect(unitBunPath(unitContent("/opt/100%bun", "/repo/main.ts", "/bin"))).toBe("/opt/100%bun");
+  });
+
+  test("null when ExecStart isn't quoted the way we write it", () => {
+    expect(unitBunPath("[Service]\nExecStart=/opt/bun /repo/main.ts\n")).toBeNull();
   });
 });
 

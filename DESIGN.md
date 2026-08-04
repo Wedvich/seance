@@ -511,6 +511,26 @@ together (re-sends registry data on every poll, useless offline).
   `launchctl kickstart -k`. Rejected: `bun build --compile` single-file
   install (originally written here — ~100 MB artifact plus a build/ship
   step per machine, and every machine already runs Bun).
+- **The recorded bun is PATH's, never `process.execPath`** (`resolvedBun()` in
+  `link.ts`, used by the plist, the unit, and the MCP registration). execPath is
+  the realpath'd binary — on Homebrew a versioned keg — and `brew upgrade bun`
+  deletes it, leaving every definition that recorded it pointing at nothing.
+  macOS cannot recover from that on its own: `launchd.selfRestart()` exits rather
+  than rewriting, because launchd caches job definitions and a rewrite wouldn't
+  land until the next bootstrap, so only `seanced install` ever repoints the
+  plist. The systemd unit does get rewritten on self-restart, but from the
+  pre-update process still serving old code, so a definition change lands one
+  update later. `doctor` reports drift (recorded path gone → fail; alive but no
+  longer what PATH resolves → warn) precisely because nothing else notices.
+  Rejected: `process.execPath` (what this originally did — precise about the
+  running binary, and wrong about the next one).
+- **`install` is re-runnable against a live agent.** Repointing a loaded agent is
+  the normal reason to run it, and `launchctl bootout` returns before launchd has
+  finished the teardown — bootstrapping into that window fails with EIO (5) and
+  leaves the agent _unloaded_, a worse state than before the command. So a pass is
+  bootout → poll until the job is gone (5s cap) → bootstrap, and a failed pass
+  gets exactly one retry. Rejected: reporting the error and letting the user
+  re-run (observed behavior was a half-installed machine with no daemon at all).
 - **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
   (write config skeleton + deviceId), `install`/`uninstall` (launchd plist on
   macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
@@ -1054,7 +1074,17 @@ and receives registry pushes. Zero relay/DO changes; every channel property
 - **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp uninstall`
   shell out to `claude mcp add` / `claude mcp remove` (argv-array, per the exec
   invariant) rather than editing `~/.claude.json` — Claude Code owns that
-  schema. `doctor` reports whether the entry exists.
+  schema. What gets registered is PATH-resolved bun plus this checkout's
+  `main.ts`, the same target `link` points at, so the entry survives both a
+  `git pull` and a bun upgrade. `doctor` reports whether the entry exists.
+  Nothing re-registers on its own — no self-update path touches Claude config —
+  so a machine that predates a change to the recorded argv needs
+  `seanced mcp install` run again by hand. Which is why `install` clears the name
+  before adding it: `claude mcp add` fails with "already exists" otherwise, and
+  the machines needing a repoint are exactly the registered ones. Same
+  bootout-before-bootstrap shape as the launchd install. Rejected: telling the
+  user to run `mcp uninstall` first (an extra step per machine, for a command
+  that should be idempotent).
 
 **Spawn attribution.** A spawn from the MCP server reaches the target daemon
 as an ordinary relay spawn, and the audit tag exists precisely to separate "me

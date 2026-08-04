@@ -79,6 +79,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - Errors that cross the wire are structured codes (`SPAWN_ERROR_CODES` in `shared/src/types.ts`),
   not free-text throws.
 - Comments state rationale and constraints, not narration — match that density and style.
+- Never persist `process.execPath`. It's the realpath'd binary (on Homebrew,
+  `…/Cellar/bun/1.3.14/bin/bun`), so anything recording it — launchd plist, systemd unit, the Claude
+  MCP entry — dangles the moment a package manager retires that version. Resolve through PATH
+  (`resolvedBun()` in `daemon/src/link.ts`) or invoke bun by bare name and let exec resolve it
+  (`update.ts`). Resolving at _use_ time is always fine; the hazard is only what outlives the process.
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec only,
   `spawn` resolves repos by name against the cached scan set, both spawn paths audit through one
   formatter, prompt text is never logged. Don't let changes drift from them.

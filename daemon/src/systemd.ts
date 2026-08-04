@@ -4,6 +4,7 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
+import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { logPath } from "./paths.ts";
 import type { Check } from "./check.ts";
 import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
@@ -32,11 +33,22 @@ function unitEscape(s: string): string {
   return s.replaceAll("%", "%%");
 }
 
+function unitUnescape(s: string): string {
+  return s.replaceAll("%%", "%");
+}
+
+/** The ExecStart interpreter — what systemd will actually run. Null when the unit doesn't parse. */
+export function unitBunPath(unit: string): string | null {
+  const raw = /^ExecStart="([^"]*)"/mu.exec(unit)?.[1];
+  return raw === undefined ? null : unitUnescape(raw);
+}
+
 /**
- * Mirrors the launchd plist: run from the checkout via the installing Bun,
- * PATH captured at install time (a user unit's default PATH has no
- * tmux/claude), stdout/stderr appended to the same log file launchd
- * redirects to — journald would fork the audit trail per platform.
+ * Mirrors the launchd plist: run from the checkout via PATH's bun (never the
+ * realpath'd install path, which a runtime upgrade deletes), PATH captured at
+ * install time (a user unit's default PATH has no tmux/claude), stdout/stderr
+ * appended to the same log file launchd redirects to — journald would fork the
+ * audit trail per platform.
  */
 export function unitContent(bunPath: string, mainPath: string, pathEnv: string): string {
   return `[Unit]
@@ -120,7 +132,7 @@ export async function installService(): Promise<InstallResult> {
   const target = unitPath();
   await mkdir(dirname(target), { recursive: true });
   await mkdir(dirname(logPath()), { recursive: true });
-  await Bun.write(target, unitContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
+  await Bun.write(target, unitContent(resolvedBun(), mainPath, process.env["PATH"] ?? ""));
   const reload = await exec(["systemctl", "--user", "daemon-reload"]);
   if (reload.exitCode !== 0) {
     throw new Error(`systemctl --user daemon-reload failed: ${reload.stderr.trim()}`);
@@ -207,13 +219,15 @@ export async function restartService(): Promise<void> {
 /**
  * The self-update's restart. Rewrites the unit first so definition drift
  * (KillMode above) ships with the code that needs it, reloads, and restarts
- * without blocking — the caller is inside the process being restarted. Not
- * running under systemd? Exit clean and let the supervisor apply its policy.
+ * without blocking — the caller is inside the process being restarted. The
+ * rewrite runs from the pre-update process, still serving old code from memory,
+ * so a definition change lands one update after the code that introduced it.
+ * Not running under systemd? Exit clean and let the supervisor apply its policy.
  */
 export async function selfRestart(): Promise<void> {
   if (!systemdRunning() || !(await serviceLoaded())) process.exit(0);
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
-  await Bun.write(unitPath(), unitContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
+  await Bun.write(unitPath(), unitContent(resolvedBun(), mainPath, process.env["PATH"] ?? ""));
   const reload = await exec(["systemctl", "--user", "daemon-reload"]);
   if (reload.exitCode !== 0) throw new Error(`systemctl --user daemon-reload failed: ${reload.stderr.trim()}`);
   // Throwing matters more here than anywhere else in this file: the caller has
@@ -235,6 +249,11 @@ export async function doctorServiceChecks(): Promise<readonly Check[]> {
       message: "systemd unit not active — run `seanced install` (its preflight names what's missing)",
     });
   }
+  const unit = await Bun.file(unitPath())
+    .text()
+    .catch(() => null);
+  const drift = unit === null ? null : await recordedBunCheck(unitBunPath(unit));
+  if (drift !== null) checks.push(drift);
   const username = userInfo().username;
   if (Bun.which("loginctl") === null) {
     checks.push({

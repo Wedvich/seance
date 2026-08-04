@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Check } from "./check.ts";
-import { exec } from "./exec.ts";
+import { exec, type ExecResult } from "./exec.ts";
+import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { logPath } from "./paths.ts";
 import type { InstallResult } from "./service-types.ts";
 
@@ -17,10 +18,22 @@ function xmlEscape(s: string): string {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+function xmlUnescape(s: string): string {
+  return s.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+}
+
+/** First ProgramArguments entry — the interpreter launchd will exec. Null when the plist doesn't parse. */
+export function plistBunPath(plist: string): string | null {
+  const match = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/u.exec(plist);
+  const raw = match?.[1];
+  return raw === undefined ? null : xmlUnescape(raw);
+}
+
 /**
- * Runs the daemon from the git checkout via the installing Bun — update =
- * `git pull` + `seanced restart`. PATH is captured at install time because
- * launchd agents otherwise get /usr/bin:/bin, which has no tmux/claude.
+ * Runs the daemon from the git checkout via PATH's bun (never the realpath'd
+ * keg, which a runtime upgrade deletes) — update = `git pull` + `seanced
+ * restart`. PATH is captured at install time because launchd agents otherwise
+ * get /usr/bin:/bin, which has no tmux/claude.
  */
 export function plistContent(bunPath: string, mainPath: string, pathEnv: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -56,6 +69,32 @@ export function assertMacos(action: string): void {
   }
 }
 
+const UNLOAD_WAIT_MS = 5_000;
+
+/**
+ * `bootout` returns before launchd has finished tearing the job down, and
+ * bootstrapping into that window fails with EIO — which leaves the agent
+ * unloaded, strictly worse than never having tried. `install` is what a machine
+ * runs to repoint a *live* agent, so that window is the common path, not an edge
+ * case. So: bootout, wait for the job to actually go, then bootstrap.
+ */
+async function bootstrapPass(target: string): Promise<ExecResult> {
+  await exec(["launchctl", "bootout", `${gui()}/${LAUNCHD_LABEL}`]); // ignore failure: not loaded yet
+  const deadline = Date.now() + UNLOAD_WAIT_MS;
+  // oxlint-disable-next-line no-await-in-loop -- a poll is sequential by definition
+  while ((await serviceLoaded()) && Date.now() < deadline) await Bun.sleep(50);
+  return exec(["launchctl", "bootstrap", gui(), target]);
+}
+
+async function bootstrapFresh(target: string): Promise<void> {
+  const first = await bootstrapPass(target);
+  if (first.exitCode === 0) return;
+  // A teardown slower than the wait is the only thing a second pass can fix, and
+  // an agent left unloaded is worth one more try.
+  const retry = await bootstrapPass(target);
+  if (retry.exitCode !== 0) throw new Error(`launchctl bootstrap failed: ${retry.stderr.trim()}`);
+}
+
 /** `notes` is always empty: launchd needs no step the user has to finish by hand. */
 export async function installService(): Promise<InstallResult> {
   assertMacos("seanced install");
@@ -63,12 +102,8 @@ export async function installService(): Promise<InstallResult> {
   const target = servicePath();
   await mkdir(dirname(target), { recursive: true });
   await mkdir(dirname(logPath()), { recursive: true });
-  await Bun.write(target, plistContent(process.execPath, mainPath, process.env["PATH"] ?? ""));
-  await exec(["launchctl", "bootout", `${gui()}/${LAUNCHD_LABEL}`]); // ignore failure: not loaded yet
-  const bootstrap = await exec(["launchctl", "bootstrap", gui(), target]);
-  if (bootstrap.exitCode !== 0) {
-    throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim()}`);
-  }
+  await Bun.write(target, plistContent(resolvedBun(), mainPath, process.env["PATH"] ?? ""));
+  await bootstrapFresh(target);
   return { target, notes: [] };
 }
 
@@ -104,9 +139,14 @@ export function selfRestart(): Promise<void> {
   process.exit(0);
 }
 
-/** Doctor's macOS service section. One check — launchd needs no linger or pin task. */
+/** Doctor's macOS service section: the agent, plus whether the plist's bun still resolves. */
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
-  return (await serviceLoaded())
-    ? [{ level: "ok", message: "launchd agent loaded" }]
-    : [{ level: "warn", message: "launchd agent not loaded — run `seanced install`" }];
+  const loaded: Check = (await serviceLoaded())
+    ? { level: "ok", message: "launchd agent loaded" }
+    : { level: "warn", message: "launchd agent not loaded — run `seanced install`" };
+  const plist = await Bun.file(servicePath())
+    .text()
+    .catch(() => null);
+  const drift = plist === null ? null : await recordedBunCheck(plistBunPath(plist));
+  return drift === null ? [loaded] : [loaded, drift];
 }

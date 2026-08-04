@@ -232,6 +232,10 @@ does. `seanced mcp uninstall` removes it; `seanced doctor` reports whether it
 is registered. Treat `spawn_session` like the remote it is: leave it behind
 Claude Code's per-tool approval rather than allowlisting it.
 
+The entry records bun by its PATH name, so upgrading bun doesn't break it. It is
+per Claude config directory, though: if you run Claude Code with a non-default
+`CLAUDE_CONFIG_DIR`, run `seanced mcp install` once from a session using it.
+
 ### Updating
 
 ```sh
@@ -247,6 +251,20 @@ A machine that was asleep or offline catches up on its next reconnect. A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` shows each machine's version
 and its last update outcome. Relay and app deploys stay manual wrangler steps.
+
+Service definitions already on disk lag behind: launchd caches job definitions,
+so the plist is only rewritten by `seanced install`, and systemd's unit is
+rewritten by the update's own restart — one update cycle behind the code.
+Machines installed before the daemon recorded bun by its PATH name still name a
+specific bun build, which a runtime upgrade can delete — run this once per
+machine, and before the next `brew upgrade bun`:
+
+```sh
+bun daemon/src/main.ts mcp install    # re-record the MCP command
+bun daemon/src/main.ts install        # rewrite the plist/unit and reload it
+```
+
+`seanced doctor` flags a machine that still needs it.
 
 ### Local development
 
