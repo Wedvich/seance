@@ -164,8 +164,7 @@ describe("connection", () => {
     try {
       expect(client.getState().settling).toBe(true);
       client.start();
-      for (let waited = 0; waited < 2_000 && client.getState().settling; waited += 10) await Bun.sleep(10);
-      expect(client.getState().settling).toBe(false);
+      await pollUntil(() => !client.getState().settling, "the settle window to elapse");
       expect(client.getState().status).not.toBe("open");
     } finally {
       client.stop();

@@ -136,30 +136,13 @@ async function configFile(): Promise<string> {
  * A fresh connection is the only unambiguous evidence a daemon restarted here:
  * the register queue still holds the frames the *first* daemon sent, and these
  * tests reuse one config name across the failure and the recovery, so matching
- * on a name would pass on a stale frame.
+ * on a name would pass on a stale frame. The client's own flag is a second wait,
+ * because `connectionCount()` is the relay's view and rises when it accepts the
+ * socket, which can precede the client's open handler by a tick.
  */
-async function waitForConnections(testRelay: TestRelay, atLeast: number): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (testRelay.connectionCount() >= atLeast) return;
-    await Bun.sleep(10);
-  }
-  throw new Error(`only ${testRelay.connectionCount()} connections, wanted ${atLeast}`);
-}
-
-/**
- * `connectionCount()` is the relay's view and rises when it accepts the socket,
- * which can precede the client's own open handler by a tick. Asserting
- * `client.connected` off the back of it is therefore a race — poll the flag the
- * assertion is actually about.
- */
-async function waitForConnected(handle: SupervisorHandle): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if ((await handle.current()).client.connected) return;
-    await Bun.sleep(10);
-  }
-  throw new Error("daemon did not report a connected client");
+async function awaitRestart(testRelay: TestRelay, connectionsBefore: number): Promise<void> {
+  await pollUntil(() => testRelay.connectionCount() > connectionsBefore, "a new relay connection");
+  await pollUntil(async () => (await supervisor!.current()).client.connected, "a connected client");
 }
 
 describe("config reload failure paths", () => {
@@ -187,8 +170,7 @@ describe("config reload failure paths", () => {
     failing = false;
     await writeConfig(path, "Healthy", testRelay.url);
     await reload();
-    await waitForConnections(testRelay, connectionsBefore + 1);
-    await waitForConnected(supervisor!);
+    await awaitRestart(testRelay, connectionsBefore);
   });
 
   test("a rolled-back swap does not log a reload", async () => {
@@ -213,8 +195,7 @@ describe("config reload failure paths", () => {
     // that was never adopted.
     expect(lines.some((line) => line.includes("reloaded as"))).toBe(false);
     // The rollback really did restart on the old config, rather than leaving nothing.
-    await waitForConnections(testRelay, connectionsBefore + 1);
-    await waitForConnected(supervisor!);
+    await awaitRestart(testRelay, connectionsBefore);
   });
 
   test("a reload that throws leaves the supervisor able to reload again", async () => {
