@@ -16,9 +16,23 @@ work.
 | `bun run lint`         | oxlint (`lint:fix` to apply)                       |
 | `bun run format:check` | oxfmt (`format` to apply)                          |
 
+The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
+lists the commands).
+
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
 The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
 that boot workerd need the headroom.
+
+## Deploying
+
+`bun run deploy` in `relay/` and in `pwa/`; the pwa build fails without `VITE_RELAY_URL`
+by design (it pins the CSP to your relay — see the README's setup walkthrough).
+
+Wrangler is a per-workspace devDependency, not on PATH and not hoisted to the root —
+bare `wrangler` and `bun run wrangler` from the repo root both fail; run
+`bun run wrangler <cmd>` from inside `relay/` or `pwa/`. Auth is global
+(`~/Library/Preferences/.wrangler` on macOS), so logging in from either workspace
+answers for both; `bun run wrangler whoami` says where you stand.
 
 ## How the tests are layered
 
@@ -37,9 +51,10 @@ that boot workerd need the headroom.
 
 No Cloudflare account and no real `claude` are needed anywhere; `tmux` and `git` are.
 
-CI runs lint, format and typecheck once, then the full suite on both `ubuntu-latest`
-and `macos-latest` — ubuntu standing in for WSL's Linux userland. The WSL interop
-tests self-skip on both legs and stay local-only.
+CI runs lint, format and typecheck once, alongside (not gating — the jobs are
+independent) the full suite on both `ubuntu-latest` and `macos-latest` — ubuntu
+standing in for WSL's Linux userland. The WSL interop tests self-skip on both legs
+and stay local-only.
 
 `CLAUDE.md` carries the conventions and the portability scars worth knowing before
 changing test infrastructure; `DESIGN.md` is the decision record for everything else.

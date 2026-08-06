@@ -15,30 +15,38 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
   plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
   of record, so a frame change touches both.
+- **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob),
+  how import keeps it off argv and shell history, and what the TPM path does and does not protect.
+  Constraints on the psk-store/import code live here, nowhere else in prose.
+- **docs/platform-notes.md** — Linux/WSL service specifics: linger, the Windows logon pin task, and
+  the service-definition lag that update/install code must respect, plus the one-time catch-up for
+  older installs.
 
-## Commands
+- **docs/development.md** — commands, local dev (dev server, `.dev.vars`), deploy mechanics
+  (wrangler is per-workspace, not hoisted), and how the tests are layered. Read it before running
+  the suite, setting up local dev, or deploying; don't restate it here — a change to commands,
+  deploys or test layout updates that file.
 
-- `bun run test` — everything via `scripts/test.ts`, which shards into concurrent `bun test`
-  processes and raises bun's 5s hook timeout (the workerd-booting suites need it); narrow to one
-  shard with `bun run test daemon/test/spawn.test.ts`
-- `bun run typecheck` / `bun run lint` / `bun run lint:fix` / `bun run format:check` (root)
-- `bun run dev` in `relay/` and `pwa/` for local dev; needs a gitignored `relay/.dev.vars` with
-  `BEARER_TOKEN` (see `.dev.vars.example`)
-- `bun run deploy` in `relay/` and `pwa/`; the pwa build fails without `VITE_RELAY_URL` by design
-- Before any deploy or other Cloudflare operation (both `relay/` and `pwa/` deploy via wrangler),
-  confirm auth with `bun run wrangler whoami` from inside `relay/` or `pwa/`. Wrangler is a
-  per-workspace devDependency, not on PATH and not hoisted to the root — bare `wrangler` and
-  `bun run wrangler` from the repo root both fail. Auth is global (`~/Library/Preferences/.wrangler`
-  on macOS), so either workspace answers for both. If the output doesn't name an authenticated
-  account, stop and ask the user to run `wrangler login` rather than discovering it mid-deploy.
-- Daemon CLI: `bun daemon/src/main.ts <command>` (`help` lists them)
+Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
+updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
+
+## Deploys
+
+- Before any deploy or other Cloudflare operation, confirm auth with `bun run wrangler whoami` from
+  inside `relay/` or `pwa/` (mechanics in docs/development.md). If the output doesn't name an
+  authenticated account, stop and ask the user to run `wrangler login` rather than discovering it
+  mid-deploy.
 
 ## Testing
 
+Layout, commands and env vars are in docs/development.md; these are the rules that keep the suite
+green:
+
+- Run the suite with `bun run test` (`scripts/test.ts`), never bare `bun test` — the last bullet
+  below is why.
 - Runner is `bun:test`, not Vitest — deliberate (DESIGN.md), don't introduce Vitest idioms.
-- Daemon integration tests need real `tmux` and `git` on PATH. They isolate via a private tmux
-  server (`SEANCE_TMUX_SOCKET`) and a stub claude binary (`SEANCE_CLAUDE_BIN`) — set in the tests,
-  useful to know when debugging.
+- The daemon suites' isolation env vars (`SEANCE_TMUX_SOCKET`, `SEANCE_CLAUDE_BIN`) are set by the
+  tests themselves — useful to know when debugging.
 - A fixed sleep before a _positive_ assertion is a latent flake: it has to outlast the slowest
   machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
   in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
@@ -46,12 +54,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
 - `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.
-- Relay and PWA suites boot the real Worker + Durable Object under workerd via Miniflare, reading
-  bindings from `wrangler.jsonc` — config drift there fails tests, which is intended.
-- `e2e/` wires all three real components (daemon, workerd relay, app RelayClient + Store) and runs
-  the user flows end to end. Each pairwise suite keeps its double on purpose — the daemon's fake
-  relay is controllable in ways the real DO forbids — and the e2e suite is what catches
-  fake-vs-real drift.
+- Each pairwise suite keeps its double on purpose — the daemon's fake relay is controllable in ways
+  the real DO forbids — and the e2e suite is what catches fake-vs-real drift. Don't "upgrade" a
+  double to the real component.
 - The full suite is green on macOS and Linux. Two hard-won portability rules: tmux `-F` format
   strings must use printable separators (tmux 3.4 mangles tabs to `_`; see `sessions.ts`/`tmux.ts`),
   and sockets Bun dials into workerd need `perMessageDeflate: false` (frames die with close code
@@ -84,6 +89,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   MCP entry — dangles the moment a package manager retires that version. Resolve through PATH
   (`resolvedBun()` in `daemon/src/link.ts`) or invoke bun by bare name and let exec resolve it
   (`update.ts`). Resolving at _use_ time is always fine; the hazard is only what outlives the process.
-- DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec only,
-  `spawn` resolves repos by name against the cached scan set, both spawn paths audit through one
-  formatter, prompt text is never logged. Don't let changes drift from them.
+- DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
+  shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
+  resolves repos by name against the cached scan set, both spawn paths audit through one formatter,
+  prompt text is never logged. Don't let changes drift from them.

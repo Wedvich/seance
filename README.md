@@ -2,7 +2,7 @@
 
 Spawn new Claude Code sessions on any of your machines, from your phone.
 
-[Setup](#setup) · [Usage](#usage) · [Docs](#docs) · [Design](DESIGN.md)
+[Setup](#setup) · [Usage](#usage) · [Docs](#docs)
 
 <p align="center">
   <img src="docs/images/spawn-form.png" width="320"
@@ -17,8 +17,8 @@ Spawn new Claude Code sessions on any of your machines, from your phone.
   default branch first, so a spawn never disturbs what you're in the middle of.
 - **The relay is blind.** It routes ciphertext; the pre-shared key never leaves your
   own devices.
-- **Free to run.** One Worker and one SQLite-backed Durable Object — inside
-  Cloudflare's free tier.
+- **Free to run.** A Worker and a SQLite-backed Durable Object for the relay, a
+  static-assets Worker for the app — all inside Cloudflare's free tier.
 - **Daemons update themselves.** `git pull` and restart on one machine; the rest
   fetch, fast-forward, and restart on their own.
 
@@ -35,10 +35,12 @@ The relay is a router, not a participant: every payload crossing it is sealed wi
 pre-shared key you mint yourself, so Cloudflare stores and forwards ciphertext it
 cannot read. The bearer token only gates access to the relay — the PSK is the actual
 trust boundary, and it belongs in a platform key store rather than a file
-([docs/psk.md](docs/psk.md)). On the machine, spawns exec argv arrays and never a
-shell, repos resolve by name against a cached scan set rather than by path, and
-prompt text is never written to the log. [DESIGN.md](DESIGN.md) carries the full
-threat model, including what this deliberately does not defend against.
+([docs/psk.md](docs/psk.md)). On the machine, spawns exec argv arrays — the one
+shell string is the tmux command line, where every wire-supplied value is
+shell-quoted and the prompt travels by temp file, never argv — repos resolve by
+name against a cached scan set rather than by path, and
+prompt text is never written to the log. DESIGN.md carries the full threat model,
+including what this deliberately does not defend against.
 
 ## How it fits together
 
@@ -282,8 +284,6 @@ that still needs it.
 
 ## Docs
 
-- [DESIGN.md](DESIGN.md) — architecture, wire protocol, threat model, and every
-  rejected alternative with its rationale.
 - [docs/psk.md](docs/psk.md) — where the pre-shared key lives on each platform, how to
   import it without it touching argv or shell history, and what the TPM path does and
   does not protect.
