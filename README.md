@@ -1,7 +1,26 @@
 # Séance
 
-A tiny PWA that contacts your machines through a blind relay and asks a daemon (`seanced`)
-to spawn a fresh remote controlled Claude Code session in `tmux`.
+Spawn new Claude Code sessions on any of your machines, from your phone.
+
+[Setup](#setup) · [Usage](#usage) · [Docs](#docs) · [Design](DESIGN.md)
+
+<p align="center">
+  <img src="docs/images/spawn-form.png" width="320"
+       alt="The Séance spawn form on a phone: a prompt, pickers for machine, repository, model and effort, a fresh-worktree toggle, and a Start button">
+</p>
+
+- **Starts sessions — doesn't just continue them.** Claude Code Remote Control
+  resumes what already exists; Séance creates.
+- **Every machine you own, with no pairing step.** macOS, Linux, WSL: a daemon
+  holding the right token and key simply appears in the app.
+- **A fresh worktree per session, by default.** It fetches and fast-forwards the
+  default branch first, so a spawn never disturbs what you're in the middle of.
+- **The relay is blind.** It routes ciphertext; the pre-shared key never leaves your
+  own devices.
+- **Free to run.** One Worker and one SQLite-backed Durable Object — inside
+  Cloudflare's free tier.
+- **Daemons update themselves.** `git pull` and restart on one machine; the rest
+  fetch, fast-forward, and restart on their own.
 
 ## Why
 
@@ -10,60 +29,44 @@ can't _start_ new ones on a machine remotely. Keeping a persistent "god"
 session alive just to run a spawn script works, but it's fragile and
 awkward. Séance replaces it with a per-machine daemon that's always ready.
 
-## Components
+## Security
+
+The relay is a router, not a participant: every payload crossing it is sealed with a
+pre-shared key you mint yourself, so Cloudflare stores and forwards ciphertext it
+cannot read. The bearer token only gates access to the relay — the PSK is the actual
+trust boundary, and it belongs in a platform key store rather than a file
+([docs/psk.md](docs/psk.md)). On the machine, spawns exec argv arrays and never a
+shell, repos resolve by name against a cached scan set rather than by path, and
+prompt text is never written to the log. [DESIGN.md](DESIGN.md) carries the full
+threat model, including what this deliberately does not defend against.
+
+## How it fits together
 
 | Component | Where it runs                                                            | What it does                                                                                                                                    |
 | --------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery)                                                    |
 | `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session; `seanced mcp` serves the same reach to a local Claude Code |
-| `pwa/`    | Cloudflare Worker (static assets)                                        | Machine list, repo picker, spawn form, spawn verdict, read-only session list                                                                    |
+| `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions                                                    |
 
 See [DESIGN.md](DESIGN.md) for the full architecture and every decision with
 its rationale.
 
-## Status
-
-Daemon (`seanced`) implemented for macOS, Linux (systemd), and WSL: relay
-client with encrypted op dispatch, repo scanning, tmux spawning, service
-install (launchd / systemd user unit, plus a Windows logon task on WSL), a
-platform PSK store (macOS login keychain / WSL DPAPI blob / TPM-sealed blob
-on Linux with a TPM 2.0; TPM-less Linux keeps the PSK in `config.json`), and a CLI
-(`init` / `install` / `doctor` / `status` / `scan` / `sessions` / `spawn`).
-
-Relay implemented: Worker + hibernating Durable Object with path-based roles,
-bearer auth, the machine registry, envelope routing, and `undeliverable`
-notices.
-
-PWA implemented: spawn screen, bottom sheets, verdicts, first-run setup and
-settings, offline-capable shell.
-
-Tests: `bun run test` (the script raises bun's 5s hook timeout — the suites
-that boot workerd need the headroom). The daemon suite uses a throwaway in-process relay, a
-private tmux server, and a stub claude; the relay and PWA suites boot the real
-Worker and Durable Object under workerd via Miniflare — the PWA's relay client
-is exercised against the shipped relay rather than a double. The `e2e/` suite
-then wires all three real components together — the daemon from `daemon/src`,
-the Worker + Durable Object under workerd, and the app's relay client and
-store — and runs the user flows end to end: machine discovery, spawns (and
-their failures), dropped-reply reconciliation, rescan, and daemon restart.
-It needs `tmux` and `git` on PATH, but no Cloudflare account and no real
-`claude`.
-
-## Setting up end to end
+## Setup
 
 Everything runs from one dev machine — which can also be the first daemon
 machine. There is no chicken-and-egg: the two secrets are minted by you before
 anything exists, and the only other shared value (the relay URL) is _produced_
 by step 2 and consumed by steps 3 and 4.
 
-Prerequisites: [Bun](https://bun.sh), a Cloudflare account, and this repo
-cloned with `bun install` run at the root. Each daemon machine (macOS, Linux,
-or WSL) additionally needs `tmux`, `git`, and `claude` on PATH. Linux machines
+Prerequisites: [Bun](https://bun.sh), a Cloudflare account, and this repo cloned with
+`bun install` run at the root. The relay is one Worker plus one SQLite-backed Durable
+Object, so it fits the free tier — no paid plan needed. Each daemon machine (macOS,
+Linux, or WSL) additionally needs `tmux`, `git`, and `claude` on PATH. Linux machines
 need systemd for `seanced install` — a standard Debian/Ubuntu box, VM, or LXC
-container (unprivileged is fine) qualifies; without systemd, run `seanced`
-under your own supervisor. A WSL machine also needs `systemd=true` under
-`[boot]` in `/etc/wsl.conf` — flipping it takes a `wsl.exe --shutdown`, which
-kills every session on the box, so do it before anything else.
+container (unprivileged is fine) qualifies; without systemd, run `seanced` under your
+own supervisor. **On WSL, enable systemd before anything else**: `systemd=true` under
+`[boot]` in `/etc/wsl.conf`, which takes a `wsl.exe --shutdown` to apply and kills
+every session on the box ([docs/platform-notes.md](docs/platform-notes.md)).
 
 ### 1. Mint the shared secrets
 
@@ -114,8 +117,14 @@ applies again.
 ### 4. Install seanced on each machine
 
 Distribution is the git checkout itself: the service runs
-`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart. The
-CLI runs the same way, and to spare the typing:
+`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart.
+
+```sh
+git clone <this repo> && cd seance && bun install
+bun daemon/src/main.ts init      # writes the ~/.config/seance/config.json skeleton
+```
+
+The CLI runs the same way, and to spare the typing:
 
 ```sh
 bun daemon/src/main.ts link      # symlinks `seanced` into a dir on your PATH
@@ -129,19 +138,16 @@ removes it, as does `uninstall`. A shell alias (`alias seanced='bun
 the name doesn't resolve — or resolves into a different checkout, which
 `link` repoints — though they can't see an alias.
 
-```sh
-git clone <this repo> && cd seance && bun install
-bun daemon/src/main.ts init      # writes the ~/.config/seance/config.json skeleton
-```
-
 Edit `~/.config/seance/config.json`:
 
 - `relayUrl` — `wss://seance-relay.<subdomain>.workers.dev/daemon` (must end
   in `/daemon`)
 - `bearerToken` — from step 1
-- `psk` — from step 1, or leave empty and run `seanced psk-import` to keep it
+- `psk` — from step 1, or leave it empty and run `seanced psk-import` to keep the key
   in the platform store instead (macOS login keychain / WSL DPAPI blob / Linux
-  TPM-sealed blob)
+  TPM-sealed blob), which is where it belongs — see [docs/psk.md](docs/psk.md). Linux
+  without a usable TPM has no such store; there the PSK stays in `config.json`, which
+  `init` creates 0600.
 - `repoRoots` — directories to scan for repos
 
 A running daemon watches this file and reloads within a second of a save, so
@@ -157,58 +163,13 @@ bun daemon/src/main.ts install   # macOS: launchd agent (RunAtLoad + KeepAlive)
                                  # Linux/WSL: systemd user unit + linger (+ a Windows logon task on WSL)
 ```
 
-On a fresh headless Linux box the systemd user instance may not exist until
-linger is enabled — if `install`'s preflight says so, run
-`sudo loginctl enable-linger <user>` once and re-run it.
-
-On WSL, `install` also registers a `SeanceWslPin` scheduled task via
-`schtasks.exe` — it starts the distro at Windows logon and pins the VM so the
-idle timeout never takes the daemon offline. If registration is denied,
-`install` prints the exact command to run from a Windows shell instead. The
-machine is offline while no Windows user is logged in — the same class of
-limitation as a launchd agent, which is also per-login.
+Both platforms have sharp edges worth knowing about — linger on a headless Linux
+box, the WSL logon pin task, and what happens while no Windows user is logged in —
+collected in [docs/platform-notes.md](docs/platform-notes.md).
 
 `doctor` prints a PSK fingerprint — compare it across machines to confirm they
 all hold the same key. A daemon with the right token and PSK simply appears in
 the app; there is no pairing step.
-
-#### Storing the PSK
-
-The PSK belongs in the platform store, not `config.json`: the login keychain
-on macOS, a DPAPI (CurrentUser) blob under `~/.local/state/seance/` on WSL,
-and on Linux with a TPM 2.0 a `systemd-creds` blob sealed to the TPM at
-`~/.local/state/seance/psk.cred` — in every case a filesystem sweep, backup,
-or stolen disk gets ciphertext. (Linux without a usable TPM has no such
-store — there the PSK stays in `config.json`, which `init` creates 0600, and
-`psk-import` says so and stores nothing.) Run `seanced psk-import` bare and
-it prompts on the terminal (no echo), or pipe it straight from 1Password —
-the key never lands in argv or shell history:
-
-```sh
-op item get Séance --fields password --reveal --account my | seanced psk-import
-```
-
-Then clear `psk` in `config.json`; the daemon reloads and logs the fingerprint
-it came up with, so you can see which store answered.
-
-The Linux path needs `/dev/tpmrm0` and `systemd-creds` on PATH (systemd
-≥ 250 — Debian 12+/Ubuntu 24.04+). The blob is sealed to the TPM alone, with
-no PCR binding, so firmware updates don't invalidate it — but it is
-machine-bound by design: restore a container backup or copy the blob to other
-hardware and it will not decrypt. The daemon fails closed with "no psk" and
-`doctor` explains why; re-run `psk-import` on the new machine. This protects
-the key at rest (container backups, ZFS snapshots, stolen disks) — not
-against root on the host or other processes running as your user.
-
-In a Proxmox LXC container, pass the TPM through once on the host:
-
-```sh
-pct set <ctid> --dev0 path=/dev/tpmrm0,uid=<uid>,gid=<gid>,mode=0660
-```
-
-In an unprivileged container, `uid=`/`gid=` are the container-side ids the
-device maps to — set them to the daemon's user so it can open the device; the
-daemon never needs root.
 
 ### 5. Set up the phone
 
@@ -225,18 +186,80 @@ On any machine that runs `seanced`:
 seanced mcp install    # registers the MCP server with Claude Code (user scope)
 ```
 
-Claude Code sessions on that machine can then list machines, query running
-sessions, and spawn sessions on other machines through the relay — the server
-reads the daemon's own config and speaks to the relay exactly like the phone
-does. `seanced mcp uninstall` removes it; `seanced doctor` reports whether it
-is registered. Treat `spawn_session` like the remote it is: leave it behind
-Claude Code's per-tool approval rather than allowlisting it.
+Claude Code sessions on that machine can then reach every other machine through the
+relay — see [From another Claude Code session](#from-another-claude-code-session).
+`seanced mcp uninstall` removes it; `seanced doctor` reports whether it is
+registered.
 
 The entry records bun by its PATH name, so upgrading bun doesn't break it. It is
 per Claude config directory, though: if you run Claude Code with a non-default
 `CLAUDE_CONFIG_DIR`, run `seanced mcp install` once from a session using it.
 
-### Updating
+## Usage
+
+### From the phone
+
+Type what the session should do — or leave the prompt blank to start an empty one —
+then pick where it runs. Four tiles open pickers: **machine**, **repository**,
+**model** (Fable / Opus / Sonnet), and **effort** (Low through Max). **Fresh
+worktree** is on by default; switching it off runs the session in the repo as it
+stands. Then start it.
+
+The verdict names the tmux window it created, and from there you continue the session
+in the Claude app like any other. Two things keep you from spawning duplicates: the
+header counts sessions across every machine (`2 online · 1 asleep · 3 sessions`), and
+the footer counts what is already running on the machine you picked. The repo list
+comes from that daemon's last scan — **↻ Rescan repos** in the repository picker
+refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
+
+There is no title field: the daemon names the tmux window after the prompt.
+
+<p align="center">
+  <img src="docs/images/machine-sheet.png" width="260"
+       alt="The machine picker: two machines online with their repo counts, one offline with when it was last seen">
+  <img src="docs/images/verdict.png" width="260"
+       alt="The success verdict: it's running on studio, naming the tmux window it created">
+</p>
+
+### From the machine
+
+```sh
+seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
+#   note: local main diverged from origin — worktree bases on local HEAD
+#   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
+
+seanced spawn seance --here   # run in the checkout as it stands, no worktree
+seanced sessions              # running claude windows: window, repo, path
+seanced status                # this machine: service, relay, repo count, running vs on-disk sha
+seanced doctor                # preflight config, binaries, roots, relay, service
+seanced help                  # every command
+```
+
+`<repo>` is a _name_, matched exactly against the cached scan set and never joined as
+a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
+`parent/base` when two collide). Bare words after it become the prompt, which makes
+`-p` optional: `seanced spawn seance fix the flaky test` works.
+
+Worktree mode, the default, fetches the repo's default branch, fast-forwards the main
+checkout when it is clean and on that branch, and puts the session in
+`.claude/worktrees/<slug>` on a `worktree-<slug>` branch. `--here` skips all of that
+and runs in the checkout you already have.
+
+`status` reports the machine you run it on — including the sha the daemon is running
+versus the one on disk, which is how you spot a `git pull` that still needs a
+`restart`. The cross-machine view is the app, or `list_machines` over MCP.
+
+### From another Claude Code session
+
+With `seanced mcp install` done (step 6), a local Claude Code can list machines,
+query running sessions, and spawn sessions on other machines through the relay:
+`list_machines`, `get_sessions`, `spawn_session`. The server reads the daemon's own
+config and speaks to the relay exactly like the phone does.
+
+Treat `spawn_session` like the remote it is: leave it behind Claude Code's per-tool
+approval rather than allowlisting it.
+
+## Updating
 
 ```sh
 git pull && bun daemon/src/main.ts restart    # daemon, on one machine
@@ -249,25 +272,30 @@ announces it over the relay, and every other machine fetches, fast-forwards
 its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
 A machine that was asleep or offline catches up on its next reconnect. A
 checkout that is dirty, on another branch, or has local commits is skipped —
-never forced — and reports why; `seanced status` shows each machine's version
+never forced — and reports why; `seanced status` on that machine shows its version
 and its last update outcome. Relay and app deploys stay manual wrangler steps.
 
-Service definitions already on disk lag behind: launchd caches job definitions,
-so the plist is only rewritten by `seanced install`, and systemd's unit is
-rewritten by the update's own restart — one update cycle behind the code.
-Machines installed before the daemon recorded bun by its PATH name still name a
-specific bun build, which a runtime upgrade can delete — run this once per
-machine, and before the next `brew upgrade bun`:
+Service definitions already on disk lag behind the code that writes them, and
+machines installed before certain fixes need a one-time catch-up — both in
+[docs/platform-notes.md](docs/platform-notes.md). `seanced doctor` flags a machine
+that still needs it.
 
-```sh
-bun daemon/src/main.ts mcp install    # re-record the MCP command
-bun daemon/src/main.ts install        # rewrite the plist/unit and reload it
-```
+## Docs
 
-`seanced doctor` flags a machine that still needs it.
+- [DESIGN.md](DESIGN.md) — architecture, wire protocol, threat model, and every
+  rejected alternative with its rationale.
+- [docs/psk.md](docs/psk.md) — where the pre-shared key lives on each platform, how to
+  import it without it touching argv or shell history, and what the TPM path does and
+  does not protect.
+- [docs/platform-notes.md](docs/platform-notes.md) — WSL and Linux service specifics,
+  plus the one-time catch-up for older installs.
+- [docs/development.md](docs/development.md) — running the relay and app locally, and
+  the test suite.
 
-### Local development
+This is a personal project shared publicly rather than one looking for contributors:
+issues and observations are welcome, but the roadmap is whatever I happen to need
+next.
 
-Put `BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see
-`.dev.vars.example`) and use `bun run dev` in `relay/` and `pwa/` — the app
-defaults to `ws://127.0.0.1:8787/app` outside production builds.
+## License
+
+[MIT](LICENSE)

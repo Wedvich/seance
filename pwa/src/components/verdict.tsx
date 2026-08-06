@@ -88,7 +88,7 @@ function describe(verdict: Verdict, machineName: string): Content {
     glyph: "?",
     glyphClass: "verdict-glyph verdict-glyph-muted",
     headline: "The connection dropped.",
-    body: `Séance lost the reply while summoning. ${running}`,
+    body: `Séance lost the reply while spawning. ${running}`,
     detail: null,
     primary: { label: "Start another", onClick: "another" },
     showBack: true,
