@@ -308,7 +308,12 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         repo: z.string().describe("Repo name from that machine's repo list"),
         prompt: z.string().optional().describe("The task for the spawned session"),
-        title: z.string().optional().describe("tmux window title (defaults to a slug of the prompt)"),
+        title: z
+          .string()
+          .optional()
+          .describe(
+            "Name for the spawned Claude session — also names the window the backend runs it in, and the worktree branched for it. Defaults to a slug of the prompt.",
+          ),
         mode: z.enum(["worktree", "here"]).default("worktree"),
         model: z.string().optional().describe('Model for the session, e.g. "opus"'),
         effort: z.string().optional().describe('Reasoning effort, e.g. "medium"'),
