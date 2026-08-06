@@ -2,7 +2,7 @@
   "name": "seance",
   "version": "0.0.0",
   "private": true,
-  "description": "Spawn remote-controlled Claude Code sessions on your machines through a blind relay",
+  "description": "Spawn new Claude Code sessions on any of your machines, from your phone",
   "license": "MIT",
   "workspaces": [
     "daemon",
