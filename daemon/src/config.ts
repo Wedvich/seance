@@ -82,9 +82,10 @@ export interface ResolvedPsk {
  * `stores` exists so tests can point at names/paths that cannot exist.
  *
  * Every store is *read* regardless of `available()`: the TPM store's read gate
- * is deliberately weaker than its availability probe (DESIGN.md's open item on
- * `has-tpm2` under LXC), so a box where sealing works but the probe says no
- * must still resolve its key.
+ * is deliberately weaker than its availability probe (`has-tpm2` reports
+ * partial under LXC even with a working seal path — verified, see DESIGN.md),
+ * so a box where unsealing works but the probe says no must still resolve its
+ * key.
  */
 export async function loadPsk(config: Config, stores: readonly PskStore[] = pskStores()): Promise<ResolvedPsk | null> {
   if (config.psk !== "") return { psk: config.psk, source: "config" };

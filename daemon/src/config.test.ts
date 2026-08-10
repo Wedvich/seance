@@ -16,7 +16,7 @@ import {
 import { importDpapiPskValue } from "./dpapi.ts";
 import { importTpmPskValue, tpmAvailable } from "./tpmcreds.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
-import { dpapiStore, keychainStore, tpmStore, type PskStore } from "./psk-store.ts";
+import { credentialStore, dpapiStore, keychainStore, tpmStore, type PskStore } from "./psk-store.ts";
 import { loadOrInitState, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
 
@@ -111,7 +111,8 @@ describe("psk resolution", () => {
   const ABSENT_DPAPI = "/nonexistent/seance-tests/psk.dpapi";
   const ABSENT_TPM = "/nonexistent/seance-tests/psk.cred";
   /** The real store set, every location swapped for one that cannot hold a key. */
-  const absentStores = (overrides: { dpapi?: string; tpm?: string } = {}): readonly PskStore[] => [
+  const absentStores = (overrides: { credential?: string; dpapi?: string; tpm?: string } = {}): readonly PskStore[] => [
+    credentialStore(overrides.credential ?? null),
     keychainStore(ABSENT_KEYCHAIN),
     dpapiStore(overrides.dpapi ?? ABSENT_DPAPI),
     tpmStore(overrides.tpm ?? ABSENT_TPM),
@@ -129,6 +130,16 @@ describe("psk resolution", () => {
 
   test("an empty field with nothing in any store resolves to null", async () => {
     expect(await loadPsk({ ...base, psk: "" }, absentStores())).toBeNull();
+  });
+
+  test("a service-manager credential wins over every platform store", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "seance-psk");
+    await writeFile(path, `${VALID.psk}\n`);
+    expect(await loadPsk({ ...base, psk: "" }, absentStores({ credential: path }))).toEqual({
+      psk: VALID.psk,
+      source: "credential",
+    });
   });
 
   test.skipIf(!isWsl())(

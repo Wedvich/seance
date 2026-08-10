@@ -12,6 +12,50 @@ enabled. If `seanced install`'s preflight says so, run it once and re-run `insta
 sudo loginctl enable-linger <user>
 ```
 
+### System unit with a delivered credential (systemd ≥ 256)
+
+Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
+a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncrypted=`
+— why in docs/psk.md). `seanced install` only writes user units today, so this is a
+hand-managed bridge until an `install --system` exists:
+
+1. Uninstall any user unit first (`seanced uninstall`) — the self-update's restart
+   only knows user scope, and a loaded user unit would be the one it rewrites and
+   restarts.
+2. Write `/etc/systemd/system/seanced.service`, mirroring the generated user unit
+   (run `seanced install` on any box and copy, or start from this):
+
+   ```ini
+   [Unit]
+   Description=Seance daemon (seanced)
+
+   [Service]
+   User=<user>
+   ExecStart="<path to bun>" "<checkout>/daemon/src/main.ts"
+   LoadCredentialEncrypted=seance-psk:/home/<user>/.local/state/seance/psk.cred
+   Restart=always
+   RestartSec=5
+   KillMode=process
+   Environment="PATH=<the user's PATH — a unit's default has no tmux/claude>"
+   StandardOutput=append:/home/<user>/.local/state/seance/seanced.log
+   StandardError=append:/home/<user>/.local/state/seance/seanced.log
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+3. `sudo systemctl daemon-reload && sudo systemctl enable --now seanced`.
+
+`Restart=always` where the generated unit says `on-failure` is load-bearing, not
+taste: after a self-update the daemon looks for its _user_ unit, finds none, and exits
+cleanly expecting its supervisor's policy — under `on-failure` a clean exit stays
+down, and the first auto-update would take the machine offline for good. `always`
+restarts it into the new code.
+
+Two things the user-unit flow does that this bridge doesn't: the unit definition never
+self-rewrites (the "definitions lag the code" catch-up below becomes a manual edit
+here), and linger is irrelevant — system units outlive sessions by nature.
+
 ## WSL
 
 `systemd=true` under `[boot]` in `/etc/wsl.conf` is a prerequisite, not a tweak:

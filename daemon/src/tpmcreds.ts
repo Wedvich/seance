@@ -10,8 +10,12 @@ export function tpmPskPath(): string {
   return join(stateDir(), "psk.cred");
 }
 
-/** Name embedded in the credential at encrypt time; decrypt must present the same one. */
-const CRED_NAME = "seance-psk";
+/**
+ * Name embedded in the credential at encrypt time; decrypt must present the
+ * same one, and a unit loading the blob must use it as the credential id
+ * (credential.ts reads $CREDENTIALS_DIRECTORY under this name).
+ */
+export const CRED_NAME = "seance-psk";
 
 // No PCR binding (--tpm2-pcrs=): a PCR-bound blob dies on the next firmware
 // update, and the threat model here is at-rest exfiltration, not a tampered
@@ -33,8 +37,12 @@ let cached: Promise<boolean> | null = null;
  * True only on plain Linux with a usable TPM 2.0: /dev/tpmrm0 present,
  * systemd-creds on PATH, and `has-tpm2` reporting full support. Memoized —
  * hardware does not change under a running process. `has-tpm2` exits non-zero
- * on partial support; if an LXC guest masks /sys firmware info this probe may
- * need loosening (unverified on hardware, see DESIGN.md).
+ * on partial support, which an LXC guest reports even with a working seal path
+ * (masked /sys firmware info — verified 2026-08-10, see DESIGN.md). The gate
+ * stays strict anyway: it guards *import*, and systemd >= 256 refuses
+ * unprivileged seal/unseal regardless, so the container path is a system unit
+ * delivering the key via LoadCredentialEncrypted= (credential.ts) — `loadPsk`
+ * reads the blob without consulting this probe.
  */
 export function tpmAvailable(): Promise<boolean> {
   cached ??= probeTpm();
