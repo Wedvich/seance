@@ -82,9 +82,10 @@ export interface ResolvedPsk {
  * `stores` exists so tests can point at names/paths that cannot exist.
  *
  * Every store is *read* regardless of `available()`: the TPM store's read gate
- * is deliberately weaker than its availability probe (DESIGN.md's open item on
- * `has-tpm2` under LXC), so a box where sealing works but the probe says no
- * must still resolve its key.
+ * is deliberately weaker than its availability probe (`has-tpm2` reports
+ * partial under LXC even with a working seal path — verified, see DESIGN.md),
+ * so a box where unsealing works but the probe says no must still resolve its
+ * key.
  */
 export async function loadPsk(config: Config, stores: readonly PskStore[] = pskStores()): Promise<ResolvedPsk | null> {
   if (config.psk !== "") return { psk: config.psk, source: "config" };
@@ -105,12 +106,23 @@ export async function pskFingerprint(psk: string): Promise<string> {
   return fingerprint(fromBase64(psk));
 }
 
+export interface RunnableOptions {
+  /**
+   * Set where a service manager will hand the daemon its key at start
+   * (`LoadCredentialEncrypted=`). Resolving none is then the expected result
+   * everywhere except inside that service, so it isn't a problem to report —
+   * `doctor` sets this, `run` never does, because a `run` that resolved no key
+   * genuinely cannot serve.
+   */
+  readonly pskDelivered?: boolean;
+}
+
 /**
  * Everything `seanced` (run) needs beyond shape. Returns problems instead of
  * throwing so doctor can list them all. `psk` is the *resolved* key from
  * `loadPsk` — config field or a platform store — not `config.psk`.
  */
-export function runnableProblems(config: Config, psk: string | null): readonly string[] {
+export function runnableProblems(config: Config, psk: string | null, opts: RunnableOptions = {}): readonly string[] {
   const problems: string[] = [];
   if (!/^wss?:\/\/.+/u.test(config.relayUrl)) {
     problems.push(`relayUrl "${config.relayUrl}" is not a ws:// or wss:// URL`);
@@ -122,7 +134,11 @@ export function runnableProblems(config: Config, psk: string | null): readonly s
     problems.push("name is empty");
   }
   if (psk === null) {
-    problems.push("no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seanced psk-import`");
+    if (!opts.pskDelivered) {
+      problems.push(
+        "no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seanced psk-import`",
+      );
+    }
   } else {
     try {
       const bytes = fromBase64(psk);

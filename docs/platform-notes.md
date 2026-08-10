@@ -12,6 +12,69 @@ enabled. If `seanced install`'s preflight says so, run it once and re-run `insta
 sudo loginctl enable-linger <user>
 ```
 
+### System unit with a delivered credential (systemd ≥ 256)
+
+Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
+a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncrypted=`
+— why in docs/psk.md). `seanced install` only writes user units today, so this is a
+hand-managed bridge until an `install --system` exists:
+
+1. Uninstall any user unit first (`seanced uninstall`) — the self-update's restart
+   only knows user scope, and a loaded user unit would be the one it rewrites and
+   restarts.
+2. Write `/etc/systemd/system/seanced.service`, mirroring the generated user unit
+   (run `seanced install` on any box and copy, or start from this):
+
+   ```ini
+   [Unit]
+   Description=Seance daemon (seanced)
+
+   [Service]
+   User=<user>
+   ExecStart="<path to bun>" "<checkout>/daemon/src/main.ts"
+   LoadCredentialEncrypted=seance-psk:<state dir>/psk.cred
+   Restart=always
+   RestartSec=5
+   KillMode=process
+   Environment="PATH=<the user's PATH — a unit's default has no tmux/claude>"
+   StandardOutput=append:<state dir>/seanced.log
+   StandardError=append:<state dir>/seanced.log
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   `<state dir>` is `/home/<user>/.local/state/seance` unless `SEANCE_STATE_DIR` or
+   `XDG_STATE_HOME` moves it — and a `User=` system unit inherits none of the user's
+   environment, so whatever the shell resolves must be written out literally here
+   (`seanced doctor` prints the log path it uses). A `%` anywhere in a value needs
+   doubling: systemd expands `%` specifiers, which is why the generated unit escapes
+   them.
+
+3. `sudo systemctl daemon-reload && sudo systemctl enable --now seanced`.
+
+Two fields deliberately differ from the generated user unit. `Restart=always` where it
+says `on-failure` is load-bearing, not taste: after a self-update the daemon looks for
+its _user_ unit, finds none, and exits cleanly expecting its supervisor's policy —
+under `on-failure` a clean exit stays down, and the first auto-update would take the
+machine offline for good. `always` restarts it into the new code. And `WantedBy` is
+`multi-user.target` rather than `default.target`, the system-scope counterpart; every
+other field matches.
+
+What the user-unit flow does that this bridge doesn't:
+
+- The unit definition never self-rewrites — the "definitions lag the code" catch-up
+  below becomes a manual edit here, and the pre-2026-08-04 bun-path check `doctor`
+  performs is a user-unit check, so it stays silent on this box. Re-check the
+  `ExecStart=` line by hand when that catch-up applies.
+- Linger is irrelevant — system units outlive sessions by nature — but `doctor` still
+  reports it, because it probes user scope.
+- `doctor` and `seanced status` both look for the _user_ unit, so they say "systemd
+  unit not active" / "not loaded" and point at `seanced install` on a perfectly healthy
+  box. Ignore those three; `systemctl status seanced` is the real answer here. Doctor's
+  PSK reporting is the exception — it reads this unit, so it names the delivered
+  credential correctly.
+
 ## WSL
 
 `systemd=true` under `[boot]` in `/etc/wsl.conf` is a prerequisite, not a tweak:

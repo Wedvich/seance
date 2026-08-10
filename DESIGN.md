@@ -172,6 +172,30 @@ Séance's noise is cover for a real intruder.
    Like DPAPI it does not subtract the user's own session: any process
    running as the user on the same machine can drive the same unseal. Linux
    without a usable TPM keeps only the config field, as decided above.
+   Revised again (2026-08-10, verified on hardware — Proxmox VE host,
+   unprivileged Debian 13 LXC, systemd 257): systemd ≥ 256 refuses
+   unprivileged seal/unseal outright — `systemd-creds` delegates the crypto
+   to PID 1 over varlink and system-scope TPM operations are root-only
+   (`org.varlink.service.PermissionDenied`), on bare metal as much as in a
+   container — and `--user` scope is no way out: it cannot express TPM-only
+   keys, and its default key degrades to a host key file inside the rootfs,
+   which travels with backups — the very exposure sealing exists to prevent.
+   So on modern systemd the key is _delivered_, not unsealed: seanced runs as
+   a system unit with `User=` plus `LoadCredentialEncrypted=seance-psk:<blob>`,
+   PID 1 unseals at service start, and the daemon reads the plaintext from
+   the service-private `$CREDENTIALS_DIRECTORY` mount — a `credential` store
+   ahead of every platform store in `loadPsk` resolution. The daemon never
+   touches the TPM there; the plaintext exists only in that tmpfs and daemon
+   memory, and the sealing itself is a one-time root step (docs/psk.md).
+   Rejected: a sudoers NOPASSWD rule letting the user's processes call
+   `systemd-creds decrypt` — it hands the PSK to _anything_ running as the
+   user, i.e. to any prompt-injected command on exactly the box built to run
+   semi-trusted sessions; at-rest protection with a runtime hole. Direct
+   unseal by the daemon remains supported for pre-256 systems. One more
+   verified wrinkle: `has-tpm2` reports partial support (non-zero exit)
+   inside an LXC guest whose seal path fully works — masked sysfs/ACPI
+   firmware info — so the strict probe gates only _import_, and reads never
+   consult it.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
@@ -554,10 +578,11 @@ together (re-sends registry data on every poll, useless offline).
   the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
   rejected here as having no clean WSL counterpart; both halves of that are
   now revised — each platform has a store (login keychain / DPAPI blob in
-  the state dir / TPM-sealed systemd-creds blob) as the fallback behind
-  `loadPsk()`, with a non-empty config field still winning, so `psk-import`
-  never rewrites config.json and a TPM-less Linux box keeps the file path.
-  See threat-model item 2.
+  the state dir / TPM-sealed systemd-creds blob, plus the credential a
+  service manager delivers, which is read ahead of all three) as the
+  fallback behind `loadPsk()`, with a non-empty config field still winning,
+  so `psk-import` never rewrites config.json and a TPM-less Linux box keeps
+  the file path. See threat-model item 2.
 - **Config hot reload** (added 2026-07-30): the daemon _watches_ config.json and
   reloads on change — still never writes it, so the invariant above is intact.
   Two cases motivated it: editing config on a machine you are only reachable on
@@ -1035,7 +1060,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   keychain/DPAPI/TPM stores. No new at-rest copy of the PSK anywhere; the cost
   is that the MCP server requires a machine that carries a daemon config,
   accepted because it is colocated by design. The key is imported
-  non-extractable, same as the PWA.
+  non-extractable, same as the PWA. One machine class is excluded by this: where
+  the key exists only as a credential systemd delivers to the daemon's unit,
+  `seanced mcp` — launched by Claude Code, outside that unit — resolves nothing
+  and cannot run. Deliberate; see the open item below and docs/psk.md.
 - **App-role transport is `shared/src/app-client.ts`** — the `RelayClient`
   extracted verbatim from `pwa/src/relay/` (it was already runtime-agnostic;
   e2e had been importing it from `pwa/` under Bun, a wrong-direction edge this
@@ -1115,6 +1143,18 @@ field is display-only, so validation would buy nothing.
   machine that already runs one (the daemon).
 - The group address stays out of reach: the MCP server seals only to specific
   `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
+- **A delivered credential never leaves the daemon process.** `exec.ts` strips
+  `CREDENTIALS_DIRECTORY` from every child's environment, because the daemon
+  cold-boots the tmux server when none is running and a pane's environment is
+  the server's — so inheriting it would publish the PSK's plaintext path to
+  every Claude session on the box, including on the credential-delivered boxes
+  where the bullet above says MCP is unsupported. It would otherwise be
+  _silently supported there, by accident_: same-uid sessions can read that
+  tmpfs, so the exclusion is enforced by this scrub and nothing else. Note
+  which boxes: the leak needs the daemon to have booted the server itself,
+  which is the normal case on a headless system unit and not the case when a
+  login shell got there first — so the accident would also have been
+  boot-order dependent.
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
 
@@ -1207,11 +1247,25 @@ CSP items landed with the app (see the PWA section).
   `/usr/bin/security`, so the entry recorded on create should be the one
   presented on read, but confirming the launchd agent is never prompted needs
   one real `psk-import` + `restart` on a machine.
-- The TPM path is likewise unverified from CI (no TPM in test runners). Needs
-  one real `psk-import` + `restart` on a TPM machine: the non-root
-  `systemd-creds encrypt/decrypt --with-key=tpm2` invocation (if plain-user
-  decrypt is refused, add `--user` — systemd ≥ 254 — and pin the version in
-  the availability probe), `has-tpm2` semantics inside an LXC guest (it may
-  report partial support when /sys firmware info is masked even though
-  sealing works — the probe requires exit 0 today), and the passthrough
-  uid/gid mapping for an unprivileged container.
+- The TPM path stays unverified from CI (no TPM in test runners), but the
+  open questions were answered on hardware 2026-08-10 (Proxmox LXC, systemd 257) and folded into the threat-model item above: non-root seal/unseal is
+  refused on systemd ≥ 256 (`--user` is not a fix), `has-tpm2` does report
+  partial in an LXC guest with a working seal path, and the answer is
+  delivery via `LoadCredentialEncrypted=` rather than probe loosening. What
+  remains is tooling, not research: `systemd.ts` is user-scope only, so a
+  system unit is hand-written for now (docs/platform-notes.md — including
+  `Restart=always`, because `selfRestart` under a system unit finds no user
+  unit and exits cleanly expecting the supervisor's policy); `install
+--system` and `psk-import --system` would fold that runbook into the CLI.
+  The one place that gap was not tolerable is `doctor`: a delivered key is
+  unreadable outside the unit, so every check that resolves one reported a
+  healthy box as broken and exited 1. It now _reads_ the system unit
+  (`systemUnitDeliversPsk`) purely to distinguish "the manager holds the key"
+  from "there is no key", and says so instead of failing. Its remaining
+  user-scope checks (unit active, linger, the bun-path catch-up) still
+  misreport there, documented rather than fixed until `install --system`.
+  MCP on a credential-delivered box is deliberately unsupported
+  (docs/psk.md); the sanctioned future path is an op-level proxy through the
+  daemon — semantic ops over a local socket with per-op policy and the
+  existing audit trail, never the raw key — rather than a crypto oracle,
+  which same-uid peers make unpoliceable.

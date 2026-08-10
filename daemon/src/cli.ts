@@ -22,6 +22,7 @@ import {
   doctorServiceChecks,
   installService,
   restartService,
+  serviceDeliversPsk,
   serviceLoaded,
   servicePath,
   uninstallService,
@@ -244,7 +245,10 @@ export async function cmdDoctor(): Promise<void> {
     config = await loadConfig();
     ok(`loads from ${configPath()}`);
     const resolved = await loadPsk(config);
-    const problems = runnableProblems(config, resolved?.psk ?? null);
+    // Doctor runs in a shell; a delivered key exists only inside the unit. Ask
+    // the unit whether it delivers one before condemning the box for holding none.
+    const pskDelivered = resolved === null && (await serviceDeliversPsk());
+    const problems = runnableProblems(config, resolved?.psk ?? null, { pskDelivered });
     for (const problem of problems) fail(problem);
     // Independent of those failures: a token can be shape-valid and still be one
     // the app cannot pass through `?t=` intact.
@@ -253,6 +257,14 @@ export async function cmdDoctor(): Promise<void> {
       ok(tokenWarnings.length === 0 ? "psk, bearerToken, relayUrl look valid" : "psk and relayUrl look valid");
       if (!config.relayUrl.endsWith(DAEMON_PATH)) {
         warn(`relayUrl does not end in ${DAEMON_PATH} — the relay rejects the upgrade and the daemon retries silently`);
+      }
+      if (pskDelivered) {
+        // The one healthy case with no fingerprint to print: it would have to
+        // come from a key this process is not meant to be able to read.
+        ok(
+          "psk delivered to the system unit by systemd (LoadCredentialEncrypted=) — not readable from a shell; " +
+            `the daemon logs its fingerprint at start (${logPath()})`,
+        );
       }
       if (resolved !== null) {
         // Printed on every device so a mismatched paste is one glance away,

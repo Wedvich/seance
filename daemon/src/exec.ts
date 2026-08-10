@@ -5,12 +5,32 @@ export interface ExecResult {
   readonly timedOut: boolean;
 }
 
+/**
+ * The daemon's environment minus the secrets its service manager delivered to
+ * *it*. `Bun.spawn` inherits `process.env`, and under a
+ * `LoadCredentialEncrypted=` unit that names the tmpfs holding the PSK — which
+ * the daemon would hand to the tmux server it may cold-boot, and through it to
+ * every Claude session on the box. DESIGN.md's "MCP on a credential-delivered
+ * box is unsupported" and psk.md's "the plaintext exists only in the service's
+ * tmpfs and the daemon's memory" are both true only while this holds, so this
+ * is an invariant, not a precaution.
+ *
+ * Rebuilt per call rather than memoized: the test suites set their isolation
+ * env vars after import, and a frozen copy would serve children the wrong ones.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env["CREDENTIALS_DIRECTORY"];
+  return env;
+}
+
 export async function exec(
   argv: readonly string[],
   opts: { readonly cwd?: string; readonly timeoutMs?: number; readonly stdin?: string } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
     cwd: opts.cwd,
+    env: childEnv(),
     stdin: opts.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
