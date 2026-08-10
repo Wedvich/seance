@@ -76,6 +76,13 @@ Who performs the unseal depends on the systemd version:
   only in the service's tmpfs and the daemon's memory. Service mechanics (the unit
   itself, self-update behavior) are in docs/platform-notes.md.
 
+  Nothing outside the unit is _meant_ to reach the key, and one thing had to be done
+  to keep that true: the daemon strips `CREDENTIALS_DIRECTORY` from every process it
+  spawns (`exec.ts`). It cold-boots the tmux server where none is running, panes
+  inherit that server's environment, and a same-uid session that knows the path can
+  read the tmpfs — so without the scrub every Claude session on the box would hold the
+  PSK's plaintext path, and the MCP exclusion below would be unenforced.
+
   A consequence worth expecting: **nothing outside the unit can resolve the key**, so
   `seanced doctor`, `seanced run` and `seanced mcp` in a shell all see no PSK. Doctor
   reads the system unit to tell that arrangement from a genuinely keyless box, and

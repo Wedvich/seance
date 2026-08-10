@@ -24,3 +24,20 @@ describe("exec stdin", () => {
     expect(result.exitCode).not.toBe(0);
   });
 });
+
+describe("exec environment", () => {
+  // The tmux server the daemon may cold-boot inherits this env, and every
+  // Claude session on the box inherits it from there — so a leak here is a leak
+  // to semi-trusted sessions, not just to one child.
+  test("strips the delivered credential path, keeping the rest of the environment", async () => {
+    process.env["CREDENTIALS_DIRECTORY"] = "/run/credentials/seanced.service";
+    process.env["SEANCE_EXEC_CANARY"] = "kept";
+    try {
+      const result = await exec(["sh", "-c", 'echo "${CREDENTIALS_DIRECTORY-absent}/${SEANCE_EXEC_CANARY-absent}"']);
+      expect(result.stdout.trim()).toBe("absent/kept");
+    } finally {
+      delete process.env["CREDENTIALS_DIRECTORY"];
+      delete process.env["SEANCE_EXEC_CANARY"];
+    }
+  });
+});

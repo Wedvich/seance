@@ -93,4 +93,6 @@ green:
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, both spawn paths audit through one formatter,
-  prompt text is never logged. Don't let changes drift from them.
+  prompt text is never logged, and a service-delivered credential never leaves the daemon process
+  (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
+  every session). Don't let changes drift from them.

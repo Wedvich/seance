@@ -1143,6 +1143,18 @@ field is display-only, so validation would buy nothing.
   machine that already runs one (the daemon).
 - The group address stays out of reach: the MCP server seals only to specific
   `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
+- **A delivered credential never leaves the daemon process.** `exec.ts` strips
+  `CREDENTIALS_DIRECTORY` from every child's environment, because the daemon
+  cold-boots the tmux server when none is running and a pane's environment is
+  the server's — so inheriting it would publish the PSK's plaintext path to
+  every Claude session on the box, including on the credential-delivered boxes
+  where the bullet above says MCP is unsupported. It would otherwise be
+  _silently supported there, by accident_: same-uid sessions can read that
+  tmpfs, so the exclusion is enforced by this scrub and nothing else. Note
+  which boxes: the leak needs the daemon to have booted the server itself,
+  which is the normal case on a headless system unit and not the case when a
+  login shell got there first — so the accident would also have been
+  boot-order dependent.
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
 
