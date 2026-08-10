@@ -578,10 +578,11 @@ together (re-sends registry data on every poll, useless offline).
   the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
   rejected here as having no clean WSL counterpart; both halves of that are
   now revised — each platform has a store (login keychain / DPAPI blob in
-  the state dir / TPM-sealed systemd-creds blob) as the fallback behind
-  `loadPsk()`, with a non-empty config field still winning, so `psk-import`
-  never rewrites config.json and a TPM-less Linux box keeps the file path.
-  See threat-model item 2.
+  the state dir / TPM-sealed systemd-creds blob, plus the credential a
+  service manager delivers, which is read ahead of all three) as the
+  fallback behind `loadPsk()`, with a non-empty config field still winning,
+  so `psk-import` never rewrites config.json and a TPM-less Linux box keeps
+  the file path. See threat-model item 2.
 - **Config hot reload** (added 2026-07-30): the daemon _watches_ config.json and
   reloads on change — still never writes it, so the invariant above is intact.
   Two cases motivated it: editing config on a machine you are only reachable on
@@ -1059,7 +1060,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   keychain/DPAPI/TPM stores. No new at-rest copy of the PSK anywhere; the cost
   is that the MCP server requires a machine that carries a daemon config,
   accepted because it is colocated by design. The key is imported
-  non-extractable, same as the PWA.
+  non-extractable, same as the PWA. One machine class is excluded by this: where
+  the key exists only as a credential systemd delivers to the daemon's unit,
+  `seanced mcp` — launched by Claude Code, outside that unit — resolves nothing
+  and cannot run. Deliberate; see the open item below and docs/psk.md.
 - **App-role transport is `shared/src/app-client.ts`** — the `RelayClient`
   extracted verbatim from `pwa/src/relay/` (it was already runtime-agnostic;
   e2e had been importing it from `pwa/` under Bun, a wrong-direction edge this
@@ -1241,6 +1245,13 @@ CSP items landed with the app (see the PWA section).
   `Restart=always`, because `selfRestart` under a system unit finds no user
   unit and exits cleanly expecting the supervisor's policy); `install
 --system` and `psk-import --system` would fold that runbook into the CLI.
+  The one place that gap was not tolerable is `doctor`: a delivered key is
+  unreadable outside the unit, so every check that resolves one reported a
+  healthy box as broken and exited 1. It now _reads_ the system unit
+  (`systemUnitDeliversPsk`) purely to distinguish "the manager holds the key"
+  from "there is no key", and says so instead of failing. Its remaining
+  user-scope checks (unit active, linger, the bun-path catch-up) still
+  misreport there, documented rather than fixed until `install --system`.
   MCP on a credential-delivered box is deliberately unsupported
   (docs/psk.md); the sanctioned future path is an op-level proxy through the
   daemon — semantic ops over a local socket with per-op policy and the

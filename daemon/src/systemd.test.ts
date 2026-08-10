@@ -1,8 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { logPath } from "./paths.ts";
 import {
   noSystemdMessage,
   pinTaskCommand,
+  systemUnitDeliversPsk,
   unitBunPath,
   unitContent,
   unitPath,
@@ -66,5 +70,40 @@ describe("preflight messages", () => {
 describe("unitPath", () => {
   test("lands in the XDG systemd user directory", () => {
     expect(unitPath()).toMatch(/\/systemd\/user\/seanced\.service$/u);
+  });
+});
+
+describe("systemUnitDeliversPsk", () => {
+  const cleanups: string[] = [];
+  afterAll(async () => {
+    await Promise.all(cleanups.map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function unitFile(body: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "seance-unit-"));
+    cleanups.push(dir);
+    const path = join(dir, "seanced.service");
+    await writeFile(path, body);
+    return path;
+  }
+
+  test("no system unit — the user-unit boxes, which is most of them", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-unit-"));
+    cleanups.push(dir);
+    expect(await systemUnitDeliversPsk(join(dir, "seanced.service"))).toBe(false);
+  });
+
+  test("recognises the delivery line docs/platform-notes.md prescribes", async () => {
+    const path = await unitFile(
+      "[Service]\nUser=me\nLoadCredentialEncrypted=seance-psk:/home/me/.local/state/seance/psk.cred\n",
+    );
+    expect(await systemUnitDeliversPsk(path)).toBe(true);
+  });
+
+  test("a system unit that delivers nothing, or delivers under another id, does not count", async () => {
+    expect(await systemUnitDeliversPsk(await unitFile("[Service]\nUser=me\nExecStart=/bin/true\n"))).toBe(false);
+    expect(await systemUnitDeliversPsk(await unitFile("[Service]\nLoadCredentialEncrypted=other:/tmp/x\n"))).toBe(
+      false,
+    );
   });
 });

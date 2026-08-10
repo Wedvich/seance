@@ -100,6 +100,11 @@ describe("runnableProblems", () => {
   test("judges the resolved key, not the config field — an empty field with a keychain key is runnable", () => {
     expect(runnableProblems({ ...base, psk: "" }, VALID.psk)).toEqual([]);
   });
+
+  test("a key the service manager delivers is not a missing key — every other problem still reported", () => {
+    expect(runnableProblems({ ...base, psk: "" }, null, { pskDelivered: true })).toEqual([]);
+    expect(runnableProblems({ ...base, bearerToken: "" }, null, { pskDelivered: true })).toHaveLength(1);
+  });
 });
 
 describe("psk resolution", () => {

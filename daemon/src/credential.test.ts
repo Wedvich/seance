@@ -76,8 +76,15 @@ describe("credential store", () => {
     expect(await store.read()).toBe(PSK);
   });
 
+  test("an empty delivery is unavailable, not an available store psk-import would then refuse", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "seance-psk");
+    await writeFile(path, "\n");
+    expect(await credentialStore(path).available()).toBe(false);
+  });
+
   test("import refuses — the delivery mount is the manager's, not ours", async () => {
-    expect(credentialStore(null).importValue(PSK)).rejects.toThrow("LoadCredentialEncrypted");
+    await expect(credentialStore(null).importValue(PSK)).rejects.toThrow("LoadCredentialEncrypted");
   });
 
   test("doctor is silent in a shell, warns inside a service delivering the wrong id", async () => {

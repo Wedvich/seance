@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { logPath } from "./paths.ts";
+import { CRED_NAME } from "./tpmcreds.ts";
 import type { Check } from "./check.ts";
 import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
@@ -26,6 +27,30 @@ export function unitPath(): string {
  */
 export function servicePath(): string {
   return systemdRunning() ? unitPath() : NO_SERVICE_MANAGER;
+}
+
+/**
+ * The hand-written system unit of docs/platform-notes.md. `install` is
+ * user-scope only, so nothing here ever writes this path — it is read, and only
+ * to tell a correctly configured credential-delivered box from a broken one.
+ */
+export function systemUnitPath(): string {
+  return join("/etc/systemd/system", UNIT_NAME);
+}
+
+/**
+ * Whether a system unit hands the daemon its PSK at start. Read from the unit
+ * text because the key itself is unreachable from anywhere else by design: PID
+ * 1 mounts it on a service-private tmpfs inside the service, so `doctor` — which
+ * runs in a shell — resolves no key on a perfectly healthy box and would report
+ * it broken without this.
+ */
+export async function systemUnitDeliversPsk(path: string = systemUnitPath()): Promise<boolean> {
+  const unit = await Bun.file(path)
+    .text()
+    .catch(() => null);
+  if (unit === null) return false;
+  return unit.split("\n").some((line) => line.trim().startsWith(`LoadCredentialEncrypted=${CRED_NAME}:`));
 }
 
 /** systemd expands % specifiers inside unit values; paths and PATH must stay literal. */

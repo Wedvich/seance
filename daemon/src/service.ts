@@ -73,6 +73,16 @@ export function startedBySupervisor(): boolean {
   return false;
 }
 
+/**
+ * Whether the service definition hands the daemon its PSK at start rather than
+ * leaving it to be resolved. Deliberately not on `ServiceManager`: only the
+ * hand-written systemd system unit does this (docs/psk.md), and launchd has no
+ * counterpart to implement.
+ */
+export async function serviceDeliversPsk(): Promise<boolean> {
+  return process.platform === "linux" ? systemd.systemUnitDeliversPsk() : false;
+}
+
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   return (
     (await manager()?.doctorServiceChecks()) ?? [

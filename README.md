@@ -149,7 +149,9 @@ Edit `~/.config/seance/config.json`:
   in the platform store instead (macOS login keychain / WSL DPAPI blob / Linux
   TPM-sealed blob), which is where it belongs — see [docs/psk.md](docs/psk.md). Linux
   without a usable TPM has no such store; there the PSK stays in `config.json`, which
-  `init` creates 0600.
+  `init` creates 0600. On systemd ≥ 256 the sealed blob is instead sealed once as root
+  and delivered to the unit by PID 1, which `psk-import` can't do — docs/psk.md has
+  that runbook.
 - `repoRoots` — directories to scan for repos
 
 A running daemon watches this file and reloads within a second of a save, so
@@ -170,7 +172,9 @@ box, the WSL logon pin task, and what happens while no Windows user is logged in
 collected in [docs/platform-notes.md](docs/platform-notes.md).
 
 `doctor` prints a PSK fingerprint — compare it across machines to confirm they
-all hold the same key. A daemon with the right token and PSK simply appears in
+all hold the same key. (Not on a box whose key is delivered to its unit by
+systemd: nothing outside the unit can read it, so the fingerprint is in the
+daemon's log instead.) A daemon with the right token and PSK simply appears in
 the app; there is no pairing step.
 
 ### 5. Set up the phone

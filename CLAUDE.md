@@ -15,7 +15,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
   plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
   of record, so a frame change touches both.
-- **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob),
+- **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob /
+  a blob systemd unseals and delivers to the unit on systemd ≥ 256),
   how import keeps it off argv and shell history, and what the TPM path does and does not protect.
   Constraints on the psk-store/import code live here, nowhere else in prose.
 - **docs/platform-notes.md** — Linux/WSL service specifics: linger, the Windows logon pin task, and

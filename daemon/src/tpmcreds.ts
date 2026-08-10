@@ -92,9 +92,9 @@ export async function importTpmPskValue(psk: string, path: string = tpmPskPath()
     throw new Error(`systemd-creds encrypt failed (${execFailure(enc)})`);
   }
   // Decrypt the fresh blob in memory before it replaces the file: encrypt can
-  // succeed where decrypt fails (plain-user decrypt refused, TPM lockout —
-  // DESIGN.md's open item), and that asymmetry must not clobber a previously
-  // working credential.
+  // succeed where decrypt fails (systemd >= 256 refuses unprivileged unseal,
+  // TPM lockout), and that asymmetry must not clobber a previously working
+  // credential.
   const dec = await exec(decryptArgv(CRED_NAME), { stdin: blob, timeoutMs: CREDS_TIMEOUT_MS });
   if (dec.exitCode !== 0 || dec.stdout.trim() !== psk) {
     throw new Error(

@@ -13,7 +13,7 @@ import { isWsl } from "./wsl.ts";
 
 export type PskStoreSource = "credential" | "keychain" | "dpapi" | "tpm";
 
-/** One platform's place to keep the PSK — the login keychain, a DPAPI blob, or a TPM-sealed blob. */
+/** One place a machine keeps the PSK — a delivered credential, the login keychain, a DPAPI blob, or a TPM-sealed blob. */
 export interface PskStore {
   /** Provenance tag `loadPsk` returns and doctor prints beside the fingerprint. */
   readonly source: PskStoreSource;
@@ -60,7 +60,10 @@ export function credentialStore(path: string | null = credentialPskPath()): PskS
     intro: "the PSK arrives via the unit's LoadCredentialEncrypted= — there is nothing to import here.",
     readBackHint: "check the unit's LoadCredentialEncrypted= line (docs/psk.md)",
     clearHint: "the systemd credential",
-    available: () => (path === null ? Promise.resolve(false) : Bun.file(path).exists()),
+    // Same predicate as `read`, not mere existence: a delivery that mounts an
+    // empty file must not present itself to `psk-import` as the store to use,
+    // since `importValue` below always refuses.
+    available: async () => (await readCredentialPsk(path)) !== null,
     read: () => readCredentialPsk(path),
     importValue: () =>
       Promise.reject(
@@ -176,8 +179,10 @@ async function tpmChecks(path: string): Promise<readonly Check[]> {
           {
             level: "warn",
             message:
-              `sealed blob at ${path} does not decrypt here — blobs are machine-bound by design; ` +
-              "re-run `seanced psk-import` on this machine",
+              `sealed blob at ${path} does not decrypt here — expected where a system unit delivers it via ` +
+              "LoadCredentialEncrypted= (systemd >= 256 refuses unprivileged unseal, so `psk-import` can't " +
+              "re-seal it either); otherwise the blob came from other hardware — machine-bound by design, " +
+              "re-seal on this machine (docs/psk.md)",
           },
         ];
   }
@@ -204,18 +209,23 @@ export function pskStores(): readonly PskStore[] {
 }
 
 /**
+ * Doctor's key-store section. The blob stores are mutually exclusive by
+ * platform, but the credential store is not: inside a credential-bearing
+ * service it reports alongside the stranded-blob warning for the very blob
+ * being delivered, which is the pair worth seeing together.
+ */
+export async function pskStoreChecks(stores: readonly PskStore[] = pskStores()): Promise<readonly Check[]> {
+  const checks = await Promise.all(stores.map((store) => store.doctor()));
+  return checks.flat();
+}
+
+/**
  * The store this machine would use, or null where the PSK can only live in
  * config.json. The platform stores are mutually exclusive by platform, and the
  * credential store answers only inside a credential-bearing service — where
  * this is never called — so first-wins matches the hand-written chains this
  * replaced.
  */
-/** Doctor's key-store section. At most one store answers per machine. */
-export async function pskStoreChecks(stores: readonly PskStore[] = pskStores()): Promise<readonly Check[]> {
-  const checks = await Promise.all(stores.map((store) => store.doctor()));
-  return checks.flat();
-}
-
 export async function availablePskStore(stores: readonly PskStore[] = pskStores()): Promise<PskStore | null> {
   for (const store of stores) {
     // oxlint-disable-next-line no-await-in-loop -- probes spawn; the first hit is the answer, so run them in order
