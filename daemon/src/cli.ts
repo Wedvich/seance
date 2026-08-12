@@ -21,11 +21,13 @@ import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts
 import {
   doctorServiceChecks,
   installService,
+  installSystemService,
   restartService,
   serviceDeliversPsk,
   serviceLoaded,
   servicePath,
   uninstallService,
+  uninstallSystemService,
 } from "./service.ts";
 import { scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
@@ -340,7 +342,63 @@ export async function cmdDoctor(): Promise<void> {
   if (failed) process.exit(1);
 }
 
-export async function cmdInstall(): Promise<void> {
+export const INSTALL_USAGE =
+  'usage: seanced install [--system [--user <name>] [--state-dir <path>] [--path "$PATH"]]\n' +
+  "  --system  install the root-owned system unit that systemd delivers the TPM-sealed PSK to\n" +
+  "            (systemd >= 256; needs sudo — see docs/psk.md)";
+
+export interface InstallCliArgs {
+  readonly system: boolean;
+  readonly user?: string;
+  readonly stateDir?: string;
+  readonly pathEnv?: string;
+}
+
+/** Exported for tests, like `parseSpawnArgs`. Shared by `install` and `uninstall`, which take the same scope flags. */
+export function parseInstallArgs(argv: readonly string[]): InstallCliArgs {
+  let system = false;
+  let user: string | undefined;
+  let stateDir: string | undefined;
+  let pathEnv: string | undefined;
+  let expect: "user" | "state-dir" | "path" | null = null;
+  for (const arg of argv) {
+    if (expect === "user") user = arg;
+    else if (expect === "state-dir") stateDir = arg;
+    else if (expect === "path") pathEnv = arg;
+    else if (arg === "--system") {
+      system = true;
+      continue;
+    } else if (arg === "--user") {
+      expect = "user";
+      continue;
+    } else if (arg === "--state-dir") {
+      expect = "state-dir";
+      continue;
+    } else if (arg === "--path") {
+      expect = "path";
+      continue;
+    } else {
+      throw new Error(INSTALL_USAGE);
+    }
+    expect = null;
+  }
+  // A flag left waiting for its value would otherwise install a unit recording
+  // an empty PATH or the wrong user.
+  if (expect !== null) throw new Error(INSTALL_USAGE);
+  if (!system && (user ?? stateDir ?? pathEnv) !== undefined) {
+    throw new Error(`those flags only apply to \`install --system\`\n${INSTALL_USAGE}`);
+  }
+  return {
+    system,
+    ...(user !== undefined ? { user } : {}),
+    ...(stateDir !== undefined ? { stateDir } : {}),
+    ...(pathEnv !== undefined ? { pathEnv } : {}),
+  };
+}
+
+export async function cmdInstall(argv: readonly string[] = []): Promise<void> {
+  const args = parseInstallArgs(argv);
+  if (args.system) return cmdInstallSystem(args);
   const result = await installService();
   console.log(`installed and started the service (${result.target})`);
   for (const note of result.notes) console.log(`note: ${note}`);
@@ -352,7 +410,27 @@ export async function cmdInstall(): Promise<void> {
   console.log(`logs: ${logPath()}`);
 }
 
-export async function cmdUninstall(): Promise<void> {
+/**
+ * No `cliOnPath()` note and no `logPath()`: both answer for root here, and the
+ * unit's log path is the target user's — `installSystemService` reports it.
+ */
+async function cmdInstallSystem(args: InstallCliArgs): Promise<void> {
+  const result = await installSystemService({
+    ...(args.user !== undefined ? { user: args.user } : {}),
+    ...(args.stateDir !== undefined ? { stateDir: args.stateDir } : {}),
+    ...(args.pathEnv !== undefined ? { pathEnv: args.pathEnv } : {}),
+  });
+  console.log(`installed and started the system unit (${result.target})`);
+  for (const note of result.notes) console.log(`note: ${note}`);
+}
+
+export async function cmdUninstall(argv: readonly string[] = []): Promise<void> {
+  if (parseInstallArgs(argv).system) {
+    const systemNotes = await uninstallSystemService();
+    console.log("system unit stopped and removed");
+    for (const note of systemNotes) console.log(`note: ${note}`);
+    return;
+  }
   const notes = await uninstallService();
   console.log("service stopped and removed");
   for (const note of notes) console.log(`note: ${note}`);

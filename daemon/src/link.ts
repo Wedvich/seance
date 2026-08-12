@@ -71,13 +71,25 @@ export function bunDriftCheck(
   return { level: "ok", message: `${what} bun path current (${recorded})` };
 }
 
-/** Null when the caller couldn't read a path out of the record: a parse miss must not read as a problem. */
-export async function recordedBunCheck(recorded: string | null, what?: string, remedy?: string): Promise<Check | null> {
+/**
+ * Null when the caller couldn't read a path out of the record: a parse miss must
+ * not read as a problem. `current` overrides what the record is compared
+ * against, for a record whose interpreter is resolved from a PATH that isn't the
+ * caller's — a system unit carries its own `Environment="PATH="`, and comparing
+ * that against the shell's would report drift every time the two merely order
+ * the same directories differently.
+ */
+export async function recordedBunCheck(
+  recorded: string | null,
+  what?: string,
+  remedy?: string,
+  current?: string,
+): Promise<Check | null> {
   if (recorded === null) return null;
   const exists = await access(recorded, constants.X_OK)
     .then(() => true)
     .catch(() => false);
-  return bunDriftCheck(recorded, resolvedBun(), exists, what, remedy);
+  return bunDriftCheck(recorded, current ?? resolvedBun(), exists, what, remedy);
 }
 
 /**

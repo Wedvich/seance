@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64 } from "@seance/shared";
@@ -37,6 +37,18 @@ describe("tpmcreds", () => {
     await writeFile(path, "\n");
     expect(await readTpmPsk(path)).toBeNull();
   });
+
+  // Root can read anything, so the case only exists for an unprivileged process.
+  test.if(process.platform === "linux" && process.getuid?.() !== 0)(
+    "a blob present but unreadable reads as null — the delivered-credential arrangement, where only PID 1 opens it",
+    async () => {
+      const dir = await tempDir();
+      const path = join(dir, "psk.cred");
+      await writeFile(path, "whatever\n");
+      await chmod(path, 0o000);
+      expect(await readTpmPsk(path)).toBeNull();
+    },
+  );
 
   test.skipIf(!hasTpm)(
     "round-trips a key and stores the blob 0600",

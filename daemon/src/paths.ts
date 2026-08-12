@@ -11,9 +11,40 @@ export function configDir(): string {
 
 export function stateDir(): string {
   return (
-    process.env["SEANCE_STATE_DIR"] ??
-    join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), "seance")
+    process.env["SEANCE_STATE_DIR"] ?? join(process.env["XDG_STATE_HOME"] ?? defaultStateHome(homedir()), "seance")
   );
+}
+
+/**
+ * The layout `stateDir()` resolves to, for a home directory that isn't this
+ * process's own. `install --system` runs as root and records the *target user's*
+ * paths in the unit; the XDG vars in root's environment are the wrong answer,
+ * and so is `homedir()`. Kept here so the layout is stated once.
+ */
+export function stateDirFor(home: string): string {
+  return join(defaultStateHome(home), "seance");
+}
+
+function defaultStateHome(home: string): string {
+  return join(home, ".local", "state");
+}
+
+/** Same for the config dir: what the daemon will read once it runs as the target user. */
+export function configDirFor(home: string): string {
+  return join(home, ".config", "seance");
+}
+
+/**
+ * The per-state-dir file names, taking the directory rather than resolving it.
+ * `install --system` needs them for a directory that isn't this process's, and
+ * the plain accessors below are the same functions applied to `stateDir()`.
+ */
+export function logPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "seanced.log");
+}
+
+export function pskBlobPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "psk.cred");
 }
 
 export function configPath(): string {
@@ -29,7 +60,7 @@ export function runtimePath(): string {
 }
 
 export function logPath(): string {
-  return join(stateDir(), "seanced.log");
+  return logPathIn(stateDir());
 }
 
 export function expandTilde(p: string): string {

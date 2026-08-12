@@ -16,64 +16,67 @@ sudo loginctl enable-linger <user>
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
 a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncrypted=`
-— why in docs/psk.md). `seanced install` only writes user units today, so this is a
-hand-managed bridge until an `install --system` exists:
+— why in docs/psk.md). `seanced install --system` writes and enables it:
 
-1. Uninstall any user unit first (`seanced uninstall`) — the self-update's restart
-   only knows user scope, and a loaded user unit would be the one it rewrites and
-   restarts.
-2. Write `/etc/systemd/system/seanced.service`, mirroring the generated user unit
-   (run `seanced install` on any box and copy, or start from this):
+```sh
+seanced uninstall                                   # if a user unit is installed
+sudo --preserve-env=PATH seanced install --system   # or: sudo seanced install --system --path "$PATH"
+```
 
-   ```ini
-   [Unit]
-   Description=Seance daemon (seanced)
+`--preserve-env=PATH` is not decoration. Everything the unit records is written out
+literally — a `User=` system unit inherits nothing from your shell — and under a plain
+`sudo` the PATH on offer is `secure_path`, which holds no mise shim, no `~/.local/bin`
+and so neither bun nor claude. `install --system` refuses rather than write a unit that
+starts and then fails every spawn, so if your sudo's `secure_path` wins anyway, pass
+`--path "$PATH"`.
 
-   [Service]
-   User=<user>
-   ExecStart="<path to bun>" "<checkout>/daemon/src/main.ts"
-   LoadCredentialEncrypted=seance-psk:<state dir>/psk.cred
-   Restart=always
-   RestartSec=5
-   KillMode=process
-   Environment="PATH=<the user's PATH — a unit's default has no tmux/claude>"
-   StandardOutput=append:<state dir>/seanced.log
-   StandardError=append:<state dir>/seanced.log
+What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
+rather than from root: home and uid/gid via `getent`, the state dir
+(`<home>/.local/state/seance`, or `--state-dir`, which is also written into the unit as
+`SEANCE_STATE_DIR=` so the daemon resolves the same path), the log file — pre-created
+and chowned, because systemd's `append:` opens it as root before dropping privileges —
+and the sealed blob, if there is one. `%` is doubled in every value, since systemd
+expands `%` specifiers.
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
+It refuses in three more cases, each naming its remedy: not root; a `SUDO_USER` that is
+root or absent (the daemon must never run as root); and a user unit still installed for
+that user — two units means two daemons against one state dir, one log and one relay
+identity, and the user one is what `selfRestart` rewrites. `install` refuses the mirror
+case, and `doctor` warns when both exist.
 
-   `<state dir>` is `/home/<user>/.local/state/seance` unless `SEANCE_STATE_DIR` or
-   `XDG_STATE_HOME` moves it — and a `User=` system unit inherits none of the user's
-   environment, so whatever the shell resolves must be written out literally here
-   (`seanced doctor` prints the log path it uses). A `%` anywhere in a value needs
-   doubling: systemd expands `%` specifiers, which is why the generated unit escapes
-   them.
+Three fields deliberately differ from the user unit, and `systemd.ts` now enforces them
+rather than trusting a hand-written file. `User=` is added. `Restart=always` where the
+user unit says `on-failure` is load-bearing, not taste: under a system unit the daemon
+can neither rewrite `/etc/systemd/system` nor reach the system manager, so `selfRestart`
+exits cleanly and leaves the relaunch to the supervisor's policy — under `on-failure` a
+clean exit stays down and the first auto-update would take the machine offline for good.
+And `WantedBy` is `multi-user.target`, the system-scope counterpart of `default.target`.
 
-3. `sudo systemctl daemon-reload && sudo systemctl enable --now seanced`.
+The sealed blob and the unit are installed independently, in either order.
+`LoadCredentialEncrypted=` is only written for a blob that exists **and** decrypts as
+root, because a credential systemd can't load fails the unit at start — worse than a
+unit that comes up and reports no key. So installing before sealing is fine: it says so
+in a note, and re-running `install --system` after the seal adds the line. `doctor`
+warns if a blob is sitting there undelivered.
 
-Two fields deliberately differ from the generated user unit. `Restart=always` where it
-says `on-failure` is load-bearing, not taste: after a self-update the daemon looks for
-its _user_ unit, finds none, and exits cleanly expecting its supervisor's policy —
-under `on-failure` a clean exit stays down, and the first auto-update would take the
-machine offline for good. `always` restarts it into the new code. And `WantedBy` is
-`multi-user.target` rather than `default.target`, the system-scope counterpart; every
-other field matches.
+What the user-unit flow still does that this doesn't:
 
-What the user-unit flow does that this bridge doesn't:
+- The unit definition never self-rewrites — `selfRestart` under a system unit exits for
+  `Restart=always` to relaunch it, and it cannot regenerate a root-owned file. So the
+  "definitions lag the code" catch-up below is `sudo seanced install --system` here, and
+  `doctor` reports the drift by comparing the installed unit against what this checkout
+  would write. That replaces the manual `ExecStart=` re-check this section used to ask
+  for.
+- Linger is irrelevant — system units outlive sessions by nature — and `doctor` says so
+  instead of probing user scope.
+- `seanced restart` needs root here; it says `sudo systemctl restart seanced.service`
+  rather than surfacing systemd's interactive-auth refusal.
 
-- The unit definition never self-rewrites — the "definitions lag the code" catch-up
-  below becomes a manual edit here, and the pre-2026-08-04 bun-path check `doctor`
-  performs is a user-unit check, so it stays silent on this box. Re-check the
-  `ExecStart=` line by hand when that catch-up applies.
-- Linger is irrelevant — system units outlive sessions by nature — but `doctor` still
-  reports it, because it probes user scope.
-- `doctor` and `seanced status` both look for the _user_ unit, so they say "systemd
-  unit not active" / "not loaded" and point at `seanced install` on a perfectly healthy
-  box. Ignore those three; `systemctl status seanced` is the real answer here. Doctor's
-  PSK reporting is the exception — it reads this unit, so it names the delivered
-  credential correctly.
+`doctor` and `seanced status` both report the system unit correctly now: which scope owns
+the daemon, whether it is active, the bun path resolved against the unit's _own_ recorded
+PATH, and the key as delivered. `sudo seanced uninstall --system` removes the unit,
+leaving the sealed blob (a TPM blob can't be recreated from a backup) and the `seanced`
+name on PATH, which belongs to a user whose PATH root can't see.
 
 ## WSL
 
@@ -95,7 +98,9 @@ limitation as a launchd agent, which is also per-login.
 An update restarts the daemon from new code, but the service definition already on
 disk is not rewritten in step: launchd caches job definitions, so the plist changes
 only when you run `seanced install`, and systemd's unit is rewritten by the update's
-own restart — one update cycle behind the code that generates it.
+own restart — one update cycle behind the code that generates it. A systemd **system**
+unit is never rewritten at all, since the daemon lacks the privilege: `doctor` reports
+the drift, and `sudo seanced install --system` clears it.
 
 ## One-time catch-up for pre-2026-08-04 installs
 

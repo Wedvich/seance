@@ -27,7 +27,8 @@ usage: seanced [command]
   init        write config skeleton + generate deviceId (never the PSK)
   psk-import  store the PSK in the platform store — macOS login keychain, WSL DPAPI blob, or Linux TPM-sealed blob (prompts, or reads a pipe; never argv)
   install     install and start the service (macOS launchd plist; Linux/WSL systemd user unit + linger, plus a logon pin task on WSL)
-  uninstall   stop the service and remove it, plus any symlink from link
+              --system: the root-owned systemd unit that gets the TPM-sealed PSK delivered to it, needs sudo (docs/psk.md)
+  uninstall   stop the service and remove it, plus any symlink from link (--system for the system unit)
   link        put seanced on PATH — a symlink to this file, so it tracks git pull: seanced link [dir]
   unlink      remove the PATH symlink (only ones pointing at this checkout)
   restart     restart the service (after git pull)
@@ -71,10 +72,10 @@ try {
       await cmdPskImport();
       break;
     case "install":
-      await cmdInstall();
+      await cmdInstall(rest);
       break;
     case "uninstall":
-      await cmdUninstall();
+      await cmdUninstall(rest);
       break;
     case "link":
       await cmdLink(rest);
