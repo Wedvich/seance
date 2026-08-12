@@ -32,17 +32,21 @@ starts and then fails every spawn, so if your sudo's `secure_path` wins anyway, 
 
 What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
 rather than from root: home and uid/gid via `getent`, the state dir
-(`<home>/.local/state/seance`, or `--state-dir`, which is also written into the unit as
-`SEANCE_STATE_DIR=` so the daemon resolves the same path), the log file — pre-created
-and chowned, because systemd's `append:` opens it as root before dropping privileges —
-and the sealed blob, if there is one. `%` is doubled in every value, since systemd
-expands `%` specifiers.
+(`<home>/.local/state/seance`, or an absolute `--state-dir`, which is also written into
+the unit as `SEANCE_STATE_DIR=` so the daemon resolves the same path) — chowned along
+with every parent it has to create, or a fresh account is left a root-owned `~/.local`
+it can never put a `~/.local/bin` in — the log file, pre-created and chowned because
+systemd's `append:` opens it as root before dropping privileges, and the sealed blob, if
+there is one. `%` is doubled in every value, since systemd expands `%` specifiers.
 
-It refuses in three more cases, each naming its remedy: not root; a `SUDO_USER` that is
-root or absent (the daemon must never run as root); and a user unit still installed for
-that user — two units means two daemons against one state dir, one log and one relay
-identity, and the user one is what `selfRestart` rewrites. `install` refuses the mirror
-case, and `doctor` warns when both exist.
+It refuses in four more cases, each naming its remedy: not root; a target user that is
+absent or resolves to uid 0 — `root` by name, a second uid-0 account like `toor`, or a
+gid of 0, since the daemon must never run as root; a `--state-dir` or `--path` the unit
+cannot carry (relative, or holding a quote or newline), refused before anything is
+created; and a user unit still installed for that user — two units means two daemons
+against one state dir, one log and one relay identity, and the user one is what
+`selfRestart` rewrites. `install` refuses the mirror case, and `doctor` warns when both
+exist.
 
 Three fields deliberately differ from the user unit, and `systemd.ts` now enforces them
 rather than trusting a hand-written file. `User=` is added. `Restart=always` where the
@@ -100,7 +104,9 @@ disk is not rewritten in step: launchd caches job definitions, so the plist chan
 only when you run `seanced install`, and systemd's unit is rewritten by the update's
 own restart — one update cycle behind the code that generates it. A systemd **system**
 unit is never rewritten at all, since the daemon lacks the privilege: `doctor` reports
-the drift, and `sudo seanced install --system` clears it.
+the drift, and `sudo seanced install --system` clears it — rewriting the file _and_
+restarting the unit, since `enable --now` leaves an already-running one on its old
+definition.
 
 ## One-time catch-up for pre-2026-08-04 installs
 

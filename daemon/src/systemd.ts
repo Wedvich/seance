@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import { chown, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { configDirFor, logPath, logPathIn, pskBlobPathIn, stateDir, stateDirFor } from "./paths.ts";
 import {
   lookupUser,
+  mkdirAsTarget,
   missingBinariesMessage,
   missingUnitBinaries,
   requireRoot,
@@ -176,6 +177,26 @@ function unitEscape(s: string): string {
 
 function unitUnescape(s: string): string {
   return s.replaceAll("%%", "%");
+}
+
+/**
+ * A value that arrives from an install flag and lands in the unit verbatim.
+ * `unitEscape` covers `%`; a quote or newline it cannot — those close the field and
+ * malform the unit. A relative path is worse than useless: it resolves against
+ * root's cwd here, and systemd rejects one outright in `append:`, so the install
+ * would create a stray directory and leave a unit that fails at start.
+ */
+export function assertUnitFlag(flag: string, value: string, absolute = false): void {
+  if (/["\n]/u.test(value)) {
+    throw new Error(
+      `${flag} must contain no quote or newline — the unit records it verbatim (got ${JSON.stringify(value)})`,
+    );
+  }
+  if (absolute && !isAbsolute(value)) {
+    throw new Error(
+      `${flag} must be an absolute path — the unit has no cwd to resolve it against (got ${JSON.stringify(value)})`,
+    );
+  }
 }
 
 /** The ExecStart interpreter — what systemd will actually run. Null when the unit doesn't parse. */
@@ -431,6 +452,12 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
   requireRoot(process.getuid?.(), "install --system");
 
+  // Before anything is created: a value the unit can't carry would otherwise be
+  // discovered by systemd, after root has made a directory and left a broken unit
+  // file behind.
+  if (opts.stateDir !== undefined) assertUnitFlag("--state-dir", opts.stateDir, true);
+  if (opts.pathEnv !== undefined) assertUnitFlag("--path", opts.pathEnv);
+
   const user = await lookupUser(targetUserName(opts.user, process.env));
   // The target's own XDG_CONFIG_HOME is unknowable from root, so this checks the
   // default location; a relocated user unit is caught by doctor instead.
@@ -447,8 +474,7 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   const defaultStateDir = stateDirFor(user.home);
   const targetStateDir = opts.stateDir ?? defaultStateDir;
   const logFile = logPathIn(targetStateDir);
-  await mkdir(targetStateDir, { recursive: true });
-  await chown(targetStateDir, user.uid, user.gid);
+  await mkdirAsTarget(targetStateDir, user);
   // systemd opens `append:` as root before dropping to User=, so a log file it
   // has to create lands root-owned and the daemon's own CLI can't read it.
   if (!existsSync(logFile)) await writeFile(logFile, "");
@@ -457,23 +483,38 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   const blob = pskBlobPathIn(targetStateDir);
   const credentialBlob = await credentialBlobFor(blob, join(configDirFor(user.home), "config.json"), notes);
   const target = unitPathFor("system");
-  await Bun.write(
-    target,
-    unitContent({
-      scope: "system",
-      user: user.name,
-      bunPath,
-      mainPath: fileURLToPath(new URL("./main.ts", import.meta.url)),
-      pathEnv,
-      logFile,
-      credentialBlob,
-      stateDirEnv: targetStateDir === defaultStateDir ? undefined : targetStateDir,
-    }),
-  );
+  const previous = await Bun.file(target)
+    .text()
+    .catch(() => null);
+  const unit = unitContent({
+    scope: "system",
+    user: user.name,
+    bunPath,
+    mainPath: fileURLToPath(new URL("./main.ts", import.meta.url)),
+    pathEnv,
+    logFile,
+    credentialBlob,
+    stateDirEnv: targetStateDir === defaultStateDir ? undefined : targetStateDir,
+  });
+  await Bun.write(target, unit);
   const reload = await exec(scopeArgv("system").concat("daemon-reload"));
   if (reload.exitCode !== 0) throw new Error(`systemctl daemon-reload failed: ${reload.stderr.trim()}`);
   const enable = await exec(scopeArgv("system").concat(["enable", "--now", UNIT_NAME]));
   if (enable.exitCode !== 0) throw new Error(`systemctl enable --now failed: ${enable.stderr.trim()}`);
+  // `enable --now` starts a stopped unit but leaves a running one on its old
+  // definition, and nothing else can apply a new one — `selfRestart` exits under a
+  // system unit rather than rewriting /etc. So a reinstall is where a changed
+  // definition takes effect; without this, doctor's drift warning goes quiet while
+  // the process keeps serving the old ExecStart.
+  if (previous !== null && previous !== unit) {
+    const restart = await exec(scopeArgv("system").concat(["restart", UNIT_NAME]));
+    notes.push(
+      restart.exitCode === 0
+        ? "the unit definition changed, so the running daemon was restarted onto it"
+        : `the unit definition changed but the restart failed (${restart.stderr.trim() || "denied"}) — the daemon ` +
+            `still serves the old one: sudo systemctl restart ${UNIT_NAME}`,
+    );
+  }
 
   notes.push(
     `the daemon runs as ${user.name}; \`systemctl status ${UNIT_NAME}\` and ${logFile} are how you see its health — ` +
@@ -524,12 +565,30 @@ export async function uninstallSystemService(): Promise<readonly string[]> {
   ];
 }
 
-export async function serviceLoaded(): Promise<boolean> {
-  if (!systemdRunning()) return false;
-  const scopes = installedUnits();
-  const scope: UnitScope = scopes.system ? "system" : "user";
+async function scopeActive(scope: UnitScope): Promise<boolean> {
   const result = await exec(scopeArgv(scope).concat(["is-active", UNIT_NAME]));
   return result.exitCode === 0;
+}
+
+/**
+ * Which scope's unit holds this box's daemon, as far as an unprivileged caller can
+ * tell. The files answer unless both exist — there only `is-active` separates the
+ * live daemon from a leftover unit file, and answering "system" for a daemon the
+ * user manager is running sends `seanced restart` at the wrong one.
+ */
+async function ownerScope(units: InstalledUnits = installedUnits()): Promise<UnitScope> {
+  if (units.system && units.user && !(await scopeActive("system"))) return "user";
+  return units.system ? "system" : "user";
+}
+
+/**
+ * Whether the unit is up. The scope is a parameter because its two kinds of caller
+ * know it differently: `selfRestart` reads its own cgroup, which is exact, while
+ * status and doctor have only the unit files.
+ */
+export async function serviceLoaded(scope?: UnitScope): Promise<boolean> {
+  if (!systemdRunning()) return false;
+  return scopeActive(scope ?? (await ownerScope()));
 }
 
 /** What restarts this box's daemon, in the scope that owns it — a system unit needs privilege the CLI doesn't have. */
@@ -539,7 +598,7 @@ export function restartCommandFor(scope: UnitScope): string {
 
 export async function restartService(): Promise<void> {
   if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
-  const scope: UnitScope = installedUnits().system ? "system" : "user";
+  const scope = await ownerScope();
   // Root-owned unit, unprivileged caller: say so rather than surface systemd's
   // interactive-auth refusal, which reads like the unit is broken.
   if (scope === "system" && process.getuid?.() !== 0) {
@@ -566,8 +625,13 @@ export async function restartService(): Promise<void> {
  * make this exit the last thing the machine ever did.
  */
 export async function selfRestart(): Promise<void> {
-  if (!systemdRunning() || !(await serviceLoaded())) process.exit(0);
-  if ((await runningScope()) === "system") {
+  if (!systemdRunning()) process.exit(0);
+  // The cgroup, not the unit files: with both installed, file order answers
+  // "system" for a daemon the user manager is running, and this would then exit 0
+  // under `Restart=on-failure` — a clean exit that stays down until someone logs in.
+  const scope = await runningScope();
+  if (!(await serviceLoaded(scope))) process.exit(0);
+  if (scope === "system") {
     console.log(
       "updated — exiting for Restart=always to relaunch on the new code; the unit definition is not rewritten " +
         "here, so run `sudo seanced install --system` if `seanced doctor` reports it drifted",
@@ -674,7 +738,7 @@ export async function doctorServiceChecks(): Promise<readonly Check[]> {
   // blob somewhere this shell's `stateDir()` would never look.
   const blobPath = pskBlobPathIn((unitText === null ? null : unitStateDirEnv(unitText)) ?? stateDir());
   const checks: Check[] = [
-    ...(await scopeChecks(units, await serviceLoaded(), {
+    ...(await scopeChecks(units, await serviceLoaded(scope), {
       unitText,
       expectedUnit: scope === "user" || unitText === null ? null : expectedSystemUnit(unitText),
       blobPath: existsSync(blobPath) ? blobPath : null,

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64 } from "@seance/shared";
-import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmRoundTrip } from "./tpmcreds.ts";
+import { blobLoadable, importTpmPskValue, readTpmPsk, tpmAvailable, tpmRoundTrip } from "./tpmcreds.ts";
 
 const hasTpm = await tpmAvailable();
 
@@ -83,4 +83,14 @@ describe("tpmcreds", () => {
     },
     30_000,
   );
+
+  // The install runs this as root before writing LoadCredentialEncrypted=; without
+  // the guard `exec` throws ENOENT here and takes the install down after it has
+  // already created and chowned the log file.
+  test.if(Bun.which("systemd-creds") === null)("reports missing tooling rather than throwing", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "psk.cred");
+    await writeFile(path, "whatever\n");
+    expect(await blobLoadable(path)).toContain("systemd-creds");
+  });
 });

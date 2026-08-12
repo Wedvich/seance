@@ -5,9 +5,9 @@
 // install. So nothing here reads the ambient environment except through an
 // argument, which also makes it testable without a second user on the box.
 
-import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { constants, existsSync } from "node:fs";
+import { access, chown, mkdir } from "node:fs/promises";
+import { delimiter, dirname, join } from "node:path";
 import { exec } from "./exec.ts";
 
 export interface TargetUser {
@@ -16,6 +16,9 @@ export interface TargetUser {
   readonly gid: number;
   readonly home: string;
 }
+
+/** One wording for both root refusals — the name check in `targetUserName`, the uid check in `assertUnprivileged`. */
+const NEVER_ROOT = "the daemon must never run as root";
 
 /** The one privileged action per command, named in the message so the remedy is the whole answer. */
 export function requireRoot(uid: number | undefined, action: string): void {
@@ -40,7 +43,7 @@ export function targetUserName(flag: string | undefined, env: NodeJS.ProcessEnv)
         "(the daemon must not run as root)",
     );
   }
-  if (name === "root") throw new Error("the daemon must never run as root — pass `--user <name>` naming your account");
+  if (name === "root") throw new Error(`${NEVER_ROOT} — pass \`--user <name>\` naming your account`);
   return name;
 }
 
@@ -55,14 +58,30 @@ export function parsePasswdLine(line: string): TargetUser | null {
   const [name, , uid, gid, , home] = fields as [string, string, string, string, string, string, string];
   const uidNum = Number(uid);
   const gidNum = Number(gid);
-  if (name === "" || home === "" || !Number.isInteger(uidNum) || !Number.isInteger(gidNum)) return null;
+  // Number("") is 0 and an integer, so an empty uid or gid field would parse as
+  // root and hand it everything this install chowns.
+  if (name === "" || home === "" || uid === "" || gid === "") return null;
+  if (!Number.isInteger(uidNum) || !Number.isInteger(gidNum)) return null;
   return { name, uid: uidNum, gid: gidNum, home };
+}
+
+/**
+ * The uid is the invariant; `root` is only its common spelling. A second uid-0
+ * account (`toor`) is a normal thing to find in /etc/passwd, and gid 0 gives the
+ * same reach over everything the install writes.
+ */
+export function assertUnprivileged(user: TargetUser): void {
+  if (user.uid !== 0 && user.gid !== 0) return;
+  throw new Error(
+    `"${user.name}" resolves to ${user.uid}:${user.gid} — ${NEVER_ROOT}; pass \`--user <name>\` naming an unprivileged account`,
+  );
 }
 
 export async function lookupUser(name: string): Promise<TargetUser> {
   const result = await exec(["getent", "passwd", name], { timeoutMs: 10_000 });
   const user = result.exitCode === 0 ? parsePasswdLine(result.stdout) : null;
   if (user === null) throw new Error(`no such user "${name}" (getent passwd found nothing usable)`);
+  assertUnprivileged(user);
   return user;
 }
 
@@ -108,8 +127,19 @@ export function missingBinariesMessage(missing: readonly string[], pathEnv: stri
   );
 }
 
-/** Ownership for what root creates on the target user's behalf — the state dir and the log file. */
-export async function ownedByTarget(path: string, user: TargetUser): Promise<boolean> {
-  const info = await stat(path).catch(() => null);
-  return info !== null && info.uid === user.uid && info.gid === user.gid;
+/**
+ * `mkdir -p` where every component it has to create belongs to the target user.
+ * Chowning the leaf alone leaves a root-owned `~/.local` behind on a fresh
+ * account — and the user could then never create `~/.local/bin` beside it, which
+ * is the dir `seanced link` prefers. The leaf is chowned either way: an install
+ * over a directory someone else owns is the case this is fixing.
+ */
+export async function mkdirAsTarget(dir: string, user: TargetUser): Promise<void> {
+  const missing: string[] = [];
+  for (let cur = dirname(dir); !existsSync(cur) && dirname(cur) !== cur; cur = dirname(cur)) missing.push(cur);
+  await mkdir(dir, { recursive: true });
+  for (const path of [...missing.toReversed(), dir]) {
+    // oxlint-disable-next-line no-await-in-loop -- outermost first, and a handful of components at most
+    await chown(path, user.uid, user.gid);
+  }
 }

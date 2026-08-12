@@ -1272,9 +1272,14 @@ CSP items landed with the app (see the PWA section).
   Decisions worth keeping: scope is **detected, never persisted** (a recorded
   scope goes stale against a hand-edited unit, which is the box being served)
   — from `/proc/self/cgroup` inside the daemon, where `selfRestart` needs it
-  and no flag reaches, and from the unit files in the CLI; a system unit is
-  never rewritten by the daemon, so `selfRestart` exits 0 for
-  `Restart=always` and `doctor` reports definition drift instead;
+  and no flag reaches (the files would answer "system" for a user-manager
+  daemon on a box carrying both, and that exit under `on-failure` stays down),
+  and from the unit files in the CLI, which asks `is-active` which of the two
+  is live rather than trusting file order; a system unit is never rewritten by
+  the daemon, so `selfRestart` exits 0 for `Restart=always` and `doctor`
+  reports definition drift instead — a reinstall is what applies a new
+  definition, and it restarts the unit, because `enable --now` leaves a
+  running one on the old one;
   `LoadCredentialEncrypted=` is written only for a blob that decrypts as root,
   since a credential systemd cannot load fails the unit at start, which is
   worse than a unit that comes up keyless and says so; and installing both

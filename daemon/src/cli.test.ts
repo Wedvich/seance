@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { cmdInstall, parseInstallArgs, parseSpawnArgs } from "./cli.ts";
 import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
+import { systemdRunning } from "./systemd.ts";
 
 describe("parseSpawnArgs", () => {
   test("repo only", () => {
@@ -60,11 +61,18 @@ describe("parseInstallArgs", () => {
 });
 
 describe("install --system as a normal user", () => {
-  test.if(process.platform === "linux" && process.getuid?.() !== 0)("refuses, naming the sudo form", async () => {
-    // The refusal has to land before anything is written, and it has to say what
-    // to run — the whole point of folding the runbook into the CLI.
-    await expect(cmdInstall(["--system"])).rejects.toThrow(/sudo --preserve-env=PATH seanced install --system/u);
-  });
+  // Gated on a running systemd too, not just Linux: the privilege refusal comes
+  // after the systemd probe, so in a container or a WSL distro without systemd the
+  // message under test is the other one — and that ordering is deliberate, an
+  // operator with no systemd gains nothing from being told to sudo first.
+  test.if(process.platform === "linux" && process.getuid?.() !== 0 && systemdRunning())(
+    "refuses, naming the sudo form",
+    async () => {
+      // The refusal has to land before anything is written, and it has to say what
+      // to run — the whole point of folding the runbook into the CLI.
+      await expect(cmdInstall(["--system"])).rejects.toThrow(/sudo --preserve-env=PATH seanced install --system/u);
+    },
+  );
 });
 
 describe("plistContent", () => {

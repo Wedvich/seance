@@ -122,6 +122,10 @@ export async function importTpmPskValue(psk: string, path: string = tpmPskPath()
  * answer. Null when loadable, otherwise what failed.
  */
 export async function blobLoadable(path: string): Promise<string | null> {
+  // Like every other systemd-creds path here: `exec` throws ENOENT for a missing
+  // binary rather than reporting a failure, and this one runs mid-install — after
+  // the state dir and log file exist and before the unit is written.
+  if (Bun.which("systemd-creds") === null) return "systemd-creds not found on PATH";
   const result = await exec(["systemd-creds", "decrypt", `--name=${CRED_NAME}`, path, "/dev/null"], {
     timeoutMs: CREDS_TIMEOUT_MS,
   });

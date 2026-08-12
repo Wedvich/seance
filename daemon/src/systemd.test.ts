@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logPath } from "./paths.ts";
 import {
+  assertUnitFlag,
   conflictingScopeMessage,
   expectedSystemUnit,
   installedUnits,
@@ -111,6 +112,21 @@ describe("unitContent, system scope", () => {
     expect(unitCredentialBlob(systemUnit())).toBe("/home/ada/.local/state/seance/psk.cred");
     expect(unitDeliversPsk(systemUnit({ credentialBlob: undefined }))).toBe(false);
     expect(unitStateDirEnv(systemUnit({ stateDirEnv: "/srv/100%" }))).toBe("/srv/100%");
+  });
+});
+
+describe("assertUnitFlag", () => {
+  test("a relative --state-dir is refused, before root creates it against its own cwd", () => {
+    expect(() => assertUnitFlag("--state-dir", "state", true)).toThrow(/absolute/u);
+    expect(() => assertUnitFlag("--state-dir", "/srv/seance", true)).not.toThrow();
+  });
+
+  test("a quote or newline is refused — the unit would malform rather than expand", () => {
+    expect(() => assertUnitFlag("--path", '/bin:/o"pt')).toThrow(/quote or newline/u);
+    expect(() => assertUnitFlag("--path", "/bin\nUser=root")).toThrow(/quote or newline/u);
+    // % is the one hostile character the generator handles itself.
+    expect(() => assertUnitFlag("--state-dir", "/srv/100%", true)).not.toThrow();
+    expect(() => assertUnitFlag("--path", "/home/ada/.local/share/mise/shims:/usr/bin")).not.toThrow();
   });
 });
 
