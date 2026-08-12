@@ -62,7 +62,8 @@ Who performs the unseal depends on the systemd version:
   express TPM-only keys, and its default key degrades to a host key file inside the
   rootfs — which travels with backups, exactly the exposure sealing exists to prevent.
   Here the key is _delivered_ instead of unsealed: run `seanced` as a systemd
-  **system** unit with `User=<you>` and
+  **system** unit (`sudo --preserve-env=PATH seanced install --system` writes it) with
+  `User=<you>` and
 
   ```ini
   LoadCredentialEncrypted=seance-psk:/home/<you>/.local/state/seance/psk.cred
@@ -87,8 +88,8 @@ Who performs the unseal depends on the systemd version:
   `seanced doctor`, `seanced run` and `seanced mcp` in a shell all see no PSK. Doctor
   reads the system unit to tell that arrangement from a genuinely keyless box, and
   reports the key as delivered rather than missing; the other two are simply not
-  runnable by hand there. `seanced status` and the daemon's log remain the way to see
-  a running unit's health and its key fingerprint.
+  runnable by hand there. The daemon's log carries the fingerprint, which is the only
+  place it can come from here; `seanced status` reports the unit's health.
 
 ### Sealing the blob as root
 
@@ -107,8 +108,15 @@ sudo systemd-creds decrypt --name=seance-psk /tmp/psk.cred.new - | tr -d '\n' | 
 install -m 600 /tmp/psk.cred.new ~/.local/state/seance/psk.cred && rm /tmp/psk.cred.new
 ```
 
-Then clear `psk` in `config.json` and restart the unit. A future
-`psk-import --system` folds this into the CLI.
+Then clear `psk` in `config.json` and restart the unit. This is the one half of the
+arrangement still done by hand — `install --system` writes the unit but does not seal;
+a future `psk-import --system` folds this runbook into the CLI too.
+
+Order doesn't matter. `install --system` only writes the
+`LoadCredentialEncrypted=` line for a blob that already decrypts as root — a credential
+systemd can't load fails the unit at start — so seal first and install, or install first
+and re-run `sudo seanced install --system` after sealing. `seanced doctor` warns while a
+blob is sitting there undelivered.
 
 ### Proxmox LXC
 

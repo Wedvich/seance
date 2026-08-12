@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { exec, execFailure } from "./exec.ts";
-import { stateDir } from "./paths.ts";
+import { pskBlobPathIn, stateDir } from "./paths.ts";
 import { isWsl } from "./wsl.ts";
 
 /** TPM2-sealed systemd-creds blob, base64 — the plain-Linux counterpart of the macOS login keychain. */
 export function tpmPskPath(): string {
-  return join(stateDir(), "psk.cred");
+  return pskBlobPathIn(stateDir());
 }
 
 /**
@@ -70,7 +70,13 @@ export async function readTpmPsk(path: string = tpmPskPath()): Promise<string | 
   if (process.platform !== "linux" || isWsl()) return null;
   const file = Bun.file(path);
   if (!(await file.exists())) return null;
-  const blob = (await file.text()).trim();
+  // Existing and readable are different questions: a blob only PID 1 needs to
+  // open can be root-owned 0600 in a directory this process can traverse, and
+  // an EACCES escaping here would take `loadPsk` and `doctor` down on exactly
+  // the credential-delivered box they are meant to report on.
+  const text = await file.text().catch(() => null);
+  if (text === null) return null;
+  const blob = text.trim();
   if (blob === "") return null;
   if (Bun.which("systemd-creds") === null) return null;
   const result = await exec(decryptArgv(CRED_NAME), { stdin: blob, timeoutMs: CREDS_TIMEOUT_MS });
@@ -105,6 +111,25 @@ export async function importTpmPskValue(psk: string, path: string = tpmPskPath()
   // Created 0600 outright — write-then-chmod would leave a umask-mode window,
   // and unlike DPAPI the file mode is this blob's only user-binding.
   await writeFile(path, `${blob}\n`, { mode: 0o600 });
+}
+
+/**
+ * Whether PID 1 will be able to load this blob — the question
+ * `LoadCredentialEncrypted=` answers at service start, where a failure is fatal
+ * to the unit rather than degraded. Run as root by `install --system` before it
+ * writes that line. Plaintext goes to /dev/null, not through a pipe: the
+ * installer has no business holding the key, and the exit code is the whole
+ * answer. Null when loadable, otherwise what failed.
+ */
+export async function blobLoadable(path: string): Promise<string | null> {
+  // Like every other systemd-creds path here: `exec` throws ENOENT for a missing
+  // binary rather than reporting a failure, and this one runs mid-install — after
+  // the state dir and log file exist and before the unit is written.
+  if (Bun.which("systemd-creds") === null) return "systemd-creds not found on PATH";
+  const result = await exec(["systemd-creds", "decrypt", `--name=${CRED_NAME}`, path, "/dev/null"], {
+    timeoutMs: CREDS_TIMEOUT_MS,
+  });
+  return result.exitCode === 0 ? null : `systemd-creds decrypt failed: ${execFailure(result)}`;
 }
 
 /**

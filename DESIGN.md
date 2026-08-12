@@ -181,12 +181,17 @@ Séance's noise is cover for a real intruder.
    keys, and its default key degrades to a host key file inside the rootfs,
    which travels with backups — the very exposure sealing exists to prevent.
    So on modern systemd the key is _delivered_, not unsealed: seanced runs as
-   a system unit with `User=` plus `LoadCredentialEncrypted=seance-psk:<blob>`,
-   PID 1 unseals at service start, and the daemon reads the plaintext from
-   the service-private `$CREDENTIALS_DIRECTORY` mount — a `credential` store
-   ahead of every platform store in `loadPsk` resolution. The daemon never
-   touches the TPM there; the plaintext exists only in that tmpfs and daemon
-   memory, and the sealing itself is a one-time root step (docs/psk.md).
+   a system unit with `User=` plus `LoadCredentialEncrypted=seance-psk:<blob>`
+   (`install --system` writes it; the daemon still never runs as root, and a
+   target user that resolves to root is refused), PID 1 unseals at service
+   start, and the daemon reads the plaintext from the service-private
+   `$CREDENTIALS_DIRECTORY` mount — a `credential` store ahead of every
+   platform store in `loadPsk` resolution. The daemon never touches the TPM
+   there; the plaintext exists only in that tmpfs and daemon memory, and the
+   sealing itself is a one-time root step (docs/psk.md). `install --system`
+   verifies a blob is loadable before recording it, decrypting to `/dev/null`
+   rather than through a pipe — the installer has no business holding the key
+   either.
    Rejected: a sudoers NOPASSWD rule letting the user's processes call
    `systemd-creds decrypt` — it hands the PSK to _anything_ running as the
    user, i.e. to any prompt-injected command on exactly the box built to run
@@ -1252,18 +1257,42 @@ CSP items landed with the app (see the PWA section).
   refused on systemd ≥ 256 (`--user` is not a fix), `has-tpm2` does report
   partial in an LXC guest with a working seal path, and the answer is
   delivery via `LoadCredentialEncrypted=` rather than probe loosening. What
-  remains is tooling, not research: `systemd.ts` is user-scope only, so a
-  system unit is hand-written for now (docs/platform-notes.md — including
-  `Restart=always`, because `selfRestart` under a system unit finds no user
-  unit and exits cleanly expecting the supervisor's policy); `install
---system` and `psk-import --system` would fold that runbook into the CLI.
-  The one place that gap was not tolerable is `doctor`: a delivered key is
-  unreadable outside the unit, so every check that resolves one reported a
-  healthy box as broken and exited 1. It now _reads_ the system unit
-  (`systemUnitDeliversPsk`) purely to distinguish "the manager holds the key"
-  from "there is no key", and says so instead of failing. Its remaining
-  user-scope checks (unit active, linger, the bun-path catch-up) still
-  misreport there, documented rather than fixed until `install --system`.
+  remained was tooling, not research, and `install --system` has since folded
+  the unit half of that runbook into the CLI (2026-08-11). `psk-import
+--system` is still open: sealing is a root step by hand (docs/psk.md).
+  A delivered key is unreadable outside the unit, so every check that resolves
+  one first reported a healthy box as broken and exited 1; `doctor` therefore
+  _reads_ the system unit (`systemUnitDeliversPsk`) purely to distinguish "the
+  manager holds the key" from "there is no key", and its three remaining
+  user-scope misreports (unit active, linger, the bun-path catch-up) are now
+  fixed rather than documented — `installedUnits()` picks the scope from which
+  unit file exists, linger is reported as irrelevant, and the bun path is
+  compared against the unit's _own_ recorded PATH rather than the shell's,
+  which would otherwise read two orderings of one PATH as drift.
+  Decisions worth keeping: scope is **detected, never persisted** (a recorded
+  scope goes stale against a hand-edited unit, which is the box being served)
+  — from `/proc/self/cgroup` inside the daemon, where `selfRestart` needs it
+  and no flag reaches (the files would answer "system" for a user-manager
+  daemon on a box carrying both, and that exit under `on-failure` stays down),
+  and from the unit files in the CLI, which asks `is-active` which of the two
+  is live rather than trusting file order; a system unit is never rewritten by
+  the daemon, so `selfRestart` exits 0 for `Restart=always` and `doctor`
+  reports definition drift instead — a reinstall is what applies a new
+  definition, and it restarts the unit, because `enable --now` leaves a
+  running one on the old one;
+  `LoadCredentialEncrypted=` is written only for a blob that decrypts as root,
+  since a credential systemd cannot load fails the unit at start, which is
+  worse than a unit that comes up keyless and says so; and installing both
+  scopes at once is refused in both directions rather than resolved — two
+  daemons would share one state dir, log and device id.
+  Rejected: shelling out to `sudo` from the CLI (a password prompt through
+  `Bun.spawn`, whose tty `exec.ts` deliberately withholds, and a half-root
+  command with no coherent recovery point) — `--system` refuses unless euid 0
+  and resolves the target from `SUDO_USER`, never from root's own
+  environment, since `homedir()`, `stateDir()`, `PATH` and `Bun.which` all
+  answer for the wrong user there and every one of those values is written
+  into a unit that outlives the install. Also rejected: keeping the runbook as
+  printed instructions, which is what the docs already were.
   MCP on a credential-delivered box is deliberately unsupported
   (docs/psk.md); the sanctioned future path is an op-level proxy through the
   daemon — semantic ops over a local socket with per-op policy and the

@@ -2,6 +2,7 @@ import type { Check } from "./check.ts";
 import * as launchd from "./launchd.ts";
 import { NO_SERVICE_MANAGER, type InstallResult, type ServiceManager } from "./service-types.ts";
 import * as systemd from "./systemd.ts";
+import type { SystemInstallOptions } from "./systemd.ts";
 
 // One dispatch point for every lifecycle action: cli.ts stays platform-blind,
 // and a future platform is a new module here, not edits across the CLI. Linux
@@ -12,6 +13,7 @@ import * as systemd from "./systemd.ts";
 // drifting into return shapes this file would have to adapt.
 
 export type { InstallResult, ServiceManager } from "./service-types.ts";
+export type { SystemInstallOptions } from "./systemd.ts";
 
 /** Null off the two supported platforms; callers turn that into the message the action deserves. */
 function manager(): ServiceManager | null {
@@ -40,6 +42,22 @@ export async function uninstallService(): Promise<readonly string[]> {
   const service = manager();
   if (service === null) throw unsupported("seanced uninstall");
   return service.uninstallService();
+}
+
+/**
+ * System scope stays off `ServiceManager` for the reason `serviceDeliversPsk`
+ * does: it exists to satisfy `LoadCredentialEncrypted=`, which only systemd has,
+ * and a launchd daemon is a different thing with a different threat model
+ * (DESIGN.md declines it). So these two are Linux-only by signature.
+ */
+export async function installSystemService(opts: SystemInstallOptions): Promise<InstallResult> {
+  if (process.platform !== "linux") throw new Error("`install --system` is a systemd arrangement — see docs/psk.md");
+  return systemd.installSystemService(opts);
+}
+
+export async function uninstallSystemService(): Promise<readonly string[]> {
+  if (process.platform !== "linux") throw new Error("`uninstall --system` is a systemd arrangement — see docs/psk.md");
+  return systemd.uninstallSystemService();
 }
 
 export async function serviceLoaded(): Promise<boolean> {

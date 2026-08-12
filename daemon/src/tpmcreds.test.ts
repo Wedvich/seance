@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64 } from "@seance/shared";
-import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmRoundTrip } from "./tpmcreds.ts";
+import { blobLoadable, importTpmPskValue, readTpmPsk, tpmAvailable, tpmRoundTrip } from "./tpmcreds.ts";
 
 const hasTpm = await tpmAvailable();
 
@@ -38,6 +38,18 @@ describe("tpmcreds", () => {
     expect(await readTpmPsk(path)).toBeNull();
   });
 
+  // Root can read anything, so the case only exists for an unprivileged process.
+  test.if(process.platform === "linux" && process.getuid?.() !== 0)(
+    "a blob present but unreadable reads as null — the delivered-credential arrangement, where only PID 1 opens it",
+    async () => {
+      const dir = await tempDir();
+      const path = join(dir, "psk.cred");
+      await writeFile(path, "whatever\n");
+      await chmod(path, 0o000);
+      expect(await readTpmPsk(path)).toBeNull();
+    },
+  );
+
   test.skipIf(!hasTpm)(
     "round-trips a key and stores the blob 0600",
     async () => {
@@ -71,4 +83,14 @@ describe("tpmcreds", () => {
     },
     30_000,
   );
+
+  // The install runs this as root before writing LoadCredentialEncrypted=; without
+  // the guard `exec` throws ENOENT here and takes the install down after it has
+  // already created and chowned the log file.
+  test.if(Bun.which("systemd-creds") === null)("reports missing tooling rather than throwing", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "psk.cred");
+    await writeFile(path, "whatever\n");
+    expect(await blobLoadable(path)).toContain("systemd-creds");
+  });
 });

@@ -96,3 +96,9 @@ green:
   prompt text is never logged, and a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session). Don't let changes drift from them.
+- The daemon never runs as root. `install --system` / `uninstall --system` are the only commands
+  that require it (they write `/etc/systemd/system`), they refuse a target user that resolves to
+  root, and they never invoke `sudo` themselves — the operator supplies the privilege. Under them
+  nothing may read the ambient environment for a value that ends up in the unit: as root
+  `homedir()`, `stateDir()`, `logPath()`, `PATH` and `Bun.which` all answer for the wrong user, and
+  the unit outlives the install. `daemon/src/target-user.ts` resolves the target instead.
