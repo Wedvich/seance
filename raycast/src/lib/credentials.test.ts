@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
-import { loadPsk, type Config } from "../../../daemon/src/config.ts";
+import { configSkeleton, loadPsk, type Config } from "../../../daemon/src/config.ts";
 import { PSK_SERVICE as DAEMON_PSK_SERVICE } from "../../../daemon/src/keychain.ts";
 import { configDir as daemonConfigDir, configPath as daemonConfigPath } from "../../../daemon/src/paths.ts";
 import { keychainStore, type PskStore } from "../../../daemon/src/psk-store.ts";
@@ -172,6 +172,16 @@ describe("loadKey", () => {
     await expect(
       loadKey(sources({ readTextFile: () => Promise.resolve(JSON.stringify(config({ bearerToken: "" }))) })),
     ).rejects.toThrow(/bearerToken is empty/u);
+  });
+
+  // Drift-guarded against the daemon's actual skeleton: `seanced init` writes
+  // the placeholder this must catch, or `new URL` inside appRelayUrl surfaces
+  // a bare "Invalid URL" naming neither the field nor the file.
+  test("names the field and file for a config still holding the init placeholder", async () => {
+    const placeholder = (JSON.parse(configSkeleton("box")) as { relayUrl: string }).relayUrl;
+    await expect(
+      loadKey(sources({ readTextFile: () => Promise.resolve(JSON.stringify(config({ relayUrl: placeholder }))) })),
+    ).rejects.toThrow(/relayUrl .* is not a ws:\/\/ or wss:\/\/ URL/u);
   });
 
   test("points at psk-import when neither the config nor the keychain holds a key", async () => {

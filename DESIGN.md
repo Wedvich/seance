@@ -1210,9 +1210,18 @@ latency budget — one hotkey to a running session.
   selection. A dial costs a TLS handshake plus a registry push, which is plainly
   felt on a surface whose entire premise is speed. Rejected: blocking the form
   on `open` + registry (correct, and slow enough to defeat the point).
-  Reconciliation waits for the list to be non-empty or for a 1.5s settle,
-  because an empty registry pushes no observable state change — the same bounded
-  wait `LazyRelay` makes, for the same reason.
+  Reconciliation trusts the cached list until the client's
+  `RelayState.registrySettled` bit marks the live one authoritative — set by the
+  first registry frame after `open`, or by a 1.5s bound if none ever comes, and
+  re-armed on every re-dial so a connection flap never reads as "every machine
+  vanished". The bit lives in `RelayClient` (and `LazyRelay` waits on the same
+  one) because only the client sees an empty registry frame arrive; a subscriber
+  cannot await a push that changes no state. An authoritative empty list is
+  written to the cache like any other, so a machine removed from the registry
+  does not resurrect from LocalStorage on the next launch. Rejected: each
+  consumer hand-rolling the non-empty-or-timeout wait (two copies of the same
+  1.5s constant, and the Raycast copy's timer once survived a disconnect and
+  wiped the cached list).
 - **Defaults: last-used wins**, persisted after each successful spawn;
   preferences seed only the first run, or when the remembered machine is gone
   from the registry. The prompt always starts empty. Repos are remembered _per

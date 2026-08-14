@@ -37,6 +37,7 @@ function fakeRelay(
     hidden: [],
     ignored: 0,
     settling: false,
+    registrySettled: status === "open",
   };
   const listeners = new Set<() => void>();
   const fake: FakeRelay = {
@@ -144,7 +145,6 @@ describe("LazyRelay", () => {
         created += 1;
         return fakeRelay([machine()]);
       },
-      settleMs: 10,
     });
     expect(created).toBe(0);
     const [a, b] = await Promise.all([lazy.acquire(), lazy.acquire()]);
@@ -162,7 +162,6 @@ describe("LazyRelay", () => {
         return fake;
       },
       idleMs: 20,
-      settleMs: 10,
     });
     await lazy.acquire();
     lazy.release();
@@ -173,7 +172,7 @@ describe("LazyRelay", () => {
   });
 
   test("a rejected token surfaces as an error instead of a silent retry loop", async () => {
-    const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected"), settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
     await expect(lazy.acquire()).rejects.toThrow("bearer token");
   });
 
@@ -181,7 +180,6 @@ describe("LazyRelay", () => {
     const lazy = new LazyRelay({
       create: () => fakeRelay([], () => ({}), "connecting"),
       connectTimeoutMs: 30,
-      settleMs: 10,
     });
     await expect(lazy.acquire()).rejects.toThrow("did not answer");
   });
@@ -193,11 +191,10 @@ describe("LazyRelay", () => {
         fake = fakeRelay([machine()], () => ({}), "connecting");
         return fake;
       },
-      settleMs: 10,
     });
     const pending = lazy.acquire();
     lazy.stop();
-    fake?.setState({ status: "open" });
+    fake?.setState({ status: "open", registrySettled: true });
     await expect(pending).rejects.toThrow("stopped");
     expect(fake?.stopped).toBe(true);
   });
@@ -205,7 +202,7 @@ describe("LazyRelay", () => {
 
 describe("mcp tools", () => {
   test("list_machines reports the registry with ISO times and repo names", async () => {
-    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]), settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
     const client = await connectedClient(lazy);
     const result = await client.callTool({ name: "list_machines", arguments: {} });
     const listed = JSON.parse(toolText(result)) as Record<string, unknown>[];
@@ -225,7 +222,7 @@ describe("mcp tools", () => {
   test("get_sessions resolves the machine by name and returns its sessions", async () => {
     const sessions = [{ window: "fix-bug", repo: "seance", path: "/repos/seance" }];
     const fake = fakeRelay([machine()], (op) => (op === "sessions" ? { sessions, at: 3_000 } : {}));
-    const lazy = new LazyRelay({ create: () => fake, settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
     expect(JSON.parse(toolText(result))).toEqual(sessions);
@@ -235,7 +232,7 @@ describe("mcp tools", () => {
 
   test("spawn_session tags the request as the mcp client and reports the window", async () => {
     const fake = fakeRelay([machine()], () => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
-    const lazy = new LazyRelay({ create: () => fake, settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({
       name: "spawn_session",
@@ -251,7 +248,7 @@ describe("mcp tools", () => {
 
   test("spawn_session refuses an offline machine with its last-seen time", async () => {
     const fake = fakeRelay([machine({ connected: false })]);
-    const lazy = new LazyRelay({ create: () => fake, settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({
       name: "spawn_session",
@@ -265,7 +262,7 @@ describe("mcp tools", () => {
 
   test("spawn_session answers an unknown repo with the machine's repo list, without a round trip", async () => {
     const fake = fakeRelay([machine()]);
-    const lazy = new LazyRelay({ create: () => fake, settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({
       name: "spawn_session",
@@ -280,7 +277,7 @@ describe("mcp tools", () => {
 
   test("a structured spawn failure surfaces its code and message", async () => {
     const fake = fakeRelay([machine()], () => ({ ok: false, code: "claude_died", message: "pane died" }));
-    const lazy = new LazyRelay({ create: () => fake, settleMs: 10 });
+    const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({
       name: "spawn_session",

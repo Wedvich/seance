@@ -14,7 +14,7 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RelayState, SpawnRequest } from "@seance/shared";
+import type { RelayState, SpawnRequest, SpawnResponse } from "@seance/shared";
 import { readLastUsed, readRegistry, writeLastUsed, writeRegistry, type Store } from "./lib/cache.ts";
 import { loadKey } from "./lib/credentials.ts";
 import { failureText } from "./lib/errors.ts";
@@ -23,7 +23,7 @@ import {
   initialValues,
   nextLastUsed,
   reconcile,
-  sortedByName,
+  sortedMachines,
   type Defaults,
   type FormValues,
   type LastUsed,
@@ -58,16 +58,6 @@ type Preferences = {
   readonly defaultEffort: string;
 };
 
-/**
- * How long after the socket opens to keep trusting the cached machine list. An
- * empty registry pushes no observable state change, so "the registry arrived"
- * cannot be awaited — the same bounded wait `LazyRelay` makes in
- * daemon/src/mcp.ts, for the same reason. Without it the moment between `open`
- * and the first push reads as "every machine vanished" and reconciliation
- * apologises for a change that never happened.
- */
-const REGISTRY_SETTLE_MS = 1_500;
-
 // Before anything from `shared/` runs: Raycast's sandbox withholds `crypto` and
 // `WebSocket`, which every envelope and every socket needs. See lib/runtime.ts.
 installNodeGlobals();
@@ -89,7 +79,7 @@ function readDefaults(): Defaults {
   };
 }
 
-function statusLine(relay: RelayState | null, live: boolean, machines: readonly PickerMachine[]): string {
+function statusLine(relay: RelayState | null, machines: readonly PickerMachine[]): string {
   if (relay === null) return "Reading the local daemon config…";
   if (relay.status === "rejected") {
     return relay.rejection === "unauthorized"
@@ -102,7 +92,7 @@ function statusLine(relay: RelayState | null, live: boolean, machines: readonly 
       ? "Relay unreachable"
       : `Relay unreachable — showing the last list, from ${formatAge(machines)}`;
   }
-  if (!live) return "Connected — waiting for the machine list";
+  if (!relay.registrySettled) return "Connected — waiting for the machine list";
   const online = machines.filter((machine) => machine.connected).length;
   return `Connected · ${online} of ${machines.length} ${machines.length === 1 ? "machine" : "machines"} online`;
 }
@@ -134,13 +124,9 @@ export default function Command(): React.JSX.Element {
 
   const [ready, setReady] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
-  const [cached, setCached] = useState<readonly PickerMachine[]>([]);
   const [machines, setMachines] = useState<readonly PickerMachine[]>([]);
-  /** True once the live registry is authoritative — see REGISTRY_SETTLE_MS. */
-  const [live, setLive] = useState(false);
   const [relay, setRelay] = useState<RelayState | null>(null);
   const [values, setValues] = useState<FormValues>(() => initialValues([], null, defaultsRef.current));
-  const [lastUsed, setLastUsed] = useState<LastUsed | null>(null);
   const [busy, setBusy] = useState<"spawn" | "rescan" | null>(null);
 
   const handleRef = useRef<RelayHandle | null>(null);
@@ -148,14 +134,19 @@ export default function Command(): React.JSX.Element {
   const notedRef = useRef(false);
   const valuesRef = useRef(values);
   valuesRef.current = values;
-  const cachedRef = useRef(cached);
-  cachedRef.current = cached;
+  /** The cached projection and the last-used memory feed reconciliation, but nothing renders them — refs, not state. */
+  const cachedRef = useRef<readonly PickerMachine[]>([]);
+  const lastUsedRef = useRef<LastUsed | null>(null);
 
   const absorb = useCallback(
     (pushed: readonly PickerMachine[], authoritative: boolean): void => {
-      const list = sortedByName(pushed);
+      const list = sortedMachines(pushed);
       setMachines(list);
-      const result = reconcile(valuesRef.current, list, { cached: cachedRef.current, defaults });
+      const result = reconcile(valuesRef.current, list, {
+        cached: cachedRef.current,
+        lastUsed: lastUsedRef.current,
+        defaults,
+      });
       setValues(result.values);
       if (result.note !== null && authoritative && !notedRef.current) {
         notedRef.current = true;
@@ -170,19 +161,21 @@ export default function Command(): React.JSX.Element {
   // from the moment the cache lands, and the socket reconciles into it.
   useEffect(() => {
     let disposed = false;
-    let settle: ReturnType<typeof setTimeout> | null = null;
 
     const run = async (): Promise<void> => {
       const [registry, remembered] = await Promise.all([readRegistry(store), readLastUsed(store)]);
       if (disposed) return;
-      const list = sortedByName(registry?.machines ?? []);
-      setCached(list);
+      const list = sortedMachines(registry?.machines ?? []);
       cachedRef.current = list;
       setMachines(list);
-      setLastUsed(remembered);
-      const opening = initialValues(list, remembered, defaults);
-      setValues(opening);
-      valuesRef.current = opening;
+      lastUsedRef.current = remembered;
+      // The autoFocus TextArea takes keystrokes from the first frame, before
+      // these reads resolve — anything already typed survives the opening values.
+      setValues((current) => {
+        const opening = { ...initialValues(list, remembered, defaults), prompt: current.prompt };
+        valuesRef.current = opening;
+        return opening;
+      });
       setReady(true);
 
       let credentials;
@@ -202,22 +195,14 @@ export default function Command(): React.JSX.Element {
       const onChange = (): void => {
         const state = handle.getState();
         setRelay(state);
-        if (state.status !== "open") return;
-        // The list only becomes authoritative once something is in it, or once
-        // the settle window closes on a genuinely empty registry.
-        if (state.machines.length > 0) {
-          if (settle !== null) clearTimeout(settle);
-          settle = null;
-          setLive(true);
-          absorb(state.machines, true);
-          void writeRegistry(store, state.machines, Date.now());
-          return;
-        }
-        settle ??= setTimeout(() => {
-          settle = null;
-          setLive(true);
-          absorb(handle.getState().machines, true);
-        }, REGISTRY_SETTLE_MS);
+        // Authoritative only once the client marks this socket's registry
+        // settled — the moment between `open` and the first push must not read
+        // as "every machine vanished". An authoritative *empty* list is cached
+        // like any other: a machine removed from the registry must not
+        // resurrect from LocalStorage on the next launch.
+        if (state.status !== "open" || !state.registrySettled) return;
+        absorb(state.machines, true);
+        void writeRegistry(store, state.machines, Date.now());
       };
       const unsubscribe = handle.subscribe(onChange);
       onChange();
@@ -229,7 +214,6 @@ export default function Command(): React.JSX.Element {
 
     return () => {
       disposed = true;
-      if (settle !== null) clearTimeout(settle);
       for (const dispose of disposers) dispose();
       handleRef.current?.stop();
       handleRef.current = null;
@@ -262,16 +246,27 @@ export default function Command(): React.JSX.Element {
     };
 
     setBusy("spawn");
+    let reply: SpawnResponse;
     try {
-      const reply = await handle.spawn(check.machine.deviceId, request);
-      if (!reply.ok) {
-        // Stays open with the form intact: the typed prompt is the expensive
-        // part of this interaction and must survive a failure.
-        await showToast(Toast.Style.Failure, `Spawn failed (${reply.code})`, reply.message);
-        return;
-      }
-      const persisted = nextLastUsed(lastUsed, values);
-      setLastUsed(persisted);
+      reply = await handle.spawn(check.machine.deviceId, request);
+    } catch (err) {
+      await showToast(Toast.Style.Failure, "Spawn failed", failureText(err));
+      return;
+    } finally {
+      setBusy(null);
+    }
+    if (!reply.ok) {
+      // Stays open with the form intact: the typed prompt is the expensive
+      // part of this interaction and must survive a failure.
+      await showToast(Toast.Style.Failure, `Spawn failed (${reply.code})`, reply.message);
+      return;
+    }
+    // Only the spawn itself sits in the try above. The session is running now,
+    // so a failure in the bookkeeping below must not report "Spawn failed" —
+    // that reads as "nothing started" and invites a duplicate.
+    const persisted = nextLastUsed(lastUsedRef.current, values);
+    lastUsedRef.current = persisted;
+    try {
       await writeLastUsed(store, persisted);
       if (reply.note !== undefined) {
         // A note is the one success worth reading, so the window stays put.
@@ -280,10 +275,8 @@ export default function Command(): React.JSX.Element {
       }
       await closeMainWindow();
       await showHUD(`Started ${reply.window} on ${check.machine.name}`);
-    } catch (err) {
-      await showToast(Toast.Style.Failure, "Spawn failed", failureText(err));
-    } finally {
-      setBusy(null);
+    } catch {
+      void showToast(Toast.Style.Success, `Started ${reply.window} on ${check.machine.name}`);
     }
   };
 
@@ -351,13 +344,22 @@ export default function Command(): React.JSX.Element {
         value={values.prompt}
         onChange={(prompt) => setValues((current) => ({ ...current, prompt }))}
       />
-      <Form.Description title="Relay" text={statusLine(relay, live, machines)} />
+      <Form.Description title="Relay" text={statusLine(relay, machines)} />
       <Form.Dropdown
         id="machine"
         title="Machine"
         value={values.machineId ?? ""}
         onChange={(machineId) =>
-          setValues((current) => reconcile({ ...current, machineId }, machines, { cached, defaults }).values)
+          setValues(
+            (current) =>
+              // repo: null — switching machines consults the target machine's
+              // own remembered repo, never the previous machine's selection.
+              reconcile({ ...current, machineId, repo: null }, machines, {
+                cached: cachedRef.current,
+                lastUsed: lastUsedRef.current,
+                defaults,
+              }).values,
+          )
         }
       >
         {machines.map((machine) => (
@@ -375,7 +377,7 @@ export default function Command(): React.JSX.Element {
         value={values.repo ?? ""}
         onChange={(repo) => setValues((current) => ({ ...current, repo }))}
       >
-        {sortedByName(selected?.repos ?? []).map((repo) => (
+        {(selected?.repos ?? []).map((repo) => (
           <Form.Dropdown.Item key={repo.name} value={repo.name} title={repo.name} keywords={[repo.path]} />
         ))}
       </Form.Dropdown>

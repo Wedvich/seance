@@ -150,6 +150,15 @@ export async function loadKey(overrides: Partial<CredentialSources> = {}): Promi
 
   if (bearerToken === "") throw new Error(`bearerToken is empty in ${path}`);
 
+  // `seanced init` writes the placeholder "wss://", which `new URL` inside
+  // appRelayUrl would surface as a bare "Invalid URL" naming neither the field
+  // nor the file. Same shape the daemon's runnableProblems accepts.
+  if (!/^wss?:\/\/.+/u.test(relayUrl)) {
+    throw new Error(
+      `relayUrl "${relayUrl}" in ${path} is not a ws:// or wss:// URL — fill it in, or re-run \`seanced init\``,
+    );
+  }
+
   const psk = configured === "" ? await sources.readKeychain(PSK_SERVICE) : configured;
   if (psk === null || psk === "") {
     throw new Error(

@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import type { Machine, RelayState } from "@seance/shared";
+import { DEFAULT_FORM } from "../../../pwa/src/state.ts";
+import { resolveMachine as pwaResolveMachine, resolveRepo as pwaResolveRepo } from "../../../pwa/src/view.ts";
 import {
   checkSubmit,
   initialValues,
   nextLastUsed,
   reconcile,
   sortedByName,
+  sortedMachines,
   type Defaults,
   type FormValues,
   type LastUsed,
@@ -99,7 +103,11 @@ describe("initialValues", () => {
 });
 
 describe("reconcile", () => {
-  const context = (cached: readonly PickerMachine[]) => ({ cached, defaults });
+  const context = (cached: readonly PickerMachine[], lastUsed: LastUsed | null = null) => ({
+    cached,
+    lastUsed,
+    defaults,
+  });
 
   test("a selection the live registry still holds is left alone, silently", () => {
     const current = values({ machineId: "device-1", repo: "other" });
@@ -154,6 +162,56 @@ describe("reconcile", () => {
     const current = values({ machineId: "device-1", repo: "seance" });
     const result = reconcile({ ...current, machineId: "device-2" }, [machine(), desktop], context([]));
     expect(result.values.repo).toBe("www");
+  });
+
+  test("switching machines restores the target machine's remembered repo, not its first", () => {
+    const desktopTwo = machine({
+      deviceId: "device-2",
+      name: "desktop",
+      repos: [
+        { name: "api", path: "/a", defaultBranch: null },
+        { name: "www", path: "/w", defaultBranch: null },
+      ],
+    });
+    const remembered: LastUsed = {
+      machineId: "device-1",
+      repos: { "device-2": "www" },
+      model: "opus",
+      effort: "medium",
+      worktree: true,
+    };
+    // The view hands reconcile `repo: null` on a switch, so the previous
+    // machine's selection cannot carry over.
+    const result = reconcile(
+      values({ machineId: "device-2", repo: null }),
+      [machine(), desktopTwo],
+      context([], remembered),
+    );
+    expect(result.values.repo).toBe("www");
+    expect(result.note).toBeNull();
+  });
+
+  test("a repo gone from the machine falls back to its remembered one before its first", () => {
+    const shifted = machine({
+      repos: [
+        { name: "alpha", path: "/repos/alpha", defaultBranch: null },
+        { name: "other", path: "/repos/other", defaultBranch: null },
+      ],
+    });
+    const remembered: LastUsed = {
+      machineId: "device-1",
+      repos: { "device-1": "other" },
+      model: "opus",
+      effort: "medium",
+      worktree: true,
+    };
+    const result = reconcile(
+      values({ machineId: "device-1", repo: "seance" }),
+      [shifted],
+      context([machine()], remembered),
+    );
+    expect(result.values.repo).toBe("other");
+    expect(result.note).toBe("seance is gone from laptop — picked other");
   });
 
   test("an offline machine is still selectable — refusing to submit is the blocker's job", () => {
@@ -228,6 +286,22 @@ describe("sortedByName", () => {
   });
 });
 
+describe("sortedMachines", () => {
+  test("sorts each machine's repos at entry, so the first-repo fallback is the first shown", () => {
+    const entered = sortedMachines([
+      machine({
+        repos: [
+          { name: "zeta", path: "/z", defaultBranch: null },
+          { name: "alpha", path: "/a", defaultBranch: null },
+        ],
+      }),
+      desktop,
+    ]);
+    expect(entered.map((entry) => entry.name)).toEqual(["desktop", "laptop"]);
+    expect(entered[1]?.repos.map((repo) => repo.name)).toEqual(["alpha", "zeta"]);
+  });
+});
+
 describe("nextLastUsed", () => {
   test("records the repo under the machine it was picked for", () => {
     const next = nextLastUsed(null, values({ machineId: "device-1", repo: "other", model: "fable", effort: "max" }));
@@ -254,5 +328,82 @@ describe("nextLastUsed", () => {
 
   test("does not invent an entry when nothing was selected", () => {
     expect(nextLastUsed(null, values()).repos).toEqual({});
+  });
+});
+
+function relayOf(machines: readonly Machine[]): RelayState {
+  return {
+    status: "open",
+    rejection: null,
+    machines,
+    registrySize: machines.length,
+    hidden: [],
+    ignored: 0,
+    settling: false,
+    registrySettled: true,
+  };
+}
+
+/**
+ * pickMachine and pickRepo document themselves as the PWA's resolveMachine /
+ * resolveRepo fallback policy, extended only by the named-default preference
+ * (inert here: machineName is ""). Asserted the way credentials.test.ts pins
+ * the daemon: import the PWA's own functions, feed both sides equivalent
+ * inputs, and require the same choice. `reconcile` is the exported surface the
+ * pickers sit behind.
+ */
+describe("drift guard: fallback policy agrees with pwa/src/view.ts", () => {
+  function pwaMachine(overrides: Partial<Machine> = {}): Machine {
+    return { ...machine(), platform: "darwin", ...overrides };
+  }
+
+  function expectAgreement(
+    machines: readonly Machine[],
+    machineId: string | null,
+    repos: Readonly<Record<string, string>>,
+  ): void {
+    const chosen = pwaResolveMachine(relayOf(machines), machineId);
+    const repo = pwaResolveRepo(chosen, { ...DEFAULT_FORM, machineId, repos });
+    const lastUsed: LastUsed = { machineId, repos, model: "opus", effort: "medium", worktree: true };
+    const ours = reconcile(values({ machineId }), machines, { cached: machines, lastUsed, defaults });
+    expect(ours.values.machineId).toBe(chosen?.deviceId ?? null);
+    expect(ours.values.repo).toBe(repo?.name ?? null);
+  }
+
+  const twoRepos = [
+    { name: "api", path: "/a", defaultBranch: null },
+    { name: "www", path: "/w", defaultBranch: null },
+  ];
+
+  test("a remembered machine still present keeps its remembered repo", () => {
+    expectAgreement(
+      [pwaMachine(), pwaMachine({ deviceId: "device-2", name: "desktop", repos: twoRepos })],
+      "device-2",
+      { "device-2": "www" },
+    );
+  });
+
+  test("a remembered machine that is gone falls to the first connected", () => {
+    expectAgreement(
+      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", name: "desktop" })],
+      "gone",
+      {},
+    );
+  });
+
+  test("nothing connected falls to the first listed", () => {
+    expectAgreement(
+      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", connected: false })],
+      null,
+      {},
+    );
+  });
+
+  test("a remembered repo that is gone falls to the machine's first", () => {
+    expectAgreement([pwaMachine({ repos: twoRepos })], "device-1", { "device-1": "vanished" });
+  });
+
+  test("an empty registry resolves nothing on either side", () => {
+    expectAgreement([], "device-1", {});
   });
 });

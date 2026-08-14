@@ -33,6 +33,27 @@ export class RequestFailure extends Error {
   }
 }
 
+/**
+ * The one line per failure reason every surface shows, shared so `seanced mcp`,
+ * the Raycast extension and any later app-role client explain a reason the same
+ * way. Callers add their own op/title framing around it.
+ */
+export function failureReasonText(failure: RequestFailure): string {
+  switch (failure.reason) {
+    case "offline":
+      return "that machine is not connected to the relay";
+    case "unknown":
+      return "the relay has never seen that machine";
+    case "disconnected":
+      return "lost the relay connection before the request went out";
+    // The one outcome that is genuinely unknown: the request went out and no
+    // answer came back, so it may have landed anyway. Saying "failed" flatly
+    // would be a lie — and an invitation to fire a duplicate.
+    case "timeout":
+      return `${failure.message} — the machine may be asleep, or the request may have landed anyway`;
+  }
+}
+
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */
 export interface Machine {
   readonly deviceId: string;
@@ -62,6 +83,13 @@ export interface RelayState {
    * follows one — once the drop has been shown it stays shown.
    */
   readonly settling: boolean;
+  /**
+   * True once this socket's registry is authoritative: its first registry frame
+   * has landed, or REGISTRY_SETTLE_MS passed after `open` without one. While
+   * false under an open socket, an empty `machines` means "no push yet", never
+   * "every machine vanished". Reset whenever the socket leaves `open`.
+   */
+  readonly registrySettled: boolean;
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -77,6 +105,16 @@ const BACKOFF_CAP_MS = 15_000;
  */
 const SETTLE_MS = 1_500;
 
+/**
+ * How long after `open` to wait for the registry push before declaring the
+ * (possibly empty) machine list authoritative anyway. The relay pushes the
+ * registry on every app connect, so the timer is a bound for the abnormal case,
+ * not the expected path. Lives here, not in consumers: the client sees every
+ * registry frame — including an empty one, which pushes no state change a
+ * subscriber could await.
+ */
+const REGISTRY_SETTLE_MS = 1_500;
+
 const INITIAL_STATE: RelayState = {
   status: "connecting",
   rejection: null,
@@ -85,6 +123,7 @@ const INITIAL_STATE: RelayState = {
   hidden: [],
   ignored: 0,
   settling: true,
+  registrySettled: false,
 };
 
 interface Pending {
@@ -163,6 +202,7 @@ export class RelayClient {
   #attempt = 0;
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #settleTimer: ReturnType<typeof setTimeout> | null = null;
+  #registrySettleTimer: ReturnType<typeof setTimeout> | null = null;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
   /** When the current socket last delivered anything — pong or frame. Uplink evidence for timeout blame. */
@@ -172,6 +212,7 @@ export class RelayClient {
   readonly #timeouts: Partial<Record<RequestOp, number>>;
   readonly #createSocket: (url: string) => WebSocket;
   readonly #settleMs: number;
+  readonly #registrySettleMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
   readonly #log: (line: string) => void;
@@ -186,6 +227,8 @@ export class RelayClient {
     readonly createSocket?: (url: string) => WebSocket;
     /** Override for SETTLE_MS; tests use it to avoid a real 1.5s wait. */
     readonly settleMs?: number;
+    /** Override for REGISTRY_SETTLE_MS; tests use it to avoid a real 1.5s wait. */
+    readonly registrySettleMs?: number;
     /** Overrides for the shared heartbeat cadence; tests use them to avoid real 30s beats. */
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
@@ -200,6 +243,7 @@ export class RelayClient {
     this.#timeouts = opts.timeouts ?? {};
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
     this.#settleMs = opts.settleMs ?? SETTLE_MS;
+    this.#registrySettleMs = opts.registrySettleMs ?? REGISTRY_SETTLE_MS;
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#hidden = new Set(opts.hidden ?? []);
@@ -257,10 +301,11 @@ export class RelayClient {
     if (this.#retryTimer !== null) clearTimeout(this.#retryTimer);
     this.#retryTimer = null;
     this.#clearSettle();
+    this.#clearRegistrySettle();
     this.#teardownHeartbeat();
     // Leaving the settle window set would strand the screen on "connecting…" for as
     // long as the client stays stopped, which is the one thing it is certainly not.
-    this.#patch({ settling: false });
+    this.#patch({ settling: false, registrySettled: false });
     this.#socket?.close();
     this.#socket = null;
     this.#failAllPending(new RequestFailure("disconnected", "client stopped"));
@@ -359,7 +404,8 @@ export class RelayClient {
       this.#attempt = 0;
       this.#clearSettle();
       this.#startHeartbeat(socket);
-      this.#patch({ status: "open", rejection: null, settling: false });
+      this.#patch({ status: "open", rejection: null, settling: false, registrySettled: false });
+      this.#armRegistrySettle(socket);
     });
     socket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
@@ -386,10 +432,12 @@ export class RelayClient {
     if (code === CLOSE_UNAUTHORIZED || code === CLOSE_BAD_REQUEST) {
       this.#stopped = true;
       this.#clearSettle();
+      this.#clearRegistrySettle();
       this.#patch({
         status: "rejected",
         rejection: code === CLOSE_UNAUTHORIZED ? "unauthorized" : "bad-request",
         settling: false,
+        registrySettled: false,
       });
       return;
     }
@@ -406,8 +454,9 @@ export class RelayClient {
    * shown at once, so backoff never makes the banner blink.
    */
   #patchDown(status: "connecting" | "retrying"): void {
+    this.#clearRegistrySettle();
     const settling = this.#state.settling || this.#state.status === "open";
-    this.#patch({ status, settling });
+    this.#patch({ status, settling, registrySettled: false });
     if (!settling || this.#settleTimer !== null) return;
     this.#settleTimer = setTimeout(() => {
       this.#settleTimer = null;
@@ -418,6 +467,20 @@ export class RelayClient {
   #clearSettle(): void {
     if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
     this.#settleTimer = null;
+  }
+
+  #armRegistrySettle(socket: WebSocket): void {
+    this.#clearRegistrySettle();
+    this.#registrySettleTimer = setTimeout(() => {
+      this.#registrySettleTimer = null;
+      if (this.#socket !== socket) return;
+      this.#patch({ registrySettled: true });
+    }, this.#registrySettleMs);
+  }
+
+  #clearRegistrySettle(): void {
+    if (this.#registrySettleTimer !== null) clearTimeout(this.#registrySettleTimer);
+    this.#registrySettleTimer = null;
   }
 
   /**
@@ -521,9 +584,12 @@ export class RelayClient {
   }
 
   async #onRegistry(entries: readonly RegistryView[]): Promise<void> {
+    this.#clearRegistrySettle();
     this.#entries = entries;
     await Promise.all(entries.map((entry) => this.#decryptInfo(entry.info)));
-    this.#rebuildMachines();
+    // Settled in the same patch as the machines it vouches for, so a subscriber
+    // never observes an authoritative flag beside a stale list.
+    this.#rebuildMachines({ registrySettled: true });
   }
 
   /**
@@ -545,7 +611,7 @@ export class RelayClient {
     }
   }
 
-  #rebuildMachines(): void {
+  #rebuildMachines(extra: Partial<RelayState> = {}): void {
     const previous = this.#state.machines;
     // Keyed, not positional: the relay lists entries in lexicographic deviceId
     // order, so a machine registering for the first time can land anywhere in
@@ -598,6 +664,7 @@ export class RelayClient {
       hidden: sameIds(hidden, this.#state.hidden) ? this.#state.hidden : hidden,
       // Counted off entries the registry actually holds, so a removal never reads as a key mismatch.
       ignored: this.#entries.length - machines.length - hiddenHere,
+      ...extra,
     });
   }
 

@@ -24,12 +24,21 @@ const collator = new Intl.Collator();
 /**
  * Alphabetical by name, matching the PWA's pickers. The relay pushes registry
  * entries in lexicographic *deviceId* order, which to a reader is no order at
- * all. Applied where the list enters the form rather than at render, so the
- * "first listed" fallbacks below land on the machine that is actually shown
- * first.
+ * all.
  */
 export function sortedByName<T extends { readonly name: string }>(items: readonly T[]): readonly T[] {
   return items.toSorted((a, b) => collator.compare(a.name, b.name));
+}
+
+/**
+ * How every machine list enters the form — cache read and live push alike:
+ * machines alphabetical, and each machine's repos too, since the daemon
+ * reports repos in scan order. Sorting at entry rather than at render is what
+ * makes the "first listed" fallbacks below land on the item actually shown
+ * first.
+ */
+export function sortedMachines(machines: readonly PickerMachine[]): readonly PickerMachine[] {
+  return sortedByName(machines.map((machine) => ({ ...machine, repos: sortedByName(machine.repos) })));
 }
 
 /** Everything the form holds. The prompt always starts empty, so it is never persisted. */
@@ -90,9 +99,16 @@ function pickMachine(
   return machines.find((machine) => machine.connected) ?? machines[0] ?? null;
 }
 
-/** The machine's remembered repo, else its first — the cache may name one that has gone. */
-function pickRepo(machine: PickerMachine, preferred: string | null): RepoEntry | null {
-  return machine.repos.find((repo) => repo.name === preferred) ?? machine.repos[0] ?? null;
+/**
+ * First preference that resolves, else the machine's first repo — the cache or
+ * the memory may name one that has gone.
+ */
+function pickRepo(machine: PickerMachine, preferred: readonly (string | null)[]): RepoEntry | null {
+  for (const name of preferred) {
+    const match = name === null ? undefined : machine.repos.find((repo) => repo.name === name);
+    if (match !== undefined) return match;
+  }
+  return machine.repos[0] ?? null;
 }
 
 /**
@@ -103,7 +119,11 @@ function pickRepo(machine: PickerMachine, preferred: string | null): RepoEntry |
 export function reconcile(
   values: FormValues,
   machines: readonly PickerMachine[],
-  context: { readonly cached: readonly PickerMachine[]; readonly defaults: Defaults },
+  context: {
+    readonly cached: readonly PickerMachine[];
+    readonly lastUsed: LastUsed | null;
+    readonly defaults: Defaults;
+  },
 ): Reconciliation {
   const machine = pickMachine(machines, values.machineId, context.defaults);
   if (machine === null) {
@@ -112,7 +132,11 @@ export function reconcile(
     return { values: { ...values, machineId: null, repo: null }, note: null };
   }
 
-  const repo = pickRepo(machine, values.repo);
+  // The per-machine memory mirrors the PWA's resolveRepo: the current selection
+  // carries over only while the machine itself is unchanged — on a switch, the
+  // target machine's own remembered repo wins, never the previous machine's.
+  const remembered = context.lastUsed?.repos[machine.deviceId] ?? null;
+  const repo = pickRepo(machine, machine.deviceId === values.machineId ? [values.repo, remembered] : [remembered]);
   const next: FormValues = { ...values, machineId: machine.deviceId, repo: repo?.name ?? null };
 
   if (machine.deviceId !== values.machineId) {
@@ -146,16 +170,15 @@ export function initialValues(
   lastUsed: LastUsed | null,
   defaults: Defaults,
 ): FormValues {
-  const machineId = lastUsed?.machineId ?? null;
   const base: FormValues = {
     prompt: "",
-    machineId,
-    repo: machineId === null ? null : (lastUsed?.repos[machineId] ?? null),
+    machineId: lastUsed?.machineId ?? null,
+    repo: null,
     model: lastUsed?.model ?? defaults.model,
     effort: lastUsed?.effort ?? defaults.effort,
     worktree: lastUsed?.worktree ?? true,
   };
-  return reconcile(base, cached, { cached, defaults }).values;
+  return reconcile(base, cached, { cached, lastUsed, defaults }).values;
 }
 
 /** What to persist after a spawn that started. Folds the machine's repo into the per-machine map. */

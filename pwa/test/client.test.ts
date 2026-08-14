@@ -872,3 +872,49 @@ describe("store", () => {
     }
   });
 });
+
+describe("registry settle", () => {
+  // The bit both `LazyRelay` and the Raycast view key on: false between `open`
+  // and the first registry frame, true from that frame on, re-armed by a
+  // re-dial — so a connection flap never reads as "every machine vanished".
+  test("settles on the first registry frame and re-arms on a re-dial", async () => {
+    const { client, waitFor } = startClient();
+    try {
+      expect(client.getState().registrySettled).toBe(false);
+      const state = await waitFor((s) => s.registrySettled, "the registry to settle");
+      expect(state.status).toBe("open");
+      client.reconnect();
+      expect(client.getState().registrySettled).toBe(false);
+      await waitFor((s) => s.registrySettled, "the registry to settle again");
+    } finally {
+      client.stop();
+    }
+  });
+
+  // The relay pushes the registry on every app connect, so the timer is the
+  // bound for an abnormal peer that never does.
+  test("declares an unpushed registry settled once the bound elapses", async () => {
+    const silent = Bun.serve({
+      port: 0,
+      fetch(request, server) {
+        return server.upgrade(request) ? undefined : new Response("expected a websocket", { status: 400 });
+      },
+      websocket: { message() {} },
+    });
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${silent.port}/app`,
+      token: TOKEN,
+      key,
+      registrySettleMs: 30,
+      createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+    });
+    try {
+      client.start();
+      await pollUntil(() => client.getState().registrySettled, "the settle bound to elapse");
+      expect(client.getState().machines).toEqual([]);
+    } finally {
+      client.stop();
+      await silent.stop(true);
+    }
+  });
+});
