@@ -17,6 +17,7 @@ import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from ".
 import { exec, execFailure } from "./exec.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, statePath } from "./paths.ts";
+import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
   doctorServiceChecks,
@@ -289,8 +290,12 @@ export async function cmdDoctor(): Promise<void> {
   const gitBin = Bun.which("git");
   if (gitBin === null) fail("git not on PATH");
   else ok(`git at ${gitBin}`);
-  render([await cliOnPath()]);
-  render(await mcpChecks());
+  // Independent, and the claude-CLI probe is a 15s-bounded spawn — no reason
+  // for the rest to queue behind it. Rendered in the order they are declared.
+  const [cli, mcp, ray] = await Promise.all([cliOnPath(), mcpChecks(), raycastChecks()]);
+  render([cli]);
+  render(mcp);
+  render(ray);
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -590,4 +595,49 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
       ? "registered — Claude Code sessions can now list machines, query sessions, and spawn via the relay"
       : "removed — Claude Code no longer loads the séance MCP server",
   );
+}
+
+export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast uninstall";
+
+/**
+ * Allow-listed like `mcp`'s, but with no bare-invocation mode: `mcp` alone
+ * serves the MCP server, while `raycast` alone would name no action at all.
+ * Exported for tests.
+ */
+export function parseRaycastArgs(argv: readonly string[]): "install" | "uninstall" {
+  const [sub, ...extra] = argv;
+  if (sub === undefined) throw new Error(`seanced raycast needs a subcommand\n${RAYCAST_USAGE}`);
+  if (sub !== "install" && sub !== "uninstall") {
+    throw new Error(`unknown raycast subcommand "${sub}"\n${RAYCAST_USAGE}`);
+  }
+  if (extra.length > 0) throw new Error(`raycast ${sub} takes no arguments\n${RAYCAST_USAGE}`);
+  return sub;
+}
+
+/**
+ * Like `mcp install`, the other tool's own CLI does the writing: `ray build`
+ * typechecks and bundles, `ray develop` performs the import. Nothing here
+ * touches Raycast's extensions directory or its registry — see DESIGN.md.
+ */
+export async function cmdRaycast(argv: readonly string[]): Promise<void> {
+  if (parseRaycastArgs(argv) === "install") {
+    const result = await installExtension((line) => console.log(line));
+    for (const warning of result.warnings) console.log(`warn: ${warning}`);
+    if (!result.imported) {
+      // The warning above already said what happened; printing the success line
+      // and exiting 0 on top of it would be the lie.
+      console.error(`nothing was imported into ${result.path} — see the warning above`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`imported "${result.name}" — Raycast can now spawn a session on any paired machine, from a hotkey`);
+    console.log("re-run this after a `git pull`: nothing else rebuilds the imported copy");
+    return;
+  }
+  const { removed, wasImported } = await uninstallExtension();
+  for (const path of removed) console.log(`removed ${path}`);
+  if (!wasImported) console.log("nothing imported into Raycast");
+  // The one step this cannot do: the import is recorded in Raycast's own
+  // encrypted sqlite, which nothing outside the app may write.
+  console.log("Raycast still lists Séance until you remove it in Manage Extensions (⌘⇧E) — it cannot be done here");
 }

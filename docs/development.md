@@ -76,6 +76,25 @@ the linked one.
 | `bun run dev` (in `raycast/`)       | imports into Raycast and watches             |
 | `bun run typecheck` (in `raycast/`) | `src` on node types, then tests on bun types |
 
+`seanced raycast install` runs both of the first two in order — `ray build` for
+the typecheck, then `ray develop` long enough to import — and is the command to
+use rather than driving `ray` by hand; `seanced raycast uninstall` reverses what
+it can, and `seanced doctor` reports whether the imported copy has gone stale.
+`ray develop` by hand is still the right tool while iterating on the extension
+itself: it watches, and `install` deliberately stops the watcher once the import
+lands. Both go through `raycast/node_modules/.bin/ray`, so the "never `npx ray`"
+rule holds for the CLI too.
+
+The install path is macOS-only and needs the Raycast app, so CI never exercises
+it. `daemon/test/raycast-cli.test.ts` drives the real CLI against a stub `ray` in
+a temp `HOME` and self-skips where the app is absent, the way the `install
+--system` test self-skips without systemd; `daemon/src/raycast.test.ts` covers the
+parsing, path and staleness logic everywhere. Two seams exist for those tests:
+`SEANCE_RAYCAST_DIR` points the CLI at a workspace other than this checkout's, and
+`SEANCE_RAYCAST_ANY_PLATFORM=1` crosses the macOS-only gate so `uninstall`'s
+guards — fs work against the temp `HOME`, no Raycast involved — are covered off
+macOS too.
+
 Two tsconfigs, for the same reason `pwa/` has two: `tsconfig.json` covers the
 shipped extension on `@types/node` and is the one `ray build` drives;
 `tsconfig.test.json` covers the colocated tests on bun types, because the drift

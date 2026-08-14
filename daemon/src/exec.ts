@@ -17,20 +17,30 @@ export interface ExecResult {
  *
  * Rebuilt per call rather than memoized: the test suites set their isolation
  * env vars after import, and a frozen copy would serve children the wrong ones.
+ *
+ * Exported so the one caller that spawns a long-running child itself
+ * (`raycast.ts`, watching `ray develop`) inherits the scrub rather than
+ * rebuilding it. `overrides` layer on top — a caller that has to point a child
+ * at a different PATH must not have to reconstruct the exclusion to do it.
  */
-function childEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+export function childEnv(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...overrides };
   delete env["CREDENTIALS_DIRECTORY"];
   return env;
 }
 
 export async function exec(
   argv: readonly string[],
-  opts: { readonly cwd?: string; readonly timeoutMs?: number; readonly stdin?: string } = {},
+  opts: {
+    readonly cwd?: string;
+    readonly timeoutMs?: number;
+    readonly stdin?: string;
+    readonly env?: Readonly<Record<string, string>>;
+  } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
     cwd: opts.cwd,
-    env: childEnv(),
+    env: childEnv(opts.env),
     stdin: opts.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",

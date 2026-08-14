@@ -206,6 +206,27 @@ The entry records bun by its PATH name, so upgrading bun doesn't break it. It is
 per Claude config directory, though: if you run Claude Code with a non-default
 `CLAUDE_CONFIG_DIR`, run `seanced mcp install` once from a session using it.
 
+### 7. Optional: spawn from Raycast (macOS)
+
+On a Mac with [Raycast](https://raycast.com) installed:
+
+```sh
+seanced raycast install    # builds this checkout's extension and imports it
+```
+
+Séance then appears in Raycast as **Spawn Session** — a form that reaches every
+paired machine, one hotkey away. It reads this machine's `config.json` and the
+PSK from the login keychain, so there is no secret to enter and nothing to
+configure; Raycast's extension preferences hold only which machine, model and
+effort to preselect.
+
+The install is a local one — the extension is deliberately never published to the
+Raycast Store — so nothing updates it on its own: **re-run it after a `git
+pull`**, which `seanced doctor` reminds you of once the sources are newer than
+the imported copy. `seanced raycast uninstall` removes the import and the build
+artifacts; Raycast keeps listing the extension until you also remove it in
+**Manage Extensions** (⌘⇧E), which no command can do for you.
+
 ## Usage
 
 ### From the phone
@@ -285,6 +306,10 @@ A machine that was asleep or offline catches up on its next reconnect. A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` on that machine shows its version
 and its last update outcome. Relay and app deploys stay manual wrangler steps.
+
+The Raycast extension does not self-propagate: it is a built copy, so a machine
+that has it needs `seanced raycast install` re-run after the pull. `seanced
+doctor` flags one that is out of date.
 
 Service definitions already on disk lag behind the code that writes them, and
 machines installed before certain fixes need a one-time catch-up — both in

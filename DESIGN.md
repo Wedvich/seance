@@ -1245,6 +1245,72 @@ latency budget — one hotkey to a running session.
   the config-dir resolution, the PSK precedence, and the offered model/effort
   lists. Those four are duplicated by necessity (different runtimes, plus a
   static manifest that cannot import), so they are guarded instead.
+- **`seanced raycast install` drives Raycast's own CLI, exactly as `mcp
+install` drives Claude's.** Two steps, in order. `ray build` first, because
+  it is the only typecheck in the loop: `ray develop` skips it entirely — its
+  output stops at "compiled entry points", where `ray build` also prints
+  "checked TypeScript" — so without this gate a `shared/` wire-type change
+  would import happily and fail at the user. Then `ray develop`, which is a
+  watcher that never exits, so "imported" has to be observed from outside the
+  process: poll the imported manifest for an appearance or an mtime change
+  (snapshotted first, so a _re_-install is detectable at all), give it a
+  moment, then SIGINT. `ray` answers SIGINT by removing `cli.pid` and
+  `dev.log`, leaving the bundle imported, and **exiting 1** — a failing exit
+  code that is this command's success, so it is not consulted. The stdout
+  marker `ready - built extension successfully` only shortens the wait; the
+  directory is the proof, and a marker with no directory warns and **exits
+  non-zero** rather than claiming success — the outcome carries the observed
+  import, so the command cannot print its success line off the marker alone.
+  The whole handshake is bounded, and on expiry `ray`'s own tail is what the
+  error carries.
+  Rejected: **writing Raycast's extensions directory ourselves.** Unsupported,
+  and it would not work: the import is recorded in Raycast's encrypted sqlite,
+  which would know nothing about a directory that appeared behind it. Rejected:
+  **a preflight-and-print-instructions command** — honest, and useless. The
+  checks are the cheap part; the sequence is what is worth automating.
+- **The import is name-keyed, and the name is read from the manifest.**
+  `ray develop` imports to `~/.config/raycast/extensions/<manifest name>/`;
+  UUID-named siblings there are Store installs, which this extension
+  deliberately never becomes. A constant in the CLI would let a manifest rename
+  leave install watching a directory that never appears and uninstall refusing
+  to remove the one that did, so the CLI reads `raycast/package.json` for it.
+  The workspace is located from `checkoutRoot()`, never from
+  `process.execPath` — which is the realpath'd bun binary, and so the wrong
+  directory as well as the forbidden one.
+- **`raycast uninstall` removes only what it can prove is ours, and names what
+  it cannot do.** There is no supported way to un-import a development
+  extension — the record is in that same encrypted sqlite — so Raycast keeps
+  listing Séance until it is removed in Manage Extensions, which the command
+  prints rather than implies. What it does remove: the imported directory, but
+  only after its `package.json` names this manifest (never `rm -rf` a path that
+  was not positively identified), and never while `cli.pid` names a pid that is
+  actually alive — the file is a claim, probed with signal 0, since a crash
+  leaves it behind and a trusted stale pid would wedge every uninstall after
+  it; plus this checkout's `dist/` and generated `raycast-env.d.ts`. Idempotent
+  like the service teardown — removing what is not there is not an error. A
+  manifest that is _there but unparseable_ is not "not there": that is a `ray`
+  killed mid-write, so it refuses loudly naming the path rather than reporting
+  nothing imported and leaving the directory behind forever.
+- **Doctor warns when the imported copy is older than `raycast/src` or
+  `shared/src`.** The direct analogue of the plist/MCP recorded-bun drift
+  warning, and it earns its place for the same reason: nothing rebuilds the
+  extension on a `git pull`, so a machine can sit indefinitely running a bundle
+  that speaks last week's wire types. Silent off macOS, the way the TPM checks
+  are silent off Linux.
+- **Node's version matters only as `@raycast/api`'s engine, and the floor is
+  read from the installed package's `engines.node`** (`>= 22.22.2` today) — a
+  literal in the daemon would go stale on the next dependency bump and quietly
+  defeat the fallback below; the literal survives only for a manifest that
+  cannot be read.
+  When PATH's node is older or missing, install prepends Raycast's own bundled
+  runtime (`~/Library/Application Support/com.raycast.macos/NodeJS/runtime/
+<version>/bin`) to the child's PATH — resolved at use time and written
+  nowhere, since that directory is versioned and disappears on the next app
+  update. Dependencies, when the workspace has none, come from `bun install` at
+  the repo root and never npm: `workspace:*` is not an npm spec, and npm would
+  flatten the isolated linker tree the two-TypeScript arrangement depends on.
+  Since PR 1 the workspace also has a real runtime dependency (`ws`), so an
+  uninstalled workspace is not merely missing the build tool.
 
 **Runtime surprises, both verified by probing rather than by reading version
 numbers.** Raycast runs extensions on Node v22.22.2 but in a sandbox whose

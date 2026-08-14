@@ -6,6 +6,7 @@ import {
   cmdLink,
   cmdMcp,
   cmdPskImport,
+  cmdRaycast,
   cmdRestart,
   cmdScan,
   cmdSessions,
@@ -38,6 +39,7 @@ usage: seanced [command]
   sessions    list running claude tmux windows
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
+  raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
   help        this text
 `;
 
@@ -103,6 +105,9 @@ try {
       break;
     case "mcp":
       await cmdMcp(rest);
+      break;
+    case "raycast":
+      await cmdRaycast(rest);
       break;
     case "help":
     case "--help":

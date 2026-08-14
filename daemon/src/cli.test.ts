@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cmdInstall, parseInstallArgs, parseSpawnArgs } from "./cli.ts";
+import { cmdInstall, parseInstallArgs, parseRaycastArgs, parseSpawnArgs } from "./cli.ts";
 import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 import { systemdRunning } from "./systemd.ts";
 
@@ -57,6 +57,25 @@ describe("parseInstallArgs", () => {
     expect(() => parseInstallArgs(["--nope"])).toThrow("usage:");
     expect(() => parseInstallArgs(["system"])).toThrow("usage:");
     expect(() => parseInstallArgs(["--user", "ada"])).toThrow(/only apply to/u);
+  });
+});
+
+describe("parseRaycastArgs", () => {
+  test("the two subcommands, allow-listed", () => {
+    expect(parseRaycastArgs(["install"])).toBe("install");
+    expect(parseRaycastArgs(["uninstall"])).toBe("uninstall");
+  });
+
+  // Unlike `mcp`, which serves the MCP server when invoked bare, `raycast`
+  // alone names no action at all.
+  test("a bare invocation is usage, not a default action", () => {
+    expect(() => parseRaycastArgs([])).toThrow("usage:");
+  });
+
+  test("unknown subcommands and stray arguments are usage errors", () => {
+    expect(() => parseRaycastArgs(["reinstall"])).toThrow(/unknown raycast subcommand "reinstall"/u);
+    expect(() => parseRaycastArgs(["--system"])).toThrow("usage:");
+    expect(() => parseRaycastArgs(["install", "--force"])).toThrow(/takes no arguments/u);
   });
 });
 
