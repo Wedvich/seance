@@ -1163,6 +1163,104 @@ field is display-only, so validation would buy nothing.
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
 
+## Raycast extension (`raycast/`) — designed 2026-08-14
+
+A **fourth** relay participant and a **third app-role client**, structurally
+identical to `seanced mcp`: it dials `/app?t=<token>`, seals with the PSK as
+`from="app"`, correlates on `re`, and takes registry pushes. Zero relay and zero
+daemon changes; every channel property applies unchanged. What it adds is a
+latency budget — one hotkey to a running session.
+
+- **Scope is spawn, and only spawn.** Ops are `spawn` and `rescan`; there is no
+  `sessions` op and no session list. Monitoring stays the PWA's job, which is
+  what keeps this surface a form rather than a second app. Rejected: a
+  `Detail`/`List` view of running sessions (duplicates the PWA at a fraction of
+  the fidelity, and the phone is where you actually watch a session).
+- **Reach is every paired machine, through the relay.** Rejected: local-only
+  (talking to the daemon on this box directly). It would need no PSK and no
+  socket, but "spawn on the machine I am sitting at" is the one case where a
+  terminal is already open and `seanced spawn` already works; the value is
+  reaching the _other_ machines.
+- **Local install only, never the Raycast Store.** Publishing would push the
+  source into the `raycast/extensions` monorepo and — because the Store's
+  distribution model has no notion of reading another local app's secrets —
+  push users toward a preference field holding the PSK, i.e. a second copy at
+  rest. Refusing to publish is what keeps the credential story below possible.
+  The cost is that `ray lint` (eslint/prettier, which would fight oxfmt) is not
+  satisfied and CI cannot run `ray build` at all — it needs macOS and the
+  Raycast app. Accepted: `tsc` and `oxlint` cover the workspace in CI, and the
+  bundling gate is run by hand.
+- **Credentials come from the daemon's own config plus the macOS keychain, and
+  nowhere else** — the same decision as the MCP surface, and for the same
+  reason: no new copy of the PSK at rest. Raycast preferences hold defaults
+  only (machine name, model, effort) and are never a place a secret may go,
+  which `options.test.ts` asserts against the manifest. The keychain read goes
+  through `/usr/bin/security` by absolute path, because a Raycast-launched
+  process inherits the app's minimal environment rather than a login shell's
+  PATH, and it passes no `-a`, because the daemon sets the account only on
+  write. Verified on real hardware: reading from under Raycast raises **no** GUI
+  prompt, because the ACL entry `security` recorded on create is the one it
+  presents on read, exactly as for the daemon. The read is bounded at 10s all
+  the same, since a _locked_ login keychain does prompt and would otherwise
+  hang forever with no explanation.
+- **Cache-first rendering.** The last registry projection and the last-used form
+  values are persisted to Raycast's `LocalStorage`; the picker renders from them
+  before any socket exists, the client dials in the background, and the live
+  registry reconciles in when it lands — Toasting once if it had to move the
+  selection. A dial costs a TLS handshake plus a registry push, which is plainly
+  felt on a surface whose entire premise is speed. Rejected: blocking the form
+  on `open` + registry (correct, and slow enough to defeat the point).
+  Reconciliation trusts the cached list until the client's
+  `RelayState.registrySettled` bit marks the live one authoritative — set by the
+  first registry frame after `open`, or by a 1.5s bound if none ever comes, and
+  re-armed on every re-dial so a connection flap never reads as "every machine
+  vanished". The bit lives in `RelayClient` (and `LazyRelay` waits on the same
+  one) because only the client sees an empty registry frame arrive; a subscriber
+  cannot await a push that changes no state. An authoritative empty list is
+  written to the cache like any other, so a machine removed from the registry
+  does not resurrect from LocalStorage on the next launch. Rejected: each
+  consumer hand-rolling the non-empty-or-timeout wait (two copies of the same
+  1.5s constant, and the Raycast copy's timer once survived a disconnect and
+  wiped the cached list).
+- **Defaults: last-used wins**, persisted after each successful spawn;
+  preferences seed only the first run, or when the remembered machine is gone
+  from the registry. The prompt always starts empty. Repos are remembered _per
+  machine_, mirroring the PWA's `PersistedForm`, so switching machines restores
+  what you last ran there.
+- **Refuses rather than fires blind.** Offline machines stay selectable and are
+  marked in the dropdown, but submitting names the reason it cannot go (asleep,
+  no socket, empty registry, no repos) instead of disabling a button silently.
+  On failure the form stays open with state intact — the typed prompt is the
+  expensive part of the interaction. A success carrying a `note` also stays open
+  so the note is read; a clean success closes the window and shows a HUD.
+- **`SPAWN_CLIENTS` gains `"raycast"`**, so the audit line reads
+  `origin=relay client="raycast"`. Sender-side discipline only, as before — the
+  wire field stays free-text and no daemon changes.
+- **Layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It
+  throws outside the Raycast host, so any such module would be unloadable under
+  `bun test`. Views are `.tsx` at `src/`, logic is `.ts` at `src/lib/`, and
+  platform APIs arrive as injected seams. That is what lets the tests run under
+  Bun — and therefore import the daemon's _and_ the PWA's implementations
+  alongside the extension's and assert they agree on the keychain service name,
+  the config-dir resolution, the PSK precedence, and the offered model/effort
+  lists. Those four are duplicated by necessity (different runtimes, plus a
+  static manifest that cannot import), so they are guarded instead.
+
+**Runtime surprises, both verified by probing rather than by reading version
+numbers.** Raycast runs extensions on Node v22.22.2 but in a sandbox whose
+global object is not that Node's: `fetch`, `btoa` and `TextEncoder` are present
+while **`crypto` and `WebSocket` are both undefined**. `shared/` consumes both
+as globals, so without a shim the extension dies on `crypto is not defined` at
+the first `importPsk`. `raycast/src/lib/runtime.ts` installs `webcrypto` and
+`ws`'s `WebSocket` onto `globalThis` — `ws` being the one dependency this
+forces, since Node's global WebSocket is undici's and has no importable form.
+Rejected: widening `shared/` with injectable crypto and socket seams for a third
+consumer's sandbox, when the PWA and daemon both have the globals — the
+adaptation belongs at the boundary that needs it. Separately, `@types/node` must
+stay on `^26` even though the runtime is Node 22: the 22.x types declare
+`CryptoKey` only inside the `webcrypto` namespace, so matching the runtime
+version breaks the build.
+
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on

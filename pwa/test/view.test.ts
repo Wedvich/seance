@@ -39,6 +39,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     hidden: [],
     ignored: 0,
     settling: false,
+    registrySettled: true,
     ...overrides,
   };
 }

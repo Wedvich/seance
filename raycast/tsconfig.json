@@ -1,0 +1,29 @@
+{
+  // Extends the repo base, not Raycast's template: the template's
+  // `module: "commonjs"` implies node10 resolution, which ignores `exports` and
+  // so cannot see `@seance/shared` at all. `ray build` typechecks with *this*
+  // file (it shells the extension's own tsc), so the template buys nothing.
+  //
+  // No `lib: ["DOM"]`, and not by preference: `@types/node` declares
+  // `CryptoKey` and `WebSocket` globally and withdraws them the moment lib.dom
+  // loads — the same trap pwa/test/tsconfig.json and e2e/tsconfig.json document
+  // from the bun-types side.
+  //
+  // `raycast-env.d.ts` is deliberately not included: `ray` generates it and it
+  // is gitignored, so a clean clone has none and typecheck would fail on it.
+  // The preferences interface is declared by hand in src/lib/preferences.ts.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  // Tests are excluded here and covered by tsconfig.test.json instead: the drift
+  // guard imports the daemon's Bun-shaped modules, which need bun types this
+  // (Node) project must not load. `ray build` typechecks with *this* file, so
+  // shipped code is what it checks.
+  "exclude": ["src/**/*.test.ts"],
+  "include": ["src"]
+}

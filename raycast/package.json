@@ -1,0 +1,107 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "seance-raycast",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spawn a remote-controlled Claude Code session on any of your paired machines",
+  "categories": [
+    "Developer Tools"
+  ],
+  "license": "MIT",
+  "author": "martin",
+  "scripts": {
+    "build": "ray build -e dist -o dist --non-interactive --exit-on-error",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.104.24",
+    "@seance/shared": "workspace:*",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.18",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
+  },
+  "icon": "icon.png",
+  "commands": [
+    {
+      "name": "spawn",
+      "title": "Spawn Session",
+      "subtitle": "Séance",
+      "description": "Type a prompt and start a Claude Code session on a paired machine",
+      "mode": "view"
+    }
+  ],
+  "platforms": [
+    "macOS"
+  ],
+  "preferences": [
+    {
+      "name": "defaultMachine",
+      "title": "Default machine",
+      "description": "Machine name to preselect on first run, or when the last-used one is gone from the registry. Blank picks the first connected machine.",
+      "type": "textfield",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "defaultModel",
+      "title": "Default model",
+      "description": "Model to preselect on first run.",
+      "type": "dropdown",
+      "required": false,
+      "default": "opus",
+      "data": [
+        {
+          "title": "Fable",
+          "value": "fable"
+        },
+        {
+          "title": "Opus",
+          "value": "opus"
+        },
+        {
+          "title": "Sonnet",
+          "value": "sonnet"
+        }
+      ]
+    },
+    {
+      "name": "defaultEffort",
+      "title": "Default effort",
+      "description": "Reasoning effort to preselect on first run.",
+      "type": "dropdown",
+      "required": false,
+      "default": "medium",
+      "data": [
+        {
+          "title": "Low",
+          "value": "low"
+        },
+        {
+          "title": "Medium",
+          "value": "medium"
+        },
+        {
+          "title": "High",
+          "value": "high"
+        },
+        {
+          "title": "Extra",
+          "value": "xhigh"
+        },
+        {
+          "title": "Max",
+          "value": "max"
+        }
+      ]
+    }
+  ],
+  "title": "Séance"
+}

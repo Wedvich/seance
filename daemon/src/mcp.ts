@@ -2,8 +2,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
-  APP_PATH,
-  DAEMON_PATH,
+  appRelayUrl,
+  failureReasonText,
   importPsk,
   RelayClient,
   RequestFailure,
@@ -19,15 +19,6 @@ import type { Check } from "./check.ts";
 import { loadConfig, loadPsk } from "./config.ts";
 import { exec } from "./exec.ts";
 import { recordedBunCheck } from "./link.ts";
-
-/** The config's relayUrl is the daemon endpoint; this client is app-role. */
-export function appRelayUrl(relayUrl: string): string {
-  const url = new URL(relayUrl);
-  if (url.pathname.endsWith(DAEMON_PATH)) {
-    url.pathname = url.pathname.slice(0, -DAEMON_PATH.length) + APP_PATH;
-  }
-  return url.href;
-}
 
 /**
  * The slice of the shared app-role RelayClient the tools consume — injectable
@@ -54,18 +45,10 @@ const IDLE_MS = 5 * 60_000;
 /** Bounds `acquire` when the relay is down; past it the call fails instead of riding the backoff forever. */
 const CONNECT_TIMEOUT_MS = 10_000;
 
-/**
- * How long after `open` to wait for the first registry push before reading the
- * machine list. An empty registry pushes no state change, so "arrived" is not
- * observable — a bounded wait for a non-empty list is the honest alternative.
- */
-const REGISTRY_SETTLE_MS = 1_500;
-
 export interface LazyRelayOpts {
   readonly create: () => AppRelay;
   readonly idleMs?: number;
   readonly connectTimeoutMs?: number;
-  readonly settleMs?: number;
 }
 
 /**
@@ -169,19 +152,20 @@ export class LazyRelay {
     });
   }
 
+  /**
+   * Waits for the client to mark this socket's registry authoritative. Bounded
+   * by the client itself: `registrySettled` flips within REGISTRY_SETTLE_MS of
+   * `open` even if no registry frame ever arrives.
+   */
   async #settleRegistry(client: AppRelay): Promise<void> {
-    if (client.getState().machines.length > 0) return;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
+      const check = (): void => {
+        if (!client.getState().registrySettled) return;
         unsubscribe();
         resolve();
-      }, this.#opts.settleMs ?? REGISTRY_SETTLE_MS);
-      const unsubscribe = client.subscribe(() => {
-        if (client.getState().machines.length === 0) return;
-        clearTimeout(timer);
-        unsubscribe();
-        resolve();
-      });
+      };
+      const unsubscribe = client.subscribe(check);
+      check();
     });
   }
 }
@@ -230,12 +214,9 @@ function describeMachine(machine: Machine): Record<string, unknown> {
 }
 
 function failureText(op: string, err: unknown): string {
-  if (err instanceof RequestFailure) {
-    if (err.reason === "offline") return `${op} failed: that machine is not connected to the relay`;
-    if (err.reason === "timeout") return `${op} failed: ${err.message} — the machine may be asleep`;
-    return `${op} failed: ${err.message}`;
-  }
-  return `${op} failed: ${err instanceof Error ? err.message : String(err)}`;
+  const detail =
+    err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+  return `${op} failed: ${detail}`;
 }
 
 /**
