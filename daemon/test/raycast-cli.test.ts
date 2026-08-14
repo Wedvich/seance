@@ -19,9 +19,10 @@ const NAME = "seance-raycast-test";
  * command produces is entirely argv handed to another tool and files moved
  * around a temp HOME; nothing below the process boundary can see either.
  *
- * Gated on the Raycast app actually being present, not merely on macOS: the
- * preflight refuses without it, so on a bare CI box the message under test is a
- * different one. Same shape as cli.test.ts's `install --system` gate.
+ * The cases that drive `ray` are gated on the Raycast app actually being
+ * present, not merely on macOS: the preflight refuses without it, so on a bare
+ * CI box the message under test is a different one. Same shape as cli.test.ts's
+ * `install --system` gate. The rest only move files, and run everywhere.
  */
 const exists = async (path: string): Promise<boolean> =>
   stat(path).then(
@@ -113,6 +114,9 @@ exit 0
       ...process.env,
       HOME: home,
       SEANCE_RAYCAST_DIR: workspace,
+      // The uninstall cases below are fs work against this HOME, so they run
+      // everywhere; the platform gate would otherwise refuse before them.
+      SEANCE_RAYCAST_ANY_PLATFORM: "1",
       // /usr/bin and /bin are real on purpose: pgrep and open are this
       // command's preflight, and the stubs are shell scripts.
       PATH: [bin, "/usr/bin", "/bin", dirname(process.execPath)].join(delimiter),

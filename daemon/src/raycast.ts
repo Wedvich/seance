@@ -127,10 +127,15 @@ export async function raycastAppPath(home: string = homedir()): Promise<string |
   return null;
 }
 
+/**
+ * `SEANCE_RAYCAST_ANY_PLATFORM` is a test seam, like `SEANCE_RAYCAST_DIR`:
+ * `uninstall`'s guards below this are plain fs work against `HOME`, so CI
+ * covers them off macOS. Opt-in and set only by the tests — nothing in the
+ * shipped path sets it, and `install` off macOS still has no Raycast to talk to.
+ */
 function assertMacos(): void {
-  if (process.platform !== "darwin") {
-    throw new Error("the Séance Raycast extension is macOS-only — its manifest declares platforms: [macOS]");
-  }
+  if (process.platform === "darwin" || process.env["SEANCE_RAYCAST_ANY_PLATFORM"] === "1") return;
+  throw new Error("the Séance Raycast extension is macOS-only — its manifest declares platforms: [macOS]");
 }
 
 /**
