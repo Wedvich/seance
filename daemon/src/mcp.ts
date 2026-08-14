@@ -2,8 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
-  APP_PATH,
-  DAEMON_PATH,
+  appRelayUrl,
   importPsk,
   RelayClient,
   RequestFailure,
@@ -19,15 +18,6 @@ import type { Check } from "./check.ts";
 import { loadConfig, loadPsk } from "./config.ts";
 import { exec } from "./exec.ts";
 import { recordedBunCheck } from "./link.ts";
-
-/** The config's relayUrl is the daemon endpoint; this client is app-role. */
-export function appRelayUrl(relayUrl: string): string {
-  const url = new URL(relayUrl);
-  if (url.pathname.endsWith(DAEMON_PATH)) {
-    url.pathname = url.pathname.slice(0, -DAEMON_PATH.length) + APP_PATH;
-  }
-  return url.href;
-}
 
 /**
  * The slice of the shared app-role RelayClient the tools consume — injectable

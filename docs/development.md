@@ -48,8 +48,60 @@ answers for both; `bun run wrangler whoami` says where you stand.
   the user flows end to end — machine discovery, spawns and their failures,
   dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
   between the doubles and the real thing.
+- **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
+  import the daemon's and the PWA's implementations alongside the extension's and
+  assert they agree. No React harness — the relay client underneath is already
+  covered by `shared/` and e2e. Running under Bun rather than under Raycast is
+  what makes those cross-imports possible, and is why nothing in
+  `raycast/src/lib/` may import `@raycast/api`.
 
 No Cloudflare account and no real `claude` are needed anywhere; `tmux` and `git` are.
+
+## The Raycast extension
+
+Install it as a bun workspace member — `bun install` from the repo root, never
+npm: `"@seance/shared": "workspace:*"` is not a valid npm spec, and npm would
+flatten the isolated linker tree that keeps the extension on `typescript@^5.9`
+while the root is on TS 7. Adding the member puts no new packages in the root
+`node_modules`.
+
+`ray` is not on PATH and not hoisted; it lives at `raycast/node_modules/.bin/ray`.
+Run it from inside `raycast/`, or via `bun run --filter seance-raycast <script>`.
+Never `npx ray` — that fetches `@raycast/api` from the registry instead of using
+the linked one.
+
+| Command                             | What it does                                 |
+| ----------------------------------- | -------------------------------------------- |
+| `bun run build` (in `raycast/`)     | bundles **and typechecks** — the real gate   |
+| `bun run dev` (in `raycast/`)       | imports into Raycast and watches             |
+| `bun run typecheck` (in `raycast/`) | `src` on node types, then tests on bun types |
+
+Two tsconfigs, for the same reason `pwa/` has two: `tsconfig.json` covers the
+shipped extension on `@types/node` and is the one `ray build` drives;
+`tsconfig.test.json` covers the colocated tests on bun types, because the drift
+guards import the daemon's Bun-shaped modules. Neither loads `lib.dom` — doing so
+withdraws the `CryptoKey` and `WebSocket` globals the type packages declare.
+`@types/node` must stay on `^26` even though Raycast's runtime is Node 22: 22.x
+declares `CryptoKey` only inside the `webcrypto` namespace, and the build fails
+with five `TS2304`s.
+
+**`ray build` never runs in CI** — it wants macOS and the Raycast app installed —
+so CI checks the extension only through `tsc` and `oxlint`. Run
+`bun run build` in `raycast/` by hand before merging anything that touches it;
+that is the only step that exercises esbuild and the reach into `shared/`'s raw
+TS. `ray develop` skips the typecheck entirely, so the dev loop will not catch
+`shared/` drift either. `ray develop` also only picks up files that existed when
+it started; add a module and restart it, or you get a `ReferenceError` from a
+bundle missing the new file.
+
+`ray lint` is not expected to pass unaided, and nothing runs it: it wants
+eslint/prettier configs that would fight oxfmt and the repo's formatting hook.
+That is consistent with never publishing to the Raycast Store — publishing would
+push the source into the `raycast/extensions` repo and force a second copy of the
+PSK at rest. Enabling oxlint's `react` plugin for this workspace needed
+`react/react-in-jsx-scope` off (both JSX surfaces use the automatic runtime, so
+no import is in scope and none is needed) and `react/no-unescaped-entities` off
+(an apostrophe in JSX prose is correct as written).
 
 CI runs lint, format and typecheck once, alongside (not gating — the jobs are
 independent) the full suite on both `ubuntu-latest` and `macos-latest` — ubuntu

@@ -1,0 +1,17 @@
+{
+  // The tests run under Bun, not under Raycast's Node — that is what lets the
+  // drift guard import the daemon's implementation alongside this one and assert
+  // they agree on names and precedence. So they typecheck with bun types, while
+  // tsconfig.json (the one `ray build` uses) keeps the extension on node types.
+  //
+  // No `lib: ["DOM"]` here either: bun-types drops its own WebSocket client
+  // overloads the moment lib.dom loads, the same trap pwa/test/tsconfig.json
+  // documents.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src/**/*.test.ts"]
+}

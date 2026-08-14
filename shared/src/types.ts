@@ -222,7 +222,7 @@ export type SpawnMode = "worktree" | "here";
  * a daemon must never reject a spawn over a client name minted after it was
  * built, so receivers never validate against this list.
  */
-export const SPAWN_CLIENTS = ["pwa", "mcp"] as const;
+export const SPAWN_CLIENTS = ["pwa", "mcp", "raycast"] as const;
 
 export type SpawnClient = (typeof SPAWN_CLIENTS)[number];
 

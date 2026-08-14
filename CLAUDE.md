@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Séance spawns remote-controlled Claude Code sessions on dev machines via a blind relay. Bun workspaces
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
-(Vite + Preact app), `shared/` (wire types, envelope crypto + the app-role RelayClient), `e2e/` (full-stack test suite, no
-shipped code).
+(Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
+envelope crypto + the app-role RelayClient), `e2e/` (full-stack test suite, no shipped code).
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:
 
@@ -96,6 +96,26 @@ green:
   prompt text is never logged, and a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session). Don't let changes drift from them.
+- **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
+  outside the Raycast host, so such a module could not run under `bun test` and would take every
+  test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
+  `src/lib/`; platform APIs (`LocalStorage`, preferences) reach the logic as injected seams. The rule
+  is enforced by `raycast/src/lib/layering.test.ts`, not just remembered.
+- The Raycast extension is a third app-role relay client, exactly as `seanced mcp` is — no relay or
+  daemon change. Its credentials come only from the local daemon's config plus the macOS keychain;
+  Raycast preferences hold defaults, never secrets. `raycast/src/lib/credentials.ts` reimplements
+  what `daemon/src/config.ts` and `keychain.ts` do in Bun, so its test imports _both_ and asserts
+  they agree on names and precedence. Diverge in mechanism there, never in names.
+- **Two TypeScript versions on purpose.** The root is on TS 7 (the native port, different API
+  surface); `raycast/` pins `typescript@^5.9` because `ray` resolves tsc from the extension and
+  cannot drive TS 7. Bun's isolated linker contains the divergence — that is why the extension must
+  be installed by `bun install` as a workspace member and never by npm (`workspace:*` is not a valid
+  npm spec, and npm would flatten the tree the containment depends on).
+- Raycast runs extensions on Node 22 but in a sandbox that withholds `crypto` and `WebSocket`
+  (probed from inside: `fetch`/`btoa`/`TextEncoder` present, those two undefined — a bare `node` of
+  the same version has all four, so the version alone answers nothing). `shared/` uses both as
+  globals, so `raycast/src/lib/runtime.ts` installs them and the extension carries a `ws` dependency
+  for it. Don't add injectable crypto/socket seams to `shared/` for this.
 - The daemon never runs as root. `install --system` / `uninstall --system` are the only commands
   that require it (they write `/etc/systemd/system`), they refuse a target user that resolves to
   root, and they never invoke `sudo` themselves — the operator supplies the privilege. Under them

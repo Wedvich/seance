@@ -3,7 +3,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type { Machine, RelayState, RequestOp, SpawnRequest } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
-import { appRelayUrl, buildMcpServer, LazyRelay, mcpBunPath, resolveMachine, type AppRelay } from "./mcp.ts";
+import { buildMcpServer, LazyRelay, mcpBunPath, resolveMachine, type AppRelay } from "./mcp.ts";
 
 function machine(overrides: Partial<Machine> = {}): Machine {
   return {
@@ -84,16 +84,6 @@ function toolText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const content = result.content as { type: string; text: string }[];
   return content.map((entry) => entry.text).join("\n");
 }
-
-describe("appRelayUrl", () => {
-  test("swaps the daemon path for the app path, keeping the rest of the URL", () => {
-    expect(appRelayUrl("wss://relay.example.workers.dev/daemon")).toBe("wss://relay.example.workers.dev/app");
-  });
-
-  test("leaves a URL without the daemon suffix alone rather than guessing", () => {
-    expect(appRelayUrl("wss://relay.example.dev/other")).toBe("wss://relay.example.dev/other");
-  });
-});
 
 describe("mcpBunPath", () => {
   test("reads the Command: line out of `claude mcp get` output", () => {

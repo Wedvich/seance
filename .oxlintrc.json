@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "react"],
   "categories": {
     "correctness": "error",
     "suspicious": "error",
@@ -13,22 +13,24 @@
   },
   "ignorePatterns": ["node_modules", "dist"],
   "rules": {
+    "import/max-dependencies": "off",
+    // Stylesheets are imported for their side effect; there is nothing to assign.
+    "import/no-unassigned-import": ["error", { "allow": ["**/*.css"] }],
     "max-classes-per-file": "off",
     "max-lines": "off",
     "max-lines-per-function": "off",
     "no-inline-comments": "off",
     "no-negated-condition": "off",
-    "require-await": "off",
-    "import/max-dependencies": "off",
-    "promise/no-multiple-resolved": "off",
     "promise/always-return": ["error", { "ignoreLastCallback": true }],
+    "promise/no-multiple-resolved": "off",
+    "react/no-unescaped-entities": "off",
+    "react/react-in-jsx-scope": "off",
+    "require-await": "off",
     "unicorn/no-array-callback-reference": "off",
     "unicorn/no-negated-condition": "off",
-    "unicorn/no-useless-undefined": "off",
     "unicorn/no-useless-spread": "off",
-    "unicorn/prefer-code-point": "off",
-    // Stylesheets are imported for their side effect; there is nothing to assign.
-    "import/no-unassigned-import": ["error", { "allow": ["**/*.css"] }]
+    "unicorn/no-useless-undefined": "off",
+    "unicorn/prefer-code-point": "off"
   },
   "overrides": [
     {
