@@ -7,6 +7,7 @@ import {
   installExtension,
   manifestName,
   meetsNodeFloor,
+  nodeFloor,
   parseVersion,
   pickBundledRuntime,
   raycastChecks,
@@ -22,13 +23,30 @@ describe("node engine floor", () => {
     expect(parseVersion("not a version")).toBeNull();
   });
 
-  test("22.22.2 is the floor @raycast/api declares — one patch below fails", () => {
-    expect(meetsNodeFloor("v22.22.2")).toBe(true);
-    expect(meetsNodeFloor("v22.22.1")).toBe(false);
-    expect(meetsNodeFloor("v22.23.0")).toBe(true);
-    expect(meetsNodeFloor("v26.5.1")).toBe(true);
-    expect(meetsNodeFloor("v20.19.0")).toBe(false);
-    expect(meetsNodeFloor("garbage")).toBe(false);
+  // The floor is @raycast/api's to declare: restating it here would let a
+  // dependency bump leave the fallback stale and unnoticed.
+  test("comes from the installed @raycast/api's engines.node", async () => {
+    const workspace = new URL("../../raycast", import.meta.url).pathname;
+    const manifest: { readonly engines?: { readonly node?: string } } = await Bun.file(
+      join(workspace, "node_modules", "@raycast", "api", "package.json"),
+    ).json();
+    const declared = manifest.engines?.node ?? "";
+    expect(declared).toMatch(/^>=/u);
+    expect(await nodeFloor(workspace)).toEqual(parseVersion(declared.replace(/^>=/u, "")) ?? []);
+  });
+
+  test("falls back to the literal when there is no @raycast/api to read", async () => {
+    expect(await nodeFloor(join(tmpdir(), "seance-no-such-workspace"))).toEqual([22, 22, 2]);
+  });
+
+  test("one patch below the floor fails, above it passes", () => {
+    const floor = [22, 22, 2];
+    expect(meetsNodeFloor("v22.22.2", floor)).toBe(true);
+    expect(meetsNodeFloor("v22.22.1", floor)).toBe(false);
+    expect(meetsNodeFloor("v22.23.0", floor)).toBe(true);
+    expect(meetsNodeFloor("v26.5.1", floor)).toBe(true);
+    expect(meetsNodeFloor("v20.19.0", floor)).toBe(false);
+    expect(meetsNodeFloor("garbage", floor)).toBe(false);
   });
 
   test("picks the newest bundled runtime that clears it, numerically not lexically", () => {

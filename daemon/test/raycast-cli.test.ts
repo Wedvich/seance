@@ -19,10 +19,11 @@ const NAME = "seance-raycast-test";
  * command produces is entirely argv handed to another tool and files moved
  * around a temp HOME; nothing below the process boundary can see either.
  *
- * The cases that drive `ray` are gated on the Raycast app actually being
- * present, not merely on macOS: the preflight refuses without it, so on a bare
- * CI box the message under test is a different one. Same shape as cli.test.ts's
- * `install --system` gate. The rest only move files, and run everywhere.
+ * The preflight is stubbed like everything else the command shells out to: an
+ * app bundle under the temp HOME satisfies the presence probe and a `pgrep`
+ * that answers "running" keeps `open` out of it. Nothing here may launch the
+ * real Raycast — a suite that pops the GUI open on a dev machine, and fails on
+ * a headless one, is worse than no coverage. So these run everywhere.
  */
 const exists = async (path: string): Promise<boolean> =>
   stat(path).then(
@@ -35,8 +36,6 @@ const recorded = async (file: string): Promise<readonly string[]> => {
   return text.split("\n").filter((line) => line !== "");
 };
 
-const raycastInstalled = process.platform === "darwin" && (await exists("/Applications/Raycast.app"));
-
 describe("seanced raycast install/uninstall through the CLI", () => {
   let root: string;
   let home: string;
@@ -46,6 +45,7 @@ describe("seanced raycast install/uninstall through the CLI", () => {
   let rayArgv: string;
   let bunArgv: string;
   let npmArgv: string;
+  let openArgv: string;
   let rayTemplate: string;
   let env: Record<string, string | undefined>;
 
@@ -62,10 +62,13 @@ describe("seanced raycast install/uninstall through the CLI", () => {
     rayArgv = join(root, "ray-argv");
     bunArgv = join(root, "bun-argv");
     npmArgv = join(root, "npm-argv");
+    openArgv = join(root, "open-argv");
     rayTemplate = join(root, "ray-template");
     await mkdir(bin, { recursive: true });
     await mkdir(join(workspace, "node_modules", ".bin"), { recursive: true });
-    await mkdir(home, { recursive: true });
+    // Satisfies the presence probe without the real app, the way raycast.test.ts's
+    // doctor cases do.
+    await mkdir(join(home, "Applications", "Raycast.app"), { recursive: true });
     await Bun.write(join(workspace, "package.json"), JSON.stringify({ name: NAME }));
 
     // `ray develop` never exits; it imports, prints its ready line, and then
@@ -108,17 +111,20 @@ exit 0
     // Never npm: `workspace:*` is not an npm spec, and npm would flatten the
     // isolated linker tree. Its absence is asserted, so it has to be reachable.
     await Bun.write(join(bin, "npm"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${npmArgv}"\nexit 0\n`);
-    for (const name of ["node", "bun", "npm"]) await chmod(join(bin, name), 0o755);
+    // The preflight: "Raycast is already running", so the command never reaches
+    // `open`. Both stubbed — a test suite must not start the real app.
+    await Bun.write(join(bin, "pgrep"), "#!/bin/sh\nexit 0\n");
+    await Bun.write(join(bin, "open"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${openArgv}"\nexit 0\n`);
+    for (const name of ["node", "bun", "npm", "pgrep", "open"]) await chmod(join(bin, name), 0o755);
 
     env = {
       ...process.env,
       HOME: home,
       SEANCE_RAYCAST_DIR: workspace,
-      // The uninstall cases below are fs work against this HOME, so they run
-      // everywhere; the platform gate would otherwise refuse before them.
+      // Everything below is stubbed binaries and fs work against this HOME, so
+      // it runs everywhere; the platform gate would otherwise refuse first.
       SEANCE_RAYCAST_ANY_PLATFORM: "1",
-      // /usr/bin and /bin are real on purpose: pgrep and open are this
-      // command's preflight, and the stubs are shell scripts.
+      // /usr/bin and /bin are real on purpose: every stub above is a shell script.
       PATH: [bin, "/usr/bin", "/bin", dirname(process.execPath)].join(delimiter),
     };
   });
@@ -153,7 +159,7 @@ exit 0
     expect(await exists(rayArgv)).toBe(false);
   });
 
-  test.if(raycastInstalled)("install typechecks through ray build, then imports through ray develop", async () => {
+  test("install typechecks through ray build, then imports through ray develop", async () => {
     const { out, code } = await run("install");
     expect(code).toBe(0);
     const argv = await recorded(rayArgv);
@@ -169,9 +175,11 @@ exit 0
     // The bundle stays: that is what "still imported" means.
     expect(await exists(join(extensionDir(), "spawn.js"))).toBe(true);
     expect(await exists(bunArgv)).toBe(false);
+    // Raycast was already running, so nothing may have tried to launch it.
+    expect(await exists(openArgv)).toBe(false);
   });
 
-  test.if(raycastInstalled)("re-running install rebuilds and re-imports, detected by mtime", async () => {
+  test("re-running install rebuilds and re-imports, detected by mtime", async () => {
     expect((await run("install")).code).toBe(0);
     const { out, code } = await run("install");
     expect(code).toBe(0);
@@ -179,7 +187,28 @@ exit 0
     expect(await recorded(rayArgv)).toEqual([...buildArgv, "develop", ...buildArgv, "develop"]);
   });
 
-  test.if(raycastInstalled)("an uninstalled workspace is installed with bun, never npm", async () => {
+  // The marker only shortens the wait; the directory is the proof. Printing the
+  // success line off a marker alone is the one lie this command could tell.
+  test("install that builds but imports nothing warns instead of claiming success", async () => {
+    await Bun.write(
+      rayPath(),
+      `#!/bin/sh
+[ "$1" = "develop" ] || exit 0
+echo "ready - built extension successfully"
+while : ; do sleep 0.1; done
+`,
+    );
+    await chmod(rayPath(), 0o755);
+
+    const { out, err, code } = await run("install");
+    expect(code).toBe(1);
+    expect(out).toContain("nothing appeared at");
+    expect(out).not.toContain("Raycast can now spawn");
+    expect(err).toContain("nothing was imported");
+    expect(await exists(extensionDir())).toBe(false);
+  }, 20_000);
+
+  test("an uninstalled workspace is installed with bun, never npm", async () => {
     await rm(rayPath());
     const { code } = await run("install");
     expect(code).toBe(0);
@@ -187,7 +216,7 @@ exit 0
     expect(await exists(npmArgv)).toBe(false);
   });
 
-  test.if(raycastInstalled)("uninstall removes the import and this checkout's build artifacts", async () => {
+  test("uninstall removes the import and this checkout's build artifacts", async () => {
     expect((await run("install")).code).toBe(0);
     await Bun.write(join(workspace, "raycast-env.d.ts"), "// generated\n");
     await mkdir(join(workspace, "dist"), { recursive: true });
@@ -212,11 +241,44 @@ exit 0
   test("uninstall refuses while a ray develop session is live", async () => {
     await mkdir(extensionDir(), { recursive: true });
     await Bun.write(join(extensionDir(), "package.json"), JSON.stringify({ name: NAME }));
-    await Bun.write(join(extensionDir(), "cli.pid"), "4242");
+    // A pid that is genuinely running: the file is a claim, and the command probes it.
+    await Bun.write(join(extensionDir(), "cli.pid"), String(process.pid));
 
     const { err, code } = await run("uninstall");
     expect(code).toBe(1);
-    expect(err).toContain("4242");
+    expect(err).toContain(String(process.pid));
+    expect(await exists(extensionDir())).toBe(true);
+  });
+
+  // A crash or a power loss leaves cli.pid behind; without a liveness probe
+  // every uninstall after one would refuse forever.
+  test("uninstall proceeds past a stale or empty cli.pid", async () => {
+    const dead = Bun.spawn(["/bin/sh", "-c", "exit 0"], { stdout: "ignore", stderr: "ignore" });
+    await dead.exited;
+
+    const uninstallClaiming = async (pid: string): Promise<void> => {
+      await mkdir(extensionDir(), { recursive: true });
+      await Bun.write(join(extensionDir(), "package.json"), JSON.stringify({ name: NAME }));
+      await Bun.write(join(extensionDir(), "cli.pid"), pid);
+      expect((await run("uninstall")).code).toBe(0);
+      expect(await exists(extensionDir())).toBe(false);
+    };
+
+    await uninstallClaiming(String(dead.pid));
+    await uninstallClaiming("");
+    await uninstallClaiming("   \n");
+  });
+
+  // Absence means "nothing imported"; a manifest that is there but unreadable
+  // is a `ray` killed mid-write, and skipping it would never converge.
+  test("uninstall refuses a half-written manifest instead of calling it absent", async () => {
+    await mkdir(extensionDir(), { recursive: true });
+    await Bun.write(join(extensionDir(), "package.json"), '{"name": "seance-ray');
+
+    const { err, code } = await run("uninstall");
+    expect(code).toBe(1);
+    expect(err).toContain(join(extensionDir(), "package.json"));
+    expect(err).toContain("unreadable");
     expect(await exists(extensionDir())).toBe(true);
   });
 

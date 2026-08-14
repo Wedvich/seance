@@ -290,9 +290,12 @@ export async function cmdDoctor(): Promise<void> {
   const gitBin = Bun.which("git");
   if (gitBin === null) fail("git not on PATH");
   else ok(`git at ${gitBin}`);
-  render([await cliOnPath()]);
-  render(await mcpChecks());
-  render(await raycastChecks());
+  // Independent, and the claude-CLI probe is a 15s-bounded spawn — no reason
+  // for the rest to queue behind it. Rendered in the order they are declared.
+  const [cli, mcp, ray] = await Promise.all([cliOnPath(), mcpChecks(), raycastChecks()]);
+  render([cli]);
+  render(mcp);
+  render(ray);
 
   if (config !== undefined) {
     console.log("repo roots");
@@ -620,6 +623,13 @@ export async function cmdRaycast(argv: readonly string[]): Promise<void> {
   if (parseRaycastArgs(argv) === "install") {
     const result = await installExtension((line) => console.log(line));
     for (const warning of result.warnings) console.log(`warn: ${warning}`);
+    if (!result.imported) {
+      // The warning above already said what happened; printing the success line
+      // and exiting 0 on top of it would be the lie.
+      console.error(`nothing was imported into ${result.path} — see the warning above`);
+      process.exitCode = 1;
+      return;
+    }
     console.log(`imported "${result.name}" — Raycast can now spawn a session on any paired machine, from a hotkey`);
     console.log("re-run this after a `git pull`: nothing else rebuilds the imported copy");
     return;

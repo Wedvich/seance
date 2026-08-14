@@ -1258,9 +1258,11 @@ install` drives Claude's.** Two steps, in order. `ray build` first, because
   `dev.log`, leaving the bundle imported, and **exiting 1** — a failing exit
   code that is this command's success, so it is not consulted. The stdout
   marker `ready - built extension successfully` only shortens the wait; the
-  directory is the proof, and a marker with no directory warns rather than
-  claims success. The whole handshake is bounded, and on expiry `ray`'s own
-  tail is what the error carries.
+  directory is the proof, and a marker with no directory warns and **exits
+  non-zero** rather than claiming success — the outcome carries the observed
+  import, so the command cannot print its success line off the marker alone.
+  The whole handshake is bounded, and on expiry `ray`'s own tail is what the
+  error carries.
   Rejected: **writing Raycast's extensions directory ourselves.** Unsupported,
   and it would not work: the import is recorded in Raycast's encrypted sqlite,
   which would know nothing about a directory that appeared behind it. Rejected:
@@ -1281,17 +1283,25 @@ install` drives Claude's.** Two steps, in order. `ray build` first, because
   listing Séance until it is removed in Manage Extensions, which the command
   prints rather than implies. What it does remove: the imported directory, but
   only after its `package.json` names this manifest (never `rm -rf` a path that
-  was not positively identified), and never while `cli.pid` says a `ray
-develop` session is still writing it; plus this checkout's `dist/` and
-  generated `raycast-env.d.ts`. Idempotent like the service teardown — removing
-  what is not there is not an error.
+  was not positively identified), and never while `cli.pid` names a pid that is
+  actually alive — the file is a claim, probed with signal 0, since a crash
+  leaves it behind and a trusted stale pid would wedge every uninstall after
+  it; plus this checkout's `dist/` and generated `raycast-env.d.ts`. Idempotent
+  like the service teardown — removing what is not there is not an error. A
+  manifest that is _there but unparseable_ is not "not there": that is a `ray`
+  killed mid-write, so it refuses loudly naming the path rather than reporting
+  nothing imported and leaving the directory behind forever.
 - **Doctor warns when the imported copy is older than `raycast/src` or
   `shared/src`.** The direct analogue of the plist/MCP recorded-bun drift
   warning, and it earns its place for the same reason: nothing rebuilds the
   extension on a `git pull`, so a machine can sit indefinitely running a bundle
   that speaks last week's wire types. Silent off macOS, the way the TPM checks
   are silent off Linux.
-- **Node's version matters only as `@raycast/api`'s engine (`>= 22.22.2`).**
+- **Node's version matters only as `@raycast/api`'s engine, and the floor is
+  read from the installed package's `engines.node`** (`>= 22.22.2` today) — a
+  literal in the daemon would go stale on the next dependency bump and quietly
+  defeat the fallback below; the literal survives only for a manifest that
+  cannot be read.
   When PATH's node is older or missing, install prepends Raycast's own bundled
   runtime (`~/Library/Application Support/com.raycast.macos/NodeJS/runtime/
 <version>/bin`) to the child's PATH — resolved at use time and written

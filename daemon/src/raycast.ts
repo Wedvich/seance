@@ -11,7 +11,12 @@ import type { Check } from "./check.ts";
 import { childEnv, exec, execFailure } from "./exec.ts";
 import { checkoutRoot } from "./selfsource.ts";
 
-/** `@raycast/api`'s declared engine floor. Nothing else about node's version matters here. */
+/**
+ * Fallback only, for a `@raycast/api` whose manifest cannot be read — the floor
+ * proper is read from the installed package (`nodeFloor`), so a dependency bump
+ * moves it instead of leaving a stale literal here. Nothing else about node's
+ * version matters.
+ */
 const MIN_NODE = [22, 22, 2] as const;
 
 /** Raycast ships its own node for extensions; this is where the app keeps them. */
@@ -78,21 +83,35 @@ export function parseVersion(text: string): readonly number[] | null {
   return digits === undefined ? null : digits.split(".").map(Number);
 }
 
-export function meetsNodeFloor(version: string): boolean {
+/**
+ * `engines.node` of the installed `@raycast/api`, which is the only thing that
+ * decides this floor. Read at use time — the package is there by then, the
+ * `bun install` gate ran first — so a bump lands here without an edit.
+ */
+export async function nodeFloor(workspace: string = raycastWorkspace()): Promise<readonly number[]> {
+  const raw = await Bun.file(join(workspace, "node_modules", "@raycast", "api", "package.json"))
+    .json()
+    .catch(() => null);
+  const engines = isRecord(raw) && isRecord(raw["engines"]) ? raw["engines"]["node"] : undefined;
+  const declared = typeof engines === "string" ? parseVersion(engines.replace(/^\s*>=\s*/u, "")) : null;
+  return declared ?? MIN_NODE;
+}
+
+export function meetsNodeFloor(version: string, floor: readonly number[] = MIN_NODE): boolean {
   const parsed = parseVersion(version);
   if (parsed === null) return false;
-  for (const [index, floor] of MIN_NODE.entries()) {
-    const part = parsed[index] ?? 0;
-    if (part !== floor) return part > floor;
+  for (const [index, part] of floor.entries()) {
+    const has = parsed[index] ?? 0;
+    if (has !== part) return has > part;
   }
   return true;
 }
 
 /** Newest runtime that clears the floor, from Raycast's runtime directory listing. */
-export function pickBundledRuntime(entries: readonly string[]): string | null {
+export function pickBundledRuntime(entries: readonly string[], floor: readonly number[] = MIN_NODE): string | null {
   let best: string | null = null;
   for (const entry of entries) {
-    if (!meetsNodeFloor(entry)) continue;
+    if (!meetsNodeFloor(entry, floor)) continue;
     if (best === null || compareVersions(entry, best) > 0) best = entry;
   }
   return best;
@@ -144,18 +163,19 @@ function assertMacos(): void {
  * for exactly this. Resolved here, at use time, and never written anywhere: the
  * bundled runtime directory is versioned and disappears on the next app update.
  */
-async function nodeCapablePath(home: string): Promise<string> {
+async function nodeCapablePath(home: string, workspace: string): Promise<string> {
   const path = process.env["PATH"] ?? "";
+  const floor = await nodeFloor(workspace);
   const node = Bun.which("node");
   if (node !== null) {
     const version = await exec([node, "--version"], { timeoutMs: 10_000 });
-    if (version.exitCode === 0 && meetsNodeFloor(version.stdout)) return path;
+    if (version.exitCode === 0 && meetsNodeFloor(version.stdout, floor)) return path;
   }
   const runtimes = join(home, BUNDLED_RUNTIME_DIR);
-  const picked = pickBundledRuntime(await readdir(runtimes).catch(() => []));
+  const picked = pickBundledRuntime(await readdir(runtimes).catch(() => []), floor);
   if (picked === null) {
     throw new Error(
-      `node ${MIN_NODE.join(".")} or newer is needed (@raycast/api's engine) — ` +
+      `node ${floor.join(".")} or newer is needed (@raycast/api's engine) — ` +
         `PATH's node is ${node === null ? "missing" : "too old"} and ${runtimes} holds no usable runtime`,
     );
   }
@@ -213,18 +233,21 @@ async function developUntilImported(opts: {
     stderr: "pipe",
   });
 
-  let tail = "";
+  // Per stream, not shared: the two pumps run concurrently, so one tail would
+  // let a stderr chunk land between the halves of a split marker and hide it —
+  // and would report the streams as a nondeterministic interleaving.
+  const tails: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
   let markerSeen = false;
-  const pump = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+  const pump = async (stream: ReadableStream<Uint8Array>, which: "stdout" | "stderr"): Promise<void> => {
     const decoder = new TextDecoder();
     for await (const chunk of stream) {
       // Match against tail + chunk so a marker split across reads still lands.
-      const text = tail + decoder.decode(chunk, { stream: true });
-      if (text.includes(READY_MARKER)) markerSeen = true;
-      tail = text.slice(-TAIL_CHARS);
+      const text = tails[which] + decoder.decode(chunk, { stream: true });
+      if (which === "stdout" && text.includes(READY_MARKER)) markerSeen = true;
+      tails[which] = text.slice(-TAIL_CHARS);
     }
   };
-  const pumps = [pump(proc.stdout).catch(() => {}), pump(proc.stderr).catch(() => {})];
+  const pumps = [pump(proc.stdout, "stdout").catch(() => {}), pump(proc.stderr, "stderr").catch(() => {})];
 
   let exited = false;
   void proc.exited.then(() => {
@@ -261,7 +284,11 @@ async function developUntilImported(opts: {
   if (imported) await Bun.sleep(SETTLE_MS);
   await stopChild(proc);
   await Promise.allSettled(pumps);
-  return { imported, markerSeen, tail: tail.trim() };
+  const tail = [tails.stdout, tails.stderr]
+    .map((text) => text.trim())
+    .filter((text) => text !== "")
+    .join("\n");
+  return { imported, markerSeen, tail };
 }
 
 async function stopChild(proc: Bun.Subprocess): Promise<void> {
@@ -286,6 +313,8 @@ async function stopChild(proc: Bun.Subprocess): Promise<void> {
 export interface InstallOutcome {
   readonly name: string;
   readonly path: string;
+  /** The directory is the proof; a marker with no directory is false here, so the caller cannot claim success. */
+  readonly imported: boolean;
   readonly warnings: readonly string[];
 }
 
@@ -323,7 +352,7 @@ export async function installExtension(report: (line: string) => void): Promise<
     if (installed.exitCode !== 0) throw new Error(`bun install: ${execFailure(installed)}`);
   }
 
-  const path = await nodeCapablePath(home);
+  const path = await nodeCapablePath(home, workspace);
 
   // The gate that catches `shared/` drift: `ray develop` skips the typecheck
   // entirely, so without this a wire-type change would import happily and fail
@@ -350,13 +379,24 @@ export async function installExtension(report: (line: string) => void): Promise<
     return {
       name,
       path: target,
+      imported: false,
       warnings: [
         `ray reported a successful build but nothing appeared at ${target} — ` +
           "check Raycast's Manage Extensions before relying on it",
       ],
     };
   }
-  return { name, path: target, warnings: [] };
+  return { name, path: target, imported: true, warnings: [] };
+}
+
+/** Signal 0 delivers nothing and only asks: ESRCH says gone, EPERM says alive under another user. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return isRecord(err) && err["code"] === "EPERM";
+  }
 }
 
 export interface UninstallOutcome {
@@ -383,21 +423,32 @@ export async function uninstallExtension(): Promise<UninstallOutcome> {
   // Never `rm -rf` a path that wasn't positively identified: the directory is
   // named from a manifest field, and a wrong or stale name would aim this at
   // somebody else's extension.
-  const imported = await Bun.file(join(target, "package.json"))
-    .json()
-    .catch(() => null);
+  const manifest = Bun.file(join(target, "package.json"));
+  const present = await manifest.exists();
+  const imported = present ? await manifest.json().catch(() => null) : null;
+  // Absence means nothing was imported; an unreadable manifest means a `ray`
+  // killed mid-write, and calling that "nothing imported" would leave the
+  // directory on disk with no run of this command able to converge.
+  if (present && !isRecord(imported)) {
+    throw new Error(
+      `${join(target, "package.json")} is present but unreadable — a half-written import; ` +
+        `remove ${target} by hand, then re-run`,
+    );
+  }
   const wasImported = isRecord(imported) && imported["name"] === name;
   if (imported !== null && !wasImported) {
     throw new Error(`${target} does not name "${name}" — leaving it alone`);
   }
   if (wasImported) {
     // `ray` writes cli.pid while a develop session is live and removes it on
-    // SIGINT, so its presence means a watcher is still rewriting this directory.
-    const pid = await Bun.file(join(target, "cli.pid"))
+    // SIGINT — but a crash leaves it behind, so the pid is probed rather than
+    // believed; a stale one must not wedge every uninstall after it.
+    const claimed = await Bun.file(join(target, "cli.pid"))
       .text()
-      .catch(() => null);
-    if (pid !== null) {
-      throw new Error(`a \`ray develop\` session is live (pid ${pid.trim()}) — stop it, then re-run`);
+      .catch(() => "");
+    const pid = Math.trunc(Number(claimed.trim()));
+    if (Number.isFinite(pid) && pid > 0 && processAlive(pid)) {
+      throw new Error(`a \`ray develop\` session is live (pid ${pid}) — stop it, then re-run`);
     }
     await rm(target, { recursive: true, force: true });
     removed.push(target);
