@@ -98,8 +98,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     );
   };
 
+  let stopped = false;
+
   const rescan = async (): Promise<State["repos"]> => {
     const scanned = await scanRepos(config.repoRoots, state.repos);
+    if (stopped) return scanned;
     const changed = !repoSetsEqual(scanned, state.repos);
     state = { ...state, repos: scanned, scannedAt: Date.now() };
     await saveState(state);
@@ -195,6 +198,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   return {
     client,
     stop: (): void => {
+      stopped = true;
       clearInterval(rescanTimer);
       // Before the client: a check racing the swap must not report through a
       // stale `state` and clobber what the incoming daemon already saved.
