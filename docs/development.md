@@ -85,6 +85,12 @@ withdraws the `CryptoKey` and `WebSocket` globals the type packages declare.
 declares `CryptoKey` only inside the `webcrypto` namespace, and the build fails
 with five `TS2304`s.
 
+`raycast/assets/icon.png` is the PWA's `public/icon-512.png` mark with a rounded
+rect masked into its alpha channel — 114px on 512, Apple's 22.4% app-icon ratio,
+so it sits with Raycast's built-ins instead of as a hard square. Regenerate it
+from the PWA copy rather than editing it in place, and leave the PWA's own icons
+square: they are masked by the OS and the manifest.
+
 **`ray build` never runs in CI** — it wants macOS and the Raycast app installed —
 so CI checks the extension only through `tsc` and `oxlint`. Run
 `bun run build` in `raycast/` by hand before merging anything that touches it;
