@@ -109,7 +109,11 @@ function prepareHere(repo: RepoEntry): Prepared {
 
 interface InnerCommand {
   readonly command: string;
-  /** Temp dir holding the seed prompt; deleted by the caller after the alive check. */
+  /**
+   * Temp dir holding the seed prompt; deleted by the caller after the alive
+   * check. The shell opens the redirect before `exec`, so the unlink drops the
+   * name, never the fd claude is reading — cleanup cannot race the read.
+   */
   readonly seedDir: string | null;
 }
 
@@ -126,8 +130,9 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   //
   // `--remote-control [name]` takes an optional value, so it sits before the
   // other flags: trailing, it swallowed a here-mode seed prompt as the session
-  // name and the session started idle. The `--` guard below is the second,
-  // independent defence.
+  // name and the session started idle. The seed is off argv entirely now (see
+  // below), so `--` guards nothing today — it stays as the standing terminator
+  // for whatever lands at the tail next.
   const base =
     `exec ${caffeinate}${claude} -n ${shq(windowName)} --remote-control ` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
@@ -139,10 +144,13 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
   await Bun.write(seedFile, `${prepared.preamble}\n\nTask: ${request.prompt}\n`);
-  // the substitution runs before exec, so the file is consumed at shell start;
-  // `--` ends option parsing, keeping the seed an operand rather than some
-  // flag's optional value
-  return { command: `${base} -- "$(cat ${shq(seedFile)})"`, seedDir };
+  // Redirect, not an operand: an argv operand would be the expanded prompt in
+  // every local process list for the session's whole life — the same text the
+  // audit log deliberately reduces to a length and a hash. claude takes
+  // non-tty stdin as its opening prompt and reopens /dev/tty for the UI, so
+  // the pane stays interactive. `--` still terminates option parsing, and on
+  // macOS `caffeinate -is` passes the fd through to claude unchanged.
+  return { command: `${base} -- < ${shq(seedFile)}`, seedDir };
 }
 
 /**
