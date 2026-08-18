@@ -70,10 +70,19 @@ interface SocketAttachment {
   readonly connectedAt: number;
   /** Present once the socket has registered. */
   readonly identity?: SocketIdentity;
+  /**
+   * Spend of the current register window. Kept off `identity` because it is
+   * stamped for attempts the registry cap turns away too, and those must not
+   * make the socket read as registered.
+   */
+  readonly rate?: RegisterRate;
 }
 
 interface SocketIdentity {
   readonly deviceId: string;
+}
+
+interface RegisterRate {
   /** Start of the current register-rate window, ms. */
   readonly windowStart: number;
   readonly registers: number;
@@ -233,7 +242,7 @@ export class Hub implements DurableObject {
   async #register(ws: WebSocket, deviceId: string, info: Envelope): Promise<void> {
     const now = Date.now();
     const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
-    const prior = attachment.identity;
+    const prior = attachment.rate;
     const rate =
       prior === undefined || now - prior.windowStart >= REGISTER_WINDOW_MS
         ? { windowStart: now, registers: 1 }
@@ -244,6 +253,11 @@ export class Hub implements DurableObject {
       console.log(`refused register from ${deviceId}: over ${MAX_REGISTERS_PER_WINDOW} per window`);
       return;
     }
+    // Spent before the entry cap can refuse, because every attempt past here
+    // costs a storage read and a list. Persisting only on success made a full
+    // registry unmeter itself: the refusal left `rate` unset, so the next frame
+    // recomputed a fresh window and unknown ids became unlimited per socket.
+    ws.serializeAttachment({ ...attachment, rate } satisfies SocketAttachment);
 
     const key = ENTRY_PREFIX + deviceId;
     const known = (await this.#ctx.storage.get<RegistryEntry>(key)) !== undefined;
@@ -254,7 +268,7 @@ export class Hub implements DurableObject {
       return;
     }
 
-    ws.serializeAttachment({ ...attachment, identity: { deviceId, ...rate } } satisfies SocketAttachment);
+    ws.serializeAttachment({ ...attachment, rate, identity: { deviceId } } satisfies SocketAttachment);
     // Two open sockets for one machine would deliver a spawn twice, so the older
     // one loses. Attaching first keeps the loser's close handler from reporting
     // the machine as disconnected.

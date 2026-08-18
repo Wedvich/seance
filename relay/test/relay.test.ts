@@ -8,6 +8,9 @@ import {
   type RelayToDaemonFrame,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+// Straight from the module the worker forwards through: it takes a Request and
+// returns one, so the DO-facing URL is assertable without a workerd boot.
+import { hubRequest } from "../src/subrequest.ts";
 import { connectApp, connectDaemon, envelope, startRelay, type Client, type TestRelay } from "./harness.ts";
 
 const TOKEN = "test-bearer-token";
@@ -96,6 +99,29 @@ describe("upgrade", () => {
   test("426s an authenticated request that is not a websocket upgrade", async () => {
     expect((await relay.probe("/daemon", { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(426);
     expect((await relay.probe(`/app?t=${TOKEN}`)).status).toBe(426);
+  });
+});
+
+describe("hub subrequest", () => {
+  test("the app's ?t= token never reaches the Durable Object", () => {
+    const forwarded = hubRequest(
+      new Request(`https://relay.test/app?t=${TOKEN}&x=1`, { headers: { upgrade: "websocket" } }),
+    );
+
+    // The hub re-derives the role from the path, so carrying the bearer further
+    // only writes it into a second trace span.
+    expect(forwarded.url).not.toContain(TOKEN);
+    const url = new URL(forwarded.url);
+    expect(url.pathname).toBe("/app");
+    expect(url.searchParams.has("t")).toBe(false);
+    expect(url.searchParams.get("x")).toBe("1");
+    // Rebuilt, but still the upgrade the hub answers 101 to.
+    expect(forwarded.headers.get("upgrade")).toBe("websocket");
+  });
+
+  test("a request with nothing to strip is forwarded as it arrived", () => {
+    const req = new Request("https://relay.test/daemon", { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(hubRequest(req)).toBe(req);
   });
 });
 
@@ -349,11 +375,21 @@ describe("robustness", () => {
 });
 
 /** Current registry as the DO reports it: a fresh app socket is pushed it on connect. */
-async function registryIds(target: TestRelay): Promise<string[]> {
+async function registryEntries(target: TestRelay): Promise<readonly RegistryView[]> {
   const observer = await connectApp(target);
   const frame = await observer.waitFor<RegistryFrame>("registry");
   observer.close();
-  return frame.entries.map((entry) => entry.deviceId);
+  return frame.entries;
+}
+
+async function registryIds(target: TestRelay): Promise<string[]> {
+  return (await registryEntries(target)).map((entry) => entry.deviceId);
+}
+
+/** `connected` is derived from live sockets, so it is what proves a register landed. */
+async function isConnected(target: TestRelay, deviceId: string): Promise<boolean> {
+  const entries = await registryEntries(target);
+  return entries.find((entry) => entry.deviceId === deviceId)?.connected ?? false;
 }
 
 /**
@@ -413,6 +449,32 @@ describe("registry entry cap", () => {
     for (const daemon of daemons.slice(1)) daemon.close();
     app.close();
   }, 30_000);
+
+  // Runs on the registry the test above filled.
+  test("a register the full registry turns away still spends the window", async () => {
+    const MAX_REGISTERS_PER_WINDOW = 10;
+    const app = await connectApp(bounded);
+    const daemon = await connectDaemon(bounded);
+
+    // Every one of these is refused by the entry cap, and every one costs a
+    // storage read plus a list over the prefix. If the refusal were free the
+    // window would never advance and unknown ids would be unlimited per socket.
+    for (let i = 0; i < MAX_REGISTERS_PER_WINDOW; i += 1) {
+      daemon.send({ t: "register", deviceId: `spent-${i}`, info: envelope(APP_ID, `spent-${i}`) });
+    }
+    await drain(app);
+
+    // A known id the cap would wave through: the only thing left to refuse it
+    // is the rate limit the refusals above must have spent.
+    daemon.send({ t: "register", deviceId: "full-1", info: envelope(APP_ID, "full-1") });
+    await drain(app);
+
+    expect(await isConnected(bounded, "full-1")).toBe(false);
+    expect(await registryIds(bounded)).toHaveLength(MAX_DEVICES);
+
+    daemon.close();
+    app.close();
+  }, 30_000);
 });
 
 describe("register rate limit", () => {
@@ -443,6 +505,12 @@ describe("register rate limit", () => {
     const ids = await registryIds(limited);
     expect(ids).toHaveLength(MAX_REGISTERS_PER_WINDOW);
     expect(ids).not.toContain("rate-over");
+
+    // A refusal must not hand the caller a fresh window: an id already in the
+    // registry — nothing else would turn it away — is refused just the same.
+    daemon.send({ t: "register", deviceId: "rate-0", info: envelope(APP_ID, "rate-0") });
+    await drain(app);
+    expect(await isConnected(limited, "rate-0")).toBe(false);
 
     // Honest about the shape of the guarantee: the budget is per socket, so a
     // new connection starts a new window. This bounds one socket's write rate,
