@@ -229,7 +229,7 @@ function parseFrame(text: string): ParsedFrame | null {
   return null;
 }
 
-/** No deep walk needed: `repos` comes off the IV-keyed info cache, so it compares by identity. */
+/** No deep walk needed: `repos` comes off the info cache, so it compares by identity. */
 function sameMachine(a: Machine, b: Machine): boolean {
   return (
     a.deviceId === b.deviceId &&
@@ -241,6 +241,18 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.connected === b.connected
   );
 }
+
+/**
+ * Cache identity of an `info` blob. The deviceId is part of it because the same
+ * blob can arrive under two ids in one push and only one of them can be the id
+ * it was sealed from. Length-prefixed rather than separated: both halves are
+ * relay-supplied strings, so no separator character is safe on its own.
+ */
+function infoCacheKey(entry: RegistryView): string {
+  return `${entry.info.iv.length}:${entry.info.iv}${entry.deviceId}`;
+}
+
+type InfoCacheHit = MachineInfo | "unopenable" | "skewed" | "unbound";
 
 /**
  * Transport half of the app: one socket, envelope seal/open, and request
@@ -257,14 +269,15 @@ export class RelayClient {
   readonly #idByIv = new Map<string, string>();
   readonly #guard = new ReplayGuard();
   /**
-   * Decrypted `info` by envelope IV; blobs are re-sent verbatim on every push.
-   * "unopenable" is a blob sealed with a key this app doesn't hold (`ignored`);
-   * "skewed" one that opened but was not shaped like a MachineInfo. Rebuilt from
-   * each push's own IVs in `#onRegistry`, so cache ⊆ registry holds by
-   * construction — every register mints a fresh IV, and an installed PWA left
-   * open for weeks would otherwise hold every blob it ever saw.
+   * Decrypted `info` by deviceId and envelope IV (`infoCacheKey`); blobs are
+   * re-sent verbatim on every push. "unopenable" is a blob sealed with a key this
+   * app doesn't hold (`ignored`); "skewed" one that opened but was not shaped
+   * like a MachineInfo; "unbound" one whose `from` is not the entry's own
+   * deviceId. Rebuilt from each push's own keys in `#onRegistry`, so cache ⊆
+   * registry holds by construction — every register mints a fresh IV, and an
+   * installed PWA left open for weeks would otherwise hold every blob it ever saw.
    */
-  #infoCache = new Map<string, MachineInfo | "unopenable" | "skewed">();
+  #infoCache = new Map<string, InfoCacheHit>();
   /**
    * Entries the last accepted push carried that did not parse. Folded into
    * `registrySize` and `skewed`, so a machine a version ahead reads as skew on
@@ -710,16 +723,17 @@ export class RelayClient {
     this.#clearRegistrySettle();
     this.#entries = entries;
     this.#skippedEntries = skipped;
-    // Replaced, not pruned: seeding a fresh map from this push's own IVs makes
+    // Replaced, not pruned: seeding a fresh map from this push's own keys makes
     // cache ⊆ registry hold by construction. A slow decrypt from an older push
-    // can still land one dead IV in the current map; the next push evicts it.
-    const next = new Map<string, MachineInfo | "unopenable" | "skewed">();
+    // can still land one dead key in the current map; the next push evicts it.
+    const next = new Map<string, InfoCacheHit>();
     for (const entry of entries) {
-      const hit = this.#infoCache.get(entry.info.iv);
-      if (hit !== undefined) next.set(entry.info.iv, hit);
+      const key = infoCacheKey(entry);
+      const hit = this.#infoCache.get(key);
+      if (hit !== undefined) next.set(key, hit);
     }
     this.#infoCache = next;
-    await Promise.all(entries.map((entry) => this.#decryptInfo(entry.info)));
+    await Promise.all(entries.map((entry) => this.#decryptInfo(entry)));
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
@@ -729,9 +743,27 @@ export class RelayClient {
    * `machine-info` blobs are data at rest, not live messages: `scannedAt` can be
    * days old and the identical envelope arrives on every push, so the replay
    * guard must not see them.
+   *
+   * The registry pairs a plaintext `deviceId` with a blob the relay cannot read,
+   * and only `from` — AAD-bound, so unforgeable without the PSK — says which
+   * machine the blob describes. A mismatch is a swapped pairing: the entry would
+   * render one machine's name and repos on an id that routes to another. Refused
+   * here rather than in #rebuildMachines so nothing downstream can read an
+   * unbound blob; the cache is keyed by id and iv together for the same reason,
+   * as one blob can appear under two ids in a single push.
    */
-  async #decryptInfo(env: Envelope): Promise<void> {
-    if (this.#infoCache.has(env.iv)) return;
+  async #decryptInfo(entry: RegistryView): Promise<void> {
+    const env = entry.info;
+    const cacheKey = infoCacheKey(entry);
+    if (this.#infoCache.has(cacheKey)) return;
+    if (env.from !== entry.deviceId) {
+      this.#wireLog(
+        "dropped",
+        `iv=${quote(env.iv)} from=${quote(env.from)} deviceId=${quote(entry.deviceId)} reason=info-from-mismatch`,
+      );
+      this.#infoCache.set(cacheKey, "unbound");
+      return;
+    }
     try {
       const plain = await openEnvelope(this.#key, env);
       const info = parseMachineInfo(plain.payload);
@@ -743,9 +775,9 @@ export class RelayClient {
       // machine is what an operator can act on. Cached either way, so it is one
       // line per blob rather than one per push.
       if (info === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=info-shape`);
-      this.#infoCache.set(env.iv, info ?? "skewed");
+      this.#infoCache.set(cacheKey, info ?? "skewed");
     } catch {
-      this.#infoCache.set(env.iv, "unopenable");
+      this.#infoCache.set(cacheKey, "unopenable");
     }
   }
 
@@ -759,12 +791,15 @@ export class RelayClient {
     let reused = 0;
     let skewedHere = 0;
     for (const entry of this.#entries) {
-      const info = this.#infoCache.get(entry.info.iv);
+      // Only #decryptInfo writes this cache, and it stores no MachineInfo for an
+      // entry whose blob is not bound to its deviceId — so an unverified entry
+      // can only ever miss here, never render half-built.
+      const info = this.#infoCache.get(infoCacheKey(entry));
       if (info === "skewed") {
         skewedHere += 1;
         continue;
       }
-      if (info === undefined || info === "unopenable") continue;
+      if (info === undefined || info === "unopenable" || info === "unbound") continue;
       const scan = this.#scans.get(entry.deviceId);
       // A register that carries the scan (or a later one) makes the override spent.
       if (scan !== undefined && scan.scannedAt <= info.scannedAt) this.#scans.delete(entry.deviceId);
