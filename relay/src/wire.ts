@@ -4,27 +4,37 @@ import { APP_ID, MACHINES_ID, type AppFrame, type DaemonFrame, type Envelope } f
  * Bounds, not shapes. `deviceId` is an identifier rather than a credential, so
  * the job here is to stop a bearer-token holder writing absurd storage keys or
  * oversized values — not to prove an id well-formed. Enforcing exact UUIDs
- * would buy no security property the length and charset caps don't.
+ * would buy no security property the size and charset caps don't.
  */
-const MAX_ID_LENGTH = 64;
-const MAX_IV_LENGTH = 32;
+const MAX_ID_BYTES = 64;
+const MAX_IV_BYTES = 32;
 
 /** A DO value caps at 128 KiB; a register blob for ~60 repos is nearer 12 KiB. */
-const MAX_CT_LENGTH = 64 * 1024;
+const MAX_CT_BYTES = 64 * 1024;
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/u;
+
+const encoder = new TextEncoder();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function boundedString(value: unknown, max: number): value is string {
-  return typeof value === "string" && value !== "" && value.length <= max;
+/**
+ * Bytes, not string units: the DO value limit these caps exist to stay under is
+ * a byte limit, and one unit of non-ASCII text is up to three of them — counted
+ * as units, a `ct` at the cap could carry ~192 KiB. UTF-8 is never fewer bytes
+ * than units, so the cheap check turns the absurd ones away before encoding.
+ */
+function boundedString(value: unknown, maxBytes: number): value is string {
+  if (typeof value !== "string" || value === "") return false;
+  if (value.length > maxBytes) return false;
+  return encoder.encode(value).byteLength <= maxBytes;
 }
 
 /** Routing ids reach storage keys and logs, so they stay short and boring. */
 function routableId(value: unknown): value is string {
-  return boundedString(value, MAX_ID_LENGTH) && SAFE_ID.test(value);
+  return boundedString(value, MAX_ID_BYTES) && SAFE_ID.test(value);
 }
 
 function parseJson(text: string): unknown {
@@ -43,8 +53,8 @@ export function parseEnvelope(value: unknown): Envelope | null {
   if (typeof value["v"] !== "number") return null;
   if (!routableId(value["to"])) return null;
   if (!routableId(value["from"])) return null;
-  if (!boundedString(value["iv"], MAX_IV_LENGTH)) return null;
-  if (!boundedString(value["ct"], MAX_CT_LENGTH)) return null;
+  if (!boundedString(value["iv"], MAX_IV_BYTES)) return null;
+  if (!boundedString(value["ct"], MAX_CT_BYTES)) return null;
   return { v: value["v"], to: value["to"], from: value["from"], iv: value["iv"], ct: value["ct"] };
 }
 

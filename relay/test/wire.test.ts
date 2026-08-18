@@ -29,6 +29,15 @@ describe("parseEnvelope bounds", () => {
     expect(parseEnvelope(env({ ct: "A".repeat(64 * 1024 + 1) }))).toBeNull();
   });
 
+  test("the caps are bytes, so multi-byte text cannot carry three times the cap", () => {
+    // 32 KiB of three-byte characters is 96 KiB encoded: under the cap counted
+    // as string units, past the storage value it would become.
+    expect(parseEnvelope(env({ ct: "€".repeat(32 * 1024) }))).toBeNull();
+    expect(parseEnvelope(env({ ct: "€".repeat(21 * 1024) }))).not.toBeNull();
+    // `iv` has no charset to save it — the size cap is the only bound there.
+    expect(parseEnvelope(env({ iv: "€".repeat(16) }))).toBeNull();
+  });
+
   test("routing ids are bounded and boring — they become storage keys and log lines", () => {
     expect(parseEnvelope(env({ to: "a".repeat(64) }))).not.toBeNull();
     expect(parseEnvelope(env({ to: "a".repeat(65) }))).toBeNull();

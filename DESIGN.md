@@ -215,10 +215,12 @@ Séance's noise is cover for a real intruder.
    registry push to every app each time. Neither cap defends _against_ a token
    holder; rotating the token does. They keep the cost finite. The rate limit
    is per socket, so it bounds one connection's spend, not an attacker's total.
-   Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
-   ≤64 KiB, so a register can never reach the DO's 128 KiB value limit as an
-   unhandled throw. `deviceId` is not required to be a UUID — it is an
-   identifier, not a credential, so exact shape buys nothing the bounds don't.
+   Wire-level bounds back both, measured in UTF-8 bytes rather than string
+   units — counted as units, a ciphertext at the cap could still encode to
+   ~192 KiB: ids are ≤64 safe bytes and ciphertext ≤64 KiB, so a register can
+   never reach the DO's 128 KiB value limit as an unhandled throw. `deviceId`
+   is not required to be a UUID — it is an identifier, not a credential, so
+   exact shape buys nothing the bounds don't.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted. One unstated dependency: the ±60s window
