@@ -179,21 +179,39 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("seed prompt reaches claude as the final operand, quotes and all", async () => {
+  test("seed prompt reaches claude on stdin, quotes and all — never argv", async () => {
     await rm(stub.argvFile, { force: true });
-    const outcome = await spawnSession(
-      { repo: "myrepo", mode: "here", title: "Seeded", prompt: "tricky 'quoted' $prompt" },
-      repos,
-      "main",
-      WAIT,
-    );
+    await rm(stub.stdinFile, { force: true });
+    const prompt = "tricky 'quoted' $prompt";
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Seeded", prompt }, repos, "main", WAIT);
     try {
+      expect(await stub.stdin()).toEndWith(`Task: ${prompt}\n`);
       const argv = await stub.argv();
-      // Pinned behind `--`: `--remote-control [name]` takes an optional value,
-      // and a here-mode seed adjacent to it became the session's *name* — the
-      // session started idle with the prompt in the title.
-      expect(argv.at(-2)).toBe("--");
-      expect(argv.at(-1)).toEndWith("Task: tricky 'quoted' $prompt");
+      // The finding this pins: an argv operand is the prompt in plaintext in
+      // every local process list for the session's lifetime, readable by any
+      // process the user runs — including a prompt-injected session.
+      expect(argv.join(" ")).not.toContain("tricky");
+      // `--remote-control [name]` takes an optional value, and a here-mode seed
+      // adjacent to it became the session's *name* — the session started idle
+      // with the prompt in the title. Nothing trails the terminator now.
+      expect(argv.at(-1)).toBe("--");
+      // tmux keeps the pane's start command for as long as the pane lives, so
+      // the shell string is a second process-table-grade record: it may name
+      // the seed file, never quote its contents.
+      const paneCommands = await tmuxOk(["list-panes", "-a", "-F", "#{pane_start_command}"]);
+      expect(paneCommands).not.toContain("tricky");
+    } finally {
+      await killWindow(outcome.window);
+    }
+  });
+
+  test("an unseeded spawn leaves stdin alone — the pane's tty, not a file", async () => {
+    await rm(stub.stdinFile, { force: true });
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Unseeded" }, repos, "main", WAIT);
+    try {
+      // Negative assertion: nothing to poll for, and the spawn already waited
+      // out WAIT. A recorded stdin here would mean the pane lost its keyboard.
+      expect(await Bun.file(stub.stdinFile).exists()).toBe(false);
     } finally {
       await killWindow(outcome.window);
     }

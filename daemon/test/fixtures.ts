@@ -65,8 +65,12 @@ export interface ClaudeStub {
   readonly version: string;
   /** Overwritten on every `ok` launch — rm it before a spawn whose argv the test reads. */
   readonly argvFile: string;
+  /** Written only when stdin is redirected, i.e. when a spawn carried a seed prompt. */
+  readonly stdinFile: string;
   /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
   readonly argv: () => Promise<readonly string[]>;
+  /** Polls for the record, then returns everything the launch was fed on stdin. */
+  readonly stdin: () => Promise<string>;
 }
 
 /**
@@ -90,8 +94,15 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
 
   const ok = join(dir, "claude");
   const argvFile = `${ok}.argv`;
-  // NUL separators: seed prompts carry newlines, so a line-based record would lie
-  await Bun.write(ok, `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\nexec "${versioned}" "${sleeper}"\n`);
+  const stdinFile = `${ok}.stdin`;
+  // NUL separators: seed prompts carry newlines, so a line-based record would lie.
+  // The `-t 0` guard is what keeps an unseeded spawn from hanging on `cat`: those
+  // panes hand claude the tty, and only a seeded one redirects a file onto stdin.
+  await Bun.write(
+    ok,
+    `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\n` +
+      `if [ ! -t 0 ]; then cat > "${stdinFile}"; fi\nexec "${versioned}" "${sleeper}"\n`,
+  );
   await chmod(ok, 0o755);
 
   const failing = join(dir, "claude-failing");
@@ -104,7 +115,19 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     await pollUntil(() => Bun.file(argvFile).exists(), `claude stub argv at ${argvFile}`);
     return (await Bun.file(argvFile).text()).split("\0").slice(0, -1);
   };
-  return { ok, failing, version: "9.9.9", argvFile, argv };
+  // Non-empty, not merely present: `cat` creates the file before it has copied
+  // anything, so existence alone can hand a test the empty prefix.
+  const stdin = async (): Promise<string> => {
+    let text = "";
+    await pollUntil(async () => {
+      text = await Bun.file(stdinFile)
+        .text()
+        .catch(() => "");
+      return text.length > 0;
+    }, `claude stub stdin at ${stdinFile}`);
+    return text;
+  };
+  return { ok, failing, version: "9.9.9", argvFile, stdinFile, argv, stdin };
 }
 
 /**

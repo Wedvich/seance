@@ -258,7 +258,12 @@ third is the gap they leave.
   effort, prompt length and prompt SHA-256 prefix — never the prompt text,
   which would make `seanced.log` a transcript of everything ever asked. With a
   stolen PSK this log is the only thing that says someone else used your
-  machines.
+  machines. The process table was the matching exposure and is closed
+  (2026-08-18): the seed prompt used to reach claude as an argv operand, so the
+  text the log reduces to a hash stood in `ps` output for the session's whole
+  life — readable by every local process, path 6's injected agent included, for
+  every session on the box. It is delivered on stdin now; mechanics and
+  rejected alternatives under Daemon.
 - **Both spawn paths audit, through one formatter**, tagged `origin=relay` or
   `origin=cli`. A trail that covered only the relay would make `seanced spawn`
   the quieter way in — precisely the path someone with local shell access would
@@ -720,10 +725,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   (`~/.claude/commands/spawn.md`): ff-only fast-forward of the default
   branch before `claude --worktree`, worktree/window naming
   (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
-  `--remote-control` always — kept off the argv tail with the seed prompt
-  behind a `--` terminator, because the flag takes an _optional_ value and,
-  adjacent, it swallows the prompt as the session's name while the session
-  starts idle — **opus**/medium defaults (revised from
+  `--remote-control` always — ahead of the other flags and with a `--`
+  terminator closing the command, because the flag takes an _optional_ value
+  and, adjacent to the seed, it swallowed the prompt as the session's name
+  while the session started idle — **opus**/medium defaults (revised from
   sonnet), per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
   and the pane-death verification (remain-on-exit, then poll `pane_dead`
@@ -736,6 +741,30 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `no_default_branch`, `launch_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
+- **The seed prompt is delivered on stdin, never argv** (revised 2026-08-18).
+  It used to be an operand produced by a command substitution
+  (`… -- "$(cat <seedfile>)"`), which the shell expands _before_ `exec`: the
+  rendered preamble and prompt were then claude's argv — and `caffeinate`'s —
+  for the session's lifetime, i.e. plaintext in `ps` for anything running as
+  the user, which is precisely the text the audit trail reduces to a length and
+  a hash. The seed file is redirected onto stdin instead
+  (`… -- < <seedfile>`): claude takes non-tty stdin as its opening prompt and
+  reopens `/dev/tty` for the UI, so the pane stays attachable and typeable, and
+  macOS's `caffeinate -is` passes the fd through untouched. The shell opens the
+  fd before `exec`, so the unlink after the pane-alive check drops the name and
+  never the read — the cleanup ordering is unchanged. Residual, and unchanged
+  by this: the 0700 seed file is same-user readable until that unlink, seconds
+  against a whole session in `ps`.
+  `--` no longer guards a value, only the absence of one, and stays as the
+  standing guarantee that nothing appended later becomes a flag's optional
+  argument. Rejected: a prompt-from-file flag (claude 2.1.234 has none —
+  checked against `--help`, not assumed); an environment variable
+  (`/proc/<pid>/environ` is same-uid readable and lives exactly as long as argv
+  did); a heredoc (tmux keeps `pane_start_command` for the pane's life, so the
+  text would move from `ps` to the tmux server rather than disappear); and
+  typing it in with `send-keys` or `load-buffer`+`paste-buffer` (send-keys puts
+  the prompt in a client's argv, and both race the TUI being ready for input,
+  trading a leak for a session that silently starts idle).
 - **No `--permission-mode` flag** (revised from `/spawn`'s `auto`). Passing it
   would override the machine's own `settings.json` default, so a box configured
   for `bypassPermissions` still got prompted for the things `auto` withholds.
