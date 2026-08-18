@@ -8,6 +8,9 @@ import {
   type RelayToDaemonFrame,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+// Straight from the module the worker forwards through: it takes a Request and
+// returns one, so the DO-facing URL is assertable without a workerd boot.
+import { hubRequest } from "../src/subrequest.ts";
 import { connectApp, connectDaemon, envelope, startRelay, type Client, type TestRelay } from "./harness.ts";
 
 const TOKEN = "test-bearer-token";
@@ -96,6 +99,29 @@ describe("upgrade", () => {
   test("426s an authenticated request that is not a websocket upgrade", async () => {
     expect((await relay.probe("/daemon", { headers: { authorization: `Bearer ${TOKEN}` } })).status).toBe(426);
     expect((await relay.probe(`/app?t=${TOKEN}`)).status).toBe(426);
+  });
+});
+
+describe("hub subrequest", () => {
+  test("the app's ?t= token never reaches the Durable Object", () => {
+    const forwarded = hubRequest(
+      new Request(`https://relay.test/app?t=${TOKEN}&x=1`, { headers: { upgrade: "websocket" } }),
+    );
+
+    // The hub re-derives the role from the path, so carrying the bearer further
+    // only writes it into a second trace span.
+    expect(forwarded.url).not.toContain(TOKEN);
+    const url = new URL(forwarded.url);
+    expect(url.pathname).toBe("/app");
+    expect(url.searchParams.has("t")).toBe(false);
+    expect(url.searchParams.get("x")).toBe("1");
+    // Rebuilt, but still the upgrade the hub answers 101 to.
+    expect(forwarded.headers.get("upgrade")).toBe("websocket");
+  });
+
+  test("a request with nothing to strip is forwarded as it arrived", () => {
+    const req = new Request("https://relay.test/daemon", { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(hubRequest(req)).toBe(req);
   });
 });
 

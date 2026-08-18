@@ -1361,7 +1361,10 @@ version breaks the build.
   observability store and are queryable there, so this is a second retained copy
   of the `?t=` token alongside the invocation logs `observability.enabled`
   already produces. Item 3 already accepts that exposure to Cloudflare; what is
-  refused here is widening it to a third party.
+  refused here is widening it to a third party. One copy is gone: the hub
+  re-derives its role from the path, so the worker strips `?t=` before the DO
+  subrequest and the token spans only the eyeball request. That narrows the
+  retained copies, not the prerequisite — the query string still carries it.
 - True distributed tracing across daemon→relay→pwa is not available and was not
   faked. Trace context rides `traceparent` on an HTTP request, but both tiers
   hold one long-lived WebSocket whose only header exchange is the upgrade; every

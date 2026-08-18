@@ -1,6 +1,7 @@
 import { CLOSE_BAD_REQUEST, CLOSE_UNAUTHORIZED } from "@seance/shared";
 import { presentedToken, roleForPath, tokenMatches } from "./auth.ts";
 import type { Env } from "./env.ts";
+import { hubRequest } from "./subrequest.ts";
 
 export { Hub } from "./hub.ts";
 
@@ -41,8 +42,6 @@ export default {
     if (!isUpgrade) {
       return new Response("expected websocket upgrade", { status: 426 });
     }
-    // Forwarded untouched: the hub re-derives the role from the same path helper,
-    // which avoids rebuilding an upgrade request just to carry a header.
-    return env.HUB.get(env.HUB.idFromName(HUB_NAME)).fetch(req);
+    return env.HUB.get(env.HUB.idFromName(HUB_NAME)).fetch(hubRequest(req));
   },
 } satisfies ExportedHandler<Env>;
