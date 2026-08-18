@@ -219,6 +219,36 @@ Séance's noise is cover for a real intruder.
    ≤64 KiB, so a register can never reach the DO's 128 KiB value limit as an
    unhandled throw. `deviceId` is not required to be a UUID — it is an
    identifier, not a credential, so exact shape buys nothing the bounds don't.
+   Two sharper reads of the same verb, closed 2026-08-16. **Blob-swap
+   misdirection** (T1036): an `/app` socket is handed every machine's `info`
+   blob on its first push, and `register` pairs a blob with an id of the
+   caller's choosing — so a holder can re-file machine A's blob under machine
+   B's id. The picker then renders A's name and A's repos on an entry that
+   routes to B, and the tap seals the spawn to B. AAD binding still holds, so
+   "a relay compromise cannot spawn anything" survives; "you know which machine
+   you are spawning on" does not. Closed by an invariant the daemon has always
+   satisfied and nothing verified: `info.from` is AAD-bound to the machine that
+   sealed it, so an entry whose blob does not name its own `deviceId` never
+   becomes a `Machine`. Checked in `#decryptInfo`, which is what populates the
+   only cache `#rebuildMachines` reads, so an unverified entry can miss but
+   never render half-built — and that cache is keyed by id _and_ iv, because
+   one blob arriving under two ids must not be served from one slot. App-side,
+   not relay-side: the relay is blind and untrusted, so a check there is a
+   courtesy the app would have to repeat anyway, and a second copy is a second
+   thing that can drift. **Socket eviction** (T1499): `register` also moved the
+   route, closing an incumbent socket with `superseded` for an id the caller
+   never had to prove — after which app→machine envelopes went to the newcomer,
+   undecryptable and so blackholed, while the registry still read
+   `connected: true`. Now a live incumbent keeps the route and the claimant's
+   socket is closed instead; a supersede is allowed only once the incumbent has
+   been silent past the sweep's limit, which is the same evidence the sweep acts
+   on. Reconnect is untouched — a dropped socket is out of `getWebSockets()`
+   before its daemon redials. Rejected: refusing the claimant unconditionally,
+   which leaves an abruptly slept machine's zombie socket holding its own id
+   hostage until the alarm fires, and the alarm's period is coarser than its
+   limit. A holder can still squat the id of a machine that is _offline_ — that
+   is the entry blanking above wearing a socket — and rotating the token is
+   still the answer; what is gone is evicting a machine that is right there.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted. One unstated dependency: the ±60s window

@@ -2,7 +2,7 @@
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { startRelay, type TestRelay } from "../../relay/test/harness.ts";
+import { connectDaemon, startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
@@ -231,6 +231,42 @@ describe("registry", () => {
       expect(state.registrySize).toBeGreaterThan(state.machines.length);
     } finally {
       daemon.close();
+      client.stop();
+    }
+  });
+
+  // The registry pairs a plaintext deviceId with a blob only the PSK holders can
+  // read, so a bearer token alone is enough to re-file one machine's blob under
+  // another's id — the picker would then show A's name and repos on an entry that
+  // spawns on B. `from` is AAD-bound, which makes the pairing checkable.
+  test("drops an entry whose info blob is sealed from a different deviceId", async () => {
+    const real = nextDeviceId();
+    const impostor = nextDeviceId();
+    const plain: Plain = {
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      op: "machine-info",
+      payload: machineInfo("Victim Laptop"),
+    };
+    const info = await seal(key, { to: APP_ID, from: real }, plain);
+
+    const { client, waitFor } = startClient();
+    const honest = await connectDaemon(relay);
+    const thief = await connectDaemon(relay);
+    try {
+      const before = await waitFor((s) => s.registrySettled, "the first registry push");
+      honest.send({ t: "register", deviceId: real, info });
+      // Byte-identical, so a cache keyed on the envelope alone would serve the
+      // machine the honest entry decrypted.
+      thief.send({ t: "register", deviceId: impostor, info });
+
+      const state = await waitFor((s) => s.registrySize >= before.registrySize + 2, "both entries in the registry");
+      expect(state.machines.map((m) => m.deviceId)).toContain(real);
+      expect(state.machines.map((m) => m.deviceId)).not.toContain(impostor);
+      expect(state.ignored).toBe(before.ignored + 1);
+    } finally {
+      honest.close();
+      thief.close();
       client.stop();
     }
   });
