@@ -349,11 +349,21 @@ describe("robustness", () => {
 });
 
 /** Current registry as the DO reports it: a fresh app socket is pushed it on connect. */
-async function registryIds(target: TestRelay): Promise<string[]> {
+async function registryEntries(target: TestRelay): Promise<readonly RegistryView[]> {
   const observer = await connectApp(target);
   const frame = await observer.waitFor<RegistryFrame>("registry");
   observer.close();
-  return frame.entries.map((entry) => entry.deviceId);
+  return frame.entries;
+}
+
+async function registryIds(target: TestRelay): Promise<string[]> {
+  return (await registryEntries(target)).map((entry) => entry.deviceId);
+}
+
+/** `connected` is derived from live sockets, so it is what proves a register landed. */
+async function isConnected(target: TestRelay, deviceId: string): Promise<boolean> {
+  const entries = await registryEntries(target);
+  return entries.find((entry) => entry.deviceId === deviceId)?.connected ?? false;
 }
 
 /**
@@ -413,6 +423,32 @@ describe("registry entry cap", () => {
     for (const daemon of daemons.slice(1)) daemon.close();
     app.close();
   }, 30_000);
+
+  // Runs on the registry the test above filled.
+  test("a register the full registry turns away still spends the window", async () => {
+    const MAX_REGISTERS_PER_WINDOW = 10;
+    const app = await connectApp(bounded);
+    const daemon = await connectDaemon(bounded);
+
+    // Every one of these is refused by the entry cap, and every one costs a
+    // storage read plus a list over the prefix. If the refusal were free the
+    // window would never advance and unknown ids would be unlimited per socket.
+    for (let i = 0; i < MAX_REGISTERS_PER_WINDOW; i += 1) {
+      daemon.send({ t: "register", deviceId: `spent-${i}`, info: envelope(APP_ID, `spent-${i}`) });
+    }
+    await drain(app);
+
+    // A known id the cap would wave through: the only thing left to refuse it
+    // is the rate limit the refusals above must have spent.
+    daemon.send({ t: "register", deviceId: "full-1", info: envelope(APP_ID, "full-1") });
+    await drain(app);
+
+    expect(await isConnected(bounded, "full-1")).toBe(false);
+    expect(await registryIds(bounded)).toHaveLength(MAX_DEVICES);
+
+    daemon.close();
+    app.close();
+  }, 30_000);
 });
 
 describe("register rate limit", () => {
@@ -443,6 +479,12 @@ describe("register rate limit", () => {
     const ids = await registryIds(limited);
     expect(ids).toHaveLength(MAX_REGISTERS_PER_WINDOW);
     expect(ids).not.toContain("rate-over");
+
+    // A refusal must not hand the caller a fresh window: an id already in the
+    // registry — nothing else would turn it away — is refused just the same.
+    daemon.send({ t: "register", deviceId: "rate-0", info: envelope(APP_ID, "rate-0") });
+    await drain(app);
+    expect(await isConnected(limited, "rate-0")).toBe(false);
 
     // Honest about the shape of the guarantee: the budget is per socket, so a
     // new connection starts a new window. This bounds one socket's write rate,
