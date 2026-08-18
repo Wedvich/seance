@@ -3,6 +3,7 @@
 import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { startRelay, type TestRelay } from "../../relay/test/harness.ts";
+import type { ServerWebSocket } from "bun";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
@@ -64,13 +65,15 @@ function startClient(
     readonly hidden?: readonly string[];
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
+    /** Dials somewhere other than the real relay; only the hostile-peer suite does. */
+    readonly url?: string;
   } = {},
 ): {
   client: RelayClient;
   waitFor: (predicate: (state: RelayState) => boolean, label: string) => Promise<RelayState>;
 } {
   const client = new RelayClient({
-    url: appUrl(),
+    url: opts.url ?? appUrl(),
     token: opts.token ?? TOKEN,
     key,
     // Bun's client and workerd disagree about permessage-deflate once a few
@@ -915,6 +918,237 @@ describe("registry settle", () => {
     } finally {
       client.stop();
       await silent.stop(true);
+    }
+  });
+});
+
+/**
+ * A peer that says exactly what a test tells it to. Not a relay double — it
+ * models nothing and answers nothing — but the real relay cannot be made to
+ * send a frame it would never send, and that is the case these tests pin: a
+ * relay that is hostile, or simply a version ahead. `received` is there so a
+ * test can read back the iv the client sent, which is all a blind relay ever
+ * has to correlate with.
+ */
+interface HostilePeer {
+  readonly url: string;
+  readonly send: (frame: unknown) => void;
+  readonly sendText: (text: string) => void;
+  readonly received: readonly string[];
+  readonly stop: () => Promise<void>;
+}
+
+function startHostilePeer(): HostilePeer {
+  const received: string[] = [];
+  let socket: ServerWebSocket<unknown> | null = null;
+  const peerServer = Bun.serve({
+    port: 0,
+    fetch(request, server) {
+      return server.upgrade(request) ? undefined : new Response("expected a websocket", { status: 400 });
+    },
+    websocket: {
+      open(ws) {
+        socket = ws;
+      },
+      message(ws, message) {
+        // Every request carries a probe ping; an unanswered heartbeat would
+        // re-dial mid-test and is not what any of this measures.
+        if (message === "ping") {
+          ws.send("pong");
+          return;
+        }
+        received.push(String(message));
+      },
+      close() {
+        socket = null;
+      },
+    },
+  });
+  const sendText = (text: string): void => {
+    if (socket === null) throw new Error("the client has not connected to the peer yet");
+    socket.send(text);
+  };
+  return {
+    url: `ws://127.0.0.1:${peerServer.port}/app`,
+    send: (frame) => sendText(JSON.stringify(frame)),
+    sendText,
+    received,
+    stop: () => peerServer.stop(true),
+  };
+}
+
+/** A sound push, so a test can prove the client still applies one afterwards. */
+async function registryFrame(deviceId: string, info: MachineInfo): Promise<unknown> {
+  const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: info };
+  return {
+    t: "registry",
+    entries: [
+      {
+        deviceId,
+        info: await seal(key, { to: APP_ID, from: deviceId }, plain),
+        lastSeen: Date.now(),
+        connected: true,
+      },
+    ],
+  };
+}
+
+describe("malformed frames", () => {
+  // The wedge this suite exists for: the missing list was assigned before the
+  // throw, so every later rebuild — a hide, a scan, a delivery failure — threw
+  // on it too, and the tab was dead until reload.
+  test("drops a registry frame with no entries instead of wedging every later rebuild", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      peer.sendText(JSON.stringify({ t: "registry" }));
+      // A non-event has nothing to poll for, so the sleep is the assertion's setup.
+      await Bun.sleep(50);
+      expect(client.getState().machines).toEqual([]);
+      client.hide(deviceId);
+      client.applyScan(deviceId, [], Date.now());
+      peer.send(await registryFrame(deviceId, machineInfo("Still Here")));
+      const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound push still lands");
+      expect(state.registrySize).toBe(1);
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // Its own handler's catch used to throw as well: the reason line quotes `env.iv`.
+  test("drops a msg frame with no envelope", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      peer.sendText(JSON.stringify({ t: "msg" }));
+      await Bun.sleep(50);
+      peer.send(await registryFrame(deviceId, machineInfo("Unbothered")));
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound push still lands");
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // An unknown `t` fell through to the envelope branch, so it crashed exactly
+  // the way a msg with no envelope did.
+  test("drops a frame whose type this build does not know, and says so without echoing it", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const lines: string[] = [];
+    const realLog = console.log;
+    try {
+      const { client, waitFor } = startClient({ url: peer.url });
+      try {
+        await waitFor((s) => s.status === "open", "open");
+        console.log = (...args: unknown[]): void => {
+          lines.push(args.map(String).join(" "));
+        };
+        peer.send({ t: "from-a-later-relay", secret: "never-in-a-log-line" });
+        await pollUntil(() => lines.some((line) => line.startsWith("wire dropped ")), "the drop to be logged");
+        console.log = realLog;
+        expect(lines).toContain("wire dropped reason=frame");
+        expect(lines.join("\n")).not.toContain("never-in-a-log-line");
+
+        peer.send(await registryFrame(deviceId, machineInfo("Unbothered")));
+        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound push still lands");
+      } finally {
+        client.stop();
+        await peer.stop();
+      }
+    } finally {
+      console.log = realLog;
+    }
+  });
+
+  // Half a registry renders as machines that vanished, so the push is dropped
+  // whole and the list already on screen stays the best truth there is.
+  test("drops a registry push whose entries do not all parse, keeping the list it had", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      peer.send(await registryFrame(deviceId, machineInfo("Trusted")));
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "the machine to land");
+      peer.send({ t: "registry", entries: [{ deviceId: "half-written" }] });
+      await Bun.sleep(50);
+      expect(client.getState().machines).toBe(before.machines);
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // A blob that opens but is not shaped like a MachineInfo used to reach the
+  // spawn screen, where `machine.repos.map` runs on every render.
+  test("counts a blob that opens but is not a MachineInfo as ignored, not as a machine", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: { name: 7 } };
+      peer.send({
+        t: "registry",
+        entries: [
+          {
+            deviceId,
+            info: await seal(key, { to: APP_ID, from: deviceId }, plain),
+            lastSeen: Date.now(),
+            connected: true,
+          },
+        ],
+      });
+      const state = await waitFor((s) => s.registrySize === 1, "the push to land");
+      expect(state.machines).toEqual([]);
+      expect(state.ignored).toBe(1);
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // The cache is keyed by envelope iv and every register mints a fresh one, so
+  // an installed PWA left open for weeks used to hold every blob it ever saw.
+  test("prunes the info cache to the live registry instead of growing per envelope", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      for (let push = 0; push < 20; push += 1) {
+        peer.send(await registryFrame(deviceId, machineInfo(`Push ${push}`)));
+      }
+      await waitFor((s) => s.machines.some((m) => m.name === "Push 19"), "the last push to land");
+      await pollUntil(() => client.infoCacheSize === 1, "the cache to hold only the live entry");
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // `code` becomes RequestFailure.reason, which every surface explains by
+  // switching over the known set. One it cannot explain is no answer at all.
+  test("drops an undeliverable whose code this build does not know, leaving the request to time out", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url, timeouts: { sessions: 200 } });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const pending = client.request(deviceId, "sessions", {});
+      await pollUntil(() => peer.received.length > 0, "the request to reach the peer");
+      const sent = JSON.parse(peer.received[0] ?? "{}") as { readonly env?: { readonly iv?: string } };
+      peer.send({ t: "undeliverable", to: deviceId, iv: sent.env?.iv ?? "", code: "from-a-later-relay" });
+      await expect(pending).rejects.toMatchObject({ reason: "timeout" });
+    } finally {
+      client.stop();
+      await peer.stop();
     }
   });
 });

@@ -182,6 +182,10 @@ export function failureBody(code: SpawnErrorCode, repo: string, machine: string)
     case "internal_error":
       return "The daemon hit an error before the session started.";
   }
+  // Unreachable for a declared code — the switch above stays exhaustive, so a
+  // new one is still a type error here — but `code` arrives from a daemon that
+  // may be a version ahead, and an unlisted one used to render a blank card.
+  return "The daemon refused the spawn. Check the machine to see whether anything is running.";
 }
 
 function offlineBody(machine: Machine): string {
@@ -193,7 +197,10 @@ function offlineBody(machine: Machine): string {
 function sessionCount(state: AppState, deviceId: string): number | null {
   const entry = state.sessions[deviceId];
   if (entry === undefined || entry === "unknown") return null;
-  return entry.sessions.length;
+  // The list is stored exactly as the reply carried it, and a daemon a version
+  // ahead is still inside the PSK boundary — but "no count" is a line the UI
+  // already has, and a render that throws is not.
+  return Array.isArray(entry.sessions) ? entry.sessions.length : null;
 }
 
 /** The settings screen's status line: connection only, no machine counts. */

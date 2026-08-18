@@ -132,13 +132,110 @@ interface Pending {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isUndeliverableCode(value: unknown): value is UndeliverableCode {
+  return value === "offline" || value === "unknown";
+}
+
+/** Shape only, like the relay's own parser: the PSK, not this, decides authenticity. */
+function parseEnvelope(value: unknown): Envelope | null {
+  if (!isRecord(value)) return null;
+  if (typeof value["v"] !== "number") return null;
+  if (typeof value["to"] !== "string" || typeof value["from"] !== "string") return null;
+  if (typeof value["iv"] !== "string" || typeof value["ct"] !== "string") return null;
+  return { v: value["v"], to: value["to"], from: value["from"], iv: value["iv"], ct: value["ct"] };
+}
+
+function parseRegistryView(value: unknown): RegistryView | null {
+  if (!isRecord(value)) return null;
+  const info = parseEnvelope(value["info"]);
+  if (info === null) return null;
+  if (typeof value["deviceId"] !== "string" || typeof value["lastSeen"] !== "number") return null;
+  if (typeof value["connected"] !== "boolean") return null;
+  return { deviceId: value["deviceId"], info, lastSeen: value["lastSeen"], connected: value["connected"] };
+}
+
+/**
+ * Every field the handlers below touch, checked here — bounds stay the relay's
+ * job (`relay/src/wire.ts`), because what this side is defending is the tab.
+ * The types are a promise the peer makes, and a peer that breaks it used to
+ * wedge the app: a `registry` without `entries` threw mid-assignment and left
+ * every later rebuild throwing on the same undefined list, dead until reload.
+ * Unhandleable frames are dropped whole, never half-applied.
+ */
 function parseFrame(text: string): RelayToAppFrame | null {
+  let value: unknown;
   try {
-    const frame = JSON.parse(text) as RelayToAppFrame;
-    return typeof frame === "object" && frame !== null && typeof frame.t === "string" ? frame : null;
+    value = JSON.parse(text) as unknown;
   } catch {
     return null;
   }
+  if (!isRecord(value)) return null;
+  if (value["t"] === "registry") {
+    const raw = value["entries"];
+    if (!Array.isArray(raw)) return null;
+    const entries: RegistryView[] = [];
+    for (const candidate of raw) {
+      const entry = parseRegistryView(candidate);
+      // One unreadable entry drops the whole push rather than shortening the
+      // list: a short registry renders as machines that vanished, and the list
+      // already on screen is the better truth until a sound push replaces it.
+      if (entry === null) return null;
+      entries.push(entry);
+    }
+    return { t: "registry", entries };
+  }
+  if (value["t"] === "msg") {
+    const env = parseEnvelope(value["env"]);
+    return env === null ? null : { t: "msg", env };
+  }
+  if (value["t"] === "undeliverable") {
+    if (typeof value["to"] !== "string" || typeof value["iv"] !== "string") return null;
+    // Narrowed rather than carried through: `code` becomes RequestFailure.reason,
+    // and every surface explains that by switching over the known set. A code
+    // minted after this build drops the frame and the request ends on its own
+    // timeout — late, but never a blank line where the reason should be.
+    if (!isUndeliverableCode(value["code"])) return null;
+    return { t: "undeliverable", to: value["to"], iv: value["iv"], code: value["code"] };
+  }
+  return null;
+}
+
+function parseRepoEntry(value: unknown): RepoEntry | null {
+  if (!isRecord(value)) return null;
+  if (typeof value["name"] !== "string" || typeof value["path"] !== "string") return null;
+  const defaultBranch = value["defaultBranch"];
+  if (defaultBranch !== null && typeof defaultBranch !== "string") return null;
+  return { name: value["name"], path: value["path"], defaultBranch };
+}
+
+/**
+ * The decrypted register blob. Inside the PSK boundary, so this is skew
+ * tolerance rather than defence: a daemon a version ahead or behind must cost
+ * one machine tile, not the render — `machine.repos.map(…)` runs on every frame
+ * of the spawn screen. A projection of the fields the app reads, like the
+ * Raycast cache's: `source`/`lastUpdate` back the daemon's own doctor/status
+ * surfaces and no app-role client renders them.
+ */
+function parseMachineInfo(value: unknown): MachineInfo | null {
+  if (!isRecord(value)) return null;
+  if (typeof value["name"] !== "string" || typeof value["platform"] !== "string") return null;
+  if (typeof value["scannedAt"] !== "number") return null;
+  const raw = value["repos"];
+  if (!Array.isArray(raw)) return null;
+  const repos: RepoEntry[] = [];
+  for (const candidate of raw) {
+    const repo = parseRepoEntry(candidate);
+    // One unreadable repo invalidates the machine rather than silently
+    // shortening its list: a picker missing the repo you wanted is worse than a
+    // machine that reads as sealed with a key this app doesn't hold.
+    if (repo === null) return null;
+    repos.push(repo);
+  }
+  return { name: value["name"], platform: value["platform"], repos, scannedAt: value["scannedAt"] };
 }
 
 /** No deep walk needed: `repos` comes off the IV-keyed info cache, so it compares by identity. */
@@ -265,6 +362,15 @@ export class RelayClient {
   }
 
   getState = (): RelayState => this.#state;
+
+  /**
+   * Decrypted info blobs held. Nothing renders it — it exists so the bound
+   * `#pruneInfoCache` keeps is assertable, and a memory bound has no other
+   * observable behaviour to test through.
+   */
+  get infoCacheSize(): number {
+    return this.#infoCache.size;
+  }
 
   /**
    * Drops an offline machine from the list until it connects again. Connected ones
@@ -514,7 +620,13 @@ export class RelayClient {
 
   async #onFrame(text: string): Promise<void> {
     const frame = parseFrame(text);
-    if (frame === null) return;
+    if (frame === null) {
+      // Observable but contentless: the frame is peer-supplied text, so nothing
+      // of it is echoed. One line per rejection is the only evidence a relay or
+      // daemon that has moved past this build leaves behind.
+      this.#wireLog("dropped", "reason=frame");
+      return;
+    }
     if (frame.t === "registry") {
       await this.#onRegistry(frame.entries);
       return;
@@ -529,8 +641,8 @@ export class RelayClient {
   #onUndeliverable(to: string, iv: string, code: UndeliverableCode): void {
     if (code === "offline") this.#markProvenOffline(to);
     const id = this.#idByIv.get(iv);
-    // `code` is relay-supplied and `parseFrame` does not narrow it, so it is quoted
-    // like every other wire value rather than trusted to be one of the two codes.
+    // Quoted like every other wire value: `parseFrame` narrows `code` to the two
+    // known ones, but `to` and `iv` are relay-supplied text either way.
     this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
     if (id === undefined) return;
     this.#pending.get(id)?.settle({
@@ -587,9 +699,26 @@ export class RelayClient {
     this.#clearRegistrySettle();
     this.#entries = entries;
     await Promise.all(entries.map((entry) => this.#decryptInfo(entry.info)));
+    this.#pruneInfoCache();
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
+  }
+
+  /**
+   * Every register mints a fresh IV, so without this the cache holds every blob
+   * any machine ever pushed — unbounded in a PWA that stays installed for weeks,
+   * and a peer pushing fresh IVs drives it as fast as it likes. Pruned to the
+   * live registry rather than capped: the re-sent blobs a push carries are
+   * exactly what the cache is for, and the registry is what bounds it. Keyed off
+   * `#entries` rather than the push being handled, so a slow decrypt landing out
+   * of order prunes against the newest registry instead of resurrecting its own.
+   */
+  #pruneInfoCache(): void {
+    const live = new Set(this.#entries.map((entry) => entry.info.iv));
+    for (const iv of this.#infoCache.keys()) {
+      if (!live.has(iv)) this.#infoCache.delete(iv);
+    }
   }
 
   /**
@@ -602,7 +731,15 @@ export class RelayClient {
     if (cached !== undefined) return cached;
     try {
       const plain = await openEnvelope(this.#key, env);
-      const info = plain.payload as MachineInfo;
+      const info = parseMachineInfo(plain.payload);
+      // Logged where an unopenable blob is not: an entry sealed with a key this
+      // app doesn't hold is an expected steady state — it is what `ignored`
+      // counts — while a blob that opened and then failed the shape check is
+      // skew worth seeing. Named by sender, not by iv: a `machine-info` iv
+      // repeats across every push, so it is no message identity here, and the
+      // machine is what an operator can act on. Cached either way, so it is one
+      // line per blob rather than one per push.
+      if (info === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=info-shape`);
       this.#infoCache.set(env.iv, info);
       return info;
     } catch {

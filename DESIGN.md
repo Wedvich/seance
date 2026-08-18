@@ -221,9 +221,16 @@ Séance's noise is cover for a real intruder.
    identifier, not a credential, so exact shape buys nothing the bounds don't.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
-   traffic analysis, both accepted. One unstated dependency: the ±60s window
-   trusts local time and NTP is unauthenticated, so an attacker who can skew a
-   daemon's clock widens the window.
+   traffic analysis, both accepted — the accepted kind is a relay that stops
+   relaying, not one that reaches into the app. So the app-role client parses
+   every relay→app frame before handling it and drops whole what it cannot
+   handle: a half-applied frame used to leave the client throwing on every
+   later rebuild, an availability loss that outlived the connection and ended
+   only at a reload. Its `#infoCache` is pruned to the live registry for the
+   same reason — keyed by envelope iv, it otherwise grows for as long as a peer
+   cares to mint them. One unstated dependency: the ±60s window trusts local
+   time and NTP is unauthenticated, so an attacker who can skew a daemon's
+   clock widens the window.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -496,7 +503,9 @@ needs no polling); `msg { envelope }` for daemon replies; and
   endpoints on `id`, relay on `iv`, and reading it as one iv end to end is the
   mistake to avoid. The registry path is deliberately not instrumented: a
   `machine-info` iv repeats across every push (the PWA keys `#infoCache` on it),
-  so it is not a message identity there. Payloads are never logged, on any tier.
+  so it is not a message identity there — the one registry line, a blob that
+  opened but was not shaped like a `MachineInfo`, names its sender instead.
+  Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
   90s) because the right values derive from daemon internals — `exec.ts`'s 60s
   command timeout plus `spawn.ts`'s 3s pane-death check — and would silently

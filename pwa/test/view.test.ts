@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, RelayState } from "@seance/shared";
+import type { Machine, RelayState, SpawnErrorCode } from "@seance/shared";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
   abbreviatePath,
@@ -411,5 +411,13 @@ describe("failureBody", () => {
     for (const code of codes) {
       expect(failureBody(code, "seance", "MacBook Pro")).not.toContain("worktree");
     }
+  });
+
+  // The daemon mints the codes and may be a version ahead of the app. The cast
+  // is the point: it stands in for a value the wire can carry and the type
+  // says cannot exist, which used to leave the verdict card blank.
+  test("says something for a code minted after this build", () => {
+    const fromALaterDaemon = "quota_exceeded" as SpawnErrorCode;
+    expect(failureBody(fromALaterDaemon, "seance", "MacBook Pro")).toContain("refused the spawn");
   });
 });
