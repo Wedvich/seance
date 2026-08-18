@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureAuditLog } from "./audit.ts";
 import type { Check } from "./check.ts";
 import { exec, type ExecResult } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
@@ -95,16 +96,19 @@ async function bootstrapFresh(target: string): Promise<void> {
   if (retry.exitCode !== 0) throw new Error(`launchctl bootstrap failed: ${retry.stderr.trim()}`);
 }
 
-/** `notes` is always empty: launchd needs no step the user has to finish by hand. */
+/** `notes` is empty unless the log could not be prepared: launchd needs no step the user has to finish by hand. */
 export async function installService(): Promise<InstallResult> {
   assertMacos("seanced install");
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
   const target = servicePath();
   await mkdir(dirname(target), { recursive: true });
-  await mkdir(dirname(logPath()), { recursive: true });
+  // Before the bootstrap, so `StandardOutPath` opens a file that is already
+  // there at 0600 — launchd creates it at the session's umask otherwise, and
+  // the redirect has the same root-vs-user shape here as systemd's `append:`.
+  const logProblem = await ensureAuditLog();
   await Bun.write(target, plistContent(resolvedBun(), mainPath, process.env["PATH"] ?? ""));
   await bootstrapFresh(target);
-  return { target, notes: [] };
+  return { target, notes: logProblem === null ? [] : [logProblem] };
 }
 
 /** Nothing is left behind, so there is never a note — unlike systemd's linger. */

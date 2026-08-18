@@ -243,9 +243,10 @@ valid spawn frame has arbitrary code execution, laundered through the agent.
 The PSK is the whole boundary and there is nothing behind it. Recorded here so
 the control isn't read as a sandbox.
 
-**Invariants.** The first two hold in the code today and are requirements, not
-observations — they are exactly the kind of thing that drifts silently. The
-third is the gap they leave.
+**Invariants.** All but the last hold in the code today and are requirements,
+not observations — they are exactly the kind of thing that drifts silently, and
+the audit-log ownership one below did drift, in production, for as long as
+nothing checked it. The last is the gap they leave.
 
 - `spawn` resolves `repo` by **name lookup against the cached scan set**
   (`repos.find(r => r.name === request.repo)`). A wire-supplied string is never
@@ -267,6 +268,27 @@ third is the gap they leave.
   the CLI appends to the same file itself, and failing to do so warns rather
   than failing a spawn the human asked for. Two independent writers is safe
   only while nothing rotates the file.
+- **The redirect that makes one file of the two writers is also what can break
+  the `cli` half**, so the daemon repairs it on every start. Both service
+  managers open the log _before_ dropping to the daemon's user — under a systemd
+  system unit that is root, so a log the manager has to create lands root-owned
+  and every `seanced spawn` then fails its append, warns to stderr and proceeds
+  unaudited. That was the production state on a `--system` box: `install`
+  chowned the log once, and nothing re-established it after the file was
+  replaced. `ensureAuditLog` now creates it 0600 outright and tightens the mode
+  on each daemon start and install; ownership it cannot take back, so it names
+  the `chown` and keeps serving, and `doctor` checks `W_OK` rather than only the
+  size — a broken audit trail must be loud, never a silent gap in the record.
+  Repair is in place: never a rename, which would leave the daemon's redirect on
+  the old inode.
+- **Files at rest are owner-only.** `config.json` and the sealed PSK blobs
+  already were; the audit log, `state.json` and `runtime.json` were 0644 by
+  umask alone, and they hold repo paths, device ids and window titles (which,
+  unlike the prompt, are logged verbatim). All created at 0600 rather than
+  written and chmod'd, so no umask-mode window exists. Enforced as explicit
+  modes and not as a `UMask=` in the unit, deliberately: the daemon may
+  cold-boot the tmux server as its child, and a umask there would follow every
+  file a Claude session writes.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 

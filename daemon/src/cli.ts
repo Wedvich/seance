@@ -1,7 +1,7 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
-import { cliSink, spawnAudit } from "./audit.ts";
+import { auditLogChecks, cliSink, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure } from "./backend.ts";
 import {
@@ -332,13 +332,7 @@ export async function cmdDoctor(): Promise<void> {
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}`);
 
-  const logFile = Bun.file(logPath());
-  if (await logFile.exists()) {
-    const size = logFile.size;
-    if (size > 10 * 1024 * 1024)
-      warn(`log is ${Math.round(size / 1024 / 1024)}MB — consider truncating (${logPath()})`);
-    else ok(`log ${Math.round(size / 1024)}KB (${logPath()})`);
-  }
+  render(await auditLogChecks());
 
   console.log("service");
   render(await doctorServiceChecks());

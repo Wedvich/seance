@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { chown, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AUDIT_LOG_MODE, ensureAuditLog } from "./audit.ts";
 import { exec } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { configDirFor, logPath, logPathIn, pskBlobPathIn, stateDir, stateDirFor } from "./paths.ts";
@@ -358,7 +359,10 @@ export async function installService(): Promise<InstallResult> {
   const notes: string[] = [];
   const target = unitPath();
   await mkdir(dirname(target), { recursive: true });
-  await mkdir(dirname(logPath()), { recursive: true });
+  // Before the unit starts, so `append:` opens a file that is already there at
+  // 0600 rather than creating it at the manager's umask.
+  const logProblem = await ensureAuditLog();
+  if (logProblem !== null) notes.push(logProblem);
   await Bun.write(target, userUnitContent());
   const reload = await exec(["systemctl", "--user", "daemon-reload"]);
   if (reload.exitCode !== 0) {
@@ -476,9 +480,13 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   const logFile = logPathIn(targetStateDir);
   await mkdirAsTarget(targetStateDir, user);
   // systemd opens `append:` as root before dropping to User=, so a log file it
-  // has to create lands root-owned and the daemon's own CLI can't read it.
-  if (!existsSync(logFile)) await writeFile(logFile, "");
+  // has to create lands root-owned and the daemon's own CLI can't append to it —
+  // silently unauditing every `seanced spawn`. Root can put an existing one back
+  // too, which is the fix for a log rotated or deleted since the last install;
+  // the daemon repairs the mode on start, but never another user's ownership.
+  if (!existsSync(logFile)) await writeFile(logFile, "", { mode: AUDIT_LOG_MODE });
   await chown(logFile, user.uid, user.gid);
+  await chmod(logFile, AUDIT_LOG_MODE);
 
   const blob = pskBlobPathIn(targetStateDir);
   const credentialBlob = await credentialBlobFor(blob, join(configDirFor(user.home), "config.json"), notes);

@@ -97,6 +97,39 @@ Windows shell instead.
 The machine is offline while no Windows user is logged in — the same class of
 limitation as a launchd agent, which is also per-login.
 
+## The log file's owner, and why it can go wrong
+
+`StandardOutput=append:` is opened by the manager before it drops to `User=`, so under a
+**system** unit root creates the log and the daemon's own user is left unable to append
+to it. That breaks half the audit trail without breaking the daemon: the daemon keeps
+writing through its redirect, while `seanced spawn` — a separate process with no
+redirect — fails its append, prints one line to stderr and spawns anyway, unrecorded.
+
+`install --system` pre-creates and chowns the log for exactly this reason, and the daemon
+now re-checks it on every start: it creates the file 0600 if it is missing and tightens
+the mode if it is loose, in place — never renaming or rotating, which would leave the
+daemon's redirect writing to the old inode while the CLI appended to a new one. What an
+unprivileged daemon cannot do is take back a file root owns, so there it warns instead,
+and `seanced doctor` fails the check naming the fix:
+
+```sh
+sudo chown <user> ~/.local/state/seance/seanced.log
+sudo chmod 600 ~/.local/state/seance/seanced.log
+```
+
+The same shape applies to launchd on macOS — `StandardOutPath` is a redirect the manager
+opens — but there the agent is per-login and the opener is already the user, so only the
+mode is ever wrong.
+
+`seanced.log`, `state.json` and `runtime.json` are 0600, joining `config.json` and the
+sealed PSK blobs: the log records repo paths, device ids and window titles verbatim, and
+`state.json` lists every repo the machine scanned. Machines installed earlier keep the old
+0644 until each file is next written — the log on the next daemon start, the other two on
+the next write of theirs; nothing has to be re-run. The modes are set on the
+files themselves rather than with a `UMask=` in the unit, because the daemon may have
+cold-booted the tmux server as its child and a unit umask would follow into every file a
+Claude session writes.
+
 ## Service definitions lag the code
 
 An update restarts the daemon from new code, but the service definition already on

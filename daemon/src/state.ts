@@ -1,8 +1,16 @@
-import { mkdir, rename, unlink } from "node:fs/promises";
+import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RepoEntry, UpdateReport } from "@seance/shared";
 import { log } from "./log.ts";
 import { runtimePath, statePath } from "./paths.ts";
+
+/**
+ * Owner-only, like the audit log: state.json lists every repo path this machine
+ * scanned, runtime.json the daemon's pid. Written at this mode rather than
+ * chmod'd after, so no umask-mode window exists — the convention the sealed PSK
+ * blobs already follow.
+ */
+const STATE_MODE = 0o600;
 
 export interface State {
   readonly deviceId: string;
@@ -64,7 +72,7 @@ async function saveStateAtomic(path: string, state: State): Promise<void> {
   // name, and the loser would rename a file the winner already moved.
   const temp = `${path}.${process.pid}.${tempSeq++}.tmp`;
   try {
-    await Bun.write(temp, `${JSON.stringify(state, null, 2)}\n`);
+    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: STATE_MODE });
     await rename(temp, path);
   } catch (err) {
     await unlink(temp).catch(() => {});
@@ -89,7 +97,11 @@ export interface Runtime {
 /** Fixed-size and well under one write syscall, so an in-place write cannot be read torn. */
 export async function writeRuntime(runtime: Runtime, path: string = runtimePath()): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await Bun.write(path, `${JSON.stringify(runtime, null, 2)}\n`);
+  await writeFile(path, `${JSON.stringify(runtime, null, 2)}\n`, { mode: STATE_MODE });
+  // `mode` only applies where the file is created, so a runtime.json left 0644
+  // by an older daemon would keep it forever; state.json needs no counterpart,
+  // since every save renames a temp created at this mode over it.
+  await chmod(path, STATE_MODE);
 }
 
 /** True while that pid is ours and alive — the liveness half of `readRuntime`. */
