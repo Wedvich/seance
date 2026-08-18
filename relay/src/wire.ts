@@ -36,7 +36,7 @@ export type Role = "daemon" | "app";
  * Bounds, not shapes. `deviceId` is an identifier rather than a credential, so
  * the job here is to stop a bearer-token holder writing absurd storage keys or
  * oversized values — not to prove an id well-formed. Enforcing exact UUIDs
- * would buy no security property the length and charset caps don't.
+ * would buy no security property the size and charset caps don't.
  */
 const MAX_ID_LENGTH = ROUTING_ID_MAX_LENGTH;
 const MAX_IV_LENGTH = 32;
@@ -59,12 +59,27 @@ const KEY_LENGTH = base64Length(IDENTITY_PUBLIC_KEY_BYTES);
 const SIG_LENGTH = base64Length(IDENTITY_SIGNATURE_BYTES);
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/u;
 
+const encoder = new TextEncoder();
+
 function exactBase64(value: unknown, length: number): value is string {
   return typeof value === "string" && value.length === length && BASE64.test(value);
 }
 
-function boundedString(value: unknown, max: number): value is string {
-  return typeof value === "string" && value !== "" && value.length <= max;
+/**
+ * Bytes, not string units: what the caps protect is measured in bytes (the
+ * socket attachment's 2 KiB that `status` shares, the store's value budget),
+ * and one unit of non-ASCII text is up to three of them — counted as units, a
+ * `status` at its cap encodes past the attachment and throws on the write.
+ * UTF-8 is never fewer bytes than units, so the cheap check turns the absurd
+ * ones away before encoding.
+ */
+function boundedString(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value !== "" && fitsBytes(value, maxBytes);
+}
+
+function fitsBytes(value: string, maxBytes: number): boolean {
+  if (!Number.isFinite(maxBytes)) return true;
+  return value.length <= maxBytes && encoder.encode(value).byteLength <= maxBytes;
 }
 
 /** Routing ids reach storage keys and logs, so they stay short and boring. */
@@ -180,7 +195,7 @@ function parseStoreFrame(value: Record<string, unknown>, leg: Role): StoreReques
 
   const env = parseEnvelope(value["env"], Number.POSITIVE_INFINITY);
   if (env === null) return reject("invalid_request");
-  if (env.ct.length > (expect === 0 ? STORE_CREATE_MAX_CT_LENGTH : STORE_MAX_CT_LENGTH)) return reject("too_large");
+  if (!fitsBytes(env.ct, expect === 0 ? STORE_CREATE_MAX_CT_LENGTH : STORE_MAX_CT_LENGTH)) return reject("too_large");
   return { t: "store-put", id, key, expect, env, ...term };
 }
 

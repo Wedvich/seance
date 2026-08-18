@@ -381,9 +381,11 @@ Séance's noise is cover for a real intruder.
    registry push to every app each time. Neither cap defends _against_ a token
    holder; rotating the token does. They keep the cost finite. The rate limit
    is per socket, so it bounds one connection's spend, not an attacker's total.
-   Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
-   ≤64 KiB, so a register can never reach the DO's value limit as an unhandled
-   throw (2 MB per value on the SQLite backend this DO is declared with —
+   Wire-level bounds back both, measured in UTF-8 bytes rather than string
+   units (2026-10-19; counted as units, a ciphertext at a cap could encode to
+   three times it, and a `status` at its cap past the 2 KiB socket attachment
+   that holds it): ids are ≤64 safe bytes and ciphertext ≤64 KiB, so a register
+   can never reach the DO's value limit as an unhandled throw (2 MB per value on the SQLite backend this DO is declared with —
    `new_sqlite_classes`; this was first written against the KV backend's 128
    KiB). `deviceId` has no shape of its own beyond those bounds — it is the
    base64url SHA-256 of the daemon's public key (43 characters), and the hub
