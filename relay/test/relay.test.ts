@@ -292,21 +292,50 @@ describe("identity", () => {
     app.close();
   });
 
-  test("supersedes an older socket claiming the same deviceId", async () => {
+  // A register proves the bearer token and nothing more, so it cannot be what
+  // moves a machine's route: the second socket loses, not the one already
+  // carrying the identity.
+  test("refuses a register for a deviceId a live socket already holds", async () => {
     const deviceId = nextDeviceId();
     const app = await connectApp(relay);
-    const stale = await registeredDaemon(app, deviceId);
-    const fresh = await registeredDaemon(app, deviceId);
+    const incumbent = await registeredDaemon(app, deviceId);
 
-    expect(await stale.waitClosed()).toBe(1000);
+    const claimant = await connectDaemon(relay);
+    claimant.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    expect(await claimant.waitClosed()).toBe(1000);
 
+    // Delivery is the proof: the incumbent still owns the route, and the entry
+    // never stopped reporting the machine online.
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
-    expect((await fresh.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await incumbent.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
 
-    // The machine is still online: the survivor carries the identity.
-    await waitForEntry(app, deviceId, (entry) => entry.connected);
-    fresh.close();
+    // Read off a fresh socket's first push: the refusal changes nothing, so it
+    // pushes no registry of its own to wait for.
+    const observer = await connectApp(relay);
+    const entries = (await observer.waitFor<RegistryFrame>("registry")).entries;
+    expect(entries.find((entry) => entry.deviceId === deviceId)?.connected).toBe(true);
+
+    observer.close();
+    incumbent.close();
+    app.close();
+  });
+
+  // The common case the refusal above must not cost: a dropped socket is gone
+  // from the object before its daemon redials, so re-registering is unimpeded.
+  test("re-registers a deviceId whose socket dropped", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const dropped = await registeredDaemon(app, deviceId);
+    dropped.close();
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+
+    const redialed = await registeredDaemon(app, deviceId);
+    const env = envelope(deviceId, APP_ID);
+    app.send({ t: "msg", env });
+    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+
+    redialed.close();
     app.close();
   });
 });

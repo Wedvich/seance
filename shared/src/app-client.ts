@@ -141,7 +141,7 @@ function parseFrame(text: string): RelayToAppFrame | null {
   }
 }
 
-/** No deep walk needed: `repos` comes off the IV-keyed info cache, so it compares by identity. */
+/** No deep walk needed: `repos` comes off the info cache, so it compares by identity. */
 function sameMachine(a: Machine, b: Machine): boolean {
   return (
     a.deviceId === b.deviceId &&
@@ -152,6 +152,16 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.lastSeen === b.lastSeen &&
     a.connected === b.connected
   );
+}
+
+/**
+ * Cache identity of an `info` blob. The deviceId is part of it because the same
+ * blob can arrive under two ids in one push and only one of them can be the id
+ * it was sealed from. Length-prefixed rather than separated: both halves are
+ * relay-supplied strings, so no separator character is safe on its own.
+ */
+function infoCacheKey(entry: RegistryView): string {
+  return `${entry.info.iv.length}:${entry.info.iv}${entry.deviceId}`;
 }
 
 function sameIds(a: readonly string[], b: readonly string[]): boolean {
@@ -172,7 +182,7 @@ export class RelayClient {
   /** `undeliverable` can only echo the IV, so responses and failures index differently. */
   readonly #idByIv = new Map<string, string>();
   readonly #guard = new ReplayGuard();
-  /** Decrypted `info` by envelope IV; blobs are re-sent verbatim on every push. */
+  /** Decrypted `info` by deviceId and envelope IV; blobs are re-sent verbatim on every push. */
   readonly #infoCache = new Map<string, MachineInfo | null>();
   /**
    * deviceId -> the lastSeen we held when delivery failed (an `undeliverable`
@@ -586,7 +596,7 @@ export class RelayClient {
   async #onRegistry(entries: readonly RegistryView[]): Promise<void> {
     this.#clearRegistrySettle();
     this.#entries = entries;
-    await Promise.all(entries.map((entry) => this.#decryptInfo(entry.info)));
+    await Promise.all(entries.map((entry) => this.#decryptInfo(entry)));
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
@@ -596,17 +606,35 @@ export class RelayClient {
    * `machine-info` blobs are data at rest, not live messages: `scannedAt` can be
    * days old and the identical envelope arrives on every push, so the replay
    * guard must not see them.
+   *
+   * The registry pairs a plaintext `deviceId` with a blob the relay cannot read,
+   * and only `from` — AAD-bound, so unforgeable without the PSK — says which
+   * machine the blob describes. A mismatch is a swapped pairing: the entry would
+   * render one machine's name and repos on an id that routes to another. Refused
+   * here rather than in #rebuildMachines so nothing downstream can read an
+   * unbound blob; the cache is keyed by id and iv together for the same reason,
+   * as one blob can appear under two ids in a single push.
    */
-  async #decryptInfo(env: Envelope): Promise<MachineInfo | null> {
-    const cached = this.#infoCache.get(env.iv);
+  async #decryptInfo(entry: RegistryView): Promise<MachineInfo | null> {
+    const env = entry.info;
+    const cacheKey = infoCacheKey(entry);
+    const cached = this.#infoCache.get(cacheKey);
     if (cached !== undefined) return cached;
+    if (env.from !== entry.deviceId) {
+      this.#wireLog(
+        "dropped",
+        `iv=${quote(env.iv)} from=${quote(env.from)} deviceId=${quote(entry.deviceId)} reason=info-from-mismatch`,
+      );
+      this.#infoCache.set(cacheKey, null);
+      return null;
+    }
     try {
       const plain = await openEnvelope(this.#key, env);
       const info = plain.payload as MachineInfo;
-      this.#infoCache.set(env.iv, info);
+      this.#infoCache.set(cacheKey, info);
       return info;
     } catch {
-      this.#infoCache.set(env.iv, null);
+      this.#infoCache.set(cacheKey, null);
       return null;
     }
   }
@@ -621,7 +649,10 @@ export class RelayClient {
     let reused = 0;
     let hiddenHere = 0;
     for (const entry of this.#entries) {
-      const info = this.#infoCache.get(entry.info.iv) ?? null;
+      // Only #decryptInfo writes this cache, and it stores nothing for an entry
+      // whose blob is not bound to its deviceId — so an unverified entry can
+      // only ever miss here, never render half-built.
+      const info = this.#infoCache.get(infoCacheKey(entry)) ?? null;
       if (info === null) continue;
       const scan = this.#scans.get(entry.deviceId);
       // A register that carries the scan (or a later one) makes the override spent.

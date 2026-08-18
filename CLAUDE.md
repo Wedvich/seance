@@ -93,9 +93,12 @@ green:
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, both spawn paths audit through one formatter,
-  prompt text is never logged, and a service-delivered credential never leaves the daemon process
+  prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
-  every session). Don't let changes drift from them.
+  every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
+  never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
+  so only the AAD-bound `from` says which machine an entry describes). Don't let changes drift
+  from them.
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
   outside the Raycast host, so such a module could not run under `bun test` and would take every
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
