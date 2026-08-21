@@ -154,7 +154,7 @@ Edit `~/.config/seance/config.json`:
   that runbook.
 - `repoRoots` — directories to scan for repos
 - `machineTag` — optional short tag naming this box, suffixed onto the session name
-  Claude Code registers, so the Claude UIs read `fix-the-thing@thad`. The tmux window
+  Claude Code registers, so the Claude UIs read `fix-the-thing @ thad`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
 

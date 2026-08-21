@@ -21,14 +21,15 @@ export function slugify(src: string): string {
 /**
  * The remote-control session name — what the Claude UIs list, and deliberately
  * not the tmux window name, which stays bare because the host is never in
- * question locally. Reads as `user@host`: the task leads, since that is what
- * you scan a session list for, and the machine trails as the qualifier.
+ * question locally. Reads as `task @ host` (spaces so the tag is scannable):
+ * the task leads, since that is what you scan a session list for, and the
+ * machine trails as the qualifier.
  * `slug` is already slugified, so it can carry no `@` of its own and the
  * suffix can never double up.
  */
 export function sessionName(slug: string, tag?: string): string {
   if (tag === undefined || tag.trim() === "") return slug;
-  return `${slug}@${slugify(tag)}`;
+  return `${slug} @ ${slugify(tag)}`;
 }
 
 /**

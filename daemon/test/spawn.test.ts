@@ -200,12 +200,12 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     });
     try {
       const argv = await stub.argv();
-      expect(argv[argv.indexOf("-n") + 1]).toBe("tagged-run@thad");
+      expect(argv[argv.indexOf("-n") + 1]).toBe("tagged-run @ thad");
       // The window is local; the machine is never in question there.
       expect(outcome.window).toBe("Tagged Run");
       const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
       expect(windows).toContain("Tagged Run");
-      expect(windows).not.toContain("@thad");
+      expect(windows).not.toContain("@ thad");
     } finally {
       await killWindow(outcome.window);
     }
@@ -227,7 +227,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 // normalisation, and a blank one that must not render as a bare `@`.
 describe("sessionName", () => {
   test("normalises the tag and treats a blank one as absent", () => {
-    expect(sessionName("fix-the-thing", "Linux Box")).toBe("fix-the-thing@linux-box");
+    expect(sessionName("fix-the-thing", "Linux Box")).toBe("fix-the-thing @ linux-box");
     expect(sessionName("fix-the-thing", "   ")).toBe("fix-the-thing");
   });
 });

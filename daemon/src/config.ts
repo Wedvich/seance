@@ -17,7 +17,7 @@ export interface Config {
   /** tmux session group daemon-spawned windows land in. */
   readonly tmuxSession: string;
   /**
-   * Appended to the remote-control session name as `@tag`, so the Claude UIs
+   * Appended to the remote-control session name as ` @ tag`, so the Claude UIs
    * say which box a session is on. Absent means no suffix — never inferred
    * from `name`, which is a display string and makes an ugly tag.
    */
