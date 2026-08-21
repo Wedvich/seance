@@ -1,7 +1,10 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { dirname } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest, type UpdateOutcome } from "@seance/shared";
 import type { SpawnOutcome } from "./backend.ts";
+import type { Check } from "./check.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
 import { logPath } from "./paths.ts";
@@ -13,6 +16,13 @@ import { logPath } from "./paths.ts";
 export type SpawnOrigin = "relay" | "cli";
 
 export type AuditSink = (line: string) => void | Promise<void>;
+
+/**
+ * Owner-only, like config.json and the sealed PSK blobs — this is the file that
+ * records repo paths, device ids and window titles unhashed, and 0644 was only
+ * ever the default umask answering for it.
+ */
+export const AUDIT_LOG_MODE = 0o600;
 
 /** The daemon's stdout — launchd redirects it into the file the CLI appends to. */
 export const daemonSink: AuditSink = (line) => log.info(line);
@@ -27,11 +37,103 @@ export const cliSink: AuditSink = async (line) => {
   const path = logPath();
   try {
     await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${formatLine("info", line)}\n`);
+    await appendFile(path, `${formatLine("info", line)}\n`, { mode: AUDIT_LOG_MODE });
   } catch (err) {
     console.error(`could not write the audit log at ${path}: ${String(err)}`);
   }
 };
+
+/**
+ * Names the state observed in production: a log the daemon's own user cannot
+ * append to, so `seanced spawn` records nothing and the both-paths-audit
+ * invariant holds only for `origin=relay`.
+ */
+export function unwritableLogMessage(path: string, user: string): string {
+  return (
+    `the audit log at ${path} is not writable by ${user} — spawns typed at this machine go unrecorded. ` +
+    `This is what a service redirect opened as root leaves behind: sudo chown ${user} ${path} && sudo chmod 600 ${path}`
+  );
+}
+
+/**
+ * Makes the log exist, owner-only and appendable, before anything writes to it.
+ * Returns null when it is, otherwise what the operator has to run — the daemon
+ * warns and keeps serving, matching `cliSink`'s posture: a broken audit trail
+ * is not a reason to take the machine offline.
+ *
+ * Repair rather than reinstall, because `install --system` chowns the log once
+ * and systemd re-creates it as root — `StandardOutput=append:` is opened before
+ * the drop to `User=` — every time it goes missing afterwards. What is not
+ * repairable from an unprivileged daemon is the ownership of someone else's
+ * file, hence the message.
+ *
+ * Never renames or truncates: the daemon's redirect holds an fd on this inode
+ * and the CLI appends to it by name, so rotating it under them would split the
+ * trail across two files (see `cliSink`).
+ */
+export async function ensureAuditLog(path: string = logPath()): Promise<string | null> {
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    const info = await stat(path).catch(() => null);
+    if (info === null) {
+      // Created 0600 outright rather than written and chmod'd, as the PSK blobs
+      // are; "a" is what makes creating it safe on a file that already exists.
+      await (await open(path, "a", AUDIT_LOG_MODE)).close();
+    } else if (ownedByUs(info.uid) && (info.mode & 0o777) !== AUDIT_LOG_MODE) {
+      // The redirect creates it at the manager's umask, so tightening it is the
+      // daemon's job on every start, not the installer's once.
+      await chmod(path, AUDIT_LOG_MODE);
+    }
+  } catch (err) {
+    return `could not prepare the audit log at ${path}: ${String(err)} — spawns typed at this machine go unrecorded`;
+  }
+  return (await writable(path)) ? null : unwritableLogMessage(path, userInfo().username);
+}
+
+/** Doctor's audit-log section: writability first — size was never the question worth asking. */
+export async function auditLogChecks(path: string = logPath()): Promise<readonly Check[]> {
+  const info = await stat(path).catch(() => null);
+  if (info === null) return [];
+  if (!(await writable(path))) {
+    // No size line under the fail: an `ok` verdict on the same broken file reads
+    // as re-checked-and-passed — and "consider truncating" a file the user can't
+    // write is not advice.
+    return [{ level: "fail", message: unwritableLogMessage(path, userInfo().username) }];
+  }
+  const checks: Check[] = [];
+  if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
+    const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
+    const exposure = `log is ${mode}, and it records repo paths and window titles`;
+    // `seanced restart` repairs the mode only on a file the daemon owns
+    // (ensureAuditLog); on someone else's file the honest fix is the chown pair.
+    checks.push({
+      level: "warn",
+      message: ownedByUs(info.uid)
+        ? `${exposure} — \`seanced restart\` tightens it to 0600`
+        : `${exposure} — owned by another user, so restart can't tighten it: ` +
+          `sudo chown ${userInfo().username} ${path} && sudo chmod 600 ${path}`,
+    });
+  }
+  const size = info.size;
+  checks.push(
+    size > 10 * 1024 * 1024
+      ? { level: "warn", message: `log is ${Math.round(size / 1024 / 1024)}MB — consider truncating (${path})` }
+      : { level: "ok", message: `log ${Math.round(size / 1024)}KB (${path})` },
+  );
+  return checks;
+}
+
+function ownedByUs(uid: number): boolean {
+  const me = process.getuid?.();
+  return me === undefined || me === uid;
+}
+
+async function writable(path: string): Promise<boolean> {
+  return access(path, constants.W_OK).then(
+    () => true,
+    () => false,
+  );
+}
 
 export interface SpawnAudit {
   readonly request: (request: SpawnRequest) => Promise<void>;

@@ -1,5 +1,5 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo, type UpdateAvailable } from "@seance/shared";
-import { daemonSink } from "./audit.ts";
+import { daemonSink, ensureAuditLog } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import { loadConfig, loadPsk, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
@@ -63,6 +63,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     throw new Error("config is not runnable — fix the problems above");
   }
 
+  // Before the first audit line, and on every start: the service redirect
+  // creates the log as whoever opened it (root, under a system unit) at that
+  // manager's umask, and only the daemon runs often enough to put it back.
+  const logProblem = await ensureAuditLog();
+  if (logProblem !== null) log.warn(logProblem);
+
   let state: State = await loadOrInitState();
   const key = await importPsk(resolved.psk);
   const startedAt = Date.now();
@@ -114,13 +120,15 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   };
 
   const updateRuntime = (connected: boolean): void => {
+    // Unawaited, so its rejection has to land somewhere: `status` reading a
+    // stale runtime.json is a nuisance, an unhandled rejection is the daemon.
     void writeRuntime({
       pid: process.pid,
       startedAt,
       connected,
       connectedSince: connected ? Date.now() : null,
       sha: source?.sha ?? null,
-    });
+    }).catch((err: unknown) => log.warn(`could not write runtime.json: ${String(err)}`));
   };
 
   // Created after the client (its report re-registers); the closures below
