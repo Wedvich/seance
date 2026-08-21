@@ -47,12 +47,14 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
     spawn: (deviceId, request) =>
       client.request<SpawnResponse>(deviceId, "spawn", { ...request, client: SPAWN_CLIENT } satisfies SpawnRequest),
     rescan: async (deviceId) => {
-      const reply = await client.request<RescanResponse>(deviceId, "rescan", {});
+      const reply = await client.request<unknown>(deviceId, "rescan", {});
       // Folds the fresh list into the machine it came from, so a rescan that
       // found nothing new still moves `scannedAt` — without this the daemon
       // only re-registers on a *changed* set and the picker looks inert.
-      client.applyScan(deviceId, reply.repos, reply.scannedAt);
-      return reply;
+      // applyScan validates the reply; unreadable means failed, not applied.
+      const parsed = client.applyScan(deviceId, reply);
+      if (parsed === null) throw new Error("the daemon's reply was not readable by this build");
+      return parsed;
     },
     stop: () => client.stop(),
   };

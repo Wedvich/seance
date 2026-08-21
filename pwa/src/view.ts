@@ -1,5 +1,5 @@
-import type { RepoEntry, SpawnErrorCode } from "@seance/shared";
-import type { Machine, RelayState } from "@seance/shared";
+import { isSpawnErrorCode } from "@seance/shared";
+import type { Machine, RelayState, RepoEntry } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -165,8 +165,16 @@ export function abbreviatePath(path: string, paths: readonly string[]): string {
  * where no window ever opened. Its worktree clause is dropped as well: the
  * daemon passes --worktree to claude, so a claude that died on a bad flag
  * created nothing to leave behind.
+ *
+ * Takes the raw string: `code` arrives from a daemon that may be a version
+ * ahead, and an unlisted one used to render a blank card. The guard funnels
+ * those to the generic line while the switch stays compiler-checked exhaustive
+ * over the codes this build knows — a new SpawnErrorCode is a type error here.
  */
-export function failureBody(code: SpawnErrorCode, repo: string, machine: string): string {
+export function failureBody(code: string, repo: string, machine: string): string {
+  if (!isSpawnErrorCode(code)) {
+    return "The daemon refused the spawn. Check the machine to see whether anything is running.";
+  }
   switch (code) {
     case "claude_died":
       return "The window opened, but claude exited before the session started. Nothing is running.";
@@ -182,10 +190,6 @@ export function failureBody(code: SpawnErrorCode, repo: string, machine: string)
     case "internal_error":
       return "The daemon hit an error before the session started.";
   }
-  // Unreachable for a declared code — the switch above stays exhaustive, so a
-  // new one is still a type error here — but `code` arrives from a daemon that
-  // may be a version ahead, and an unlisted one used to render a blank card.
-  return "The daemon refused the spawn. Check the machine to see whether anything is running.";
 }
 
 function offlineBody(machine: Machine): string {
@@ -257,14 +261,23 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
     };
   }
   if (relay.machines.length === 0) {
-    // Entries exist but none show. A fresh install, a wrong PSK and a list emptied
-    // by hand look identical unless they are split apart here.
+    // Entries exist but none show. A fresh install, a wrong PSK, version skew
+    // and a list emptied by hand look identical unless they are split apart
+    // here — and only the key case should send anyone to rotate a credential.
     if (relay.ignored > 0) {
       return {
         title: "Key mismatch",
         body: `${relay.ignored} ${relay.ignored === 1 ? "machine is" : "machines are"} registered, but none decrypt with this key. Check the pre-shared key.`,
         tone: "err",
         opensSettings: true,
+      };
+    }
+    if (relay.skewed > 0) {
+      return {
+        title: "Version mismatch",
+        body: `${relay.skewed} ${relay.skewed === 1 ? "machine is" : "machines are"} registered, but this app can't read what ${relay.skewed === 1 ? "it" : "they"} sent. Update seanced and the app to matching versions.`,
+        tone: "err",
+        opensSettings: false,
       };
     }
     return {
@@ -297,7 +310,10 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.rejection !== null) return blocked("Bearer token rejected");
   if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
-  if (relay.machines.length === 0) return blocked(relay.ignored > 0 ? "Check your key" : "No machines listed");
+  if (relay.machines.length === 0) {
+    if (relay.ignored > 0) return blocked("Check your key");
+    return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
+  }
   // Ahead of `spawning`, which it precedes: the two are never both set.
   if (state.rescanning) return { label: "Rescanning…", enabled: false, busy: true };
   if (state.spawning) return { label: "Starting…", enabled: false, busy: true };
@@ -308,6 +324,22 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
     enabled: true,
     busy: false,
   };
+}
+
+/**
+ * Shown only beside a list that still has machines — the empty-list cases get a
+ * banner instead. Key and version trouble stay separate lines: they have
+ * different fixes, and "key mismatch" over skew sends someone to rotate a
+ * credential that is correct.
+ */
+function deriveIgnoredNote(relay: RelayState): string | null {
+  if (relay.machines.length === 0) return null;
+  const notes: string[] = [];
+  if (relay.ignored > 0)
+    notes.push(`${relay.ignored} ${relay.ignored === 1 ? "entry" : "entries"} ignored (key mismatch)`);
+  if (relay.skewed > 0)
+    notes.push(`${relay.skewed} ${relay.skewed === 1 ? "entry" : "entries"} unreadable (version mismatch)`);
+  return notes.length === 0 ? null : notes.join(" · ");
 }
 
 /** First connected machine, else first listed — the form may hold a machine that has gone. */
@@ -367,10 +399,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     worktreeHint: state.form.worktree ? "Branches off main, fast-forwarded first" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, now),
     button: deriveButton(state, machine),
-    ignoredNote:
-      state.relay.ignored > 0 && state.relay.machines.length > 0
-        ? `${state.relay.ignored} ${state.relay.ignored === 1 ? "entry" : "entries"} ignored (key mismatch)`
-        : null,
+    ignoredNote: deriveIgnoredNote(state.relay),
     machine,
     repo,
   };

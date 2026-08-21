@@ -1008,7 +1008,7 @@ describe("malformed frames", () => {
       await Bun.sleep(50);
       expect(client.getState().machines).toEqual([]);
       client.hide(deviceId);
-      client.applyScan(deviceId, [], Date.now());
+      client.applyScan(deviceId, { repos: [], scannedAt: Date.now() });
       peer.send(await registryFrame(deviceId, machineInfo("Still Here")));
       const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound push still lands");
       expect(state.registrySize).toBe(1);
@@ -1066,19 +1066,21 @@ describe("malformed frames", () => {
     }
   });
 
-  // Half a registry renders as machines that vanished, so the push is dropped
-  // whole and the list already on screen stays the best truth there is.
-  test("drops a registry push whose entries do not all parse, keeping the list it had", async () => {
+  // Every push carries the full stored registry, so dropping a push over one
+  // bad entry would drop every push for as long as that entry stays stored —
+  // an authoritative "no machines" out of one machine a version ahead.
+  test("skips the registry entries that do not parse, keeping the ones that do and counting the skew", async () => {
     const peer = startHostilePeer();
     const deviceId = nextDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
-      peer.send(await registryFrame(deviceId, machineInfo("Trusted")));
-      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "the machine to land");
-      peer.send({ t: "registry", entries: [{ deviceId: "half-written" }] });
-      await Bun.sleep(50);
-      expect(client.getState().machines).toBe(before.machines);
+      const sound = (await registryFrame(deviceId, machineInfo("Trusted"))) as { entries: unknown[] };
+      peer.send({ t: "registry", entries: [...sound.entries, { deviceId: "half-written" }] });
+      const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "the sound entry lands");
+      expect(state.registrySize).toBe(2);
+      expect(state.skewed).toBe(1);
+      expect(state.ignored).toBe(0);
     } finally {
       client.stop();
       await peer.stop();
@@ -1086,8 +1088,10 @@ describe("malformed frames", () => {
   });
 
   // A blob that opens but is not shaped like a MachineInfo used to reach the
-  // spawn screen, where `machine.repos.map` runs on every render.
-  test("counts a blob that opens but is not a MachineInfo as ignored, not as a machine", async () => {
+  // spawn screen, where `machine.repos.map` runs on every render. It counts as
+  // skew, not as ignored: "check the pre-shared key" is the wrong advice for a
+  // blob this key just opened.
+  test("counts a blob that opens but is not a MachineInfo as skewed, not as a machine", async () => {
     const peer = startHostilePeer();
     const deviceId = nextDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
@@ -1107,45 +1111,51 @@ describe("malformed frames", () => {
       });
       const state = await waitFor((s) => s.registrySize === 1, "the push to land");
       expect(state.machines).toEqual([]);
-      expect(state.ignored).toBe(1);
+      expect(state.skewed).toBe(1);
+      expect(state.ignored).toBe(0);
     } finally {
       client.stop();
       await peer.stop();
     }
   });
 
-  // The cache is keyed by envelope iv and every register mints a fresh one, so
-  // an installed PWA left open for weeks used to hold every blob it ever saw.
-  test("prunes the info cache to the live registry instead of growing per envelope", async () => {
+  // The two facts an undeliverable carries — this request failed, and the relay
+  // said so — hold whatever the code turns out to mean, so an unknown one fails
+  // the request now instead of riding the full timeout (90s for a spawn).
+  test("fails a request fast on an undeliverable whose code this build does not know", async () => {
     const peer = startHostilePeer();
     const deviceId = nextDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
-    try {
-      await waitFor((s) => s.status === "open", "open");
-      for (let push = 0; push < 20; push += 1) {
-        peer.send(await registryFrame(deviceId, machineInfo(`Push ${push}`)));
-      }
-      await waitFor((s) => s.machines.some((m) => m.name === "Push 19"), "the last push to land");
-      await pollUntil(() => client.infoCacheSize === 1, "the cache to hold only the live entry");
-    } finally {
-      client.stop();
-      await peer.stop();
-    }
-  });
-
-  // `code` becomes RequestFailure.reason, which every surface explains by
-  // switching over the known set. One it cannot explain is no answer at all.
-  test("drops an undeliverable whose code this build does not know, leaving the request to time out", async () => {
-    const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
-    const { client, waitFor } = startClient({ url: peer.url, timeouts: { sessions: 200 } });
     try {
       await waitFor((s) => s.status === "open", "open");
       const pending = client.request(deviceId, "sessions", {});
       await pollUntil(() => peer.received.length > 0, "the request to reach the peer");
       const sent = JSON.parse(peer.received[0] ?? "{}") as { readonly env?: { readonly iv?: string } };
       peer.send({ t: "undeliverable", to: deviceId, iv: sent.env?.iv ?? "", code: "from-a-later-relay" });
-      await expect(pending).rejects.toMatchObject({ reason: "timeout" });
+      await expect(pending).rejects.toMatchObject({
+        reason: "refused",
+        message: expect.stringContaining("from-a-later-relay"),
+      });
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // The rescan reply lands on `machine.repos`/`scannedAt` and renders every
+  // frame, exactly like the register blob — an unchecked one was the same
+  // wedge by another door.
+  test("applies nothing from a rescan reply that is not shaped like one", async () => {
+    const peer = startHostilePeer();
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient({ url: peer.url });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      peer.send(await registryFrame(deviceId, machineInfo("Steady")));
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "the machine to land");
+      expect(client.applyScan(deviceId, { repos: null, scannedAt: Date.now() })).toBeNull();
+      expect(client.applyScan(deviceId, { repos: [{ name: 7 }], scannedAt: "soon" })).toBeNull();
+      expect(client.getState().machines).toBe(before.machines);
     } finally {
       client.stop();
       await peer.stop();

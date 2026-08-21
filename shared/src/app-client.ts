@@ -10,18 +10,23 @@ import {
   type MachineInfo,
   type Plain,
   type RegistryView,
-  type RelayToAppFrame,
   type RepoEntry,
   type RequestOp,
+  type RescanResponse,
   type UndeliverableCode,
 } from "./types.ts";
+import { isRecord, parseEnvelope, parseMachineInfo, parseRescanResponse } from "./parse.ts";
 import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
 import { quote } from "./fmt.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 
-/** Why a request will never get an answer. */
-export type FailureReason = UndeliverableCode | "timeout" | "disconnected";
+/**
+ * Why a request will never get an answer. "refused" is an `undeliverable` whose
+ * code this build does not know: what it means is unknown, but that the relay
+ * declined delivery is not — the request certainly did not land.
+ */
+export type FailureReason = UndeliverableCode | "refused" | "timeout" | "disconnected";
 
 export class RequestFailure extends Error {
   constructor(
@@ -46,6 +51,9 @@ export function failureReasonText(failure: RequestFailure): string {
       return "the relay has never seen that machine";
     case "disconnected":
       return "lost the relay connection before the request went out";
+    // The message already names the code the relay sent; no fixed line could.
+    case "refused":
+      return failure.message;
     // The one outcome that is genuinely unknown: the request went out and no
     // answer came back, so it may have landed anyway. Saying "failed" flatly
     // would be a lie — and an invitation to fire a duplicate.
@@ -75,8 +83,15 @@ export interface RelayState {
   readonly registrySize: number;
   /** deviceIds removed by hand; they come back the moment they connect again. */
   readonly hidden: readonly string[];
-  /** registrySize minus machines.length and hidden.length — a stale PSK somewhere. */
+  /** Entries whose info blob did not decrypt with this key — a stale PSK somewhere. */
   readonly ignored: number;
+  /**
+   * Entries this build cannot read for a reason no key rotation fixes: a blob
+   * that opened but was not shaped like a MachineInfo, or a registry entry that
+   * did not parse at all — version skew, surfaced apart from `ignored` so the
+   * UI never sends anyone to check a correct key.
+   */
+  readonly skewed: number;
   /**
    * The socket is not open, but too briefly to be worth reporting yet. Set from the
    * moment `open` is left until SETTLE_MS later, and never re-armed by a retry that
@@ -122,6 +137,7 @@ const INITIAL_STATE: RelayState = {
   registrySize: 0,
   hidden: [],
   ignored: 0,
+  skewed: 0,
   settling: true,
   registrySettled: false,
 };
@@ -132,21 +148,8 @@ interface Pending {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isUndeliverableCode(value: unknown): value is UndeliverableCode {
   return value === "offline" || value === "unknown";
-}
-
-/** Shape only, like the relay's own parser: the PSK, not this, decides authenticity. */
-function parseEnvelope(value: unknown): Envelope | null {
-  if (!isRecord(value)) return null;
-  if (typeof value["v"] !== "number") return null;
-  if (typeof value["to"] !== "string" || typeof value["from"] !== "string") return null;
-  if (typeof value["iv"] !== "string" || typeof value["ct"] !== "string") return null;
-  return { v: value["v"], to: value["to"], from: value["from"], iv: value["iv"], ct: value["ct"] };
 }
 
 function parseRegistryView(value: unknown): RegistryView | null {
@@ -159,6 +162,17 @@ function parseRegistryView(value: unknown): RegistryView | null {
 }
 
 /**
+ * `RelayToAppFrame`, loosened where forward compatibility needs it: a registry
+ * push carries how many entries were skipped instead of failing whole, and
+ * `undeliverable.code` stays the raw string so a code minted after this build
+ * can still fail its request fast.
+ */
+type ParsedFrame =
+  | { readonly t: "registry"; readonly entries: readonly RegistryView[]; readonly skipped: number }
+  | { readonly t: "msg"; readonly env: Envelope }
+  | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string };
+
+/**
  * Every field the handlers below touch, checked here — bounds stay the relay's
  * job (`relay/src/wire.ts`), because what this side is defending is the tab.
  * The types are a promise the peer makes, and a peer that breaks it used to
@@ -166,7 +180,7 @@ function parseRegistryView(value: unknown): RegistryView | null {
  * every later rebuild throwing on the same undefined list, dead until reload.
  * Unhandleable frames are dropped whole, never half-applied.
  */
-function parseFrame(text: string): RelayToAppFrame | null {
+function parseFrame(text: string): ParsedFrame | null {
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;
@@ -178,15 +192,20 @@ function parseFrame(text: string): RelayToAppFrame | null {
     const raw = value["entries"];
     if (!Array.isArray(raw)) return null;
     const entries: RegistryView[] = [];
+    let skipped = 0;
     for (const candidate of raw) {
       const entry = parseRegistryView(candidate);
-      // One unreadable entry drops the whole push rather than shortening the
-      // list: a short registry renders as machines that vanished, and the list
-      // already on screen is the better truth until a sound push replaces it.
-      if (entry === null) return null;
+      // Skipped, not fatal: every push carries the full stored registry, so one
+      // persistently unreadable entry would otherwise drop every push for as
+      // long as it stays stored — an authoritative "no machines" out of one bad
+      // machine. Counted so the skipped entry surfaces as skew, never vanishes.
+      if (entry === null) {
+        skipped += 1;
+        continue;
+      }
       entries.push(entry);
     }
-    return { t: "registry", entries };
+    return { t: "registry", entries, skipped };
   }
   if (value["t"] === "msg") {
     const env = parseEnvelope(value["env"]);
@@ -194,48 +213,14 @@ function parseFrame(text: string): RelayToAppFrame | null {
   }
   if (value["t"] === "undeliverable") {
     if (typeof value["to"] !== "string" || typeof value["iv"] !== "string") return null;
-    // Narrowed rather than carried through: `code` becomes RequestFailure.reason,
-    // and every surface explains that by switching over the known set. A code
-    // minted after this build drops the frame and the request ends on its own
-    // timeout — late, but never a blank line where the reason should be.
-    if (!isUndeliverableCode(value["code"])) return null;
+    // Carried raw rather than narrowed to the known set: the frame's two facts —
+    // this request failed, that machine may be gone — hold whatever the code
+    // says, and dropping an unrecognized one left the request riding its full
+    // timeout (90s for a spawn) the relay had already answered.
+    if (typeof value["code"] !== "string") return null;
     return { t: "undeliverable", to: value["to"], iv: value["iv"], code: value["code"] };
   }
   return null;
-}
-
-function parseRepoEntry(value: unknown): RepoEntry | null {
-  if (!isRecord(value)) return null;
-  if (typeof value["name"] !== "string" || typeof value["path"] !== "string") return null;
-  const defaultBranch = value["defaultBranch"];
-  if (defaultBranch !== null && typeof defaultBranch !== "string") return null;
-  return { name: value["name"], path: value["path"], defaultBranch };
-}
-
-/**
- * The decrypted register blob. Inside the PSK boundary, so this is skew
- * tolerance rather than defence: a daemon a version ahead or behind must cost
- * one machine tile, not the render — `machine.repos.map(…)` runs on every frame
- * of the spawn screen. A projection of the fields the app reads, like the
- * Raycast cache's: `source`/`lastUpdate` back the daemon's own doctor/status
- * surfaces and no app-role client renders them.
- */
-function parseMachineInfo(value: unknown): MachineInfo | null {
-  if (!isRecord(value)) return null;
-  if (typeof value["name"] !== "string" || typeof value["platform"] !== "string") return null;
-  if (typeof value["scannedAt"] !== "number") return null;
-  const raw = value["repos"];
-  if (!Array.isArray(raw)) return null;
-  const repos: RepoEntry[] = [];
-  for (const candidate of raw) {
-    const repo = parseRepoEntry(candidate);
-    // One unreadable repo invalidates the machine rather than silently
-    // shortening its list: a picker missing the repo you wanted is worse than a
-    // machine that reads as sealed with a key this app doesn't hold.
-    if (repo === null) return null;
-    repos.push(repo);
-  }
-  return { name: value["name"], platform: value["platform"], repos, scannedAt: value["scannedAt"] };
 }
 
 /** No deep walk needed: `repos` comes off the IV-keyed info cache, so it compares by identity. */
@@ -269,8 +254,21 @@ export class RelayClient {
   /** `undeliverable` can only echo the IV, so responses and failures index differently. */
   readonly #idByIv = new Map<string, string>();
   readonly #guard = new ReplayGuard();
-  /** Decrypted `info` by envelope IV; blobs are re-sent verbatim on every push. */
-  readonly #infoCache = new Map<string, MachineInfo | null>();
+  /**
+   * Decrypted `info` by envelope IV; blobs are re-sent verbatim on every push.
+   * "unopenable" is a blob sealed with a key this app doesn't hold (`ignored`);
+   * "skewed" one that opened but was not shaped like a MachineInfo. Rebuilt from
+   * each push's own IVs in `#onRegistry`, so cache ⊆ registry holds by
+   * construction — every register mints a fresh IV, and an installed PWA left
+   * open for weeks would otherwise hold every blob it ever saw.
+   */
+  #infoCache = new Map<string, MachineInfo | "unopenable" | "skewed">();
+  /**
+   * Entries the last accepted push carried that did not parse. Folded into
+   * `registrySize` and `skewed`, so a machine a version ahead reads as skew on
+   * screen rather than as a machine that was never installed.
+   */
+  #skippedEntries = 0;
   /**
    * deviceId -> the lastSeen we held when delivery failed (an `undeliverable`
    * refusal or a request timeout). `connected` is derived from live sockets and
@@ -285,7 +283,7 @@ export class RelayClient {
    * nothing new leaves the machine asserting the old `scannedAt` — and the app
    * looks like it did nothing. Spent by the register that overtakes it.
    */
-  readonly #scans = new Map<string, { readonly repos: readonly RepoEntry[]; readonly scannedAt: number }>();
+  readonly #scans = new Map<string, RescanResponse>();
   /**
    * deviceIds removed from the list by hand. Held here rather than in the store so
    * `machines` stays "what to show" for every reader, and dropped again the moment
@@ -364,15 +362,6 @@ export class RelayClient {
   getState = (): RelayState => this.#state;
 
   /**
-   * Decrypted info blobs held. Nothing renders it — it exists so the bound
-   * `#pruneInfoCache` keeps is assertable, and a memory bound has no other
-   * observable behaviour to test through.
-   */
-  get infoCacheSize(): number {
-    return this.#infoCache.size;
-  }
-
-  /**
    * Drops an offline machine from the list until it connects again. Connected ones
    * are unhidden by the very next rebuild, so calling this on one is a no-op.
    */
@@ -385,11 +374,22 @@ export class RelayClient {
   /**
    * Folds a `rescan` reply into the machine it came from. Sealed with the same
    * key as the `machine-info` blob and strictly fresher than it, so it stands in
-   * for that blob's repo list until a register carries the scan itself.
+   * for that blob's repo list until a register carries the scan itself. Takes
+   * the raw reply and validates it here rather than trusting the request's type
+   * parameter: the fields land on `machine.repos`/`scannedAt` and render every
+   * frame, so an unchecked reply from a daemon a version ahead is the register
+   * wedge by another door. Null means the reply was unreadable and nothing was
+   * applied — callers report it as a failed rescan.
    */
-  applyScan(deviceId: string, repos: readonly RepoEntry[], scannedAt: number): void {
-    this.#scans.set(deviceId, { repos, scannedAt });
+  applyScan(deviceId: string, reply: unknown): RescanResponse | null {
+    const parsed = parseRescanResponse(reply);
+    if (parsed === null) {
+      this.#wireLog("dropped", `from=${quote(deviceId)} reason=rescan-shape`);
+      return null;
+    }
+    this.#scans.set(deviceId, parsed);
     this.#rebuildMachines();
+    return parsed;
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -628,7 +628,10 @@ export class RelayClient {
       return;
     }
     if (frame.t === "registry") {
-      await this.#onRegistry(frame.entries);
+      // The count is the only trace the skipped entries leave — parseFrame sees
+      // peer-supplied text, so nothing of them is echoed.
+      if (frame.skipped > 0) this.#wireLog("dropped", `reason=entry-shape count=${frame.skipped}`);
+      await this.#onRegistry(frame.entries, frame.skipped);
       return;
     }
     if (frame.t === "undeliverable") {
@@ -638,17 +641,16 @@ export class RelayClient {
     await this.#onMessage(frame.env);
   }
 
-  #onUndeliverable(to: string, iv: string, code: UndeliverableCode): void {
+  #onUndeliverable(to: string, iv: string, code: string): void {
     if (code === "offline") this.#markProvenOffline(to);
     const id = this.#idByIv.get(iv);
-    // Quoted like every other wire value: `parseFrame` narrows `code` to the two
-    // known ones, but `to` and `iv` are relay-supplied text either way.
+    // Quoted like every other wire value: `to`, `iv` and `code` are all relay-supplied text.
     this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
     if (id === undefined) return;
-    this.#pending.get(id)?.settle({
-      ok: false,
-      error: new RequestFailure(code, code === "offline" ? "that machine is not connected" : "unknown machine"),
-    });
+    const error = isUndeliverableCode(code)
+      ? new RequestFailure(code, code === "offline" ? "that machine is not connected" : "unknown machine")
+      : new RequestFailure("refused", `the relay refused to deliver the request (code ${quote(code)})`);
+    this.#pending.get(id)?.settle({ ok: false, error });
   }
 
   #markProvenOffline(deviceId: string): void {
@@ -695,30 +697,23 @@ export class RelayClient {
     pending?.settle({ ok: true, payload: plain.payload });
   }
 
-  async #onRegistry(entries: readonly RegistryView[]): Promise<void> {
+  async #onRegistry(entries: readonly RegistryView[], skipped: number): Promise<void> {
     this.#clearRegistrySettle();
     this.#entries = entries;
+    this.#skippedEntries = skipped;
+    // Replaced, not pruned: seeding a fresh map from this push's own IVs makes
+    // cache ⊆ registry hold by construction. A slow decrypt from an older push
+    // can still land one dead IV in the current map; the next push evicts it.
+    const next = new Map<string, MachineInfo | "unopenable" | "skewed">();
+    for (const entry of entries) {
+      const hit = this.#infoCache.get(entry.info.iv);
+      if (hit !== undefined) next.set(entry.info.iv, hit);
+    }
+    this.#infoCache = next;
     await Promise.all(entries.map((entry) => this.#decryptInfo(entry.info)));
-    this.#pruneInfoCache();
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
-  }
-
-  /**
-   * Every register mints a fresh IV, so without this the cache holds every blob
-   * any machine ever pushed — unbounded in a PWA that stays installed for weeks,
-   * and a peer pushing fresh IVs drives it as fast as it likes. Pruned to the
-   * live registry rather than capped: the re-sent blobs a push carries are
-   * exactly what the cache is for, and the registry is what bounds it. Keyed off
-   * `#entries` rather than the push being handled, so a slow decrypt landing out
-   * of order prunes against the newest registry instead of resurrecting its own.
-   */
-  #pruneInfoCache(): void {
-    const live = new Set(this.#entries.map((entry) => entry.info.iv));
-    for (const iv of this.#infoCache.keys()) {
-      if (!live.has(iv)) this.#infoCache.delete(iv);
-    }
   }
 
   /**
@@ -726,9 +721,8 @@ export class RelayClient {
    * days old and the identical envelope arrives on every push, so the replay
    * guard must not see them.
    */
-  async #decryptInfo(env: Envelope): Promise<MachineInfo | null> {
-    const cached = this.#infoCache.get(env.iv);
-    if (cached !== undefined) return cached;
+  async #decryptInfo(env: Envelope): Promise<void> {
+    if (this.#infoCache.has(env.iv)) return;
     try {
       const plain = await openEnvelope(this.#key, env);
       const info = parseMachineInfo(plain.payload);
@@ -740,11 +734,9 @@ export class RelayClient {
       // machine is what an operator can act on. Cached either way, so it is one
       // line per blob rather than one per push.
       if (info === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=info-shape`);
-      this.#infoCache.set(env.iv, info);
-      return info;
+      this.#infoCache.set(env.iv, info ?? "skewed");
     } catch {
-      this.#infoCache.set(env.iv, null);
-      return null;
+      this.#infoCache.set(env.iv, "unopenable");
     }
   }
 
@@ -757,9 +749,14 @@ export class RelayClient {
     const machines: Machine[] = [];
     let reused = 0;
     let hiddenHere = 0;
+    let skewedHere = 0;
     for (const entry of this.#entries) {
-      const info = this.#infoCache.get(entry.info.iv) ?? null;
-      if (info === null) continue;
+      const info = this.#infoCache.get(entry.info.iv);
+      if (info === "skewed") {
+        skewedHere += 1;
+        continue;
+      }
+      if (info === undefined || info === "unopenable") continue;
       const scan = this.#scans.get(entry.deviceId);
       // A register that carries the scan (or a later one) makes the override spent.
       if (scan !== undefined && scan.scannedAt <= info.scannedAt) this.#scans.delete(entry.deviceId);
@@ -797,10 +794,12 @@ export class RelayClient {
       // resume re-sends a registry that is usually identical. Handing back the
       // previous array is what lets #patch — and Preact — skip the render.
       machines: reused === machines.length && reused === previous.length ? previous : machines,
-      registrySize: this.#entries.length,
+      registrySize: this.#entries.length + this.#skippedEntries,
       hidden: sameIds(hidden, this.#state.hidden) ? this.#state.hidden : hidden,
-      // Counted off entries the registry actually holds, so a removal never reads as a key mismatch.
-      ignored: this.#entries.length - machines.length - hiddenHere,
+      // Counted off entries the registry actually holds, so a removal never
+      // reads as a key mismatch — and skew is kept out for the same reason.
+      ignored: this.#entries.length - machines.length - hiddenHere - skewedHere,
+      skewed: skewedHere + this.#skippedEntries,
       ...extra,
     });
   }

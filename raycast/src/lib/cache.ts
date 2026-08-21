@@ -1,3 +1,4 @@
+import { isRecord, parseRepoList } from "@seance/shared";
 import { isEffort, isModel } from "./options.ts";
 import type { LastUsed, PickerMachine } from "./form.ts";
 
@@ -15,17 +16,11 @@ export interface Store {
 export const REGISTRY_KEY = "registry";
 export const LAST_USED_KEY = "last-used";
 
-type Repo = PickerMachine["repos"][number];
-
 /** The last registry projection, so the picker renders before a socket exists. */
 export interface CachedRegistry {
   readonly machines: readonly PickerMachine[];
   /** When this projection was taken — not `scannedAt`, which is per machine and about repos. */
   readonly at: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -42,31 +37,17 @@ function parse(text: string | undefined): unknown {
   }
 }
 
-function parseRepo(raw: unknown): Repo | null {
-  if (!isRecord(raw)) return null;
-  const { name, path, defaultBranch } = raw;
-  if (typeof name !== "string" || typeof path !== "string") return null;
-  if (defaultBranch !== null && typeof defaultBranch !== "string") return null;
-  return { name, path, defaultBranch };
-}
-
 function parseMachine(raw: unknown): PickerMachine | null {
   if (!isRecord(raw)) return null;
-  const { deviceId, name, connected, lastSeen, scannedAt, repos } = raw;
+  const { deviceId, name, connected, lastSeen, scannedAt } = raw;
   if (typeof deviceId !== "string" || typeof name !== "string") return null;
   if (typeof connected !== "boolean") return null;
   if (typeof lastSeen !== "number" || typeof scannedAt !== "number") return null;
-  if (!Array.isArray(repos)) return null;
-  const parsed: Repo[] = [];
-  for (const entry of repos) {
-    const repo = parseRepo(entry);
-    // One unreadable repo invalidates the machine rather than silently
-    // shortening its list: a picker missing the repo you wanted is worse than a
-    // slow one.
-    if (repo === null) return null;
-    parsed.push(repo);
-  }
-  return { deviceId, name, connected, lastSeen, scannedAt, repos: parsed };
+  // Shared walk, shared policy: one unreadable repo invalidates the machine
+  // rather than silently shortening its list.
+  const repos = parseRepoList(raw["repos"]);
+  if (repos === null) return null;
+  return { deviceId, name, connected, lastSeen, scannedAt, repos };
 }
 
 export async function readRegistry(store: Store): Promise<CachedRegistry | null> {

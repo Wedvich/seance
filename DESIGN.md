@@ -223,12 +223,21 @@ Séance's noise is cover for a real intruder.
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
    relaying, not one that reaches into the app. So the app-role client parses
-   every relay→app frame before handling it and drops whole what it cannot
-   handle: a half-applied frame used to leave the client throwing on every
-   later rebuild, an availability loss that outlived the connection and ended
-   only at a reload. Its `#infoCache` is pruned to the live registry for the
-   same reason — keyed by envelope iv, it otherwise grows for as long as a peer
-   cares to mint them. One unstated dependency: the ±60s window trusts local
+   every relay→app frame — and the rescan reply, the other payload that lands
+   on the render path — before handling it, and never half-applies what it
+   cannot handle: a half-applied frame used to leave the client throwing on
+   every later rebuild, an availability loss that outlived the connection and
+   ended only at a reload. Two deliberate softenings keep skew from becoming
+   its own availability loss: a registry entry that does not parse is skipped
+   and counted (every push carries the full stored registry, so dropping the
+   push whole would let one bad entry suppress every machine indefinitely),
+   and an `undeliverable` code minted after the build still fails its request
+   fast as `refused` instead of riding the timeout. What cannot be read is
+   counted as `skewed`, apart from `ignored` (didn't decrypt) — version skew
+   must never tell an operator to rotate a correct key. `#infoCache` is
+   rebuilt from each push's own IVs for the same reason — keyed by envelope
+   iv, it otherwise grows for as long as a peer cares to mint them. One
+   unstated dependency: the ±60s window trusts local
    time and NTP is unauthenticated, so an attacker who can skew a daemon's
    clock widens the window.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
