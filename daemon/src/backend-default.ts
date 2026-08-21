@@ -9,12 +9,13 @@ import { tmux } from "./tmux.ts";
  * The shipped backend: one claude window per session in a tmux session group.
  * This file is the swap point — a fork rewrites `createBackend` here (and drops
  * spawn/sessions/tmux/trust) without touching run, handlers or the CLI. It is
- * also the only place that reads `config.tmuxSession` and the pane-death
- * budget, both of which used to thread through the frontend.
+ * also the only place that reads `config.tmuxSession`, `config.machineTag` and
+ * the pane-death budget, all of which used to thread through the frontend.
  */
 export function createBackend(config: Config, opts: { readonly waitMs?: number } = {}): SessionBackend {
   return {
-    spawn: (request, repos) => spawnSession(request, repos, config.tmuxSession, opts),
+    spawn: (request, repos) =>
+      spawnSession(request, repos, { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag }),
     sessions: (repos) => listClaudeSessions(repos),
     doctor: tmuxChecks,
   };
