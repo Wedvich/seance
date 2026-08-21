@@ -16,6 +16,12 @@ export interface Config {
   readonly repoRoots: readonly string[];
   /** tmux session group daemon-spawned windows land in. */
   readonly tmuxSession: string;
+  /**
+   * Appended to the remote-control session name as `@tag`, so the Claude UIs
+   * say which box a session is on. Absent means no suffix — never inferred
+   * from `name`, which is a display string and makes an ugly tag.
+   */
+  readonly machineTag?: string;
 }
 
 export function configSkeleton(machineName: string): string {
@@ -26,6 +32,7 @@ export function configSkeleton(machineName: string): string {
     psk: "",
     repoRoots: ["~/repos"],
     tmuxSession: "main",
+    machineTag: "",
   };
   return `${JSON.stringify(skeleton, null, 2)}\n`;
 }
@@ -65,6 +72,7 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
     psk: requireString(obj, "psk", path),
     repoRoots: (roots as string[]).map(expandTilde),
     tmuxSession: typeof obj["tmuxSession"] === "string" ? (obj["tmuxSession"] as string) : "main",
+    machineTag: typeof obj["machineTag"] === "string" ? (obj["machineTag"] as string) : undefined,
   };
 }
 

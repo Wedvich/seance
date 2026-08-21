@@ -72,6 +72,17 @@ describe("loadConfig", () => {
     expect((await loadConfig(path)).tmuxSession).toBe("main");
   });
 
+  test("machineTag is optional and read verbatim", async () => {
+    const dir = await tempDir();
+    const bare = join(dir, "bare.json");
+    await writeFile(bare, JSON.stringify(VALID));
+    expect((await loadConfig(bare)).machineTag).toBeUndefined();
+
+    const tagged = join(dir, "tagged.json");
+    await writeFile(tagged, JSON.stringify({ ...VALID, machineTag: "thad" }));
+    expect((await loadConfig(tagged)).machineTag).toBe("thad");
+  });
+
   test("missing repoRoots rejected", async () => {
     const dir = await tempDir();
     const path = join(dir, "config.json");
@@ -242,6 +253,8 @@ describe("configSkeleton", () => {
     const parsed = JSON.parse(configSkeleton("My Mac")) as Record<string, unknown>;
     expect(parsed["psk"]).toBe("");
     expect(parsed["name"]).toBe("My Mac");
+    // Empty, not derived from the name: an unset tag means unsuffixed sessions.
+    expect(parsed["machineTag"]).toBe("");
   });
 });
 

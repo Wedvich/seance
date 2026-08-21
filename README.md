@@ -153,6 +153,10 @@ Edit `~/.config/seance/config.json`:
   and delivered to the unit by PID 1, which `psk-import` can't do — docs/psk.md has
   that runbook.
 - `repoRoots` — directories to scan for repos
+- `machineTag` — optional short tag naming this box, suffixed onto the session name
+  Claude Code registers, so the Claude UIs read `fix-the-thing@thad`. The tmux window
+  name stays bare — locally the machine is never in question. Leave it empty for
+  unsuffixed names.
 
 A running daemon watches this file and reloads within a second of a save, so
 edits need no restart — including ones made by a Claude Code session on the

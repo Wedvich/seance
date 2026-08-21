@@ -7,15 +7,15 @@ import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
-import { spawnSession } from "../src/spawn.ts";
+import { sessionName, spawnSession } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
-const WAIT = { waitMs: 700 };
+const WAIT = { tmuxSession: "main", waitMs: 700 };
 // Failure tests race the stub's actual death (0.3s sleep + process startup,
 // which macOS can stretch under load) against the deadline. verifyPaneAlive
 // polls, so a wide deadline adds no latency to a spawn that really dies.
-const FAIL_WAIT = { waitMs: 5_000 };
+const FAIL_WAIT = { tmuxSession: "main", waitMs: 5_000 };
 let base: string;
 let fixture: GitFixture;
 let stub: ClaudeStub;
@@ -53,7 +53,6 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const outcome = await spawnSession(
       { repo: "myrepo", mode: "worktree", title: "Fix Tests", prompt: "fix the tests" },
       repos,
-      "main",
       WAIT,
     );
 
@@ -80,7 +79,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   });
 
   test("a title carrying the format separator stays detectable", async () => {
-    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "fix | build" }, repos, "main", WAIT);
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "fix | build" }, repos, WAIT);
     expect(outcome.window).toBe("fix - build");
 
     expect((await waitForSession(outcome.window))?.repo).toBe("myrepo");
@@ -93,7 +92,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   });
 
   test("here mode: launches at the repo root, no git preparation", async () => {
-    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, "main", WAIT);
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Here Now" }, repos, WAIT);
     expect(outcome.path).toBe(fixture.repoPath);
     await tmux(["kill-window", "-t", "main:Here Now"]);
   });
@@ -102,7 +101,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const claudeConfig = join(base, "claude-config", ".claude.json");
     await Bun.write(claudeConfig, JSON.stringify({ projects: {} }));
 
-    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Trusting" }, repos, "main", WAIT);
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Trusting" }, repos, WAIT);
 
     const config = (await Bun.file(claudeConfig).json()) as {
       projects: Record<string, { hasTrustDialogAccepted?: boolean } | undefined>;
@@ -114,12 +113,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("worktree name falls back to the prompt slug and dodges a leftover branch", async () => {
     await git(fixture.repoPath, ["branch", "worktree-reuse-the-name"]);
     try {
-      const outcome = await spawnSession(
-        { repo: "myrepo", mode: "worktree", prompt: "Reuse the name!" },
-        repos,
-        "main",
-        WAIT,
-      );
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", prompt: "Reuse the name!" }, repos, WAIT);
       expect(outcome.path).toEndWith(join(".claude", "worktrees", "reuse-the-name-2"));
       expect(outcome.window).toBe("reuse-the-name-2");
       await killWindow(outcome.window);
@@ -131,7 +125,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("dirty checkout: spawn proceeds with a note", async () => {
     await Bun.write(join(fixture.repoPath, "README.md"), "# dirtied\n");
     try {
-      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Dirty" }, repos, "main", WAIT);
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Dirty" }, repos, WAIT);
       expect(outcome.note).toContain("not on a clean main");
       await tmux(["kill-window", "-t", "main:Dirty"]);
     } finally {
@@ -142,11 +136,11 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("claude exiting nonzero is claude_died with the captured error, window killed", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.failing;
     try {
-      await expect(
-        spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT),
-      ).rejects.toThrow(SpawnFailure);
+      await expect(spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, FAIL_WAIT)).rejects.toThrow(
+        SpawnFailure,
+      );
       try {
-        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, "main", FAIL_WAIT);
+        await spawnSession({ repo: "myrepo", mode: "here", title: "Doomed" }, repos, FAIL_WAIT);
       } catch (err) {
         expect((err as SpawnFailure).code).toBe("claude_died");
         expect((err as SpawnFailure).message).toContain("boom: untrusted workspace");
@@ -160,7 +154,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 
   test("unknown repo is repo_not_found", async () => {
     try {
-      await spawnSession({ repo: "nope", mode: "worktree" }, repos, "main", WAIT);
+      await spawnSession({ repo: "nope", mode: "worktree" }, repos, WAIT);
       expect.unreachable();
     } catch (err) {
       expect((err as SpawnFailure).code).toBe("repo_not_found");
@@ -170,7 +164,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("unreachable origin is fetch_failed", async () => {
     await git(fixture.repoPath, ["remote", "set-url", "origin", "/nonexistent/origin.git"]);
     try {
-      await spawnSession({ repo: "myrepo", mode: "worktree", title: "NoNet" }, repos, "main", WAIT);
+      await spawnSession({ repo: "myrepo", mode: "worktree", title: "NoNet" }, repos, WAIT);
       expect.unreachable();
     } catch (err) {
       expect((err as SpawnFailure).code).toBe("fetch_failed");
@@ -184,7 +178,6 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const outcome = await spawnSession(
       { repo: "myrepo", mode: "here", title: "Seeded", prompt: "tricky 'quoted' $prompt" },
       repos,
-      "main",
       WAIT,
     );
     try {
@@ -197,6 +190,45 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     } finally {
       await killWindow(outcome.window);
     }
+  });
+
+  test("machineTag suffixes the remote-control name and leaves the tmux window bare", async () => {
+    await rm(stub.argvFile, { force: true });
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Tagged Run" }, repos, {
+      ...WAIT,
+      machineTag: "thad",
+    });
+    try {
+      const argv = await stub.argv();
+      expect(argv[argv.indexOf("-n") + 1]).toBe("tagged-run@thad");
+      // The window is local; the machine is never in question there.
+      expect(outcome.window).toBe("Tagged Run");
+      const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
+      expect(windows).toContain("Tagged Run");
+      expect(windows).not.toContain("@thad");
+    } finally {
+      await killWindow(outcome.window);
+    }
+  });
+
+  test("no machineTag leaves the remote-control name unsuffixed", async () => {
+    await rm(stub.argvFile, { force: true });
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Untagged Run" }, repos, WAIT);
+    try {
+      const argv = await stub.argv();
+      expect(argv[argv.indexOf("-n") + 1]).toBe("untagged-run");
+    } finally {
+      await killWindow(outcome.window);
+    }
+  });
+});
+
+// Only the branches the spawn cases above cannot reach: a tag needing
+// normalisation, and a blank one that must not render as a bare `@`.
+describe("sessionName", () => {
+  test("normalises the tag and treats a blank one as absent", () => {
+    expect(sessionName("fix-the-thing", "Linux Box")).toBe("fix-the-thing@linux-box");
+    expect(sessionName("fix-the-thing", "   ")).toBe("fix-the-thing");
   });
 });
 
@@ -245,7 +277,7 @@ async function waitForSession(window: string): Promise<SessionEntry | undefined>
  * legitimate input, not an error.
  */
 async function expectNoInjection(request: SpawnRequest, markers: readonly string[]): Promise<void> {
-  const result: SpawnOutcome | Error = await spawnSession(request, repos, "main", WAIT).catch((err: unknown) =>
+  const result: SpawnOutcome | Error = await spawnSession(request, repos, WAIT).catch((err: unknown) =>
     err instanceof Error ? err : new Error(String(err)),
   );
   try {
@@ -267,7 +299,7 @@ describe("wire input cannot escape the repo set or the shell", () => {
   test("path-shaped repo values are repo_not_found — resolution is a name lookup, never a path join", async () => {
     const cases = ["../../etc", "/etc", "myrepo/../../etc", "./myrepo", "myrepo\n", "…/myrepo"];
     const errors = await Promise.all(
-      cases.map((repo) => spawnSession({ repo, mode: "here" }, repos, "main", WAIT).catch((err: unknown) => err)),
+      cases.map((repo) => spawnSession({ repo, mode: "here" }, repos, WAIT).catch((err: unknown) => err)),
     );
     for (const err of errors) {
       expect(err).toBeInstanceOf(SpawnFailure);

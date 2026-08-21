@@ -19,6 +19,19 @@ export function slugify(src: string): string {
 }
 
 /**
+ * The remote-control session name — what the Claude UIs list, and deliberately
+ * not the tmux window name, which stays bare because the host is never in
+ * question locally. Reads as `user@host`: the task leads, since that is what
+ * you scan a session list for, and the machine trails as the qualifier.
+ * `slug` is already slugified, so it can carry no `@` of its own and the
+ * suffix can never double up.
+ */
+export function sessionName(slug: string, tag?: string): string {
+  if (tag === undefined || tag.trim() === "") return slug;
+  return `${slug}@${slugify(tag)}`;
+}
+
+/**
  * Sessions are short-lived, so names stay bare: no timestamp, just the slug.
  * Collisions are the exception, and a leftover branch counts as one — `git
  * worktree remove` leaves `worktree-<name>` behind, and reusing it would base
@@ -113,7 +126,7 @@ interface InnerCommand {
   readonly seedDir: string | null;
 }
 
-async function buildInnerCommand(prepared: Prepared, windowName: string, request: SpawnRequest): Promise<InnerCommand> {
+async function buildInnerCommand(prepared: Prepared, session: string, request: SpawnRequest): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
@@ -129,7 +142,7 @@ async function buildInnerCommand(prepared: Prepared, windowName: string, request
   // name and the session started idle. The `--` guard below is the second,
   // independent defence.
   const base =
-    `exec ${caffeinate}${claude} -n ${shq(windowName)} --remote-control ` +
+    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
   if (request.prompt === undefined || request.prompt === "") {
@@ -183,11 +196,18 @@ async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> 
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
 }
 
+export interface SpawnOptions {
+  /** tmux session group the new window lands in. */
+  readonly tmuxSession: string;
+  /** Machine tag suffixed onto the remote-control session name; absent means none. */
+  readonly machineTag?: string;
+  readonly waitMs?: number;
+}
+
 export async function spawnSession(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
-  tmuxSessionGroup: string,
-  opts: { readonly waitMs?: number } = {},
+  opts: SpawnOptions,
 ): Promise<SpawnOutcome> {
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
@@ -202,9 +222,9 @@ export async function spawnSession(
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
   const prepared = request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
-  const inner = await buildInnerCommand(prepared, windowName, request);
+  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
 
-  const target = await resolveTargetSession(tmuxSessionGroup);
+  const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
   try {
     try {

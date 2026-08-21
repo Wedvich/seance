@@ -578,7 +578,7 @@ together (re-sends registry data on every poll, useless offline).
   never rewritten by the daemon: relayUrl — which must include the `/daemon`
   path, so `doctor` warns when it doesn't; the failure mode is a rejected
   upgrade and a silent backoff loop — bearerToken, psk, name,
-  repoRoots, tmuxSession) and `~/.local/state/seance/state.json`
+  repoRoots, tmuxSession, machineTag) and `~/.local/state/seance/state.json`
   (daemon-owned: deviceId, repo cache, scannedAt). Rejected: single file
   the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
   rejected here as having no clean WSL counterpart; both halves of that are
@@ -713,6 +713,23 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   default `"main"`. Rejected: separate named `claude` session (as originally
   written here — orphans spawned windows outside the one-window-per-task
   workflow), daemon child processes without tmux (loses walk-up-and-attach).
+- **Session name vs window name** (added 2026-08-21): the name passed to
+  `claude -n` and the tmux window name are computed separately. The window
+  keeps the request's title verbatim; the session name is the worktree slug
+  plus an optional `@<machineTag>` suffix, because the Claude UIs (web,
+  desktop, mobile) list sessions from every machine in one place and
+  otherwise give no clue which box a session is on. Suffix, not prefix: those
+  lists are recency-ordered, so a leading tag buys no grouping and only costs
+  the left edge you scan for the task. `@` reads as `user@host` and is inert
+  in both shells and filenames. Locally the window name stays bare — the
+  machine is obvious from the statusline. `machineTag` is never inferred from
+  `name`: that field is a display string ("Martin's MacBook Pro") and seeds
+  from `hostname()`, so inferring would suffix every existing install with
+  something long and ugly on upgrade. Absent means no suffix, which is
+  exactly the pre-2026-08-21 behavior. Rejected: a `{slug}@{machine}`
+  template in config (a templating language for a decision made once, and
+  machines drift out of sync), and a client-supplied tag on `SpawnRequest`
+  (the tag stops identifying the host, which is its whole purpose).
 - **Spawn logic is reimplemented natively** in the daemon (structured
   errors, no shell-script templating). The `/spawn` slash command stays
   as-is for in-terminal use; drift between the two implementations is an
