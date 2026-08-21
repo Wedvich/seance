@@ -28,6 +28,14 @@ describe("failureText", () => {
     );
   });
 
+  // "refused" is an undeliverable code minted after this build: no fixed line
+  // could name it, so the message — which does — passes through whole.
+  test("keeps the relay's own code for a refusal this build does not know", () => {
+    expect(
+      failureText(new RequestFailure("refused", 'the relay refused to deliver the request (code "rejected")')),
+    ).toBe('the relay refused to deliver the request (code "rejected")');
+  });
+
   // The mapping lives in shared/ so this surface and `seanced mcp` explain a
   // reason identically; this pins the wrapper to it.
   test("is the shared mapping verbatim for a RequestFailure", () => {

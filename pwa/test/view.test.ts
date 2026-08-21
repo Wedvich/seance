@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, RelayState } from "@seance/shared";
+import { SPAWN_ERROR_CODES, type Machine, type RelayState } from "@seance/shared";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
   abbreviatePath,
@@ -38,6 +38,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     registrySize: machines.length,
     hidden: [],
     ignored: 0,
+    skewed: 0,
     settling: false,
     registrySettled: true,
     ...overrides,
@@ -237,6 +238,26 @@ describe("banner and button", () => {
     expect(view.banner?.body).toContain("1 machine is registered");
   });
 
+  // Skew is not a key problem: "check the pre-shared key" over a blob this key
+  // just opened sends someone to rotate a credential that is correct.
+  test("entries this build cannot read are reported as version skew, not a key mismatch", () => {
+    const view = deriveView(state({ relay: relay({ machines: [], registrySize: 2, skewed: 2 }) }), NOW);
+    expect(view.banner?.title).toBe("Version mismatch");
+    expect(view.banner?.body).toContain("2 machines are registered");
+    expect(view.banner?.opensSettings).toBe(false);
+    expect(view.button.label).toBe("Version mismatch");
+  });
+
+  test("partial skew gets its own footnote, apart from the key mismatch one", () => {
+    const view = deriveView(
+      state({ relay: relay({ machines: [machine()], registrySize: 3, ignored: 1, skewed: 1 }) }),
+      NOW,
+    );
+    expect(view.banner).toBeNull();
+    expect(view.ignoredNote).toBe("1 entry ignored (key mismatch) · 1 entry unreadable (version mismatch)");
+    expect(view.button.enabled).toBe(true);
+  });
+
   test("a removed machine leaves the counts and the selection to the rest", () => {
     const studio = machine({ deviceId: "dev-2", name: "Mac Studio", connected: false });
     const view = deriveView(
@@ -397,19 +418,17 @@ describe("failureBody", () => {
   });
 
   // The design's copy claimed a worktree was left behind; claude creates it, so a
-  // claude that never started created nothing.
+  // claude that never started created nothing. Derived from the schema of record,
+  // so a code added there is covered here without anyone remembering to.
   test("never claims a worktree was left behind", () => {
-    const codes = [
-      "claude_died",
-      "launch_error",
-      "repo_not_found",
-      "fetch_failed",
-      "timeout",
-      "no_default_branch",
-      "internal_error",
-    ] as const;
-    for (const code of codes) {
+    for (const code of SPAWN_ERROR_CODES) {
       expect(failureBody(code, "seance", "MacBook Pro")).not.toContain("worktree");
     }
+  });
+
+  // The daemon mints the codes and may be a version ahead of the app; an
+  // unlisted one used to leave the verdict card blank.
+  test("says something for a code minted after this build", () => {
+    expect(failureBody("quota_exceeded", "seance", "MacBook Pro")).toContain("refused the spawn");
   });
 });

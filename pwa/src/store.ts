@@ -1,11 +1,4 @@
-import type {
-  RepoEntry,
-  RescanResponse,
-  SessionsResponse,
-  SpawnClient,
-  SpawnRequest,
-  SpawnResponse,
-} from "@seance/shared";
+import type { RepoEntry, SessionsResponse, SpawnClient, SpawnRequest, SpawnResponse } from "@seance/shared";
 import { RequestFailure, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
@@ -294,9 +287,11 @@ export class Store {
    * would leave the row asserting the previous scan's time.
    */
   async #rescan(deviceId: string): Promise<readonly RepoEntry[]> {
-    const reply = await this.#client.request<RescanResponse>(deviceId, "rescan", {});
-    this.#client.applyScan(deviceId, reply.repos, reply.scannedAt);
-    return reply.repos;
+    const reply = await this.#client.request<unknown>(deviceId, "rescan", {});
+    const parsed = this.#client.applyScan(deviceId, reply);
+    // A reply this build can't read is a failed rescan, not a shorter list.
+    if (parsed === null) throw new Error("unreadable rescan reply");
+    return parsed.repos;
   }
 
   async spawn(): Promise<void> {
@@ -343,7 +338,9 @@ export class Store {
       }
     } catch (err) {
       const reason = err instanceof RequestFailure ? err.reason : "disconnected";
-      if (reason === "offline" || reason === "unknown") {
+      // "refused" belongs with the undeliverables: the relay answered that the
+      // request did not land, so nothing can be running.
+      if (reason === "offline" || reason === "unknown" || reason === "refused") {
         this.#pending = null;
         this.#showVerdict({ kind: "unknown", reason: "undelivered", machine: machine.name, sessionCount: null });
       } else {

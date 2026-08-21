@@ -36,6 +36,7 @@ function fakeRelay(
     registrySize: machines.length,
     hidden: [],
     ignored: 0,
+    skewed: 0,
     settling: false,
     registrySettled: status === "open",
   };
