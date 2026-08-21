@@ -94,14 +94,24 @@ export async function ensureAuditLog(path: string = logPath()): Promise<string |
 export async function auditLogChecks(path: string = logPath()): Promise<readonly Check[]> {
   const info = await stat(path).catch(() => null);
   if (info === null) return [];
-  const checks: Check[] = [];
   if (!(await writable(path))) {
-    checks.push({ level: "fail", message: unwritableLogMessage(path, userInfo().username) });
-  } else if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
+    // No size line under the fail: an `ok` verdict on the same broken file reads
+    // as re-checked-and-passed — and "consider truncating" a file the user can't
+    // write is not advice.
+    return [{ level: "fail", message: unwritableLogMessage(path, userInfo().username) }];
+  }
+  const checks: Check[] = [];
+  if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
+    const exposure = `log is ${mode}, and it records repo paths and window titles`;
+    // `seanced restart` repairs the mode only on a file the daemon owns
+    // (ensureAuditLog); on someone else's file the honest fix is the chown pair.
     checks.push({
       level: "warn",
-      message: `log is ${mode}, and it records repo paths and window titles — \`seanced restart\` tightens it to 0600`,
+      message: ownedByUs(info.uid)
+        ? `${exposure} — \`seanced restart\` tightens it to 0600`
+        : `${exposure} — owned by another user, so restart can't tighten it: ` +
+          `sudo chown ${userInfo().username} ${path} && sudo chmod 600 ${path}`,
     });
   }
   const size = info.size;

@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { chmod, chown, mkdir, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { mkdir, open, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -370,7 +370,10 @@ export async function installService(): Promise<InstallResult> {
   }
   const enable = await exec(["systemctl", "--user", "enable", "--now", UNIT_NAME]);
   if (enable.exitCode !== 0) {
-    throw new Error(`systemctl --user enable --now failed: ${enable.stderr.trim()}`);
+    // An uncreatable state dir fails `append:` too, and a throw discards `notes` —
+    // the log problem names the path and errno systemctl's stderr won't.
+    const cause = logProblem === null ? "" : `\n${logProblem}`;
+    throw new Error(`systemctl --user enable --now failed: ${enable.stderr.trim()}${cause}`);
   }
 
   const username = userInfo().username;
@@ -484,9 +487,20 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   // silently unauditing every `seanced spawn`. Root can put an existing one back
   // too, which is the fix for a log rotated or deleted since the last install;
   // the daemon repairs the mode on start, but never another user's ownership.
-  if (!existsSync(logFile)) await writeFile(logFile, "", { mode: AUDIT_LOG_MODE });
-  await chown(logFile, user.uid, user.gid);
-  await chmod(logFile, AUDIT_LOG_MODE);
+  // O_NOFOLLOW and the f* variants, because root is operating inside the target
+  // user's directory: a symlink planted at the log path would otherwise turn
+  // this chown into a grant of an arbitrary file to that user.
+  const logFd = await open(
+    logFile,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+    AUDIT_LOG_MODE,
+  );
+  try {
+    await logFd.chown(user.uid, user.gid);
+    await logFd.chmod(AUDIT_LOG_MODE);
+  } finally {
+    await logFd.close();
+  }
 
   const blob = pskBlobPathIn(targetStateDir);
   const credentialBlob = await credentialBlobFor(blob, join(configDirFor(user.home), "config.json"), notes);
@@ -732,6 +746,20 @@ export async function scopeChecks(
     });
   }
   return checks;
+}
+
+/**
+ * The log the installed unit actually appends to. A `--state-dir` system install
+ * relocates it via the unit's SEANCE_STATE_DIR — resolved here the way the PSK
+ * blob is in `doctorServiceChecks`, so doctor checks the file the daemon writes
+ * rather than the one this shell's environment implies.
+ */
+export async function auditLogPath(): Promise<string> {
+  if (!systemdRunning() || !installedUnits().system) return logPath();
+  const unitText = await Bun.file(unitPathFor("system"))
+    .text()
+    .catch(() => null);
+  return logPathIn((unitText === null ? null : unitStateDirEnv(unitText)) ?? stateDir());
 }
 
 /** Doctor's Linux service section — kept here so cli.ts doesn't grow systemctl/schtasks plumbing. */

@@ -20,6 +20,7 @@ import { configDir, configPath, logPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
+  auditLogPath,
   doctorServiceChecks,
   installService,
   installSystemService,
@@ -332,7 +333,7 @@ export async function cmdDoctor(): Promise<void> {
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}`);
 
-  render(await auditLogChecks());
+  render(await auditLogChecks(await auditLogPath()));
 
   console.log("service");
   render(await doctorServiceChecks());

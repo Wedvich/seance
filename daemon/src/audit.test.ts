@@ -144,11 +144,14 @@ describe("auditLogChecks — what doctor renders", () => {
     await writeFile(logPath(), "");
     await chmod(logPath(), 0o444);
 
-    const [first] = await auditLogChecks();
+    const checks = await auditLogChecks();
 
-    expect(first?.level).toBe("fail");
-    expect(first?.message).toContain("spawns typed at this machine go unrecorded");
-    expect(first?.message).toContain("sudo chown");
+    expect(checks[0]?.level).toBe("fail");
+    expect(checks[0]?.message).toContain("spawns typed at this machine go unrecorded");
+    expect(checks[0]?.message).toContain("sudo chown");
+    // No size `ok` under the fail — a passing verdict on the same broken file
+    // reads as re-checked-and-passed.
+    expect(checks).toHaveLength(1);
   });
 
   test("warns while the mode is looser than 0600, naming the command that tightens it", async () => {

@@ -102,9 +102,13 @@ export async function installService(): Promise<InstallResult> {
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
   const target = servicePath();
   await mkdir(dirname(target), { recursive: true });
+  // The redirect's directory stays a hard requirement: bootstrap succeeds
+  // without it, but the job can't open its stdout and fails only at spawn time.
+  await mkdir(dirname(logPath()), { recursive: true });
   // Before the bootstrap, so `StandardOutPath` opens a file that is already
-  // there at 0600 — launchd creates it at the session's umask otherwise, and
-  // the redirect has the same root-vs-user shape here as systemd's `append:`.
+  // there at 0600 — launchd creates it at the session's umask otherwise. Unlike
+  // systemd's root-opened `append:`, the agent's opener is already the user
+  // (per-login), so the mode, never the ownership, is what needs preparing here.
   const logProblem = await ensureAuditLog();
   await Bun.write(target, plistContent(resolvedBun(), mainPath, process.env["PATH"] ?? ""));
   await bootstrapFresh(target);

@@ -1,5 +1,6 @@
 import type { Check } from "./check.ts";
 import * as launchd from "./launchd.ts";
+import { logPath } from "./paths.ts";
 import { NO_SERVICE_MANAGER, type InstallResult, type ServiceManager } from "./service-types.ts";
 import * as systemd from "./systemd.ts";
 import type { SystemInstallOptions } from "./systemd.ts";
@@ -99,6 +100,15 @@ export function startedBySupervisor(): boolean {
  */
 export async function serviceDeliversPsk(): Promise<boolean> {
   return process.platform === "linux" ? systemd.systemUnitDeliversPsk() : false;
+}
+
+/**
+ * Where doctor should look for the audit log. Off `ServiceManager` like the PSK
+ * plumbing: only systemd's `--state-dir` install can relocate it, so everywhere
+ * else this is the shell's own `logPath()`.
+ */
+export async function auditLogPath(): Promise<string> {
+  return process.platform === "linux" ? systemd.auditLogPath() : logPath();
 }
 
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
