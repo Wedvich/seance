@@ -8,13 +8,17 @@ import { readDefaultBranch } from "./scan.ts";
 import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
 
-export function slugify(src: string): string {
-  const slug = src
+function slugCore(src: string): string {
+  return src
     .toLowerCase()
     .replaceAll(/[^a-z0-9]+/gu, "-")
     .replaceAll(/^-+|-+$/gu, "")
     .slice(0, 40)
     .replace(/-+$/u, "");
+}
+
+export function slugify(src: string): string {
+  const slug = slugCore(src);
   return slug === "" ? "session" : slug;
 }
 
@@ -25,11 +29,14 @@ export function slugify(src: string): string {
  * the task leads, since that is what you scan a session list for, and the
  * machine trails as the qualifier.
  * `slug` is already slugified, so it can carry no `@` of its own and the
- * suffix can never double up.
+ * suffix can never double up. The tag is gated on its *slugified* form, not
+ * a trim: a tag with no ASCII alphanumerics ("🖥️", "###") would otherwise
+ * fall through to slugify's "session" fallback and stamp a phantom
+ * `@ session` host on every spawn.
  */
 export function sessionName(slug: string, tag?: string): string {
-  if (tag === undefined || tag.trim() === "") return slug;
-  return `${slug} @ ${slugify(tag)}`;
+  const suffix = tag === undefined ? "" : slugCore(tag);
+  return suffix === "" ? slug : `${slug} @ ${suffix}`;
 }
 
 /**

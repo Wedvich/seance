@@ -210,25 +210,19 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       await killWindow(outcome.window);
     }
   });
-
-  test("no machineTag leaves the remote-control name unsuffixed", async () => {
-    await rm(stub.argvFile, { force: true });
-    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Untagged Run" }, repos, WAIT);
-    try {
-      const argv = await stub.argv();
-      expect(argv[argv.indexOf("-n") + 1]).toBe("untagged-run");
-    } finally {
-      await killWindow(outcome.window);
-    }
-  });
 });
 
-// Only the branches the spawn cases above cannot reach: a tag needing
-// normalisation, and a blank one that must not render as a bare `@`.
+// Only the branches the spawn case above cannot reach: an absent tag, a tag
+// needing normalisation, and unsuffixable ones — blank or with no ASCII
+// alphanumerics — that must not render as a bare `@` or slugify's "session"
+// fallback.
 describe("sessionName", () => {
-  test("normalises the tag and treats a blank one as absent", () => {
+  test("normalises the tag and treats an absent or unsuffixable one as none", () => {
+    expect(sessionName("fix-the-thing")).toBe("fix-the-thing");
     expect(sessionName("fix-the-thing", "Linux Box")).toBe("fix-the-thing @ linux-box");
     expect(sessionName("fix-the-thing", "   ")).toBe("fix-the-thing");
+    expect(sessionName("fix-the-thing", "🖥️")).toBe("fix-the-thing");
+    expect(sessionName("fix-the-thing", "###")).toBe("fix-the-thing");
   });
 });
 

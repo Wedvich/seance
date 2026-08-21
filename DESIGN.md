@@ -727,8 +727,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   machine is obvious from the statusline. `machineTag` is never inferred from
   `name`: that field is a display string ("Martin's MacBook Pro") and seeds
   from `hostname()`, so inferring would suffix every existing install with
-  something long and ugly on upgrade. Absent means no suffix, which is
-  exactly the pre-2026-08-21 behavior. Rejected: a `{slug}@{machine}`
+  something long and ugly on upgrade. Absent means no suffix — though the
+  base name still changes for every install on upgrade: pre-2026-08-21 the
+  session name was the request title near-verbatim, now it is the slug.
+  Rejected: a `{slug}@{machine}`
   template in config (a templating language for a decision made once, and
   machines drift out of sync), and a client-supplied tag on `SpawnRequest`
   (the tag stops identifying the host, which is its whole purpose).
