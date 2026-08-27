@@ -14,7 +14,7 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.0",
     "miniflare": "^4.20260722.0",
     "typescript": "^7.0.2",
     "zod": "^4.4.3"
