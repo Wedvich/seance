@@ -212,8 +212,7 @@ describe("config reload failure paths", () => {
     const start = async (opts: RunOpts): Promise<DaemonHandle> => {
       const handle = await startDaemon(opts);
       return {
-        client: handle.client,
-        updater: handle.updater,
+        ...handle,
         stop: (): void => {
           handle.stop();
           if (poisoned) throw new Error("injected stop failure");

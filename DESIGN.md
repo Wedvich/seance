@@ -279,14 +279,19 @@ nothing checked it. The last is the gap they leave.
   prompt text, which would make `seanced.log` a transcript of everything ever
   asked. With a stolen PSK this log is the only thing that says someone else
   used your machines.
-- **Both spawn paths audit, through one formatter**, tagged `origin=relay` or
-  `origin=cli`. A trail that covered only the relay would make `seanced spawn`
-  the quieter way in — precisely the path someone with local shell access would
-  choose — and the tag is what separates "me at my desk at 2pm" from "my phone
-  was in a drawer at 3am". The daemon writes via stdout (launchd redirects it);
-  the CLI appends to the same file itself, and failing to do so warns rather
-  than failing a spawn the human asked for. Two independent writers is safe
-  only while nothing rotates the file.
+- **Every spawn path audits, through one formatter**, tagged `origin=relay`,
+  `origin=cli` or `origin=local`. A trail that covered only the relay would make
+  `seanced spawn` the quieter way in — precisely the path someone with local
+  shell access would choose — and the tag is what separates "me at my desk at
+  2pm" from "my phone was in a drawer at 3am". `local` is the third: the op
+  socket below, driven by something on this box that is not the human at the
+  keyboard. Adding a surface means adding an origin, never reusing one — an
+  indistinguishable path is what makes the invariant stop meaning what it says.
+  The origin also rides the per-op `audit request` line, not just the spawn
+  lines, because enumeration is the same signal as spawning. The daemon writes
+  via stdout (launchd redirects it); the CLI appends to the same file itself,
+  and failing to do so warns rather than failing a spawn the human asked for.
+  Two independent writers is safe only while nothing rotates the file.
 - **The redirect that makes one file of the two writers is also what can break
   the `cli` half**, so the daemon repairs it on every start. Both service
   managers open the log _before_ dropping to the daemon's user — under a systemd
@@ -433,6 +438,11 @@ Who owns each frame in code — the place to change when a frame changes:
 | envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                            | same file — both ends share it, or nothing decrypts                                                             |
 | ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
 | op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+
+`sessions` and `spawn` have a second, relay-free sender: `daemon/src/local-client.ts`
+over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
+The daemon builds one handler per surface over a single context, so the two differ
+only in the audit origin they are tagged with — see "Local op socket".
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
 on connect and whenever the repo set changes; `msg { envelope }` for routed
@@ -1169,8 +1179,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   `OP_TIMEOUT_MS`. `machine` is the config `name` resolved against the live
   registry; ambiguity or a miss returns candidates, `deviceId` is the
   exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
-  agent, trivial to add. Self-targeting is allowed and just loops through the
-  relay: uniform beats a special case.
+  agent, trivial to add. Self-targeting short-circuits to the local op socket
+  below rather than looping through the relay: uniformity is not worth an
+  internet round trip to reach the machine the server is running on. Rejected:
+  routing it through the relay like any other target, which is simpler to
+  describe and pays Cloudflare's latency for a process on the same box.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -1225,7 +1238,9 @@ field is display-only, so validation would buy nothing.
   (friction in the wrong place; the approving human is at the Claude session,
   not the config file), a read-only server (defers the point of the thing).
 - No new key at rest, but a new _process_ holding the imported PSK — on a
-  machine that already runs one (the daemon).
+  machine that already runs one (the daemon). Only when an op is aimed at
+  another machine, though: the key is resolved on first _remote_ use, so a
+  session that only ever spawns locally never imports it.
 - The group address stays out of reach: the MCP server seals only to specific
   `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
 - **A delivered credential never leaves the daemon process.** `exec.ts` strips
@@ -1242,6 +1257,102 @@ field is display-only, so validation would buy nothing.
   boot-order dependent.
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
+
+## Local op socket (`daemon/src/local-socket.ts`) — designed 2026-08-29
+
+The daemon listens on a unix socket, and the MCP server sends `sessions` and
+`spawn` straight there when the target resolves to the box it runs on. No relay,
+no envelope, no PSK: a spawn on the machine you are sitting at never leaves it.
+The alternative is an internet round trip to Cloudflare and back down the
+daemon's own websocket, to reach a process a few hundred microseconds away.
+
+This is the op-level proxy the credential-delivered-box problem calls for —
+semantic ops with per-op policy and the existing audit trail, never the raw key.
+
+- **A socket into the daemon, not a second spawner.** The alternative was ~50
+  lines: the MCP process calling `createBackend(config).spawn()` itself, exactly
+  as `seanced spawn` does. Rejected, because it makes a **second executor**. The
+  daemon cold-boots the tmux server when none is running, so whichever process
+  spawns first decides that server's environment — and a pane's environment is
+  the server's. Routing through the daemon keeps one executor, one repo set (its
+  live one, not a re-read of `state.json`), one audit sink, and — because
+  `machineTag` is read in `backend-default.ts` — a session name byte-identical to
+  a relayed spawn's. A local spawn differs from a relayed one in exactly one
+  observable way: the origin tag.
+- **Semantic ops, never the key.** A peer sends a `Plain` and gets a `Plain`
+  back; the ops it may ask for are `sessions` and `spawn` and nothing else.
+  `rescan` is out of scope and `update-available` is refused structurally — it is
+  fire-and-forget, drives the self-updater, and must not be reachable from a
+  surface whose premise is skipping the envelope. Same posture as the broadcast
+  allowlist in `relay-client.ts`. Rejected: a crypto oracle (seal/open on
+  request), which is what the open item warned against — same-uid peers make it
+  unpoliceable, and it hands out the relay's whole reach rather than two ops
+  against this box.
+- **The 0700 directory is the access control**, not the socket's mode. The
+  socket lives at `stateDir()/run/seanced.sock`, in a directory the daemon
+  creates 0700 and re-tightens on every start. `Bun.listen({ unix })` creates
+  the socket itself 0755, and there is a window before the `chmod 0600` lands;
+  socket-mode enforcement on `connect(2)` is also inconsistent across
+  BSD-derived kernels. Directory traversal gates connect everywhere, so that is
+  what the argument rests on and the socket's own 0600 is belt-and-braces.
+  `doctor` checks the directory mode, because a daemon that has not restarted
+  since it was loosened would not have tightened it yet.
+- **It grants no authority a same-uid process did not already have.** Such a
+  process can read `config.json` (0600, same uid) and take the PSK outright, run
+  `seanced spawn`, or drive the tmux server directly. The socket is strictly
+  less: two named ops, no way to address another machine, no way to reach the
+  `"machines"` group address, and every request recorded. What it adds is that
+  going through it is the _recorded_ way in — hence `origin=local`, and hence the
+  origin on the `audit request` line too.
+- **Connection per request; no correlation, no heartbeat, no backoff.** One
+  `Plain` per line, one reply, close. This is deliberately not the relay
+  protocol: there is no reordering to correlate against and no network to
+  survive. Rejected: a long-lived correlated connection (a pending map and a
+  heartbeat for a problem that does not exist here). Frames are newline-delimited
+  JSON capped at 1 MiB — past it the peer is dropped, since a truncated frame is
+  not a request. The newline is matched as a _byte_, which is safe because 0x0a
+  never occurs inside a multi-byte UTF-8 sequence and prompts carry non-ASCII.
+- **Locality is decided from files, not from the socket.** The MCP server
+  compares the target against `config.name` and the `deviceId` in `state.json` —
+  a deviceId exactly, a name case-insensitively, the same precedence
+  `resolveMachine` uses. Deciding this from disk rather than by probing means a
+  local target whose daemon is down fails with "the daemon isn't running"
+  instead of quietly paying a round trip to be told the same thing. Reading it
+  needs `readState`, which — unlike `loadOrInitState` — never mints a `deviceId`
+  and never logs, since `log.ts` writes to stdout and that is the MCP server's
+  JSON-RPC channel.
+- **Local wins a name collision**, and `deviceId` remains the escape hatch to the
+  remote twin. `resolveMachine` refuses an ambiguous name; the short circuit
+  resolves it toward the box you are on, because that is the case the whole
+  feature exists for. Said in the tool description, so the model on the other end
+  knows.
+- **No fallback to the relay when the local path is unavailable.** A silent
+  fallback would make the failure mode invisible, and the daemon being down means
+  the relayed spawn would fail anyway — the machine is offline by the same fact.
+  Rejected: falling back to an in-process spawn, which reintroduces the second
+  executor this design exists to avoid.
+- **`list_machines` still needs the relay**, and marks the local entry `local:
+true`. When the relay cannot be reached at all it answers with this machine
+  alone plus a note. That is not a nicety: on a credential-delivered box the
+  relay is unreachable by construction, and a model that can see no machine
+  cannot spawn on the one it is sitting on either.
+- **The PSK is resolved lazily**, on first remote use rather than at startup,
+  memoized, and cleared on failure so a locked keychain can be retried. Local ops
+  need no key, which is what makes the credential-delivered box work. It also
+  narrows the threat-model addendum above: for local work the MCP process no
+  longer holds the PSK at all.
+- **The listener never fails the daemon.** An unbindable socket — a run directory
+  owned by someone else, a path past the ~104-byte `sun_path` limit — logs and is
+  skipped, matching `ensureAuditLog`'s posture: a degraded local surface is not a
+  reason to take the machine offline. An `EADDRINUSE` is probed by connecting;
+  a corpse is cleared and rebound, a live daemon is left alone. The supervisor's
+  reload is `stop()` then start, sequentially, and `stop(true)` unlinks the path,
+  so a config swap rebinds cleanly with no race.
+
+Non-goals: routing `seanced spawn` through the socket (it would collapse the
+executors further, but `origin=cli` should keep meaning "typed at this machine");
+a `rescan` op; the Raycast extension using it — its local-only reach was rejected
+on product grounds and that has not changed.
 
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 
@@ -1537,8 +1648,7 @@ CSP items landed with the app (see the PWA section).
   answer for the wrong user there and every one of those values is written
   into a unit that outlives the install. Also rejected: keeping the runbook as
   printed instructions, which is what the docs already were.
-  MCP on a credential-delivered box is deliberately unsupported
-  (docs/psk.md); the sanctioned future path is an op-level proxy through the
-  daemon — semantic ops over a local socket with per-op policy and the
-  existing audit trail, never the raw key — rather than a crypto oracle,
-  which same-uid peers make unpoliceable.
+  MCP on a credential-delivered box reaches that machine but not the others
+  (docs/psk.md): the local op socket needs no key, and the PSK is resolved only
+  when an op is aimed elsewhere. Mediating at op level is what makes that safe —
+  a crypto oracle, which same-uid peers make unpoliceable, would not have.

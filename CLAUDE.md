@@ -92,10 +92,17 @@ green:
   (`update.ts`). Resolving at _use_ time is always fine; the hazard is only what outlives the process.
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
-  resolves repos by name against the cached scan set, both spawn paths audit through one formatter,
+  resolves repos by name against the cached scan set, every spawn path audits through one formatter
+  under its own origin (`relay`, `cli`, `local` — a new surface adds an origin, never reuses one),
   prompt text is never logged, and a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session). Don't let changes drift from them.
+- The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
+  this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
+  the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
+  allowlist is `sessions` and `spawn` only; widening it is a threat-model change, not a tweak.
+  Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
+  server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
   outside the Raycast host, so such a module could not run under `bun test` and would take every
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at

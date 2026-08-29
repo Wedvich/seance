@@ -31,21 +31,43 @@ function isState(raw: unknown): raw is State {
   return typeof obj["deviceId"] === "string" && Array.isArray(obj["repos"]);
 }
 
+/** Null when the file is absent; the problem string when it is there but unusable. */
+async function parseState(path: string): Promise<{ readonly state: State } | { readonly problem: string } | null> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return null;
+  try {
+    const raw: unknown = await file.json();
+    if (isState(raw)) return { state: raw };
+    return { problem: "has unexpected shape" };
+  } catch {
+    return { problem: "is not valid JSON" };
+  }
+}
+
+/**
+ * State as it is on disk, or null — the probe for a reader that only wants to
+ * know who this machine is. Two things it deliberately does not do, both of
+ * which `loadOrInitState` does: it never mints a `deviceId`, so asking the
+ * question on a box that has never run the daemon does not answer it by
+ * inventing an identity; and it never logs, because `log.ts` writes to stdout
+ * and `seanced mcp` — the caller this exists for — carries JSON-RPC frames
+ * there.
+ */
+export async function readState(path: string = statePath()): Promise<State | null> {
+  const result = await parseState(path);
+  return result !== null && "state" in result ? result.state : null;
+}
+
 /**
  * Loads state or initializes it (deviceId is generated exactly here, on first
  * run). A corrupt file is replaced — losing deviceId only means the machine
  * registers as a new entry; the stale one is forgettable from the PWA.
  */
 export async function loadOrInitState(path: string = statePath()): Promise<State> {
-  const file = Bun.file(path);
-  if (await file.exists()) {
-    try {
-      const raw: unknown = await file.json();
-      if (isState(raw)) return raw;
-      log.warn(`state at ${path} has unexpected shape — reinitializing`);
-    } catch {
-      log.warn(`state at ${path} is not valid JSON — reinitializing`);
-    }
+  const result = await parseState(path);
+  if (result !== null) {
+    if ("state" in result) return result.state;
+    log.warn(`state at ${path} ${result.problem} — reinitializing`);
   }
   const state = freshState();
   await saveState(state, path);

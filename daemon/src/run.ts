@@ -3,7 +3,8 @@ import { daemonSink, ensureAuditLog } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import { loadConfig, loadPsk, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
-import { createHandler } from "./handlers.ts";
+import { createHandler, type HandlerContext } from "./handlers.ts";
+import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -18,6 +19,8 @@ export interface DaemonHandle {
   readonly stop: () => void;
   /** Null unless self-update is wired; tests await its `settled()` instead of sleeping. */
   readonly updater: Updater | null;
+  /** Where the local op socket bound, or null when it could not — see `local-socket.ts`. */
+  readonly localSocket: string | null;
 }
 
 export interface RunOpts {
@@ -137,26 +140,33 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let updater: Updater | null = null;
   let announcePending =
     opts.selfUpdate !== undefined && source !== null && previousSha !== undefined && previousSha !== source.sha;
+
+  // One context, a handler per inbound surface. The relay leg and the local op
+  // socket share the backend, the repo set and the audit sink, and differ only
+  // in the origin they are tagged with — which is what keeps "every spawn path
+  // audits through one formatter" true as surfaces are added.
+  const handlerCtx: HandlerContext = {
+    backend: opts.backend ?? createBackend(config),
+    getRepos: () => state.repos,
+    rescan,
+    auditSink: daemonSink,
+    ...(opts.selfUpdate !== undefined && source !== null
+      ? {
+          updateAvailable: (notice: UpdateAvailable): void => {
+            // The sha we already run is the wave stopping, not a nudge.
+            if (notice.sha !== source.sha) updater?.check("announce");
+          },
+        }
+      : {}),
+  };
+
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
     deviceId: state.deviceId,
     key,
     buildInfo,
-    handle: createHandler({
-      backend: opts.backend ?? createBackend(config),
-      getRepos: () => state.repos,
-      rescan,
-      auditSink: daemonSink,
-      ...(opts.selfUpdate !== undefined && source !== null
-        ? {
-            updateAvailable: (notice: UpdateAvailable): void => {
-              // The sha we already run is the wave stopping, not a nudge.
-              if (notice.sha !== source.sha) updater?.check("announce");
-            },
-          }
-        : {}),
-    }),
+    handle: createHandler(handlerCtx),
     onConnect: (): void => {
       updateRuntime(true);
       if (announcePending && source !== null) {
@@ -198,6 +208,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   log.info(`seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos`);
   client.start();
 
+  // After the relay leg, because the local surface is the optional one: it never
+  // throws, and a box that cannot bind it still serves every phone.
+  const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local") });
+
   // Cached repos registered instantly above; refresh in the background now,
   // then hourly. Explicit rescans arrive as ops.
   void rescan();
@@ -205,9 +219,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   return {
     client,
+    localSocket: local.path,
     stop: (): void => {
       stopped = true;
       clearInterval(rescanTimer);
+      // Before the relay client, so a reload's stop→start sequence has the path
+      // free by the time the incoming daemon binds it.
+      local.stop();
       // Before the client: a check racing the swap must not report through a
       // stale `state` and clobber what the incoming daemon already saved.
       updater?.stop();

@@ -3,7 +3,16 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type { Machine, RelayState, RequestOp, SpawnRequest } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
-import { buildMcpServer, LazyRelay, mcpBunPath, resolveMachine, type AppRelay } from "./mcp.ts";
+import { LocalUnavailable } from "./local-client.ts";
+import {
+  buildMcpServer,
+  isLocalRef,
+  LazyRelay,
+  mcpBunPath,
+  resolveMachine,
+  type AppRelay,
+  type LocalMachine,
+} from "./mcp.ts";
 
 function machine(overrides: Partial<Machine> = {}): Machine {
   return {
@@ -67,7 +76,30 @@ function fakeRelay(
   return fake;
 }
 
-async function connectedClient(relay: LazyRelay): Promise<Client> {
+interface FakeLocal extends LocalMachine {
+  requests: { op: RequestOp; payload: unknown }[];
+}
+
+function fakeLocal(
+  respond: (op: RequestOp, payload: unknown) => unknown = () => ({}),
+  overrides: Partial<LocalMachine> = {},
+): FakeLocal {
+  const requests: { op: RequestOp; payload: unknown }[] = [];
+  return {
+    deviceId: "device-1",
+    name: "MacBook Pro",
+    platform: "darwin",
+    repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }],
+    requests,
+    request: <T>(op: RequestOp, payload: unknown): Promise<T> => {
+      requests.push({ op, payload });
+      return Promise.resolve(respond(op, payload) as T);
+    },
+    ...overrides,
+  };
+}
+
+async function connectedClient(relay: LazyRelay, local: LocalMachine | null = null): Promise<Client> {
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
   // point of pinning is that these tests prove the modern era is served. That
   // requires serving through the same entry the daemon uses — serveStdio with
@@ -77,7 +109,7 @@ async function connectedClient(relay: LazyRelay): Promise<Client> {
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(relay), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(relay, local), { transport: serverTransport });
   await client.connect(clientTransport);
   return client;
 }
@@ -215,6 +247,7 @@ describe("mcp tools", () => {
         connected: true,
         lastSeen: new Date(2_000).toISOString(),
         repos: ["seance"],
+        local: false,
       },
     ]);
     lazy.stop();
@@ -302,6 +335,197 @@ describe("mcp tools", () => {
     });
     expect(result.isError).toBe(true);
     expect(toolText(result)).toContain("claude_died");
+    lazy.stop();
+  });
+});
+
+describe("isLocalRef", () => {
+  const local = fakeLocal();
+
+  test("matches this machine by name, case-insensitively, and by deviceId exactly", () => {
+    expect(isLocalRef(local, "MacBook Pro")).toBe(true);
+    expect(isLocalRef(local, "macbook pro")).toBe(true);
+    expect(isLocalRef(local, "device-1")).toBe(true);
+  });
+
+  test("does not match another machine", () => {
+    expect(isLocalRef(local, "Linux Box")).toBe(false);
+    expect(isLocalRef(local, "device-2")).toBe(false);
+  });
+});
+
+describe("the local short circuit", () => {
+  test("a self-targeted spawn goes to the daemon on this box and never dials the relay", async () => {
+    const fake = fakeRelay([machine()]);
+    const local = fakeLocal(() => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance", prompt: "do it" },
+    });
+
+    expect(toolText(result)).toContain("spawned window task on MacBook Pro");
+    expect(local.requests).toHaveLength(1);
+    expect(local.requests[0]?.op).toBe("spawn");
+    // Stamped for the audit trail on this path too — the daemon renders it as
+    // `origin=local client="mcp"`.
+    expect((local.requests[0]?.payload as SpawnRequest | undefined)?.client).toBe("mcp");
+    // The relay was never touched: no request, and no socket dialed.
+    expect(fake.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("a self-targeted get_sessions answers locally", async () => {
+    const sessions = [{ window: "fix-bug", repo: "seance", path: "/repos/seance" }];
+    const fake = fakeRelay([machine()]);
+    const local = fakeLocal(() => ({ sessions, at: 3_000 }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+
+    const result = await client.callTool({ name: "get_sessions", arguments: { machine: "device-1" } });
+    expect(JSON.parse(toolText(result))).toEqual(sessions);
+    expect(local.requests[0]?.op).toBe("sessions");
+    expect(fake.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("a remote target still goes through the relay", async () => {
+    const remote = machine({ deviceId: "device-2", name: "Linux Box" });
+    const fake = fakeRelay([machine(), remote], () => ({
+      ok: true,
+      window: "task",
+      path: "/repos/seance",
+      sessions: [],
+    }));
+    const local = fakeLocal();
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+
+    await client.callTool({ name: "spawn_session", arguments: { machine: "Linux Box", repo: "seance" } });
+    expect(fake.requests[0]?.deviceId).toBe("device-2");
+    expect(local.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("a remote machine sharing this one's name loses to local; its deviceId still reaches it", async () => {
+    const twin = machine({ deviceId: "device-2", name: "MacBook Pro" });
+    const fake = fakeRelay([machine(), twin], () => ({
+      ok: true,
+      window: "task",
+      path: "/repos/seance",
+      sessions: [],
+    }));
+    const local = fakeLocal(() => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+
+    // By name: local wins, where `resolveMachine` would have refused as ambiguous.
+    await client.callTool({ name: "spawn_session", arguments: { machine: "MacBook Pro", repo: "seance" } });
+    expect(local.requests).toHaveLength(1);
+    expect(fake.requests).toHaveLength(0);
+
+    // By deviceId: the escape hatch reaches the twin.
+    await client.callTool({ name: "spawn_session", arguments: { machine: "device-2", repo: "seance" } });
+    expect(local.requests).toHaveLength(1);
+    expect(fake.requests[0]?.deviceId).toBe("device-2");
+    lazy.stop();
+  });
+
+  test("no local daemon reports that, rather than silently paying a round trip", async () => {
+    const fake = fakeRelay([machine()]);
+    const local = fakeLocal(() => {
+      throw new LocalUnavailable("no daemon listening at /run/seanced.sock — is seanced running?");
+    });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance" },
+    });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain("is seanced running");
+    expect(fake.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("an unknown repo on the local machine answers with the candidates", async () => {
+    const local = fakeLocal();
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
+    const client = await connectedClient(lazy, local);
+
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "nope" },
+    });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain("its repos: seance");
+    expect(local.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("list_machines marks which entry is this box", async () => {
+    const remote = machine({ deviceId: "device-2", name: "Linux Box" });
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine(), remote]) });
+    const client = await connectedClient(lazy, fakeLocal());
+    const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as {
+      name: string;
+      local: boolean;
+    }[];
+    expect(listed.map((entry) => [entry.name, entry.local])).toEqual([
+      ["MacBook Pro", true],
+      ["Linux Box", false],
+    ]);
+    lazy.stop();
+  });
+
+  test("an unreachable relay still lists this machine, so a keyless box is not blind", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
+    const client = await connectedClient(lazy, fakeLocal());
+    const result = await client.callTool({ name: "list_machines", arguments: {} });
+    const listed = JSON.parse(toolText(result)) as { machines: { name: string; local: boolean }[]; note: string };
+    expect(listed.machines).toHaveLength(1);
+    expect(listed.machines[0]?.local).toBe(true);
+    expect(listed.note).toContain("only local spawns will work");
+    lazy.stop();
+  });
+
+  test("no resolvable PSK still serves local ops; only a remote one pays the error", async () => {
+    // What `runMcpServer` does on a box whose key is only ever delivered to the
+    // daemon's systemd unit: creating the relay client is what throws, and it is
+    // deferred to first remote use.
+    const local = fakeLocal(() => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
+    const lazy = new LazyRelay({
+      create: () => {
+        throw new Error("no PSK — fill the psk field in config.json or run `seanced psk-import`");
+      },
+    });
+    const client = await connectedClient(lazy, local);
+
+    const localResult = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance" },
+    });
+    expect(localResult.isError).toBeUndefined();
+    expect(toolText(localResult)).toContain("spawned window task");
+
+    const remoteResult = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "Linux Box", repo: "seance" },
+    });
+    expect(remoteResult.isError).toBe(true);
+    expect(toolText(remoteResult)).toContain("no PSK");
+    lazy.stop();
+  });
+
+  test("with no local machine at all, every target is remote", async () => {
+    const fake = fakeRelay([machine()], () => ({ ok: true, window: "t", path: "/p", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, null);
+    await client.callTool({ name: "spawn_session", arguments: { machine: "MacBook Pro", repo: "seance" } });
+    expect(fake.requests[0]?.deviceId).toBe("device-1");
     lazy.stop();
   });
 });
