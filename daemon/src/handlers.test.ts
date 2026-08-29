@@ -66,6 +66,13 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
+  // The string-key loop in isSpawnRequest cannot see a boolean field, so this is
+  // the only thing standing between a truthy "false" and a plan-mode spawn.
+  test("a non-boolean plan is rejected rather than coerced", async () => {
+    await createHandler(ctx)(spawnNope({ plan: "yes" }));
+    expect(logged()).toContain("audit spawn origin=relay rejected");
+  });
+
   test("a newline in a wire value cannot forge an audit line", async () => {
     await createHandler(ctx)(request("spawn", { repo: 'x\ninfo audit spawn ok window="gotcha"', mode: "here" }));
     expect(logged()).not.toContain('window="gotcha"');
