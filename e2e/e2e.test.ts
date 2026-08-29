@@ -9,7 +9,7 @@ import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
-import { buildMcpServer, LazyRelay } from "../daemon/src/mcp.ts";
+import { buildMcpServer, LazyRelay, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import { killWindow, listWindows, ownMachine, startApp, startStack, TOKEN, wsUrl, type Stack } from "./harness.ts";
 
 /**
@@ -348,6 +348,68 @@ describe("mcp ↔ relay ↔ daemon", () => {
       if (window !== null) await killWindow(window);
       await client.close();
       lazy.stop();
+    }
+  });
+
+  test("a self-targeted spawn goes over the local socket, with the relay unreachable throughout", async () => {
+    expect(stack.daemon.localSocket).not.toBeNull();
+
+    // The daemon registers before its scan finishes; the local path reads the
+    // same set from state.json, so wait for it to land there. `repos()` is read
+    // per call, so one `localMachine` sees the scan land without being rebuilt.
+    let local: LocalMachine | null = null;
+    await pollUntil(async () => {
+      local ??= await localMachine(stack.config);
+      return local !== null && (await local.repos()).some((repo) => repo.name === "myrepo");
+    }, "the fixture repo in state.json");
+    if (local === null) throw new Error("no local machine");
+
+    // The proof that no relay is involved: creating the client throws, so any
+    // code path that reaches for the relay fails the test loudly. This is also
+    // the credential-delivered box, where the PSK cannot be resolved at all.
+    const dead = new LazyRelay({
+      create: () => {
+        throw new Error("the relay must not be touched by a local spawn");
+      },
+    });
+    const client = new Client(
+      { name: "e2e-local", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(dead, local), { transport: serverTransport });
+    await client.connect(clientTransport);
+
+    const text = async (name: string, args: Record<string, unknown>): Promise<string> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return content.map((entry) => entry.text).join("\n");
+    };
+
+    let window: string | null = null;
+    try {
+      const spawned = await text("spawn_session", {
+        machine: "TestMac",
+        repo: "myrepo",
+        prompt: "skip the relay",
+      });
+      window = "skip-the-relay";
+      expect(spawned).toContain("spawned window skip-the-relay on TestMac");
+      // A real window, from the same backend the relay path uses.
+      expect(await listWindows()).toContain(window);
+
+      const sessions = await text("get_sessions", { machine: "TestMac" });
+      expect(JSON.parse(sessions).map((entry: SessionEntry) => entry.window)).toContain(window);
+
+      // And the fleet view still needs the relay, so it degrades to this box.
+      const listed = JSON.parse(await text("list_machines", {})) as {
+        machines: { name: string; local: boolean }[];
+      };
+      expect(listed.machines).toEqual([expect.objectContaining({ name: "TestMac", local: true })]);
+    } finally {
+      if (window !== null) await killWindow(window);
+      await client.close();
+      dead.stop();
     }
   });
 });

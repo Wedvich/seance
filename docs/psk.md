@@ -149,7 +149,18 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 `seanced mcp` is its own relay client and resolves the PSK itself — Claude Code
 launches it outside the daemon's unit, where no credential is delivered and (on
-systemd ≥ 256) direct unseal is refused. So a box whose key exists only as a
-TPM-sealed blob behind a system unit has no working MCP path: keep MCP on machines
-with a keychain/DPAPI store. Deliberate for now — the box that runs semi-trusted
-sessions holds the least authority.
+systemd ≥ 256) direct unseal is refused.
+
+That limits reach, not function. The key is resolved on first _remote_ use rather
+than at startup, and ops aimed at the machine the server runs on take the daemon's
+local op socket instead of the relay — which needs no key at all. So on a box whose
+key exists only as a TPM-sealed blob behind a system unit:
+
+- `list_machines`, `get_sessions` and `spawn_session` **for that machine** work.
+  `list_machines` reports only that machine, with a note saying why.
+- Anything aimed at another machine reports the missing key, naming the fact that
+  local spawns need none.
+
+Reaching the _other_ machines from such a box needs a keychain/DPAPI store. The box
+running semi-trusted sessions holding the least authority is the point; it holds
+enough to drive itself, and no more.

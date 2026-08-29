@@ -10,7 +10,7 @@ import type {
   UpdateAvailable,
 } from "@seance/shared";
 import { quote } from "@seance/shared";
-import { spawnAudit, type AuditSink, type SpawnAudit } from "./audit.ts";
+import { spawnAudit, type AuditSink, type SpawnAudit, type SpawnOrigin } from "./audit.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
 
@@ -21,9 +21,10 @@ export interface HandlerContext {
   readonly rescan: () => Promise<readonly RepoEntry[]>;
   /**
    * Where the audit trail goes — the daemon's stdout in production. Only the
-   * transport is injectable: the formatter and the `origin=relay` tag are
-   * applied below, so nothing a caller supplies can make a spawn quiet or
-   * relabel it as the human at the keyboard.
+   * transport is injectable: the formatter is applied below, and the origin is
+   * a parameter of `createHandler` rather than of the context, so nothing a
+   * wire-supplied payload can carry will make a spawn quiet or relabel it as
+   * the human at the keyboard.
    */
   readonly auditSink: AuditSink;
   /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
@@ -95,13 +96,22 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   }
 }
 
-/** Routes decrypted request ops to their implementations and wraps the reply. */
-export function createHandler(ctx: HandlerContext): (plain: Plain) => Promise<Plain | null> {
-  const audit = spawnAudit("relay", ctx.auditSink);
+/**
+ * Routes decrypted request ops to their implementations and wraps the reply.
+ * `origin` tags everything this handler audits; the daemon builds one per
+ * inbound surface over a single shared context, so the relay and the local op
+ * socket run the same code and stay distinguishable in the log.
+ */
+export function createHandler(
+  ctx: HandlerContext,
+  origin: SpawnOrigin = "relay",
+): (plain: Plain) => Promise<Plain | null> {
+  const audit = spawnAudit(origin, ctx.auditSink);
   return async (plain: Plain): Promise<Plain | null> => {
     // Every op, not just spawn: with a stolen PSK, "something enumerated my
-    // sessions at 3am" is the same signal as "something spawned".
-    await ctx.auditSink(`audit request op=${quote(plain.op)} id=${quote(plain.id)}`);
+    // sessions at 3am" is the same signal as "something spawned" — and the
+    // origin is on this line for the same reason it is on the spawn lines.
+    await ctx.auditSink(`audit request origin=${origin} op=${quote(plain.op)} id=${quote(plain.id)}`);
 
     const reply = (payload: unknown): Plain => ({
       id: crypto.randomUUID(),

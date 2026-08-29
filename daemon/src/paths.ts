@@ -63,6 +63,23 @@ export function logPath(): string {
   return logPathIn(stateDir());
 }
 
+/**
+ * Holds the local op socket, and exists to be 0700. That mode is the access
+ * control, not the socket's own: `Bun.listen({ unix })` creates the socket 0755,
+ * there is a window between bind and chmod, and socket-mode enforcement on
+ * connect(2) is inconsistent across BSD-derived kernels. Directory traversal is
+ * what gates connect everywhere, so the directory is the thing to get right.
+ * Separate from `stateDir()` because that one is 0755 and holds files whose own
+ * modes already answer for them.
+ */
+export function runDir(): string {
+  return join(stateDir(), "run");
+}
+
+export function socketPath(): string {
+  return join(runDir(), "seanced.sock");
+}
+
 export function expandTilde(p: string): string {
   return p.replace(/^~(?=\/|$)/u, homedir());
 }

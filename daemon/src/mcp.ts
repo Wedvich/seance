@@ -7,8 +7,10 @@ import {
   importPsk,
   RelayClient,
   RequestFailure,
+  type ErrorResponse,
   type Machine,
   type RelayState,
+  type RepoEntry,
   type RequestOp,
   type SessionsResponse,
   type SpawnClient,
@@ -16,9 +18,11 @@ import {
   type SpawnResponse,
 } from "@seance/shared";
 import type { Check } from "./check.ts";
-import { loadConfig, loadPsk } from "./config.ts";
+import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { exec } from "./exec.ts";
 import { recordedBunCheck } from "./link.ts";
+import { localRequest, LocalUnavailable } from "./local-client.ts";
+import { readState } from "./state.ts";
 
 /**
  * The slice of the shared app-role RelayClient the tools consume — injectable
@@ -46,7 +50,13 @@ const IDLE_MS = 5 * 60_000;
 const CONNECT_TIMEOUT_MS = 10_000;
 
 export interface LazyRelayOpts {
-  readonly create: () => AppRelay;
+  /**
+   * Async because the PSK is resolved here rather than at startup: local ops
+   * need no key, so a box whose key only exists as a systemd-delivered
+   * credential still gets a working MCP server for itself, and only a remote
+   * op pays the "no PSK" error.
+   */
+  readonly create: () => AppRelay | Promise<AppRelay>;
   readonly idleMs?: number;
   readonly connectTimeoutMs?: number;
 }
@@ -105,7 +115,9 @@ export class LazyRelay {
   }
 
   async #connect(): Promise<AppRelay> {
-    const client = this.#opts.create();
+    // Awaited before `start()`, so a create that throws — an unresolvable PSK —
+    // propagates with nothing to tear down.
+    const client = await this.#opts.create();
     client.start();
     try {
       await this.#waitOpen(client);
@@ -171,6 +183,42 @@ export class LazyRelay {
 }
 
 /**
+ * What this box is, and how to reach its daemon without the relay.
+ *
+ * Resolved from `config.json` and `state.json` rather than from the registry, so
+ * recognising a target as local never depends on the relay being up — which is
+ * what lets a local request fail with "the daemon isn't running" instead of
+ * quietly paying a round trip to Cloudflare to be told the same thing.
+ *
+ * `request` is injectable so the tools can be driven without a socket; in
+ * production it is `localRequest`.
+ */
+export interface LocalMachine {
+  readonly deviceId: string;
+  readonly name: string;
+  readonly platform: string;
+  /**
+   * Re-read per call, not snapshotted: the daemon rewrites state.json on every
+   * rescan and `seanced mcp` outlives many of them. A snapshot rejects a repo
+   * cloned since startup, and rejects every repo if the first scan hadn't landed.
+   */
+  readonly repos: () => Promise<readonly RepoEntry[]>;
+  readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T>;
+}
+
+/**
+ * Whether a tool's `machine` argument names this box. Same precedence as
+ * `resolveMachine`: a deviceId matches exactly, a name case-insensitively.
+ *
+ * Local wins over a remote machine of the same name, deliberately — the point of
+ * the short circuit is that the common case takes no round trip, and a name
+ * collision is exactly what `deviceId` is the escape hatch for.
+ */
+export function isLocalRef(local: LocalMachine, ref: string): boolean {
+  return ref === local.deviceId || ref.toLowerCase() === local.name.toLowerCase();
+}
+
+/**
  * `machine` is the human name from the target's config, resolved against the
  * live registry; a deviceId is accepted as the exact-match escape hatch for
  * names that collide. Misses come back with the candidates, because the model
@@ -202,7 +250,7 @@ interface ToolResult {
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
-function describeMachine(machine: Machine): Record<string, unknown> {
+function describeMachine(machine: Machine, local: LocalMachine | null): Record<string, unknown> {
   return {
     name: machine.name,
     deviceId: machine.deviceId,
@@ -210,7 +258,42 @@ function describeMachine(machine: Machine): Record<string, unknown> {
     connected: machine.connected,
     lastSeen: new Date(machine.lastSeen).toISOString(),
     repos: machine.repos.map((repo) => repo.name),
+    // Named so the model knows which target costs nothing to reach; spawning
+    // there goes straight to the daemon on this box.
+    local: local !== null && machine.deviceId === local.deviceId,
   };
+}
+
+/** The local machine as `list_machines` renders it when the relay cannot be reached at all. */
+async function describeLocal(local: LocalMachine): Promise<Record<string, unknown>> {
+  return {
+    name: local.name,
+    deviceId: local.deviceId,
+    platform: local.platform,
+    connected: true,
+    repos: (await local.repos()).map((repo) => repo.name),
+    local: true,
+  };
+}
+
+/** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
+function localFailureText(op: string, err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (err instanceof LocalUnavailable) {
+    return `${op} failed: ${detail} — is seanced running? try \`seanced status\``;
+  }
+  return `${op} failed: ${detail}`;
+}
+
+/**
+ * Both legs need this: a handler that throws answers with an `ErrorResponse`, and
+ * neither client treats that as a failure — `RequestFailure` is the relay refusing
+ * to deliver, not the daemon refusing to serve. Unchecked, `sessions` is undefined
+ * and `JSON.stringify` hands `textResult` a non-string.
+ */
+function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
+  if ("ok" in reply) return errorResult(`get_sessions failed (${reply.code}): ${reply.message}`);
+  return textResult(JSON.stringify(reply.sessions, null, 2));
 }
 
 function failureText(op: string, err: unknown): string {
@@ -223,8 +306,14 @@ function failureText(op: string, err: unknown): string {
  * The MCP face of Séance: three tools mapping 1:1 onto the registry and the
  * `sessions`/`spawn` ops. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface.
+ *
+ * `local` is what makes a self-targeted call skip the relay: the per-machine
+ * ops go straight to this box's daemon over its op socket, which is the same
+ * handler the relay leg reaches and so the same backend, repo set, machineTag
+ * and audit trail — only tagged `origin=local`. Null on a box with no daemon
+ * state, where every target is remote by definition.
  */
-export function buildMcpServer(relay: LazyRelay): McpServer {
+export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = null): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
@@ -251,32 +340,66 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
         "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time.",
       annotations: { readOnlyHint: true },
     },
-    async () =>
-      withRelay((client) => {
-        const machines = client.getState().machines.map(describeMachine);
-        return Promise.resolve(textResult(JSON.stringify(machines, null, 2)));
-      }),
+    async () => {
+      let client: AppRelay;
+      try {
+        client = await relay.acquire();
+      } catch (err) {
+        // The fleet needs the relay, but this box does not. Answering with the
+        // local machine alone beats answering with nothing: on a
+        // credential-delivered box the relay is unreachable by construction, and
+        // a model that cannot see any machine cannot spawn on the one it is
+        // sitting on either.
+        if (local === null) return errorResult(failureText("connecting to the relay", err));
+        return textResult(
+          JSON.stringify(
+            {
+              machines: [await describeLocal(local)],
+              note: `the relay is unreachable (${failureText("connect", err)}) — only this machine is listed, and only local spawns will work`,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      try {
+        const machines = client.getState().machines.map((machine) => describeMachine(machine, local));
+        return textResult(JSON.stringify(machines, null, 2));
+      } finally {
+        relay.release();
+      }
+    },
   );
 
   server.registerTool(
     "get_sessions",
     {
       title: "List running sessions",
-      description: "List the Claude Code tmux sessions currently running on a machine.",
+      description:
+        "List the Claude Code tmux sessions currently running on a machine. Naming this machine answers from the local daemon without touching the relay.",
       inputSchema: z.object({ machine: z.string().describe("Machine name (or deviceId) from list_machines") }),
       annotations: { readOnlyHint: true },
     },
-    async ({ machine }) =>
-      withRelay(async (client) => {
+    async ({ machine }) => {
+      if (local !== null && isLocalRef(local, machine)) {
+        try {
+          return renderSessions(await local.request<SessionsResponse | ErrorResponse>("sessions", {}));
+        } catch (err) {
+          return errorResult(localFailureText("get_sessions", err));
+        }
+      }
+      return withRelay(async (client) => {
         const resolved = resolveMachine(client.getState().machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         try {
-          const reply = await client.request<SessionsResponse>(resolved.machine.deviceId, "sessions", {});
-          return textResult(JSON.stringify(reply.sessions, null, 2));
+          return renderSessions(
+            await client.request<SessionsResponse | ErrorResponse>(resolved.machine.deviceId, "sessions", {}),
+          );
         } catch (err) {
           return errorResult(failureText("get_sessions", err));
         }
-      }),
+      });
+    },
   );
 
   server.registerTool(
@@ -284,7 +407,7 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
     {
       title: "Spawn a Claude Code session",
       description:
-        'Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo\'s main checkout instead.',
+        "Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode \"here\" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId.",
       inputSchema: z.object({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         repo: z.string().describe("Repo name from that machine's repo list"),
@@ -307,65 +430,132 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan }) =>
-      withRelay(async (client) => {
+    async ({ machine, repo, prompt, title, mode, model, effort, plan }) => {
+      const request: SpawnRequest = {
+        repo,
+        mode,
+        client: "mcp" satisfies SpawnClient,
+        ...(prompt === undefined ? {} : { prompt }),
+        ...(title === undefined ? {} : { title }),
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+        ...(plan === undefined ? {} : { plan }),
+      };
+      const rendered = (reply: SpawnResponse, where: string): ToolResult => {
+        if (!reply.ok) return errorResult(`spawn failed (${reply.code}): ${reply.message}`);
+        const note = reply.note === undefined ? "" : `\nnote: ${reply.note}`;
+        return textResult(`spawned window ${reply.window} on ${where} at ${reply.path}${note}`);
+      };
+
+      if (local !== null && isLocalRef(local, machine)) {
+        // Same pre-check as the relay path and for the same reason — the daemon
+        // resolves the repo authoritatively, this just answers with candidates
+        // instead of costing a round trip to be told `repo_not_found`. An empty
+        // set means the first scan hasn't landed, not that there are no repos:
+        // deny nothing then, and let the daemon answer.
+        const repos = await local.repos();
+        if (repos.length > 0 && !repos.some((entry) => entry.name === repo)) {
+          const known = repos.map((entry) => entry.name).join(", ");
+          return errorResult(`${local.name} has no repo named "${repo}" — its repos: ${known}`);
+        }
+        try {
+          return rendered(await local.request<SpawnResponse>("spawn", request), local.name);
+        } catch (err) {
+          return errorResult(localFailureText("spawn_session", err));
+        }
+      }
+
+      return withRelay(async (client) => {
         const resolved = resolveMachine(client.getState().machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
           return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
         }
-        // The daemon resolves the repo authoritatively; this pre-check just
-        // turns a repo_not_found round trip into an answer with candidates.
         if (!target.repos.some((entry) => entry.name === repo)) {
           const known = target.repos.map((entry) => entry.name).join(", ");
           return errorResult(`${target.name} has no repo named "${repo}" — its repos: ${known}`);
         }
-        const request: SpawnRequest = {
-          repo,
-          mode,
-          client: "mcp" satisfies SpawnClient,
-          ...(prompt === undefined ? {} : { prompt }),
-          ...(title === undefined ? {} : { title }),
-          ...(model === undefined ? {} : { model }),
-          ...(effort === undefined ? {} : { effort }),
-          ...(plan === undefined ? {} : { plan }),
-        };
         try {
-          const reply = await client.request<SpawnResponse>(target.deviceId, "spawn", request);
-          if (!reply.ok) return errorResult(`spawn failed (${reply.code}): ${reply.message}`);
-          const note = reply.note === undefined ? "" : `\nnote: ${reply.note}`;
-          return textResult(`spawned window ${reply.window} on ${target.name} at ${reply.path}${note}`);
+          return rendered(await client.request<SpawnResponse>(target.deviceId, "spawn", request), target.name);
         } catch (err) {
           return errorResult(failureText("spawn_session", err));
         }
-      }),
+      });
+    },
   );
 
   return server;
 }
 
+/**
+ * This box, as the tools see it, or null when no daemon state exists here — a
+ * checkout that has never run `seanced` has no deviceId, and `readState` will
+ * not invent one just to answer the question.
+ */
+export async function localMachine(config: Config): Promise<LocalMachine | null> {
+  const state = await readState();
+  if (state === null) return null;
+  return {
+    deviceId: state.deviceId,
+    name: config.name,
+    platform: process.platform,
+    // Falls back to the startup read: a transient failure shouldn't read as "no repos".
+    repos: async (): Promise<readonly RepoEntry[]> => (await readState())?.repos ?? state.repos,
+    request: <T>(op: RequestOp, payload: unknown): Promise<T> => localRequest<T>(op, payload),
+  };
+}
+
+/**
+ * Resolves and imports the PSK on first remote use, memoized. Deferred rather
+ * than done at startup because local ops need no key at all: on a box where the
+ * key only exists as a credential systemd delivers to the daemon's unit, this
+ * throws — and only for the calls that actually need the relay.
+ *
+ * Cleared on failure so a later call retries rather than caching a rejection: a
+ * keychain that was locked at the first attempt may be open at the second.
+ */
+function relayKey(config: Config): () => Promise<CryptoKey> {
+  const resolve = async (): Promise<CryptoKey> => {
+    const resolved = await loadPsk(config);
+    if (resolved === null) {
+      throw new Error(
+        "no PSK — fill the psk field in config.json or run `seanced psk-import`. " +
+          "Spawning on this machine needs no key; only reaching another one does.",
+      );
+    }
+    return importPsk(resolved.psk);
+  };
+  let pending: Promise<CryptoKey> | null = null;
+  return async (): Promise<CryptoKey> => {
+    pending ??= resolve();
+    try {
+      return await pending;
+    } catch (err) {
+      pending = null;
+      throw err;
+    }
+  };
+}
+
 /** `seanced mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
   const config = await loadConfig();
-  const resolved = await loadPsk(config);
-  if (resolved === null) {
-    throw new Error("no PSK — fill the psk field in config.json or run `seanced psk-import`");
-  }
-  const key = await importPsk(resolved.psk);
+  const local = await localMachine(config);
+  const key = relayKey(config);
   const relay = new LazyRelay({
-    create: () =>
+    create: async () =>
       new RelayClient({
         url: appRelayUrl(config.relayUrl),
         token: config.bearerToken,
-        key,
+        key: await key(),
         // stdout carries the protocol frames — the wire log must land on stderr.
         log: (line) => console.error(line),
         // Bun dialing workerd needs this or frames die with close code 1002.
         createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
       }),
   });
-  const handle = serveStdio(() => buildMcpServer(relay), {
+  const handle = serveStdio(() => buildMcpServer(relay, local), {
     onerror: (err) => console.error(`mcp: ${err.message}`),
   });
   await new Promise<void>((resolve) => {

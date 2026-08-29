@@ -3,7 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
-import { loadOrInitState, saveState, writeRuntime, type State } from "../src/state.ts";
+import { loadOrInitState, readState, saveState, writeRuntime, type State } from "../src/state.ts";
 
 let base: string;
 
@@ -65,5 +65,35 @@ describe("state writes", () => {
       ),
     );
     expect((await readdir(dir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("readState", () => {
+  test("returns null for a missing file instead of minting a deviceId", async () => {
+    const path = join(base, "never-run", "state.json");
+    expect(await readState(path)).toBeNull();
+    // The probe must leave no trace: `seanced mcp` asks this on every tool call,
+    // and a box that has never run the daemon must not acquire an identity from
+    // being asked whether it has one.
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  test("returns null for an unusable file, where loadOrInitState would reinitialize", async () => {
+    const path = join(base, "corrupt", "state.json");
+    await Bun.write(path, "{ not json");
+    expect(await readState(path)).toBeNull();
+    // Still untouched — only loadOrInitState replaces it.
+    expect(await Bun.file(path).text()).toBe("{ not json");
+
+    const initialized = await loadOrInitState(path);
+    expect(initialized.deviceId).not.toBe("");
+    expect((await readState(path))?.deviceId).toBe(initialized.deviceId);
+  });
+
+  test("reads back what the daemon saved", async () => {
+    const path = join(base, "live", "state.json");
+    const state: State = { deviceId: "device-x", repos: repos(3), scannedAt: 42 };
+    await saveState(state, path);
+    expect(await readState(path)).toEqual(state);
   });
 });

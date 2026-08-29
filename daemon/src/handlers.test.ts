@@ -48,7 +48,12 @@ const spawnNope = (extra: Record<string, unknown> = {}): Plain =>
 describe("relay ops are audited", () => {
   test("every op is recorded, not just spawn — enumeration at 3am is the same signal", async () => {
     await createHandler(ctx)(request("rescan", {}));
-    expect(logged()).toContain('audit request op="rescan" id="req-1"');
+    expect(logged()).toContain('audit request origin=relay op="rescan" id="req-1"');
+  });
+
+  test("the origin rides every request line, so a local op is not mistaken for a relayed one", async () => {
+    await createHandler(ctx, "local")(request("sessions", {}));
+    expect(logged()).toContain('audit request origin=local op="sessions" id="req-1"');
   });
 
   test("a relay spawn is tagged as such, so it is distinguishable from one typed at the machine", async () => {

@@ -292,6 +292,14 @@ query running sessions, and spawn sessions on other machines through the relay:
 `list_machines`, `get_sessions`, `spawn_session`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
+Naming _this_ machine skips the relay entirely: the request goes straight to the
+local daemon over a unix socket in the state directory, so spawning where you are
+sitting costs no round trip and works with the relay down. It is the same daemon,
+backend and audit trail either way — the log says `origin=local` instead of
+`origin=relay`, and `seanced status` and `doctor` report whether the socket is up.
+If a remote machine shares this one's name, local wins; reach the remote one by its
+`deviceId`.
+
 Treat `spawn_session` like the remote it is: leave it behind Claude Code's per-tool
 approval rather than allowlisting it.
 

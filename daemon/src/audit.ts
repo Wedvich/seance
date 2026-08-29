@@ -11,9 +11,12 @@ import { logPath } from "./paths.ts";
 
 /**
  * The first question when a line looks unfamiliar. `cli` at 2pm is the human at
- * the keyboard; `relay` at 3am with the phone in a drawer is not.
+ * the keyboard; `relay` at 3am with the phone in a drawer is not. `local` is
+ * neither: something on this box drove the daemon over its op socket without
+ * touching the relay — in practice a Claude session holding the MCP server, so
+ * the `client` tag beside it is the rest of the answer.
  */
-export type SpawnOrigin = "relay" | "cli";
+export type SpawnOrigin = "relay" | "cli" | "local";
 
 export type AuditSink = (line: string) => void | Promise<void>;
 
@@ -143,8 +146,8 @@ export interface SpawnAudit {
 }
 
 /**
- * Both spawn paths audit through here so the two never drift into formats that
- * need two greps. The prompt is recorded as a length plus eight hex of SHA-256,
+ * Every spawn path audits through here so they never drift into formats that
+ * need three greps. The prompt is recorded as a length plus eight hex of SHA-256,
  * never quoted — the log is plaintext at rest, and a hash still answers "was
  * that mine?" without turning it into a transcript of everything ever asked.
  */

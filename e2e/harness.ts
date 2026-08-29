@@ -43,6 +43,8 @@ export function wsUrl(relay: TestRelay, path: string): string {
 
 export interface Stack {
   readonly relay: TestRelay;
+  /** The daemon's own config — the local MCP path reads its `name` to recognise this box. */
+  readonly config: Config;
   readonly fixture: GitFixture;
   readonly stub: ClaudeStub;
   readonly appKey: CryptoKey;
@@ -101,6 +103,7 @@ export async function startStack(base: string): Promise<Stack> {
 
   const stack: Stack = {
     relay,
+    config,
     fixture,
     stub,
     appKey,

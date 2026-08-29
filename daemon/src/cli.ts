@@ -14,9 +14,11 @@ import {
 } from "./config.ts";
 import type { Check } from "./check.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
+import { localSocketReachable } from "./local-client.ts";
+import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
-import { configDir, configPath, logPath, statePath } from "./paths.ts";
+import { configDir, configPath, logPath, socketPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -174,6 +176,7 @@ export async function cmdStatus(): Promise<void> {
   console.log(
     `relay:     ${runtime.connected && alive ? `connected since ${new Date(runtime.connectedSince ?? 0).toISOString()}` : "disconnected"}`,
   );
+  console.log(`socket:    ${(await localSocketReachable()) ? `listening (${socketPath()})` : "not listening"}`);
   const state = await loadOrInitState();
   console.log(
     `repos:     ${state.repos.length}${state.scannedAt !== null ? ` (scanned ${new Date(state.scannedAt).toISOString()})` : ""}`,
@@ -337,6 +340,7 @@ export async function cmdDoctor(): Promise<void> {
 
   console.log("service");
   render(await doctorServiceChecks());
+  render(await localSocketChecks());
   render(await pskStoreChecks());
 
   if (failed) process.exit(1);
