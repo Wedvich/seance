@@ -159,9 +159,12 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
         prompt === "" ? "prompt=none" : `promptLen=${prompt.length} promptSha=${await fingerprintText(prompt)}`;
       // First when present, so `origin=relay client=…` reads as one attribution.
       const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
+      // Only when on, so every ordinary spawn's line stays byte-identical.
+      const planNote = request.plan === true ? "plan=true " : "";
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
+          planNote +
           promptNote,
       );
     },

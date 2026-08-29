@@ -298,10 +298,16 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
         mode: z.enum(["worktree", "here"]).default("worktree"),
         model: z.string().optional().describe('Model for the session, e.g. "opus"'),
         effort: z.string().optional().describe('Reasoning effort, e.g. "medium"'),
+        plan: z
+          .boolean()
+          .optional()
+          .describe(
+            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise.",
+          ),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort }) =>
+    async ({ machine, repo, prompt, title, mode, model, effort, plan }) =>
       withRelay(async (client) => {
         const resolved = resolveMachine(client.getState().machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
@@ -323,6 +329,7 @@ export function buildMcpServer(relay: LazyRelay): McpServer {
           ...(title === undefined ? {} : { title }),
           ...(model === undefined ? {} : { model }),
           ...(effort === undefined ? {} : { effort }),
+          ...(plan === undefined ? {} : { plan }),
         };
         try {
           const reply = await client.request<SpawnResponse>(target.deviceId, "spawn", request);

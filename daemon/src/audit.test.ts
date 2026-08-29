@@ -79,6 +79,16 @@ describe("spawn audit lines", () => {
     expect(emitted()).not.toContain("client=");
     expect(emitted()).toContain('origin=relay repo="myrepo"');
   });
+
+  test("plan mode is recorded, so the log says which spawns started constrained", async () => {
+    await audit.request({ repo: "myrepo", mode: "here", plan: true });
+    expect(emitted()).toContain("plan=true");
+  });
+
+  test("a spawn that did not ask for plan mode carries no plan field at all", async () => {
+    await audit.request({ repo: "myrepo", mode: "here", plan: false });
+    expect(emitted()).not.toContain("plan=");
+  });
 });
 
 describe("cliSink", () => {

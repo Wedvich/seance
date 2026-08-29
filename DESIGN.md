@@ -74,8 +74,8 @@ its Tailscale lockdown defeats the relay's purpose).
 - **The relay is blind**: it routes opaque blobs and stores encrypted
   machine info it cannot read. Relay compromise cannot spawn anything or
   read prompts/repo names.
-- **Structured payloads only**: daemons accept
-  `{repo, prompt, title, mode, model, effort}` and build shell commands
+- **Structured payloads only**: daemons accept the `SpawnRequest` fields
+  (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.
 - **Relay-level bearer token** (shared, in daemon config + PWA) gates
   registration. Anti-junk hygiene only — the PSK is the trust boundary; the
@@ -270,12 +270,15 @@ nothing checked it. The last is the gap they leave.
 - Every external process is invoked as an **argv array** (`exec.ts`). The one
   shell string is the tmux inner command, where every wire-supplied value —
   `title`, `model`, `effort`, worktree name — goes through `shq()`. Nothing
-  wire-supplied may be concatenated into a command unquoted.
+  wire-supplied may be concatenated into a command unquoted. `plan` is the one
+  wire field exempt, and only because it is a boolean whose flag value is a
+  literal: no wire-supplied text reaches the command line, so there is nothing
+  to quote. A future flag carrying wire _text_ is back under the rule.
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
-  effort, prompt length and prompt SHA-256 prefix — never the prompt text,
-  which would make `seanced.log` a transcript of everything ever asked. With a
-  stolen PSK this log is the only thing that says someone else used your
-  machines.
+  effort, plan mode when on, prompt length and prompt SHA-256 prefix — never the
+  prompt text, which would make `seanced.log` a transcript of everything ever
+  asked. With a stolen PSK this log is the only thing that says someone else
+  used your machines.
 - **Both spawn paths audit, through one formatter**, tagged `origin=relay` or
   `origin=cli`. A trail that covered only the relay would make `seanced spawn`
   the quieter way in — precisely the path someone with local shell access would
@@ -547,7 +550,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows. The one live pull — session
   state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, client? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
   verdict embeds a refreshed session list so the PWA updates without a
   second round trip. That list is polled (2s cap) until it holds the window
@@ -797,13 +800,29 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `no_default_branch`, `launch_error`, `claude_died` + captured pane output,
   `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
   basing worktree on local HEAD").
-- **No `--permission-mode` flag** (revised from `/spawn`'s `auto`). Passing it
-  would override the machine's own `settings.json` default, so a box configured
-  for `bypassPermissions` still got prompted for the things `auto` withholds.
-  Omitting it makes a spawned session behave like an in-terminal `claude` on
-  that machine. It is not a tightening: the effective mode is now ambient, and
-  on a machine left at the plain `default` mode a spawn will sit on permission
-  prompts until answered from the phone.
+- **No `--permission-mode` flag by default** (revised from `/spawn`'s `auto`).
+  Passing one unconditionally would override the machine's own `settings.json`
+  default, so a box configured for `bypassPermissions` still got prompted for
+  the things `auto` withholds. Omitting it makes a spawned session behave like
+  an in-terminal `claude` on that machine. It is not a tightening: the effective
+  mode is now ambient, and on a machine left at the plain `default` mode a spawn
+  will sit on permission prompts until answered from the phone.
+- **`plan` is the one opt-in exception** (added 2026-08-29). The bullet above
+  rejects a _default_ mode flag, not a caller-chosen one: `SpawnRequest.plan`
+  is an optional boolean that, when true, emits `--permission-mode plan` and
+  nothing else changes. Absent or false, the command string is byte-identical
+  to what every client sent before, so the ambient default stands. It exists
+  for the MCP tool, where the calling model can read "plan the implementation
+  of X" out of a request and set it — a surface with no human picking flags is
+  exactly where the intent is legible and a picker is not. Deliberately binary:
+  the other five modes either loosen what the machine chose (`bypassPermissions`,
+  `acceptEdits`, `auto`, `dontAsk`) or are the ambient default already
+  (`manual`), and a remote loosening the machine's own setting is the thing the
+  bullet above refuses. Plan only ever constrains. Not exposed in the PWA or
+  Raycast — a human at a picker can say "plan this" in the prompt — and
+  `seanced spawn` does not take it either; the field is on the wire, so adding
+  either later is a client change with no protocol change. Old daemons ignore
+  it, exactly as they ignore `client`.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in `~/.claude.json`, or
   under `$CLAUDE_CONFIG_DIR` when set — the daemon mirrors claude's own
@@ -1145,7 +1164,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the registry settle on every call), always-on (idle sockets × sessions).
 - **Tools**: `list_machines` (registry + presence, works for offline machines
   because repos ride the register blob), `get_sessions { machine }`, and
-  `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort? }`
+  `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort?, plan? }`
   mapping 1:1 onto the `sessions`/`spawn` ops with the existing
   `OP_TIMEOUT_MS`. `machine` is the config `name` resolved against the live
   registry; ambiguity or a miss returns candidates, `deviceId` is the

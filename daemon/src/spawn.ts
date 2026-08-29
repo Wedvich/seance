@@ -141,9 +141,10 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   // forked child under a compound command leaves pane_current_command as the
   // shell, hiding the window from session detection.
   //
-  // No `--permission-mode`: the flag would override whatever the machine's
-  // settings.json chose, so the session inherits the same default an
-  // in-terminal `claude` would get on that box.
+  // `--permission-mode` is omitted unless the caller asked for plan mode: passing one
+  // unconditionally would override whatever the machine's settings.json chose, so by
+  // default the session inherits the same mode an in-terminal `claude` gets on that box.
+  // `plan` is the one exception, and only ever a tightening the caller opted into.
   //
   // `--remote-control [name]` takes an optional value, so it sits before the
   // other flags: trailing, it swallowed a here-mode seed prompt as the session
@@ -152,6 +153,8 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   const base =
     `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
+    // literal value, so nothing wire-supplied reaches the command line — no shq() needed
+    `${request.plan === true ? " --permission-mode plan" : ""}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
   if (request.prompt === undefined || request.prompt === "") {
     return { command: base, seedDir: null };

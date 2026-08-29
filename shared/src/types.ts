@@ -234,6 +234,14 @@ export interface SpawnRequest {
   readonly model?: string;
   readonly effort?: string;
   /**
+   * Start the session in plan mode (`--permission-mode plan`). Absent or false leaves the
+   * flag off entirely, so the session inherits the machine's own settings.json default —
+   * the standing behaviour for every other caller. Boolean, not free text: the flag's value
+   * is a literal, so unlike `title`/`model`/`effort` nothing wire-supplied reaches the
+   * command line. Optional: older clients don't send it, older daemons ignore it.
+   */
+  readonly plan?: boolean;
+  /**
    * Which app-role client formed the request — audit trail only, so
    * `origin=relay` stays separable into "my phone" vs "an agent on my
    * laptop". Our senders stamp a `SpawnClient`; the wire keeps `string` so a

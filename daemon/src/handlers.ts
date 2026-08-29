@@ -38,6 +38,7 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   for (const key of ["prompt", "title", "model", "effort", "client"]) {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
+  if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
   return true;
 }
 

@@ -210,6 +210,27 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       await killWindow(outcome.window);
     }
   });
+
+  test("plan mode passes --permission-mode plan, and every other spawn passes no mode at all", async () => {
+    await rm(stub.argvFile, { force: true });
+    const planned = await spawnSession({ repo: "myrepo", mode: "here", title: "Planned", plan: true }, repos, WAIT);
+    try {
+      const argv = await stub.argv();
+      expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("plan");
+    } finally {
+      await killWindow(planned.window);
+    }
+
+    // The regression guard for the PWA, the CLI and every pre-`plan` client:
+    // omitting the field must leave the machine's own settings.json in charge.
+    await rm(stub.argvFile, { force: true });
+    const ambient = await spawnSession({ repo: "myrepo", mode: "here", title: "Ambient" }, repos, WAIT);
+    try {
+      expect(await stub.argv()).not.toContain("--permission-mode");
+    } finally {
+      await killWindow(ambient.window);
+    }
+  });
 });
 
 // Only the branches the spawn case above cannot reach: an absent tag, a tag

@@ -244,6 +244,22 @@ describe("mcp tools", () => {
     const request = fake.requests[0]?.payload as SpawnRequest;
     expect(request.client).toBe("mcp");
     expect(request.mode).toBe("worktree");
+    // Nobody asked for plan mode, so the field must not ride along and flip it on.
+    expect(request.plan).toBeUndefined();
+    lazy.stop();
+  });
+
+  test("spawn_session forwards plan mode when the caller asks for it", async () => {
+    const fake = fakeRelay([machine()], () => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance", prompt: "plan the thing", plan: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const request = fake.requests[0]?.payload as SpawnRequest;
+    expect(request.plan).toBe(true);
     lazy.stop();
   });
 
