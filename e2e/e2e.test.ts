@@ -355,11 +355,12 @@ describe("mcp ↔ relay ↔ daemon", () => {
     expect(stack.daemon.localSocket).not.toBeNull();
 
     // The daemon registers before its scan finishes; the local path reads the
-    // same set from state.json, so wait for it to land there.
+    // same set from state.json, so wait for it to land there. `repos()` is read
+    // per call, so one `localMachine` sees the scan land without being rebuilt.
     let local: LocalMachine | null = null;
     await pollUntil(async () => {
-      local = await localMachine(stack.config);
-      return local !== null && local.repos.some((repo) => repo.name === "myrepo");
+      local ??= await localMachine(stack.config);
+      return local !== null && (await local.repos()).some((repo) => repo.name === "myrepo");
     }, "the fixture repo in state.json");
     if (local === null) throw new Error("no local machine");
 

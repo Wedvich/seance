@@ -131,24 +131,17 @@ async function dispatch(
   if (reply !== null) send(sock, conn, reply);
 }
 
-/** True while the path is ours to replace: nothing is listening on it. */
-async function stale(path: string): Promise<boolean> {
-  try {
-    const probe = await Bun.connect({ unix: path, socket: { data: (): void => {}, error: (): void => {} } });
-    probe.end();
-    return false;
-  } catch {
-    return true;
-  }
-}
-
 /**
  * The run directory is the access control (see `runDir`), so a directory we do
  * not own is not one to bind in — its mode is not ours to fix and its contents
  * are not ours to trust. Returns the problem, or null when the directory is
  * ready.
+ *
+ * `enforceMode` is false for a caller-supplied path: its parent is not ours to
+ * chmod, and an explicit path under a shared directory would silently tighten
+ * that directory to 0700. The uid check still applies.
  */
-async function prepareRunDir(dir: string): Promise<string | null> {
+async function prepareRunDir(dir: string, enforceMode: boolean): Promise<string | null> {
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const info = await stat(dir);
@@ -156,7 +149,7 @@ async function prepareRunDir(dir: string): Promise<string | null> {
     if (uid !== undefined && info.uid !== uid) return `${dir} belongs to another user`;
     // `mode` on mkdir only applies where it creates, so a directory left behind
     // by an older daemon is tightened here, on every start.
-    if ((info.mode & 0o777) !== 0o700) await chmod(dir, 0o700);
+    if (enforceMode && (info.mode & 0o777) !== 0o700) await chmod(dir, 0o700);
     return null;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
@@ -170,9 +163,10 @@ async function prepareRunDir(dir: string): Promise<string | null> {
  */
 export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSocketHandle> {
   const path = opts.path ?? socketPath();
-  const dir = opts.path === undefined ? runDir() : dirname(path);
+  const ownDir = opts.path === undefined;
+  const dir = ownDir ? runDir() : dirname(path);
 
-  const dirProblem = await prepareRunDir(dir);
+  const dirProblem = await prepareRunDir(dir, ownDir);
   if (dirProblem !== null) {
     log.warn(`local socket: not listening — ${dirProblem}`);
     return { path: null, stop: (): void => {} };
@@ -233,7 +227,7 @@ export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSock
       log.warn(`local socket: not listening at ${path} — ${err instanceof Error ? err.message : String(err)}`);
       return { path: null, stop: (): void => {} };
     }
-    if (!(await stale(path))) {
+    if (await localSocketReachable(path)) {
       log.warn(`local socket: not listening — another daemon already owns ${path}`);
       return { path: null, stop: (): void => {} };
     }

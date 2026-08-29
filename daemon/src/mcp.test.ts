@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import type { Machine, RelayState, RequestOp, SpawnRequest } from "@seance/shared";
+import type { Machine, RelayState, RepoEntry, RequestOp, SpawnRequest } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import {
@@ -89,7 +89,7 @@ function fakeLocal(
     deviceId: "device-1",
     name: "MacBook Pro",
     platform: "darwin",
-    repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }],
+    repos: () => Promise.resolve([{ name: "seance", path: "/repos/seance", defaultBranch: "main" }]),
     requests,
     request: <T>(op: RequestOp, payload: unknown): Promise<T> => {
       requests.push({ op, payload });
@@ -436,7 +436,7 @@ describe("the local short circuit", () => {
   test("no local daemon reports that, rather than silently paying a round trip", async () => {
     const fake = fakeRelay([machine()]);
     const local = fakeLocal(() => {
-      throw new LocalUnavailable("no daemon listening at /run/seanced.sock — is seanced running?");
+      throw new LocalUnavailable("no daemon listening at /run/seanced.sock (ENOENT)");
     });
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, local);
@@ -446,7 +446,10 @@ describe("the local short circuit", () => {
       arguments: { machine: "MacBook Pro", repo: "seance" },
     });
     expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("is seanced running");
+    // The remediation is attached here, not baked into the thrown message, so it
+    // reads the same for a socket that closed mid-request as for one never there.
+    expect(toolText(result)).toContain("no daemon listening at /run/seanced.sock (ENOENT)");
+    expect(toolText(result)).toContain("is seanced running? try `seanced status`");
     expect(fake.requests).toHaveLength(0);
     lazy.stop();
   });
@@ -464,6 +467,67 @@ describe("the local short circuit", () => {
     expect(toolText(result)).toContain("its repos: seance");
     expect(local.requests).toHaveLength(0);
     lazy.stop();
+  });
+
+  test("a repo cloned after the MCP server started is spawnable without a restart", async () => {
+    // `seanced mcp` outlives many rescans, so the repo set is read per call. A
+    // snapshot taken at startup rejects this spawn with no way to recover short
+    // of restarting the process — `rescan` is deliberately not a local op.
+    let repos: RepoEntry[] = [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }];
+    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/fresh", sessions: [] }), {
+      repos: () => Promise.resolve(repos),
+    });
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
+    const client = await connectedClient(lazy, local);
+
+    const before = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "fresh" },
+    });
+    expect(before.isError).toBe(true);
+    expect(local.requests).toHaveLength(0);
+
+    repos = [...repos, { name: "fresh", path: "/repos/fresh", defaultBranch: "main" }];
+    const after = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "fresh" },
+    });
+    expect(after.isError).toBeFalsy();
+    expect(local.requests).toHaveLength(1);
+    lazy.stop();
+  });
+
+  test("an empty repo set defers to the daemon rather than denying every spawn", async () => {
+    // What a process started before the daemon's first scan landed sees. Denying
+    // on it would reject every local repo until the MCP server was restarted.
+    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }), {
+      repos: () => Promise.resolve([]),
+    });
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
+    const client = await connectedClient(lazy, local);
+
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance" },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(local.requests).toHaveLength(1);
+    lazy.stop();
+  });
+
+  test("a handler that failed reads as an error, not an empty session list", async () => {
+    // `ErrorResponse` is what a throwing handler answers with; neither client
+    // treats it as a failure, so an unchecked reply renders as `undefined`.
+    const failure = { ok: false, code: "internal_error", message: "tmux is not installed" };
+    for (const via of ["local", "relay"] as const) {
+      const local = via === "local" ? fakeLocal(() => failure) : null;
+      const lazy = new LazyRelay({ create: () => fakeRelay([machine()], () => failure) });
+      const client = await connectedClient(lazy, local);
+      const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("tmux is not installed");
+      lazy.stop();
+    }
   });
 
   test("list_machines marks which entry is this box", async () => {

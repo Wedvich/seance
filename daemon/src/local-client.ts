@@ -15,6 +15,8 @@ import { socketPath } from "./paths.ts";
 /** Same cap as the server; a reply that runs past it is not one to parse. */
 const MAX_REPLY_BYTES = 1_048_576;
 
+const EMPTY = Buffer.alloc(0);
+
 /**
  * The local path could not be reached at all — no daemon, or no socket. Distinct
  * from a daemon that answered with an error, because only this one means "the
@@ -64,13 +66,31 @@ export async function localRequest<T>(
   const path = opts.path ?? socketPath();
   const request: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
   const settled = deferred();
-  let inbound = Buffer.alloc(0);
+  let inbound = EMPTY;
+  let outbound = EMPTY;
   let done = false;
 
   const finish = (fn: () => void): void => {
     if (done) return;
     done = true;
     fn();
+  };
+
+  /**
+   * Mirrors the server's `flush`: Bun's write is short under backpressure and
+   * keeps no remainder, and a half-written request has no newline — the daemon
+   * would buffer it and answer nothing until the op timed out. A spawn prompt is
+   * free text, so it meets backpressure easily.
+   */
+  const flush = (sock: Socket<undefined>): void => {
+    if (outbound.length === 0) return;
+    try {
+      const written = sock.write(outbound);
+      outbound = written >= outbound.length ? EMPTY : outbound.subarray(written);
+    } catch (err) {
+      outbound = EMPTY;
+      finish(() => settled.reject(new LocalUnavailable(err instanceof Error ? err.message : String(err))));
+    }
   };
 
   let socket: Socket<undefined>;
@@ -103,11 +123,14 @@ export async function localRequest<T>(
         error: (_sock, err: Error): void => {
           finish(() => settled.reject(new LocalUnavailable(err.message)));
         },
+        drain: (sock): void => flush(sock),
       },
     });
   } catch (err) {
+    // Remediation belongs to `localFailureText`, which carries it for every
+    // `LocalUnavailable`, not just this one.
     throw new LocalUnavailable(
-      `no daemon listening at ${path} (${(err as NodeJS.ErrnoException).code ?? String(err)}) — is seanced running? try \`seanced status\``,
+      `no daemon listening at ${path} (${(err as NodeJS.ErrnoException).code ?? String(err)})`,
     );
   }
 
@@ -117,7 +140,8 @@ export async function localRequest<T>(
   }, timeoutMs);
 
   try {
-    socket.write(`${JSON.stringify(request)}\n`);
+    outbound = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
+    flush(socket);
     const reply = await settled.promise;
     // One connection per request, so this can only be our own reply — checked
     // anyway, because a mismatch means the two ends disagree about the protocol

@@ -7,6 +7,7 @@ import {
   importPsk,
   RelayClient,
   RequestFailure,
+  type ErrorResponse,
   type Machine,
   type RelayState,
   type RepoEntry,
@@ -196,8 +197,12 @@ export interface LocalMachine {
   readonly deviceId: string;
   readonly name: string;
   readonly platform: string;
-  /** The daemon's own persisted scan set — it rewrites state.json on every rescan. */
-  readonly repos: readonly RepoEntry[];
+  /**
+   * Re-read per call, not snapshotted: the daemon rewrites state.json on every
+   * rescan and `seanced mcp` outlives many of them. A snapshot rejects a repo
+   * cloned since startup, and rejects every repo if the first scan hadn't landed.
+   */
+  readonly repos: () => Promise<readonly RepoEntry[]>;
   readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T>;
 }
 
@@ -260,23 +265,35 @@ function describeMachine(machine: Machine, local: LocalMachine | null): Record<s
 }
 
 /** The local machine as `list_machines` renders it when the relay cannot be reached at all. */
-function describeLocal(local: LocalMachine): Record<string, unknown> {
+async function describeLocal(local: LocalMachine): Promise<Record<string, unknown>> {
   return {
     name: local.name,
     deviceId: local.deviceId,
     platform: local.platform,
     connected: true,
-    repos: local.repos.map((repo) => repo.name),
+    repos: (await local.repos()).map((repo) => repo.name),
     local: true,
   };
 }
 
-/** A local op could not be reached or refused; `LocalUnavailable` is the one worth naming a fix for. */
+/** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
 function localFailureText(op: string, err: unknown): string {
+  const detail = err instanceof Error ? err.message : String(err);
   if (err instanceof LocalUnavailable) {
-    return `${op} failed: ${err.message}`;
+    return `${op} failed: ${detail} — is seanced running? try \`seanced status\``;
   }
-  return `${op} failed: ${err instanceof Error ? err.message : String(err)}`;
+  return `${op} failed: ${detail}`;
+}
+
+/**
+ * Both legs need this: a handler that throws answers with an `ErrorResponse`, and
+ * neither client treats that as a failure — `RequestFailure` is the relay refusing
+ * to deliver, not the daemon refusing to serve. Unchecked, `sessions` is undefined
+ * and `JSON.stringify` hands `textResult` a non-string.
+ */
+function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
+  if ("ok" in reply) return errorResult(`get_sessions failed (${reply.code}): ${reply.message}`);
+  return textResult(JSON.stringify(reply.sessions, null, 2));
 }
 
 function failureText(op: string, err: unknown): string {
@@ -337,7 +354,7 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         return textResult(
           JSON.stringify(
             {
-              machines: [describeLocal(local)],
+              machines: [await describeLocal(local)],
               note: `the relay is unreachable (${failureText("connect", err)}) — only this machine is listed, and only local spawns will work`,
             },
             null,
@@ -366,8 +383,7 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
     async ({ machine }) => {
       if (local !== null && isLocalRef(local, machine)) {
         try {
-          const reply = await local.request<SessionsResponse>("sessions", {});
-          return textResult(JSON.stringify(reply.sessions, null, 2));
+          return renderSessions(await local.request<SessionsResponse | ErrorResponse>("sessions", {}));
         } catch (err) {
           return errorResult(localFailureText("get_sessions", err));
         }
@@ -376,8 +392,9 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         const resolved = resolveMachine(client.getState().machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         try {
-          const reply = await client.request<SessionsResponse>(resolved.machine.deviceId, "sessions", {});
-          return textResult(JSON.stringify(reply.sessions, null, 2));
+          return renderSessions(
+            await client.request<SessionsResponse | ErrorResponse>(resolved.machine.deviceId, "sessions", {}),
+          );
         } catch (err) {
           return errorResult(failureText("get_sessions", err));
         }
@@ -433,9 +450,12 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
       if (local !== null && isLocalRef(local, machine)) {
         // Same pre-check as the relay path and for the same reason — the daemon
         // resolves the repo authoritatively, this just answers with candidates
-        // instead of costing a round trip to be told `repo_not_found`.
-        if (!local.repos.some((entry) => entry.name === repo)) {
-          const known = local.repos.map((entry) => entry.name).join(", ");
+        // instead of costing a round trip to be told `repo_not_found`. An empty
+        // set means the first scan hasn't landed, not that there are no repos:
+        // deny nothing then, and let the daemon answer.
+        const repos = await local.repos();
+        if (repos.length > 0 && !repos.some((entry) => entry.name === repo)) {
+          const known = repos.map((entry) => entry.name).join(", ");
           return errorResult(`${local.name} has no repo named "${repo}" — its repos: ${known}`);
         }
         try {
@@ -480,7 +500,8 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
     deviceId: state.deviceId,
     name: config.name,
     platform: process.platform,
-    repos: state.repos,
+    // Falls back to the startup read: a transient failure shouldn't read as "no repos".
+    repos: async (): Promise<readonly RepoEntry[]> => (await readState())?.repos ?? state.repos,
     request: <T>(op: RequestOp, payload: unknown): Promise<T> => localRequest<T>(op, payload),
   };
 }

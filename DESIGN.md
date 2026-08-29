@@ -1183,7 +1183,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   below rather than looping through the relay: uniformity is not worth an
   internet round trip to reach the machine the server is running on. Rejected:
   routing it through the relay like any other target, which is simpler to
-  describe and pays Cloudflare's latency for a process on the same box.
+  describe and pays Cloudflare's latency for a process on the same box. The
+  local repo pre-check re-reads `state.json` per call and is advisory only: the
+  daemon still resolves the repo authoritatively, an MCP process outlives many
+  rescans, and an empty set means the first scan has not landed — so it denies
+  nothing then rather than rejecting every repo until a restart.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -1312,6 +1316,11 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   JSON capped at 1 MiB — past it the peer is dropped, since a truncated frame is
   not a request. The newline is matched as a _byte_, which is safe because 0x0a
   never occurs inside a multi-byte UTF-8 sequence and prompts carry non-ASCII.
+  **Both ends queue and drain their writes.** Bun's `write` is short under
+  backpressure and keeps no remainder, and a spawn is large in both directions —
+  a free-text prompt up, a refreshed session list down. A half-written frame has
+  no newline, so the far end buffers it and answers nothing until the op times
+  out: the symptom is a 90s timeout, never a parse error.
 - **Locality is decided from files, not from the socket.** The MCP server
   compares the target against `config.name` and the `deviceId` in `state.json` —
   a deviceId exactly, a name case-insensitively, the same precedence

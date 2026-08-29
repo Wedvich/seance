@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Plain, RepoEntry, SessionsResponse, SpawnResponse } from "@seance/shared";
@@ -147,6 +147,35 @@ describe("the local op socket", () => {
     expect(reply.ok).toBe(false);
     if (reply.ok) throw new Error("expected a failure");
     expect(reply.code).toBe("repo_not_found");
+  });
+
+  test("a request too big for one write still arrives whole", async () => {
+    // The client's write is short under backpressure exactly as the server's is.
+    // Unqueued, the daemon sees a fragment with no newline, dispatches nothing,
+    // and the caller learns that only when the op times out — so the tell for a
+    // regression here is the timeout, not a wrong answer. `nope` keeps the
+    // backend out of it: resolving the repo is enough to prove the frame landed.
+    const prompt = "x".repeat(400_000);
+    const reply = await localRequest<SpawnResponse>(
+      "spawn",
+      { repo: "nope", mode: "here", prompt, client: "mcp" },
+      { path: sockPath, timeoutMs: 5_000 },
+    );
+    expect(reply.ok).toBe(false);
+    if (reply.ok) throw new Error("expected a failure");
+    expect(reply.code).toBe("repo_not_found");
+  });
+
+  test("an explicit path does not drag its directory to 0700", async () => {
+    // The mode is enforced for `runDir()`, which this module owns. A caller's
+    // own directory is not ours to tighten.
+    const loose = join(base, "loose");
+    await mkdir(loose, { recursive: true });
+    await chmod(loose, 0o755);
+    const handle = await startLocalSocket({ handle: () => Promise.resolve(null), path: join(loose, "s.sock") });
+    expect(handle.path).not.toBeNull();
+    expect((await stat(loose)).mode & 0o777).toBe(0o755);
+    handle.stop();
   });
 
   test("ops outside the allowlist are refused before they reach the handler", async () => {
