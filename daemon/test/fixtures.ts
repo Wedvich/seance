@@ -104,10 +104,13 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     // the redirect creates the file before printf writes a byte, so existence is
     // not the signal: a read inside that window returns "" and a `not.toContain`
     // assertion passes vacuously. The trailing NUL is what says the write landed.
-    await pollUntil(
-      async () => (await Bun.file(argvFile).text().catch(() => "")).endsWith("\0"),
-      `claude stub argv at ${argvFile}`,
-    );
+    const written = async (): Promise<boolean> => {
+      const record = await Bun.file(argvFile)
+        .text()
+        .catch(() => "");
+      return record.endsWith("\0");
+    };
+    await pollUntil(written, `claude stub argv at ${argvFile}`);
     return (await Bun.file(argvFile).text()).split("\0").slice(0, -1);
   };
   return { ok, failing, version: "9.9.9", argvFile, argv };
