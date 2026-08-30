@@ -131,7 +131,7 @@ describe("the local op socket", () => {
     const windows = await tmux(["list-windows", "-t", "main", "-F", "#{window_name}"]);
     expect(windows.stdout).toContain("Local Op");
     const argv = await stub.argv();
-    expect(argv).toContain("local-op @ testbox");
+    expect(argv).toContain("local-op (testbox)");
 
     expect(logged()).toContain('audit spawn origin=local client="mcp" repo="myrepo"');
     expect(logged()).toContain("audit spawn origin=local ok window=");

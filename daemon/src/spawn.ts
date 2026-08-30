@@ -25,18 +25,22 @@ export function slugify(src: string): string {
 /**
  * The remote-control session name — what the Claude UIs list, and deliberately
  * not the tmux window name, which stays bare because the host is never in
- * question locally. Reads as `task @ host` (spaces so the tag is scannable):
- * the task leads, since that is what you scan a session list for, and the
- * machine trails as the qualifier.
- * `slug` is already slugified, so it can carry no `@` of its own and the
- * suffix can never double up. The tag is gated on its *slugified* form, not
- * a trim: a tag with no ASCII alphanumerics ("🖥️", "###") would otherwise
- * fall through to slugify's "session" fallback and stamp a phantom
- * `@ session` host on every spawn.
+ * question locally. Reads as `task (host)`: the task leads, since that is what
+ * you scan a session list for, and the machine trails as the qualifier.
+ * Parenthesised, never `@`: Claude Code's cross-session addressing reads `@`
+ * as team-qualifier syntax, so an `@` in the name makes the session
+ * unaddressable by `SendMessage` and it is assigned no `[ref]` to fall back
+ * on. Brackets are out for the same class of reason — they collide with the
+ * `name [ref]` disambiguator.
+ * `slug` is already slugified, so it can carry no parens of its own and the
+ * suffix can never nest. The tag is gated on its *slugified* form, not a
+ * trim: a tag with no ASCII alphanumerics ("🖥️", "###") would otherwise fall
+ * through to slugify's "session" fallback and stamp a phantom `(session)`
+ * host on every spawn.
  */
 export function sessionName(slug: string, tag?: string): string {
   const suffix = tag === undefined ? "" : slugCore(tag);
-  return suffix === "" ? slug : `${slug} @ ${suffix}`;
+  return suffix === "" ? slug : `${slug} (${suffix})`;
 }
 
 /**

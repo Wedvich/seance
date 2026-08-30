@@ -769,21 +769,28 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
 - **Session name vs window name** (added 2026-08-21): the name passed to
   `claude -n` and the tmux window name are computed separately. The window
   keeps the request's title verbatim; the session name is the worktree slug
-  plus an optional ` @ <machineTag>` suffix, because the Claude UIs (web,
+  plus an optional ` (<machineTag>)` suffix, because the Claude UIs (web,
   desktop, mobile) list sessions from every machine in one place and
   otherwise give no clue which box a session is on. Suffix, not prefix: those
   lists are recency-ordered, so a leading tag buys no grouping and only costs
-  the left edge you scan for the task. `@` reads as `user@host` with air
-  around it — spaced so the tag is scannable in a dense session list; the
-  name is only ever an argv value through `shq()`, so the spaces cost
-  nothing. Locally the window name stays bare — the
+  the left edge you scan for the task. Parenthesised, not `@` (which this was
+  until 2026-08-30): Claude Code's cross-session addressing parses `@` in a
+  `SendMessage` target as team-qualifier syntax, so an `@` in the session
+  name makes the session unaddressable by its peers — and such a session is
+  assigned no `[ref]`, so there is no fallback address either. Verified
+  empirically across eight live sessions: `@` anywhere in the name fails in
+  both directions (a reply cannot use the `from-name` it arrives under),
+  while spaces, dots, slashes and parens all round-trip. Brackets round-trip
+  too but collide with the `name [ref]` disambiguator and are rejected on
+  legibility. The name is only ever an argv value through `shq()`, so the
+  spaces and parens cost nothing. Locally the window name stays bare — the
   machine is obvious from the statusline. `machineTag` is never inferred from
   `name`: that field is a display string ("Martin's MacBook Pro") and seeds
   from `hostname()`, so inferring would suffix every existing install with
   something long and ugly on upgrade. Absent means no suffix — though the
   base name still changes for every install on upgrade: pre-2026-08-21 the
   session name was the request title near-verbatim, now it is the slug.
-  Rejected: a `{slug}@{machine}`
+  Rejected: a `{slug} ({machine})`
   template in config (a templating language for a decision made once, and
   machines drift out of sync), and a client-supplied tag on `SpawnRequest`
   (the tag stops identifying the host, which is its whole purpose).
