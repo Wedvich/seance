@@ -6,6 +6,7 @@ import {
   CLOSE_UNAUTHORIZED,
   OP_TIMEOUT_MS,
   TOKEN_PARAM,
+  type AppFrame,
   type Envelope,
   type MachineInfo,
   type Plain,
@@ -77,12 +78,10 @@ export interface RelayState {
   readonly status: RelayStatus;
   /** Set only for a permanent close; the client stops reconnecting. */
   readonly rejection: "unauthorized" | "bad-request" | null;
-  /** Decrypting entries, minus any removed by hand while offline. */
+  /** Entries whose `info` decrypted; the list the app shows. */
   readonly machines: readonly Machine[];
   /** Total entries the relay holds, including any that did not decrypt. */
   readonly registrySize: number;
-  /** deviceIds removed by hand; they come back the moment they connect again. */
-  readonly hidden: readonly string[];
   /** Entries whose info blob did not decrypt with this key — a stale PSK somewhere. */
   readonly ignored: number;
   /**
@@ -135,7 +134,6 @@ const INITIAL_STATE: RelayState = {
   rejection: null,
   machines: [],
   registrySize: 0,
-  hidden: [],
   ignored: 0,
   skewed: 0,
   settling: true,
@@ -170,7 +168,8 @@ function parseRegistryView(value: unknown): RegistryView | null {
 type ParsedFrame =
   | { readonly t: "registry"; readonly entries: readonly RegistryView[]; readonly skipped: number }
   | { readonly t: "msg"; readonly env: Envelope }
-  | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string };
+  | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string }
+  | { readonly t: "forget-refused"; readonly deviceId: string; readonly code: string };
 
 /**
  * Every field the handlers below touch, checked here — bounds stay the relay's
@@ -220,6 +219,12 @@ function parseFrame(text: string): ParsedFrame | null {
     if (typeof value["code"] !== "string") return null;
     return { t: "undeliverable", to: value["to"], iv: value["iv"], code: value["code"] };
   }
+  if (value["t"] === "forget-refused") {
+    // Raw code for the same reason as `undeliverable`: a refusal minted after
+    // this build still says the entry is still there, which is the whole fact.
+    if (typeof value["deviceId"] !== "string" || typeof value["code"] !== "string") return null;
+    return { t: "forget-refused", deviceId: value["deviceId"], code: value["code"] };
+  }
   return null;
 }
 
@@ -234,10 +239,6 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.lastSeen === b.lastSeen &&
     a.connected === b.connected
   );
-}
-
-function sameIds(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
 /**
@@ -284,13 +285,6 @@ export class RelayClient {
    * looks like it did nothing. Spent by the register that overtakes it.
    */
   readonly #scans = new Map<string, RescanResponse>();
-  /**
-   * deviceIds removed from the list by hand. Held here rather than in the store so
-   * `machines` stays "what to show" for every reader, and dropped again the moment
-   * the machine connects — a removal hides an absence, it does not forget a machine.
-   */
-  readonly #hidden: Set<string>;
-
   #entries: readonly RegistryView[] = [];
   #state: RelayState = INITIAL_STATE;
   #socket: WebSocket | null = null;
@@ -327,8 +321,6 @@ export class RelayClient {
     /** Overrides for the shared heartbeat cadence; tests use them to avoid real 30s beats. */
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
-    /** deviceIds removed in an earlier run; a reload must not resurrect them. */
-    readonly hidden?: readonly string[];
     /** Wire-log sink. Defaults to stdout; a consumer whose stdout is spoken for (the MCP server's JSON-RPC) passes its own. */
     readonly log?: (line: string) => void;
   }) {
@@ -341,7 +333,6 @@ export class RelayClient {
     this.#registrySettleMs = opts.registrySettleMs ?? REGISTRY_SETTLE_MS;
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
-    this.#hidden = new Set(opts.hidden ?? []);
     this.#log = opts.log ?? ((line) => console.log(line));
   }
 
@@ -362,13 +353,22 @@ export class RelayClient {
   getState = (): RelayState => this.#state;
 
   /**
-   * Drops an offline machine from the list until it connects again. Connected ones
-   * are unhidden by the very next rebuild, so calling this on one is a no-op.
+   * Deletes a machine's registry entry at the relay, for every app rather than
+   * just this one. Fire-and-forget: the registry push the relay sends back is
+   * the acknowledgement, and a refusal (the machine turned out to be connected)
+   * arrives as its own frame and is logged, not modelled — the entry the caller
+   * can see is what says whether it worked. Nothing happens with no socket; the
+   * relay is the only place the list lives.
    */
-  hide(deviceId: string): void {
-    if (this.#hidden.has(deviceId)) return;
-    this.#hidden.add(deviceId);
-    this.#rebuildMachines();
+  forget(deviceId: string): void {
+    const socket = this.#socket;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) {
+      this.#wireLog("dropped", `forget=${quote(deviceId)} reason=disconnected`);
+      return;
+    }
+    const frame: AppFrame = { t: "forget", deviceId };
+    socket.send(JSON.stringify(frame));
+    this.#wireLog("forget", `to=${quote(deviceId)}`);
   }
 
   /**
@@ -638,6 +638,14 @@ export class RelayClient {
       this.#onUndeliverable(frame.to, frame.iv, frame.code);
       return;
     }
+    if (frame.t === "forget-refused") {
+      // Only reachable as a race: the app offers removal for an offline machine
+      // and this says the relay holds a live socket for it. Left to resolve
+      // itself — either the machine really is up and the next push shows it, or
+      // its socket is dead and the relay's sweep closes it within three beats.
+      this.#wireLog("forget-refused", `to=${quote(frame.deviceId)} code=${quote(frame.code)}`);
+      return;
+    }
     await this.#onMessage(frame.env);
   }
 
@@ -748,7 +756,6 @@ export class RelayClient {
     const priorById = new Map(previous.map((machine) => [machine.deviceId, machine]));
     const machines: Machine[] = [];
     let reused = 0;
-    let hiddenHere = 0;
     let skewedHere = 0;
     for (const entry of this.#entries) {
       const info = this.#infoCache.get(entry.info.iv);
@@ -766,11 +773,6 @@ export class RelayClient {
       const stillProvenOffline = markedAt !== undefined && entry.lastSeen <= markedAt;
       if (!stillProvenOffline) this.#provenOffline.delete(entry.deviceId);
       const connected = entry.connected && !stillProvenOffline;
-      if (connected) this.#hidden.delete(entry.deviceId);
-      else if (this.#hidden.has(entry.deviceId)) {
-        hiddenHere += 1;
-        continue;
-      }
       const built: Machine = {
         deviceId: entry.deviceId,
         name: info.name,
@@ -788,17 +790,15 @@ export class RelayClient {
         machines.push(prior);
       } else machines.push(built);
     }
-    const hidden = [...this.#hidden];
     this.#patch({
       // Every push re-derives the whole list, and the app connect behind every
       // resume re-sends a registry that is usually identical. Handing back the
       // previous array is what lets #patch — and Preact — skip the render.
       machines: reused === machines.length && reused === previous.length ? previous : machines,
       registrySize: this.#entries.length + this.#skippedEntries,
-      hidden: sameIds(hidden, this.#state.hidden) ? this.#state.hidden : hidden,
-      // Counted off entries the registry actually holds, so a removal never
-      // reads as a key mismatch — and skew is kept out for the same reason.
-      ignored: this.#entries.length - machines.length - hiddenHere - skewedHere,
+      // Counted off entries the registry actually holds, so skew never reads as
+      // a key mismatch.
+      ignored: this.#entries.length - machines.length - skewedHere,
       skewed: skewedHere + this.#skippedEntries,
       ...extra,
     });

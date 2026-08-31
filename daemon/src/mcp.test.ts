@@ -43,7 +43,6 @@ function fakeRelay(
     rejection: status === "rejected" ? "unauthorized" : null,
     machines,
     registrySize: machines.length,
-    hidden: [],
     ignored: 0,
     skewed: 0,
     settling: false,

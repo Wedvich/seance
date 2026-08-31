@@ -248,6 +248,12 @@ the footer counts what is already running on the machine you picked. The repo li
 comes from that daemon's last scan — **↻ Rescan repos** in the repository picker
 refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
 
+A machine you have retired keeps its place in the picker with a stale last-seen —
+the relay never expires an entry. The bin on an offline row deletes it there, so it
+disappears on every device you use the app from, and returns only if that machine's
+daemon connects again. `seanced uninstall` deletes it for you on the way out; under
+`--system` it can't (as root it would read the wrong user's config) and says so.
+
 There is no title field: the daemon names the tmux window after the prompt.
 
 <p align="center">

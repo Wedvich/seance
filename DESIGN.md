@@ -365,9 +365,9 @@ The Durable Object persists a machine registry:
   alternative was presence that lies for hours. The `undeliverable` frame
   below remains the backstop for the residual ≤ ~2.5 min window.
 - Offline machines stay listed with last-seen (an asleep PC is actionable;
-  a vanished one is confusing). Entries are permanent, overwritten only by a
-  later register. **No forget verb and no TTL in v1** — deliberately, so the
-  bearer token authorizes nothing destructive (see below).
+  a vanished one is confusing). An entry is overwritten by a later register and
+  removed only by an app's `forget` (see below); **there is no TTL** — nothing
+  expires a machine you own just because it slept through a holiday.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
@@ -434,6 +434,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `update-available`               | `daemon/src/run.ts` via `broadcast()`             | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
 | `registry`                          | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
 | `undeliverable`                     | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
+| `forget`                            | `shared/src/app-client.ts`                        | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
+| `forget-refused`                    | `relay/src/hub.ts`                                | `shared/src/app-client.ts` — logged, never modelled                                                             |
 | `"ping"` / `"pong"`                 | both socket legs                                  | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
 | envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                            | same file — both ends share it, or nothing decrypts                                                             |
 | ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
@@ -478,11 +480,49 @@ needs no polling); `msg { envelope }` for daemon replies; and
   the plain 401. `/daemon` is unchanged — daemons read the real status from
   `fetch`.
 - **Bearer-token blast radius, restated:** with the token but not the PSK an
-  attacker can register junk (the PWA ignores non-decrypting entries) and read
-  registry metadata (machine count, deviceIds, last-seen), but cannot spawn or
-  read prompts. This is why v1 has no `forget` verb — a relay-side delete
-  would be the one destructive act the bearer authorizes, and the relay is
-  blind so it cannot demand PSK proof.
+  attacker can register junk (the PWA ignores non-decrypting entries), read
+  registry metadata (machine count, deviceIds, last-seen) and delete entries,
+  but cannot spawn or read prompts.
+- **`forget` is authorized by the bearer token alone, and that is not a new
+  hole.** An earlier revision refused a delete verb on the grounds that it would
+  be the one destructive act the token authorizes, with a blind relay unable to
+  demand PSK proof. Both halves of that were wrong. A registry entry is derived
+  state — the daemon re-registers on its next connect and rebuilds it — so
+  deleting a live machine's entry costs a reconnect, and deleting a retired one
+  destroys nothing that exists. And the destructive act was already reachable:
+  `register` overwrites `device:<id>` for any wire-supplied id, so a token holder
+  could always blank a real machine's `info` with a blob that decrypts for
+  nobody. What the delete adds over that is honesty, not authority.
+  Rotating the token is still the answer to a leaked token; the caps
+  (`MAX_DEVICES`, the register rate limit) still bound cost rather than defend.
+- **Uninstalling deregisters the machine, and does it as an app-role client.**
+  `seanced uninstall` sends the same `forget` on `/app` that the PWA's bin does
+  (`daemon/src/deregister.ts`), after the service is stopped and before the links
+  are removed — that order matters, because the relay refuses while it still
+  holds the socket, so the refusal is retried three times a second apart. It
+  waits for the registry push that no longer lists the entry: the push is the
+  protocol's only acknowledgement, so nothing else could tell "forgotten" from
+  "absent". Rejected: a `deregister` frame on the daemon leg, whose appeal is
+  that socket identity would prove the id. The process holding that socket is
+  the one being shut down, and the CLI running the uninstall never has it — it
+  would have to register in order to delete, or reach the running daemon through
+  the local op socket, which is a threat-model change (`Conventions`) buying an
+  authorization the bearer token already grants on `/app`. No PSK is read either:
+  the entry is routing metadata, and under a service-delivered key there is
+  nothing to read from a CLI. Never fatal — an unreachable relay or a config
+  already cleared prints a note and the uninstall still succeeds. The `--system`
+  variant deliberately does not do this: as root the relay URL and token belong to
+  the target user's config, and nothing under `--system` may read the ambient
+  environment for a value that answers for the wrong user, so it prints the note
+  and leaves the row to the app.
+- **The one check a blind relay can make is connectedness, so that is the only
+  refusal.** `forget` on a machine with an open daemon socket is answered
+  `forget-refused` and changes nothing — it would come straight back and read as
+  a broken button — while an id the registry never held is not a refusal at all
+  but the state the caller asked for (and pushes no registry, so a flood of them
+  costs one read each). A machine whose socket is dead but not yet swept is
+  briefly unforgettable; the sweep bounds that at three missed heartbeats, which
+  is why the app leaves the refusal to resolve itself rather than modelling it.
 - **App-bound envelopes broadcast to every open app socket** (phone and
   laptop tabs both address `"app"`). Stateless — just `getWebSockets("app")` —
   and clients already correlate on `re`, so another tab's reply matches no
@@ -1098,19 +1138,23 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   but two empty inputs read as "credentials lost" on a working install. So
   Settings is editable without being a re-entry chore, and only a field
   actually typed into is written.
-- **An offline machine can be removed from the list, and comes back on its own.**
-  The DO's registry is permanent by design (`Presence & identity`), so a machine
-  retired, renamed or reinstalled sits in the picker forever with a stale
-  last-seen. The ✕ on an offline row hides it until that deviceId connects
-  again — a removal states "not this one, for now", never "forget this machine",
-  which is the only claim an app-side list is entitled to make against a
-  registry it does not own. It lives in `RelayClient` beside `#provenOffline`
-  rather than in the store, so `machines` stays "what to show" for every reader,
-  and the set is persisted (`seance:hidden`) because a reload would otherwise
-  resurrect exactly what was just dismissed. Connected rows get no ✕: the next
-  rebuild would undo it. The empty-list banner splits three ways as a result —
-  nothing registered, nothing decrypting, and nothing left after removals — so a
-  list emptied by hand never reads as a wrong PSK.
+- **An offline machine is forgotten at the relay, not hidden in the browser.**
+  A machine retired, renamed or reinstalled would otherwise sit in the picker
+  forever with a stale last-seen. The bin on an offline row sends `forget`, the
+  relay deletes the entry, and the registry push that follows removes it for
+  every open app — a phone and a laptop tab agree, which the per-browser hide
+  this replaced never could. It comes back only if that daemon registers again,
+  which a retired machine never does and a merely-sleeping one does within a
+  beat of waking. No confirm step: the row is offline, the act costs a reconnect
+  at worst, and clearing several retired machines in a row is the normal case.
+  Connected rows get no bin — the relay would refuse it (`Threat model`).
+  The store drops that machine's remembered repo and clears the selection if it
+  was the one selected: unlike a hide, nothing brings that deviceId back.
+  Rejected: hiding, which is what shipped first. It kept `#hidden` in
+  `RelayClient` and a `seance:hidden` key in localStorage, said "not this one,
+  for now" where the user meant "this machine is gone", and left the relay's
+  registry filling up with entries only a manual purge could reach. The key is
+  now cleared on start (`dropLegacyHidden`) so no stale list outlives the change.
 - **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
   mid-spawn loses the reply (a blind relay cannot queue it), so the pending
   spawn is persisted and the machine is asked what is running once there is a

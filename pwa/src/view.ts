@@ -261,9 +261,9 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
     };
   }
   if (relay.machines.length === 0) {
-    // Entries exist but none show. A fresh install, a wrong PSK, version skew
-    // and a list emptied by hand look identical unless they are split apart
-    // here — and only the key case should send anyone to rotate a credential.
+    // Entries exist but none show. A fresh install, a wrong PSK and version skew
+    // look identical unless they are split apart here — and only the key case
+    // should send anyone to rotate a credential.
     if (relay.ignored > 0) {
       return {
         title: "Key mismatch",
@@ -280,9 +280,12 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
         opensSettings: false,
       };
     }
+    // Not a steady state: entries the app has not finished decrypting land here
+    // for a frame. Anything that stays is neither a key nor a version problem, so
+    // it names what is true and sends nobody anywhere.
     return {
       title: "No machines listed",
-      body: "Every machine was removed while offline. Each comes back on its own the next time it connects.",
+      body: "The relay holds machines, but none can be shown right now.",
       tone: "fg2",
       opensSettings: false,
     };

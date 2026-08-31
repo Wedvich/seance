@@ -13,6 +13,7 @@ import { DEFAULT_FORM, isEffort, isModel, type PendingSpawn, type PersistedForm 
 
 const FORM_KEY = "seance:form";
 const PENDING_KEY = "seance:pending";
+/** Only cleared now — machines are forgotten at the relay, not hidden per browser. */
 const HIDDEN_KEY = "seance:hidden";
 
 function readJson(key: string): unknown {
@@ -77,14 +78,10 @@ export function writePending(pending: PendingSpawn | null): void {
 }
 
 /**
- * Removed machines outlive a reload: the registry still lists them, so without
- * this every refresh would bring back the entries just dismissed.
+ * Machines are removed at the relay now, so nothing local decides what to show.
+ * Cleared rather than left behind: a stored list that once meant "don't show
+ * these" is the kind of leftover a later reader mistakes for live state.
  */
-export function readHidden(): readonly string[] {
-  const raw = readJson(HIDDEN_KEY);
-  return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
-}
-
-export function writeHidden(hidden: readonly string[]): void {
-  writeJson(HIDDEN_KEY, hidden);
+export function dropLegacyHidden(): void {
+  writeJson(HIDDEN_KEY, null);
 }
