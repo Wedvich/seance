@@ -287,6 +287,17 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
+  // A config blanked or never filled in (`init` writes the skeleton "wss://")
+  // reaches here as a string loadConfig accepts and `new URL` rejects. Uninstall
+  // has already stopped the service by then, so a throw would skip removing the
+  // links — the outcome must be a reported failure, never an exception.
+  test("an unusable relayUrl fails the deregistration instead of throwing", async () => {
+    for (const relayUrl of ["", "wss://", "not a url"]) {
+      const outcome = await deregisterMachine({ ...stack.config, relayUrl }, stack.deviceId);
+      expect(outcome.kind).toBe("failed");
+    }
+  });
+
   // Last in this describe: it deletes the shared stack's registry entry, which
   // every test above assumes is there.
   test("uninstall deregisters: the entry leaves the registry, and a fresh install brings it back", async () => {

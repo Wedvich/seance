@@ -60,14 +60,20 @@ function readFrame(text: string): { readonly ids: readonly string[] } | "refused
 }
 
 export function deregisterMachine(config: Config, deviceId: string): Promise<DeregisterOutcome> {
-  const url = new URL(appRelayUrl(config.relayUrl));
-  url.searchParams.set(TOKEN_PARAM, config.bearerToken);
+  let url: URL;
   let socket: WebSocket;
   try {
-    socket = new WebSocket(url.href);
+    // Inside the try: a blanked or skeleton relayUrl (`init` writes "wss://")
+    // passes loadConfig as a string and throws here, and this must never be
+    // fatal — see the caller's contract.
+    url = new URL(appRelayUrl(config.relayUrl));
+    url.searchParams.set(TOKEN_PARAM, config.bearerToken);
+    // Bun dialing workerd needs this or frames die with close code 1002.
+    socket = new WebSocket(url.href, { perMessageDeflate: false });
   } catch (err) {
     return Promise.resolve({ kind: "failed", detail: String(err) });
   }
+  const { host } = url;
 
   return new Promise<DeregisterOutcome>((resolve) => {
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -88,14 +94,17 @@ export function deregisterMachine(config: Config, deviceId: string): Promise<Der
       socket.send(JSON.stringify(frame));
     };
 
-    timers.push(
-      setTimeout(
-        () => settle({ kind: "failed", detail: `no answer from ${url.host} within ${CONNECT_MS}ms` }),
-        CONNECT_MS,
-      ),
+    // Held on its own so `open` can retire it: left armed it would always beat
+    // the confirmation timer, making that outcome dead code and squeezing the
+    // whole connect-plus-retries sequence into the connect budget.
+    const connectTimer = setTimeout(
+      () => settle({ kind: "failed", detail: `no answer from ${host} within ${CONNECT_MS}ms` }),
+      CONNECT_MS,
     );
+    timers.push(connectTimer);
 
     socket.addEventListener("open", () => {
+      clearTimeout(connectTimer);
       timers.push(
         setTimeout(() => settle({ kind: "failed", detail: "the relay never confirmed the delete" }), CONFIRM_MS),
       );
@@ -117,7 +126,7 @@ export function deregisterMachine(config: Config, deviceId: string): Promise<Der
       }
       settle(attempts === 0 ? { kind: "absent" } : { kind: "forgotten" });
     });
-    socket.addEventListener("error", () => settle({ kind: "failed", detail: `could not reach ${url.host}` }));
+    socket.addEventListener("error", () => settle({ kind: "failed", detail: `could not reach ${host}` }));
     socket.addEventListener("close", () =>
       settle({ kind: "failed", detail: "the relay closed the socket before confirming" }),
     );
