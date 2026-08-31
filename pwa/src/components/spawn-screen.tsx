@@ -229,9 +229,10 @@ function ActiveSheet(props: {
               dot={machine.connected ? "ok" : "off"}
               selected={machine.deviceId === view.machine?.deviceId}
               disabled={!machine.connected}
-              // Only offered while offline: a connected machine would reappear at once.
+              // Only offered while offline: the relay refuses to forget a machine
+              // it holds a socket for, so on a connected row it would do nothing.
               onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
-              removeLabel={`Hide ${machine.name} until it connects`}
+              removeLabel={`Forget ${machine.name}`}
               onClick={() => actions.selectMachine(machine.deviceId)}
             />
           ))}

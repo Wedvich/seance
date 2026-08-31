@@ -199,11 +199,21 @@ export class Store {
   }
 
   /**
-   * Drops an offline machine from the list. The sheet stays open: removing several
-   * stale machines in a row is the normal case, and the list re-renders under it.
+   * Forgets an offline machine at the relay, for every app rather than this one.
+   * The sheet stays open: clearing several retired machines in a row is the
+   * normal case, and the list re-renders under it when the relay pushes back.
+   *
+   * Its remembered repo goes with it, and the selection if it was the one
+   * selected. Unlike the hide this replaced, nothing brings that deviceId back —
+   * a reinstall mints a new one — so keeping either would be dead state.
    */
   removeMachine(machineId: string): void {
-    this.#client.hide(machineId);
+    this.#client.forget(machineId);
+    const { form } = this.#state;
+    const repos = Object.fromEntries(Object.entries(form.repos).filter(([id]) => id !== machineId));
+    this.#patch({
+      form: { ...form, machineId: form.machineId === machineId ? null : form.machineId, repos },
+    });
   }
 
   selectRepo(repo: string): void {

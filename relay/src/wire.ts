@@ -74,7 +74,12 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
 
 export function parseAppFrame(text: string): AppFrame | null {
   const value = parseJson(text);
-  if (!isRecord(value) || value["t"] !== "msg") return null;
+  if (!isRecord(value)) return null;
+  if (value["t"] === "forget") {
+    // Same bounds as a register's deviceId: it reaches a storage key and a log line.
+    return routableId(value["deviceId"]) ? { t: "forget", deviceId: value["deviceId"] } : null;
+  }
+  if (value["t"] !== "msg") return null;
   const env = parseEnvelope(value["env"]);
   return env === null ? null : { t: "msg", env };
 }

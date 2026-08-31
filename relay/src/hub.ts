@@ -29,8 +29,9 @@ function wireLog(event: string, env: Envelope, extra = ""): void {
 
 /**
  * Four machines today. 32 leaves room for reinstalls — each one mints a new
- * deviceId and v1 has no forget verb — while keeping a bearer-token holder
- * from growing storage without bound. Reaching it needs manual cleanup.
+ * deviceId — while keeping a bearer-token holder from growing storage without
+ * bound. Reaching it is recoverable from the app: a retired machine's entry can
+ * be forgotten.
  */
 const MAX_DEVICES = 32;
 
@@ -218,11 +219,52 @@ export class Hub implements DurableObject {
       console.log("wire dropped reason=malformed-app-frame");
       return;
     }
+    if (frame.t === "forget") {
+      await this.#forget(ws, frame.deviceId);
+      return;
+    }
     if (frame.env.from !== APP_ID) {
       console.log(`wire dropped iv=${quote(frame.env.iv)} from=${quote(frame.env.from)} reason=not-app-id`);
       return;
     }
     await this.#route(frame.env, ws, "app");
+  }
+
+  /**
+   * Deletes a registry entry. Authorized by the bearer token alone, which is
+   * sound because there is nothing here to destroy: the entry is derived state
+   * — the machine re-registers on its next connect and rebuilds it — and a
+   * token holder can already overwrite any entry's blob by registering over its
+   * id. Refused for a connected machine, the one thing a blind relay can check:
+   * it would come straight back and read as a broken button.
+   *
+   * Unbounded calls need no rate limiter either. An unknown id costs one read
+   * and pushes nothing, and the deletes that do land are bounded by the
+   * MAX_DEVICES entries that can exist — unlike a register, which can write the
+   * same id forever.
+   */
+  async #forget(ws: WebSocket, deviceId: string): Promise<void> {
+    if (this.#connectedIds([]).has(deviceId)) {
+      const refusal: RelayToAppFrame = { t: "forget-refused", deviceId, code: "connected" };
+      ws.send(JSON.stringify(refusal));
+      console.log(`refused forget ${deviceId}: connected`);
+      return;
+    }
+    const key = ENTRY_PREFIX + deviceId;
+    if ((await this.#ctx.storage.get<RegistryEntry>(key)) === undefined) {
+      // Idempotent, and silent on the wire: gone is what the caller asked for.
+      console.log(`forget ${deviceId}: not in the registry`);
+      return;
+    }
+    try {
+      await this.#ctx.storage.delete(key);
+    } catch (err) {
+      // Same shape as a failed put: the entry stays, the app's next push shows it.
+      console.log(`failed to delete ${key}: ${String(err)}`);
+      return;
+    }
+    console.log(`forgot ${deviceId}`);
+    await this.#pushRegistry();
   }
 
   /**

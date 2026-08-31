@@ -36,7 +36,6 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     rejection: null,
     machines,
     registrySize: machines.length,
-    hidden: [],
     ignored: 0,
     skewed: 0,
     settling: false,
@@ -216,24 +215,18 @@ describe("banner and button", () => {
     expect(view.button.enabled).toBe(true);
   });
 
-  // Removing the last offline machine must not read as a wrong key: nothing is
-  // undecryptable, the list is simply empty by choice.
-  test("a list emptied by removals is not reported as a key mismatch", () => {
-    const view = deriveView(
-      state({ relay: relay({ machines: [], registrySize: 2, hidden: ["dev-1", "dev-2"], ignored: 0 }) }),
-      NOW,
-    );
+  // Entries the app has not decrypted yet must not read as a wrong key: nothing
+  // has failed to open, the list is simply not built.
+  test("entries not yet decrypted are not reported as a key mismatch", () => {
+    const view = deriveView(state({ relay: relay({ machines: [], registrySize: 2, ignored: 0 }) }), NOW);
     expect(view.banner?.title).toBe("No machines listed");
     expect(view.banner?.tone).toBe("fg2");
     expect(view.banner?.opensSettings).toBe(false);
     expect(view.button.label).toBe("No machines listed");
   });
 
-  test("removals alongside an undecryptable entry still read as a key mismatch", () => {
-    const view = deriveView(
-      state({ relay: relay({ machines: [], registrySize: 2, hidden: ["dev-1"], ignored: 1 }) }),
-      NOW,
-    );
+  test("an undecryptable entry beside an unreadable one still reads as a key mismatch", () => {
+    const view = deriveView(state({ relay: relay({ machines: [], registrySize: 2, ignored: 1 }) }), NOW);
     expect(view.banner?.title).toBe("Key mismatch");
     expect(view.banner?.body).toContain("1 machine is registered");
   });
@@ -258,10 +251,10 @@ describe("banner and button", () => {
     expect(view.button.enabled).toBe(true);
   });
 
-  test("a removed machine leaves the counts and the selection to the rest", () => {
+  test("a forgotten machine leaves the counts and the selection to the rest", () => {
     const studio = machine({ deviceId: "dev-2", name: "Mac Studio", connected: false });
     const view = deriveView(
-      state({ relay: relay({ machines: [studio], registrySize: 2, hidden: ["dev-1"] }) }, { machineId: "dev-1" }),
+      state({ relay: relay({ machines: [studio], registrySize: 1 }) }, { machineId: "dev-1" }),
       NOW,
     );
     expect(view.machine?.deviceId).toBe("dev-2");

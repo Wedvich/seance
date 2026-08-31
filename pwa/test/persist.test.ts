@@ -17,7 +17,7 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { readForm, readHidden, readPending, writeForm, writeHidden, writePending } = await import("../src/persist.ts");
+const { dropLegacyHidden, readForm, readPending, writeForm, writePending } = await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -80,20 +80,15 @@ describe("pending spawn persistence", () => {
   });
 });
 
-describe("removed machine persistence", () => {
-  test("round-trips and empties", () => {
-    writeHidden(["dev-1", "dev-2"]);
-    expect(readHidden()).toEqual(["dev-1", "dev-2"]);
-    writeHidden([]);
-    expect(readHidden()).toEqual([]);
+describe("the legacy hidden-machine list", () => {
+  test("is cleared, so an upgrade leaves no stale list behind", () => {
+    store.set("seance:hidden", JSON.stringify(["dev-1", "dev-2"]));
+    dropLegacyHidden();
+    expect(store.get("seance:hidden")).toBeUndefined();
   });
 
-  test("reads nothing stored as nothing removed", () => {
-    expect(readHidden()).toEqual([]);
-  });
-
-  test("drops entries that are not deviceIds", () => {
-    store.set("seance:hidden", JSON.stringify(["dev-1", 7, null]));
-    expect(readHidden()).toEqual(["dev-1"]);
+  test("is safe to clear when nothing was stored", () => {
+    dropLegacyHidden();
+    expect(store.get("seance:hidden")).toBeUndefined();
   });
 });

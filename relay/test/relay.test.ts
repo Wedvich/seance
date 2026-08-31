@@ -15,6 +15,7 @@ const TOKEN = "test-bearer-token";
 type RegistryFrame = Extract<RelayToAppFrame, { t: "registry" }>;
 type MsgFrame = Extract<RelayToAppFrame, { t: "msg" }>;
 type UndeliverableFrame = Extract<RelayToAppFrame, { t: "undeliverable" }>;
+type ForgetRefusedFrame = Extract<RelayToAppFrame, { t: "forget-refused" }>;
 
 let relay: TestRelay;
 
@@ -365,6 +366,96 @@ async function drain(app: Client): Promise<void> {
   await app.waitFor<UndeliverableFrame>("undeliverable");
 }
 
+describe("forget", () => {
+  test("deletes an offline machine's entry and pushes the change to every app", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const observer = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    daemon.close();
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+
+    app.send({ t: "forget", deviceId });
+
+    // Asserted on the socket that did not ask: a deletion is registry state, so
+    // every open app has to learn it, not just the one holding the button.
+    for (;;) {
+      const frame = await observer.waitFor<RegistryFrame>("registry");
+      if (!frame.entries.some((entry) => entry.deviceId === deviceId)) break;
+    }
+    expect(await registryIds(relay)).not.toContain(deviceId);
+    await app.expectNo("forget-refused");
+    observer.close();
+    app.close();
+  });
+
+  test("refuses while the machine is connected, and names which one", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+
+    app.send({ t: "forget", deviceId });
+
+    const refusal = await app.waitFor<ForgetRefusedFrame>("forget-refused");
+    expect(refusal).toEqual({ t: "forget-refused", deviceId, code: "connected" });
+    expect(await registryIds(relay)).toContain(deviceId);
+    daemon.close();
+    app.close();
+  });
+
+  test("is silent about an id the registry never held", async () => {
+    const app = await connectApp(relay);
+
+    app.send({ t: "forget", deviceId: "never-registered-anywhere" });
+
+    // Idempotent: nothing to delete is the state asked for, so no refusal — and
+    // no push either, which is what keeps a flood of them from costing fanouts.
+    await app.expectNo("forget-refused");
+    await app.expectNo("registry");
+    await drain(app);
+    app.close();
+  });
+
+  test("never lets a daemon socket forget a machine", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    const other = await connectDaemon(relay);
+
+    // The frame only exists on the app leg; on this one it is malformed, and a
+    // daemon that could evict its neighbours would be a hole of its own.
+    other.send({ t: "forget", deviceId });
+    daemon.send({ t: "forget", deviceId });
+    await drain(app);
+
+    expect(await registryIds(relay)).toContain(deviceId);
+    other.close();
+    daemon.close();
+    app.close();
+  });
+
+  test("drops a malformed forget without dropping the socket", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    daemon.close();
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+
+    app.send({ t: "forget" });
+    app.send({ t: "forget", deviceId: 7 });
+    app.send({ t: "forget", deviceId: "device:../escape" });
+    await drain(app);
+    expect(await registryIds(relay)).toContain(deviceId);
+
+    // The socket still serves, so the frames above were handled rather than fatal.
+    app.send({ t: "forget", deviceId });
+    for (;;) {
+      const frame = await app.waitFor<RegistryFrame>("registry");
+      if (!frame.entries.some((entry) => entry.deviceId === deviceId)) break;
+    }
+    app.close();
+  });
+});
 // Own instance: the registry is permanent, so a test that deliberately fills it
 // would starve every later test sharing the object.
 describe("registry entry cap", () => {

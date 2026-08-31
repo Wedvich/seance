@@ -62,9 +62,10 @@ function startClient(
   opts: {
     readonly token?: string;
     readonly timeouts?: { readonly sessions?: number; readonly rescan?: number };
-    readonly hidden?: readonly string[];
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
+    /** Wire-log sink; the suites that assert on a frame the client only logs pass one. */
+    readonly log?: (line: string) => void;
     /** Dials somewhere other than the real relay; only the hostile-peer suite does. */
     readonly url?: string;
   } = {},
@@ -82,9 +83,9 @@ function startClient(
     // offer keeps these tests measuring the relay instead of that bug.
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
     ...(opts.timeouts === undefined ? {} : { timeouts: opts.timeouts }),
-    ...(opts.hidden === undefined ? {} : { hidden: opts.hidden }),
     ...(opts.pingIntervalMs === undefined ? {} : { pingIntervalMs: opts.pingIntervalMs }),
     ...(opts.pongTimeoutMs === undefined ? {} : { pongTimeoutMs: opts.pongTimeoutMs }),
+    ...(opts.log === undefined ? {} : { log: opts.log }),
   });
   const waitFor = (predicate: (state: RelayState) => boolean, label: string): Promise<RelayState> =>
     new Promise((resolve, reject) => {
@@ -238,7 +239,7 @@ describe("registry", () => {
     }
   });
 
-  test("drops a removed offline machine from the list and brings it back when it connects", async () => {
+  test("forgets an offline machine at the relay, and gets it back only if it registers again", async () => {
     const deviceId = nextDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone Fishing"));
@@ -248,18 +249,17 @@ describe("registry", () => {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
 
       // The registry is shared across this file, so it is the delta that matters:
-      // a removal is not a key mismatch and must never be counted as one.
-      const ignoredBefore = client.getState().ignored;
-      client.hide(deviceId);
-      const removed = client.getState();
-      expect(removed.machines.some((m) => m.deviceId === deviceId)).toBe(false);
-      expect(removed.hidden).toContain(deviceId);
-      expect(removed.ignored).toBe(ignoredBefore);
+      // the entry left the registry, so it is neither listed nor counted as one
+      // this key could not open.
+      const before = client.getState();
+      client.forget(deviceId);
+      const removed = await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+      expect(removed.registrySize).toBe(before.registrySize - 1);
+      expect(removed.ignored).toBe(before.ignored);
 
       const back = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone Fishing"));
       try {
-        const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "machine is back");
-        expect(state.hidden).not.toContain(deviceId);
+        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "machine is back");
       } finally {
         back.close();
       }
@@ -268,10 +268,45 @@ describe("registry", () => {
     }
   });
 
+  // The relay is blind, so connectedness is the one thing it can check before
+  // deleting — and the app only offers removal on an offline row, which makes
+  // this reachable as a race rather than as a button.
+  test("leaves a connected machine's entry alone and logs the refusal", async () => {
+    const deviceId = nextDeviceId();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ log: (line) => lines.push(line) });
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Wide Awake"));
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      client.forget(deviceId);
+      await pollUntil(() => lines.some((line) => line.startsWith("wire forget-refused")), "the refusal is logged");
+      expect(client.getState().machines.some((m) => m.deviceId === deviceId)).toBe(true);
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  test("forgetting an id the registry never held changes nothing", async () => {
+    const deviceId = nextDeviceId();
+    const { client, waitFor } = startClient();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Bystander"));
+    try {
+      const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "registry arrived");
+      client.forget(nextDeviceId());
+      await Bun.sleep(100);
+      expect(client.getState().registrySize).toBe(before.registrySize);
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
   // Reference identity is the whole render bailout: `useState` skips when the
   // state object comes back the same, so a rebuild off an unchanged registry has
-  // to hand the previous one back. Hiding a *connected* machine is the one public
-  // way to force that rebuild — it is undone by the very rebuild it triggers.
+  // to hand the previous one back. A scan older than the register blob it would
+  // override is the cheapest public way to force that rebuild — it is spent by
+  // the very rebuild it triggers.
   test("a rebuild that changes nothing keeps the state object and notifies nobody", async () => {
     const deviceId = nextDeviceId();
     const { client, waitFor } = startClient();
@@ -283,7 +318,7 @@ describe("registry", () => {
       const unsubscribe = client.subscribe(() => {
         notifications += 1;
       });
-      client.hide(deviceId);
+      client.applyScan(deviceId, { repos: [], scannedAt: 1 });
       unsubscribe();
       expect(notifications).toBe(0);
       expect(client.getState()).toBe(before);
@@ -331,19 +366,6 @@ describe("registry", () => {
       }
     } finally {
       one.close();
-      client.stop();
-    }
-  });
-
-  test("keeps a machine removed in an earlier run removed", async () => {
-    const deviceId = nextDeviceId();
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Stale"));
-    daemon.close();
-    const { client, waitFor } = startClient({ hidden: [deviceId] });
-    try {
-      await waitFor((s) => s.registrySize > 0, "registry arrived");
-      expect(client.getState().machines.some((m) => m.deviceId === deviceId)).toBe(false);
-    } finally {
       client.stop();
     }
   });
@@ -995,7 +1017,7 @@ async function registryFrame(deviceId: string, info: MachineInfo): Promise<unkno
 
 describe("malformed frames", () => {
   // The wedge this suite exists for: the missing list was assigned before the
-  // throw, so every later rebuild — a hide, a scan, a delivery failure — threw
+  // throw, so every later rebuild — a scan, a delivery failure — threw
   // on it too, and the tab was dead until reload.
   test("drops a registry frame with no entries instead of wedging every later rebuild", async () => {
     const peer = startHostilePeer();
@@ -1007,7 +1029,6 @@ describe("malformed frames", () => {
       // A non-event has nothing to poll for, so the sleep is the assertion's setup.
       await Bun.sleep(50);
       expect(client.getState().machines).toEqual([]);
-      client.hide(deviceId);
       client.applyScan(deviceId, { repos: [], scannedAt: Date.now() });
       peer.send(await registryFrame(deviceId, machineInfo("Still Here")));
       const state = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound push still lands");

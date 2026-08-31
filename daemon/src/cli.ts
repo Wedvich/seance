@@ -11,6 +11,7 @@ import {
   loadPsk,
   pskFingerprint,
   runnableProblems,
+  type Config,
 } from "./config.ts";
 import type { Check } from "./check.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
@@ -35,7 +36,8 @@ import {
 } from "./service.ts";
 import { scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { livePid, loadOrInitState, pidAlive, readRuntime, saveState } from "./state.ts";
+import { deregisterMachine } from "./deregister.ts";
+import { livePid, loadOrInitState, pidAlive, readRuntime, readState, saveState } from "./state.ts";
 
 export async function cmdInit(): Promise<void> {
   const path = configPath();
@@ -428,16 +430,52 @@ async function cmdInstallSystem(args: InstallCliArgs): Promise<void> {
   for (const note of result.notes) console.log(`note: ${note}`);
 }
 
+/**
+ * Removes this machine from the relay's registry on the way out, so the app
+ * stops listing a box that no longer runs a daemon. Never fatal: the service is
+ * already gone by the time this runs, and an unreachable relay or a config
+ * cleared ahead of the uninstall must not make `uninstall` look like it failed.
+ * `readState`, not `loadOrInitState` — asking who this machine was must not
+ * answer by minting an identity on a box that never ran the daemon.
+ */
+async function deregisterFromRelay(): Promise<void> {
+  const state = await readState();
+  if (state === null) {
+    console.log("note: no state file, so nothing was registered under this machine");
+    return;
+  }
+  let config: Config;
+  try {
+    config = await loadConfig();
+  } catch (err) {
+    console.log(`note: could not read the config, so the relay still lists this machine (${String(err)})`);
+    return;
+  }
+  const outcome = await deregisterMachine(config, state.deviceId);
+  if (outcome.kind === "forgotten") console.log("removed this machine from the relay's registry");
+  else if (outcome.kind === "absent") console.log("note: the relay's registry did not list this machine");
+  else if (outcome.kind === "connected") {
+    console.log("note: the relay still holds a socket for this machine — remove it in the app once it drops");
+  } else console.log(`note: the relay still lists this machine (${outcome.detail}) — remove it in the app`);
+}
+
 export async function cmdUninstall(argv: readonly string[] = []): Promise<void> {
   if (parseInstallArgs(argv).system) {
     const systemNotes = await uninstallSystemService();
     console.log("system unit stopped and removed");
     for (const note of systemNotes) console.log(`note: ${note}`);
+    // Not deregistered from here: as root, the relay URL and token belong to the
+    // target user's config, and nothing under `--system` may read the ambient
+    // environment for a value that answers for the wrong user.
+    console.log("note: the relay still lists this machine — remove it in the app, on the bin beside its row");
     return;
   }
   const notes = await uninstallService();
   console.log("service stopped and removed");
   for (const note of notes) console.log(`note: ${note}`);
+  // Ordered after the service is down: the relay refuses to forget a machine it
+  // still holds a socket for.
+  await deregisterFromRelay();
   // link is opt-in, unlinking is not: a name left behind would outlive the
   // checkout the user is presumably about to delete.
   const { removed } = await removeLinks(process.env.PATH ?? "", await resolvedMain());

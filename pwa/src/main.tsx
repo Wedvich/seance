@@ -2,7 +2,7 @@ import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
-import { readForm, readHidden, readPending, writeForm, writeHidden, writePending } from "./persist.ts";
+import { dropLegacyHidden, readForm, readPending, writeForm, writePending } from "./persist.ts";
 import { RelayClient } from "@seance/shared";
 import { loadPsk, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
@@ -37,7 +37,8 @@ if (key === null || token === null) {
     container,
   );
 } else {
-  const client = new RelayClient({ url: readRelayUrl(), token, key, hidden: readHidden() });
+  dropLegacyHidden();
+  const client = new RelayClient({ url: readRelayUrl(), token, key });
   const store = new Store(client, readForm(), readPending());
 
   // Debounced because the store notifies on every keystroke in the prompt.
@@ -47,7 +48,6 @@ if (key === null || token === null) {
     timer = setTimeout(() => {
       writeForm(store.getState().form);
       writePending(store.pendingSpawn);
-      writeHidden(store.getState().relay.hidden);
     }, PERSIST_DEBOUNCE_MS);
   });
 

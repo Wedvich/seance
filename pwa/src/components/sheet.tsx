@@ -88,11 +88,12 @@ export function Sheet(props: {
 }
 
 /**
- * Eye-off, in the same feather-weight stroke as the header cog. A ✕ would read as
- * the sheet's own close button one row above it, and a bin would overstate what the
- * action does — the machine is hidden until it connects, not forgotten.
+ * A bin, in the same feather-weight stroke as the header cog. It says what the
+ * action now does — the entry is deleted at the relay, for every app — where the
+ * eye-off it replaced said "hidden here, for now". A ✕ is still avoided: it would
+ * read as the sheet's own close button one row above it.
  */
-function HideIcon(): JSX.Element {
+function TrashIcon(): JSX.Element {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -105,10 +106,11 @@ function HideIcon(): JSX.Element {
       stroke-linejoin="round"
       aria-hidden="true"
     >
-      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
-      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
-      <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-      <path d="m1 1 22 22" />
+      <path d="M4 7h16" />
+      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
     </svg>
   );
 }
@@ -122,7 +124,7 @@ export function SheetItem(props: {
   /** Command row (does something) rather than option row (picks something). */
   action?: boolean;
   dot?: "ok" | "off" | null;
-  /** Trailing hide button. A nested button would be invalid, so this splits the row in two. */
+  /** Trailing remove button. A nested button would be invalid, so this splits the row in two. */
   onRemove?: (() => void) | null;
   removeLabel?: string;
   onClick: () => void;
@@ -164,7 +166,7 @@ export function SheetItem(props: {
     <div className="sheet-item-row">
       {item}
       <button type="button" className="sheet-item-remove" onClick={onRemove} aria-label={removeLabel}>
-        <HideIcon />
+        <TrashIcon />
       </button>
     </div>
   );

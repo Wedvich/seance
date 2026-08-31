@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry, SpawnResponse } from "@seance/shared";
+import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import type { AppState } from "../pwa/src/view.ts";
@@ -285,6 +286,43 @@ describe("daemon ↔ relay ↔ app", () => {
       verify.stop();
     }
   });
+
+  // Last in this describe: it deletes the shared stack's registry entry, which
+  // every test above assumes is there.
+  test("uninstall deregisters: the entry leaves the registry, and a fresh install brings it back", async () => {
+    const app = startApp(stack);
+    let restored = false;
+    try {
+      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      // The order `uninstall` relies on: while the service still holds a socket
+      // the relay refuses, which is why the CLI stops it first.
+      expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "connected" });
+
+      stack.daemon.stop();
+      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
+
+      expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "forgotten" });
+      await app.waitForApp((s) => ownMachine(s, stack.deviceId) === null, "entry gone from the app");
+      // Idempotent: an uninstall run twice reports nothing to delete, not a failure.
+      expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "absent" });
+
+      await stack.restartDaemon();
+      // Waited for, not just started: the suites after this one open with a spawn,
+      // and a daemon still mid-register reads to them as a machine that is asleep.
+      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine back after reinstall");
+      restored = true;
+    } finally {
+      if (!restored) {
+        await stack.restartDaemon();
+        await app
+          .waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine restored")
+          .catch(() => undefined);
+      }
+      app.stop();
+    }
+    // Longer budget than the rest: proving the refusal spends the retry window
+    // (three attempts, a second apart) before anything else happens.
+  }, 30_000);
 });
 
 function sessionsView(state: AppState, deviceId: string): readonly SessionEntry[] {

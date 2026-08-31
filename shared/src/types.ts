@@ -57,17 +57,36 @@ export type DaemonFrame =
 /** Layer 1: relay→daemon frames. */
 export type RelayToDaemonFrame = { readonly t: "msg"; readonly env: Envelope };
 
-/** Layer 1: app→relay frames. */
-export type AppFrame = { readonly t: "msg"; readonly env: Envelope };
+/**
+ * Layer 1: app→relay frames. `forget` deletes one registry entry — the only
+ * frame the app sends that the relay acts on itself rather than routes. It is
+ * not an `OpName`: ops are sealed end to end and answered by a daemon, and the
+ * machine being forgotten is by definition not there to answer.
+ */
+export type AppFrame =
+  | { readonly t: "msg"; readonly env: Envelope }
+  | { readonly t: "forget"; readonly deviceId: string };
 
 /** Why the relay could not hand an envelope to its target daemon. */
 export type UndeliverableCode = "offline" | "unknown";
 
 /**
+ * Why the relay would not delete an entry. Only one reason, and it is one a
+ * blind relay can check without the PSK: the machine is connected, so the
+ * entry is live state rather than a leftover. An id the registry doesn't hold
+ * is no refusal — deleting it is what the caller asked for.
+ */
+export const FORGET_REFUSAL_CODES = ["connected"] as const;
+
+export type ForgetRefusalCode = (typeof FORGET_REFUSAL_CODES)[number];
+
+/**
  * Layer 1: relay→app frames. `registry` arrives on connect and on every
  * change. `undeliverable` correlates by `iv` — the request `id` lives inside
  * the ciphertext, so a blind relay has nothing else to echo. App-bound
- * envelopes go to every open app socket; clients drop unmatched `re`.
+ * envelopes go to every open app socket; clients drop unmatched `re`. A
+ * `forget` that lands needs no ack: the registry push it causes is the ack,
+ * and it reaches every open app rather than just the one that asked.
  */
 export type RelayToAppFrame =
   | { readonly t: "registry"; readonly entries: readonly RegistryView[] }
@@ -77,11 +96,17 @@ export type RelayToAppFrame =
       readonly to: string;
       readonly iv: string;
       readonly code: UndeliverableCode;
+    }
+  | {
+      readonly t: "forget-refused";
+      readonly deviceId: string;
+      readonly code: ForgetRefusalCode;
     };
 
 /**
- * Machine registry as persisted by the Durable Object. Entries are permanent —
- * overwritten only by a later register.
+ * Machine registry as persisted by the Durable Object. An entry is overwritten
+ * by a later register and removed only by an app's `forget`; nothing else
+ * expires it.
  */
 export interface RegistryEntry {
   readonly deviceId: string;
