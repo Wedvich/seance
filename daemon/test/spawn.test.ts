@@ -46,9 +46,15 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     expect(repos[0]?.defaultBranch).toBe("main");
   });
 
-  test("worktree spawn: creates the tmux window, ffs the default branch, detection sees it", async () => {
+  // The base itself is claude's (`--worktree` branches from origin/<default>
+  // unless the machine sets worktree.baseRef to "head"), and the stub never
+  // creates a worktree — so what is asserted here is the daemon's whole share:
+  // the flag goes out, and the checkout is left exactly as it was found.
+  test("worktree spawn: passes --worktree, touches no git state, detection sees it", async () => {
     await fixture.advanceOrigin();
-    const before = (await git(fixture.repoPath, ["rev-parse", "HEAD"])).stdout.trim();
+    const before = await headOf(fixture.repoPath);
+    const beforeTracking = await headOf(fixture.repoPath, "origin/main");
+    await rm(stub.argvFile, { force: true });
 
     const outcome = await spawnSession(
       { repo: "myrepo", mode: "worktree", title: "Fix Tests", prompt: "fix the tests" },
@@ -60,11 +66,14 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     expect(outcome.path).toEndWith(join(".claude", "worktrees", "fix-tests"));
     expect(outcome.note).toBeUndefined();
 
-    // clean checkout on main → ff-only moved HEAD to the new origin commit
-    const after = (await git(fixture.repoPath, ["rev-parse", "HEAD"])).stdout.trim();
-    expect(after).not.toBe(before);
-    const originMain = (await git(fixture.repoPath, ["rev-parse", "origin/main"])).stdout.trim();
-    expect(after).toBe(originMain);
+    const argv = await stub.argv();
+    expect(argv[argv.indexOf("--worktree") + 1]).toBe("fix-tests");
+
+    // The guard for the deleted preparation, with origin ahead of the clone so
+    // both halves can move: HEAD stays put (no ff-only merge) and the tracking
+    // ref stays stale (no fetch) — claude owns both, and the stub is not claude.
+    expect(await headOf(fixture.repoPath)).toBe(before);
+    expect(await headOf(fixture.repoPath, "origin/main")).toBe(beforeTracking);
 
     // the window exists in the main session and the pane survived
     const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
@@ -122,14 +131,31 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("dirty checkout: spawn proceeds with a note", async () => {
+  // The two states the old ff-only preparation refused to proceed cleanly from,
+  // reporting a note that claimed the session would be based on the checkout.
+  // Neither is the daemon's business now, and neither produces a note.
+  test("dirty checkout: no note, and the working tree is left dirty", async () => {
     await Bun.write(join(fixture.repoPath, "README.md"), "# dirtied\n");
     try {
       const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Dirty" }, repos, WAIT);
-      expect(outcome.note).toContain("not on a clean main");
+      expect(outcome.note).toBeUndefined();
+      expect(await Bun.file(join(fixture.repoPath, "README.md")).text()).toBe("# dirtied\n");
       await tmux(["kill-window", "-t", "main:Dirty"]);
     } finally {
       await git(fixture.repoPath, ["checkout", "--", "README.md"]);
+    }
+  });
+
+  test("checkout parked on a feature branch: no note, and it stays checked out", async () => {
+    await git(fixture.repoPath, ["checkout", "-q", "-b", "side"]);
+    try {
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "From Side" }, repos, WAIT);
+      expect(outcome.note).toBeUndefined();
+      expect((await git(fixture.repoPath, ["symbolic-ref", "--short", "HEAD"])).stdout.trim()).toBe("side");
+      await killWindow(outcome.window);
+    } finally {
+      await git(fixture.repoPath, ["checkout", "-q", "main"]);
+      await git(fixture.repoPath, ["branch", "-qD", "side"]);
     }
   });
 
@@ -161,13 +187,16 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("unreachable origin is fetch_failed", async () => {
+  // Was `unreachable origin is fetch_failed`. The daemon no longer fetches, so
+  // an unreachable remote is claude's to report: it warns and falls back to the
+  // local HEAD inside the pane. `fetch_failed` stays a wire code for daemons a
+  // version behind — the PWA still has copy for it.
+  test("an unreachable origin no longer concerns the daemon", async () => {
     await git(fixture.repoPath, ["remote", "set-url", "origin", "/nonexistent/origin.git"]);
     try {
-      await spawnSession({ repo: "myrepo", mode: "worktree", title: "NoNet" }, repos, WAIT);
-      expect.unreachable();
-    } catch (err) {
-      expect((err as SpawnFailure).code).toBe("fetch_failed");
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "NoNet" }, repos, WAIT);
+      expect(outcome.path).toEndWith(join(".claude", "worktrees", "nonet"));
+      await killWindow(outcome.window);
     } finally {
       await git(fixture.repoPath, ["remote", "set-url", "origin", fixture.barePath]);
     }
@@ -254,6 +283,11 @@ describe("exec timeout", () => {
     expect(result.exitCode).not.toBe(0);
   });
 });
+
+/** Resolves a rev (default HEAD) in the checkout — the "left it alone" assertions compare two of these. */
+async function headOf(path: string, rev = "HEAD"): Promise<string> {
+  return (await git(path, ["rev-parse", rev])).stdout.trim();
+}
 
 /** Kill by window id — a hostile window *name* is not a safe tmux target string. */
 async function killWindow(name: string): Promise<void> {

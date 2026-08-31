@@ -13,8 +13,8 @@ Spawn new Claude Code sessions on any of your machines, from your phone.
   resumes what already exists; Séance creates.
 - **Every machine you own, with no pairing step.** macOS, Linux, WSL: a daemon
   holding the right token and key simply appears in the app.
-- **A fresh worktree per session, by default.** It fetches and fast-forwards the
-  default branch first, so a spawn never disturbs what you're in the middle of.
+- **A fresh worktree per session, by default.** Branched off `origin/<default>`,
+  so a spawn neither inherits nor disturbs what you're in the middle of.
 - **The relay is blind.** It routes ciphertext; the pre-shared key never leaves your
   own devices.
 - **Free to run.** A Worker and a SQLite-backed Durable Object for the relay, a
@@ -267,7 +267,6 @@ There is no title field: the daemon names the tmux window after the prompt.
 
 ```sh
 seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
-#   note: local main diverged from origin — worktree bases on local HEAD
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
@@ -282,10 +281,13 @@ a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 `parent/base` when two collide). Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
-Worktree mode, the default, fetches the repo's default branch, fast-forwards the main
-checkout when it is clean and on that branch, and puts the session in
-`.claude/worktrees/<slug>` on a `worktree-<slug>` branch. `--here` skips all of that
-and runs in the checkout you already have.
+Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
+`worktree-<slug>` branch. Claude Code does the git work — it branches from
+`origin/<default>` and fetches when its copy is a day stale — so what your checkout is
+on, and whether it is clean, changes nothing and is left untouched. (A machine whose
+`settings.json` sets `worktree.baseRef` to `"head"` branches from its checkout
+instead; that is claude's setting, not séance's.) `--here` skips the worktree and runs
+in the checkout you already have.
 
 `status` reports the machine you run it on — including the sha the daemon is running
 versus the one on disk, which is how you spot a `git pull` that still needs a

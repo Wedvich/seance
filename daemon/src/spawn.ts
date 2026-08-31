@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
-import { readDefaultBranch } from "./scan.ts";
 import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
 
@@ -71,46 +70,25 @@ interface Prepared {
   readonly resultPath: string;
   readonly worktreeFlag: readonly string[];
   readonly preamble: string;
-  readonly note?: string;
 }
 
-/** Worktree mode: resolve the default branch (network allowed here), fetch, ff-only when safe. Ported from /spawn. */
-async function prepareWorktree(repo: RepoEntry, worktreeName: string): Promise<Prepared> {
-  let defaultBranch = repo.defaultBranch ?? (await readDefaultBranch(repo.path));
-  if (defaultBranch === null) {
-    await git(repo.path, ["remote", "set-head", "origin", "-a"]);
-    defaultBranch = await readDefaultBranch(repo.path);
-  }
-  if (defaultBranch === null) {
-    throw new SpawnFailure("no_default_branch", `could not determine default branch for ${repo.name}`);
-  }
-
-  const fetch = await git(repo.path, ["fetch", "origin", defaultBranch]);
-  if (fetch.timedOut) {
-    throw new SpawnFailure("timeout", `git fetch origin ${defaultBranch} timed out`);
-  }
-  if (fetch.exitCode !== 0) {
-    throw new SpawnFailure("fetch_failed", `git fetch failed: ${fetch.stderr.trim()}`);
-  }
-
-  // claude --worktree branches off current HEAD — fast-forward the local
-  // default branch first so the worktree starts from latest origin. ff-only:
-  // never rewrites local work, and only when default is checked out clean.
-  let note: string | undefined;
-  const current = (await git(repo.path, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
-  const unstagedClean = (await git(repo.path, ["diff", "--quiet"])).exitCode === 0;
-  const stagedClean = (await git(repo.path, ["diff", "--cached", "--quiet"])).exitCode === 0;
-  if (current === defaultBranch && unstagedClean && stagedClean) {
-    const ff = await git(repo.path, ["merge", "--ff-only", `origin/${defaultBranch}`]);
-    if (ff.exitCode !== 0) {
-      note = `local ${defaultBranch} diverged from origin — worktree bases on local HEAD`;
-    }
-  } else {
-    note = `checkout not on a clean ${defaultBranch} (on '${current || "detached HEAD"}') — worktree bases on current HEAD, not latest origin/${defaultBranch}`;
-  }
-
+/**
+ * Worktree mode does no git work, deliberately. `claude --worktree` resolves the
+ * default branch, fetches, and runs `git worktree add --no-track -B <branch>
+ * <path> origin/<default>` itself — its `worktree.baseRef` setting defaults to
+ * `"fresh"`, meaning exactly that, and only a machine that sets it to `"head"`
+ * branches off the checkout instead.
+ *
+ * This used to fetch and then `git merge --ff-only origin/<default>` in the main
+ * checkout, ported from `/spawn` on the belief that claude branches off HEAD.
+ * That belief was already wrong: the ff never moved the base, only the machine
+ * owner's HEAD, and the two notes it emitted when the checkout was dirty or on
+ * another branch told the phone something untrue. Don't restore it — a remote
+ * spawn has no business moving a local HEAD, and the fetch is claude's.
+ */
+function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
-  const prepared: Prepared = {
+  return {
     launchDir: repo.path,
     resultPath: worktreePath,
     worktreeFlag: ["--worktree", worktreeName],
@@ -120,7 +98,6 @@ async function prepareWorktree(repo: RepoEntry, worktreeName: string): Promise<P
       `the repo's own docs (check CLAUDE.md's worktree-setup section and/or README), including ` +
       `copying any .env from the main checkout at ${repo.path}.`,
   };
-  return note === undefined ? prepared : { ...prepared, note };
 }
 
 function prepareHere(repo: RepoEntry): Prepared {
@@ -236,7 +213,7 @@ export async function spawnSession(
   const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
-  const prepared = request.mode === "here" ? prepareHere(repo) : await prepareWorktree(repo, worktreeName);
+  const prepared = request.mode === "here" ? prepareHere(repo) : prepareWorktree(repo, worktreeName);
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
 
   const target = await resolveTargetSession(opts.tmuxSession);
@@ -267,6 +244,5 @@ export async function spawnSession(
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
 
-  const outcome: SpawnOutcome = { window: windowName, path: prepared.resultPath };
-  return prepared.note === undefined ? outcome : { ...outcome, note: prepared.note };
+  return { window: windowName, path: prepared.resultPath };
 }

@@ -293,7 +293,12 @@ export type SpawnResponse =
       readonly ok: true;
       readonly window: string;
       readonly path: string;
-      /** Non-fatal, e.g. "default branch diverged — basing worktree on local HEAD". */
+      /**
+       * Non-fatal detail about a spawn that worked. No shipped path emits one —
+       * the two that did described a worktree base the daemon never controlled —
+       * but a backend is free to (`SessionBackend` in the daemon's `backend.ts`),
+       * and clients render it.
+       */
       readonly note?: string;
       readonly sessions: readonly SessionEntry[];
     }

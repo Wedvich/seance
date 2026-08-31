@@ -838,8 +838,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   errors, no shell-script templating). The `/spawn` slash command stays
   as-is for in-terminal use; drift between the two implementations is an
   accepted risk. Port the accumulated wisdom from `/spawn`
-  (`~/.claude/commands/spawn.md`): ff-only fast-forward of the default
-  branch before `claude --worktree`, worktree/window naming
+  (`~/.claude/commands/spawn.md`): worktree/window naming
   (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
   `--remote-control` always — kept off the argv tail with the seed prompt
   behind a `--` terminator, because the flag takes an _optional_ value and,
@@ -853,10 +852,36 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   wait, and a window that vanished mid-check counts as a death that beat
   remain-on-exit, not a success). `--here` mode
   spawns at the repo root (no remote "current directory" exists).
-  Failures return structured codes (`repo_not_found`, `fetch_failed`,
-  `no_default_branch`, `launch_error`, `claude_died` + captured pane output,
-  `timeout`) plus a non-fatal `note` field (e.g. "default branch diverged —
-  basing worktree on local HEAD").
+  Failures return structured codes (`repo_not_found`, `launch_error`,
+  `claude_died` + captured pane output, `internal_error`) plus a non-fatal
+  `note` field. `fetch_failed`, `no_default_branch` and `timeout` are still
+  wire codes and still rendered by the clients — no path reaches them since
+  the bullet below deleted the git preparation, but a daemon a version behind
+  emits them and must not degrade to the unknown-code fallback. Nothing emits
+  a `note` any more either; the field stays because `SessionBackend` is a
+  documented fork seam.
+- **Worktree mode does no git preparation** (revised 2026-08-31). This ran a
+  fetch and then `git merge --ff-only origin/<default>` in the main checkout,
+  ported from `/spawn` on the belief that `claude --worktree` branches off the
+  checkout's HEAD. That belief is wrong, and reading Claude Code 2.1.252
+  settles it: `worktree.baseRef` is documented as _"Which ref new worktrees
+  branch from. 'fresh' (default) branches from origin/&lt;default-branch&gt; for a
+  clean tree"_, and the creation path resolves `origin/<default>`, fetches,
+  and runs `git worktree add --no-track -B <branch> <path> origin/<default>`.
+  So the ff never moved the base — only the machine owner's HEAD, as a side
+  effect of a spawn from someone's phone — and the two `note`s it emitted when
+  the checkout was dirty or on another branch ("worktree bases on current
+  HEAD") told the phone something that was never true. All of it is deleted;
+  `--worktree` is passed and claude does the rest. Two costs accepted with
+  eyes open: claude re-fetches only when `FETCH_HEAD` is over 24h old, so a
+  spawn can sit on an origin up to a day stale (the daemon's own fetch used to
+  close that window incidentally), and a machine that sets `baseRef: "head"`
+  opts itself out with no CLI flag to override it — which is the machine
+  owner's call to make. Rejected: creating the worktree in the daemon to name
+  the base explicitly (implemented, then reverted — it moves worktree removal
+  on failure and a second trust entry per spawn onto the daemon, to buy
+  behaviour claude already has); keeping the fetch for freshness alone (a
+  second fetch on every spawn to narrow a 24h window claude manages itself).
 - **No `--permission-mode` flag by default** (revised from `/spawn`'s `auto`).
   Passing one unconditionally would override the machine's own `settings.json`
   default, so a box configured for `bypassPermissions` still got prompted for
@@ -922,7 +947,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   when the set changed. `defaultBranch` is best-effort from local refs only
   (`origin/HEAD` on disk, null otherwise — ~⅓ of repos lack it), carried
   forward for known repos; the network-touching `git remote set-head -a`
-  runs only in the spawn path when unresolved. Rejected: explicit repo list
+  runs only in the self-update path when unresolved (it ran in the spawn path
+  too until worktree mode stopped resolving the branch at all). Rejected: explicit repo list
   (config edit per clone — the friction being eliminated), whole-home scan
   (slow, noisy), authoritative default-branch resolution at scan time
   (turns a 19ms local walk into a multi-second networked operation that
