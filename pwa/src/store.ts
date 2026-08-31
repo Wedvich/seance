@@ -93,7 +93,12 @@ export class Store {
 
   #onRelay(): void {
     const relay = this.#client.getState();
-    this.#patch({ relay });
+    // Pruned in the same patch as the registry that justifies it: patched apart,
+    // subscribers get one render where the machine is gone but the selection
+    // still names it.
+    // Only an authoritative registry may prune — while it is unsettled an empty
+    // `machines` means "no push yet", not "every machine vanished".
+    this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
     if (relay.status !== "open") {
       // Forgotten rather than kept: a resume re-dials unconditionally and the
       // registry that follows names the same machines, so leaving the map in
@@ -108,6 +113,31 @@ export class Store {
     for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
     if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
     if (this.#pending !== null) void this.#reconcile();
+  }
+
+  /**
+   * Drops everything keyed by a deviceId the registry no longer lists — the
+   * remembered repo, the selection, the session list and the wake mark. Nothing
+   * brings that id back: a reinstall mints a new one, so all of it is dead state.
+   * Doing it here rather than at the bin is what makes a refused or undelivered
+   * forget leave the app untouched.
+   */
+  #pruneGone(machines: readonly { readonly deviceId: string }[]): Partial<AppState> {
+    const live = new Set(machines.map((machine) => machine.deviceId));
+    for (const deviceId of [...this.#wokenAt.keys()]) if (!live.has(deviceId)) this.#wokenAt.delete(deviceId);
+
+    const { form, sessions } = this.#state;
+    const repos = Object.fromEntries(Object.entries(form.repos).filter(([id]) => live.has(id)));
+    const kept = Object.fromEntries(Object.entries(sessions).filter(([id]) => live.has(id)));
+    const machineId = form.machineId !== null && !live.has(form.machineId) ? null : form.machineId;
+    // Same objects back when nothing was dropped: #patch bails on identity.
+    return {
+      form:
+        machineId === form.machineId && Object.keys(repos).length === Object.keys(form.repos).length
+          ? form
+          : { ...form, machineId, repos },
+      sessions: Object.keys(kept).length === Object.keys(sessions).length ? sessions : kept,
+    };
   }
 
   async #fetchSessions(deviceIds: readonly string[]): Promise<void> {
@@ -203,17 +233,14 @@ export class Store {
    * The sheet stays open: clearing several retired machines in a row is the
    * normal case, and the list re-renders under it when the relay pushes back.
    *
-   * Its remembered repo goes with it, and the selection if it was the one
-   * selected. Unlike the hide this replaced, nothing brings that deviceId back —
-   * a reinstall mints a new one — so keeping either would be dead state.
+   * Request only: the state keyed by this deviceId goes in `#pruneGone`, when a
+   * registry push says the entry is actually gone. A forget the relay refuses
+   * (the machine reconnected) or one that never left a closed socket therefore
+   * keeps the row, its remembered repo and the selection, rather than clearing
+   * them against a machine that is still listed.
    */
   removeMachine(machineId: string): void {
     this.#client.forget(machineId);
-    const { form } = this.#state;
-    const repos = Object.fromEntries(Object.entries(form.repos).filter(([id]) => id !== machineId));
-    this.#patch({
-      form: { ...form, machineId: form.machineId === machineId ? null : form.machineId, repos },
-    });
   }
 
   selectRepo(repo: string): void {

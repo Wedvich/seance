@@ -896,6 +896,58 @@ describe("store", () => {
       daemon.close();
     }
   });
+
+  test("a confirmed forget takes the machine's repo, selection and session list with it", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Retired"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+    });
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    try {
+      await waitForApp((s) => s.sessions[deviceId] !== undefined, "sessions fetched");
+      daemon.close();
+      await waitForApp(
+        (s) => s.relay.machines.some((m) => m.deviceId === deviceId && !m.connected),
+        "registry sees it gone",
+      );
+
+      store.removeMachine(deviceId);
+      const state = await waitForApp(
+        (s) => !s.relay.machines.some((m) => m.deviceId === deviceId),
+        "entry left the registry",
+      );
+      expect(state.form.machineId).toBeNull();
+      expect(state.form.repos[deviceId]).toBeUndefined();
+      expect(state.sessions[deviceId]).toBeUndefined();
+    } finally {
+      stop();
+    }
+  });
+
+  // The bin is only offered on an offline row, so this is a race: the daemon
+  // reconnected between the render and the tap. The relay refuses, and the app
+  // must not have thrown the selection away on the way there.
+  test("a refused forget leaves the repo and the selection where they were", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Wide Awake Too"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+    });
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      store.removeMachine(deviceId);
+      // A negative assertion: nothing to poll for, only a deletion that must not land.
+      await Bun.sleep(250);
+
+      const state = store.getState();
+      expect(state.relay.machines.some((m) => m.deviceId === deviceId)).toBe(true);
+      expect(state.form.machineId).toBe(deviceId);
+      expect(state.form.repos[deviceId]).toBe("seance");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
 });
 
 describe("registry settle", () => {

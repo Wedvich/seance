@@ -1148,8 +1148,14 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   beat of waking. No confirm step: the row is offline, the act costs a reconnect
   at worst, and clearing several retired machines in a row is the normal case.
   Connected rows get no bin — the relay would refuse it (`Threat model`).
-  The store drops that machine's remembered repo and clears the selection if it
-  was the one selected: unlike a hide, nothing brings that deviceId back.
+  The store drops that machine's remembered repo, its session list and the
+  selection if it was the one selected: unlike a hide, nothing brings that
+  deviceId back. It drops them when the registry push says the entry is gone,
+  not when the bin is tapped, and in that same patch — so a `forget` the relay
+  refuses or one that never left a closed socket leaves the app exactly as it
+  was, and no render ever shows a machine gone while the selection still names
+  it. Pruning keys off an authoritative registry only (`registrySettled`);
+  while it is unsettled an empty list means "no push yet".
   Rejected: hiding, which is what shipped first. It kept `#hidden` in
   `RelayClient` and a `seance:hidden` key in localStorage, said "not this one,
   for now" where the user meant "this machine is gone", and left the relay's
