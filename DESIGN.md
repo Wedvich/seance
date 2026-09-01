@@ -872,12 +872,19 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   effect of a spawn from someone's phone — and the two `note`s it emitted when
   the checkout was dirty or on another branch ("worktree bases on current
   HEAD") told the phone something that was never true. All of it is deleted;
-  `--worktree` is passed and claude does the rest. Two costs accepted with
-  eyes open: claude re-fetches only when `FETCH_HEAD` is over 24h old, so a
+  `--worktree` is passed and claude does the rest. Three costs accepted with
+  eyes open. Claude re-fetches only when `FETCH_HEAD` is over 24h old, so a
   spawn can sit on an origin up to a day stale (the daemon's own fetch used to
-  close that window incidentally), and a machine that sets `baseRef: "head"`
-  opts itself out with no CLI flag to override it — which is the machine
-  owner's call to make. Rejected: creating the worktree in the daemon to name
+  close that window incidentally). A machine that sets `baseRef: "head"` opts
+  itself out with no CLI flag to override it — the machine owner's call to
+  make. And the failure modes go quiet: an unreachable origin or a clone with
+  no `origin/HEAD` used to reach the phone as `fetch_failed` /
+  `no_default_branch` before anything launched, where claude warns in the pane
+  and bases the worktree on the local HEAD, so the spawn reports `ok` and the
+  session is quietly on the checkout's commit. Not a hang, at least: claude's
+  fetch runs `stdin: "ignore"` with `GIT_TERMINAL_PROMPT=0`,
+  `credential.interactive=false` and a 5s timeout, so a repo needing
+  credentials fails fast rather than blocking the pane on a prompt. Rejected: creating the worktree in the daemon to name
   the base explicitly (implemented, then reverted — it moves worktree removal
   on failure and a second trust entry per spawn onto the daemon, to buy
   behaviour claude already has); keeping the fetch for freshness alone (a

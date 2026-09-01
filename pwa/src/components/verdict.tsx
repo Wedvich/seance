@@ -19,8 +19,10 @@ function describe(verdict: Verdict, machineName: string): Content {
       glyphClass: "verdict-glyph",
       headline: `It's running on ${machineName}.`,
       body: "Open Claude on your phone and continue the session from there.",
-      // The note is the daemon telling you the worktree isn't based on what you
-      // think; silence would be the wrong default.
+      // A note is non-fatal detail about a spawn that worked. No shipped daemon
+      // emits one — the two that did misdescribed the worktree's base — but the
+      // field is on the wire for a backend to use, and silence would be the
+      // wrong default for something a daemon went out of its way to say.
       detail: verdict.note === undefined ? verdict.window : `${verdict.window}\n${verdict.note}`,
       primary: { label: "Start another", onClick: "another" },
       showBack: false,

@@ -34,8 +34,10 @@ async function resolveGitDir(repoPath: string): Promise<string | null> {
  * Local-only — never touches the network. Loose ref file first (free);
  * reftable repos (git 2.46+, the default for newer clones) keep no loose
  * ref files, so fall back to `git symbolic-ref`, which also only reads disk.
- * The network-touching `git remote set-head` belongs to the spawn path, and
- * only when this returns null.
+ * The network-touching `git remote set-head` belongs to the self-update path
+ * (`update.ts`), and only when this returns null. It ran in the spawn path too
+ * until worktree mode stopped resolving the branch at all — claude's
+ * `--worktree` does that itself.
  */
 export async function readDefaultBranch(repoPath: string): Promise<string | null> {
   const fromFile = await readDefaultBranchFile(repoPath);

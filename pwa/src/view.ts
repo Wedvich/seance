@@ -399,7 +399,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
       mono: false,
       dot: null,
     },
-    worktreeHint: state.form.worktree ? "Branches off main, fast-forwarded first" : "Runs in the repo as it stands",
+    worktreeHint: state.form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, now),
     button: deriveButton(state, machine),
     ignoredNote: deriveIgnoredNote(state.relay),

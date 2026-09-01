@@ -284,7 +284,10 @@ a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. Claude Code does the git work — it branches from
 `origin/<default>` and fetches when its copy is a day stale — so what your checkout is
-on, and whether it is clean, changes nothing and is left untouched. (A machine whose
+on, and whether it is clean, changes nothing and is left untouched. If it can't reach
+origin it says so in the session and branches off your checkout instead, so a spawn
+that reports success on an offline machine may be on an older base than you expect.
+(A machine whose
 `settings.json` sets `worktree.baseRef` to `"head"` branches from its checkout
 instead; that is claude's setting, not séance's.) `--here` skips the worktree and runs
 in the checkout you already have.

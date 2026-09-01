@@ -404,7 +404,7 @@ export default function Command(): React.JSX.Element {
       <Form.Checkbox
         id="worktree"
         label="Fresh worktree"
-        info="Branches off the default branch, fast-forwarded first. Off runs in the repo as it stands."
+        info="Branches off the default branch on origin, not off your checkout. Off runs in the repo as it stands."
         value={values.worktree}
         onChange={(worktree) => setValues((current) => ({ ...current, worktree }))}
       />

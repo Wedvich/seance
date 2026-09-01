@@ -393,7 +393,9 @@ describe("selection", () => {
 
 describe("worktree hint", () => {
   test("switches with the toggle", () => {
-    expect(deriveView(state({}, { worktree: true }), NOW).worktreeHint).toBe("Branches off main, fast-forwarded first");
+    expect(deriveView(state({}, { worktree: true }), NOW).worktreeHint).toBe(
+      "Branches off the default branch on origin",
+    );
     expect(deriveView(state({}, { worktree: false }), NOW).worktreeHint).toBe("Runs in the repo as it stands");
   });
 });
