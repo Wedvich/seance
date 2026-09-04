@@ -24,6 +24,12 @@ export interface SpawnOutcome {
   readonly window: string;
   readonly path: string;
   readonly note?: string;
+  /**
+   * Backend-scoped token for the thing that was started (the tmux window id
+   * here), so the frontend can ask `capture` about it later. Never crosses the
+   * wire — `handleSpawn` builds the response field by field to keep it out.
+   */
+  readonly handle?: string;
 }
 
 export interface SessionBackend {
@@ -35,4 +41,11 @@ export interface SessionBackend {
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
+  /**
+   * Whatever a started session is showing right now, for the one case the
+   * frontend can diagnose but not see: spawn succeeded, the process is alive,
+   * and it still never appeared in `sessions`. Optional — a backend with no
+   * screen to read omits it and the ack just says less.
+   */
+  readonly capture?: (handle: string) => Promise<string | null>;
 }

@@ -857,9 +857,9 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `note` field. `fetch_failed`, `no_default_branch` and `timeout` are still
   wire codes and still rendered by the clients — no path reaches them since
   the bullet below deleted the git preparation, but a daemon a version behind
-  emits them and must not degrade to the unknown-code fallback. Nothing emits
-  a `note` any more either; the field stays because `SessionBackend` is a
-  documented fork seam.
+  emits them and must not degrade to the unknown-code fallback. The `note`
+  field has one emitter again — the stuck-spawn detection below — and stays a
+  documented `SessionBackend` fork seam besides.
 - **Worktree mode does no git preparation** (revised 2026-08-31). This ran a
   fetch and then `git merge --ff-only origin/<default>` in the main checkout,
   ported from `/spawn` on the belief that `claude --worktree` branches off the
@@ -970,6 +970,37 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   ids (manual `/spawn` windows invisible — defeats duplicate avoidance;
   union variant adds id-reconciliation state for a hedge the visible
   breakage already covers).
+- **A spawn that starts but never registers is reported, not swallowed**
+  (added 2026-09-04). The two liveness notions disagree in exactly one case: pane
+  verification asks `pane_dead`, so a claude blocked on a startup dialog no
+  remote can answer is "alive" and the spawn acks `ok`, while session detection
+  keys off the version-string retitle, which such a claude has not reached. The
+  phone got a success and an empty machine. `handleSpawn` already polled for the
+  window and already knew it never arrived (`ACK_SETTLE_MS`); the ack now carries
+  `pending: true` plus a `note` holding the pane's visible screen, so the dialog
+  itself is readable from the phone — the screen (`SessionBackend.capture`) rides
+  the wire only, because the seed prompt renders in that pane and prompt text is
+  never logged. `pending` is a separate flag rather than a note the clients
+  pattern-match, because it changes what each surface *says*: the PWA verdict
+  drops "It's running on X" for "it started, but it's stuck", muted rather than
+  green and offering the form back instead of "Start another" (a retry meets the
+  same dialog and leaves two stuck windows); Raycast switches the toast to the
+  attention style; `seanced mcp` appends "(started, not registered yet)".
+  Optional on the wire, so a daemon a version behind omits it and its acks read
+  exactly as they did before. The window id reaches the frontend as `SpawnOutcome.handle`, a
+  backend-scoped token the response is assembled field by field to exclude.
+  Steady state gets the same check in `doctor`, warning on alive-but-untitled
+  windows séance started, identified by
+  `#{m:*--remote-control*,#{pane_start_command}}` — no daemon state, and the
+  match collapses to `0`/`1` inside tmux so wire-supplied values (model, effort)
+  in that command line never reach the format output. A tmux too old for `m:`
+  renders the format literally, matches nothing, and the check reports nothing.
+  Rejected: a tmux user option as the marker (`#{@seance}` resolution across the
+  pane/window/session hierarchy is version-dependent, and it is state to set and
+  lose); walking `pane_pid`'s process tree with `ps` (precise, but
+  platform-specific parsing for what a format string already answers);
+  pre-answering more dialogs — `trust.ts` does that for the one gate whose config
+  key is known, and detection is what covers the ones that aren't.
 - **Logging**: plain text (`ISO-timestamp level message`) to
   stdout/stderr; the launchd plist (macOS) and the systemd unit's
   `StandardOutput=append:` (WSL) redirect both to

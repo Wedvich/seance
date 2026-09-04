@@ -268,6 +268,12 @@ export default function Command(): React.JSX.Element {
     lastUsedRef.current = persisted;
     try {
       await writeLastUsed(store, persisted);
+      if (reply.pending === true) {
+        // Not a spawn failure — the session exists — but it needs someone at that
+        // machine, so it gets the style that actually stops you.
+        await showToast(Toast.Style.Failure, `${reply.window} started but is stuck`, reply.note);
+        return;
+      }
       if (reply.note !== undefined) {
         // A note is the one success worth reading, so the window stays put.
         await showToast(Toast.Style.Success, `Started ${reply.window}`, reply.note);

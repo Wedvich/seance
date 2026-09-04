@@ -1,8 +1,8 @@
 import type { SessionBackend } from "./backend.ts";
 import type { Check } from "./check.ts";
 import type { Config } from "./config.ts";
-import { listClaudeSessions } from "./sessions.ts";
-import { spawnSession } from "./spawn.ts";
+import { listClaudeSessions, listStuckWindows } from "./sessions.ts";
+import { captureWindow, spawnSession } from "./spawn.ts";
 import { tmux } from "./tmux.ts";
 
 /**
@@ -18,6 +18,7 @@ export function createBackend(config: Config, opts: { readonly waitMs?: number }
       spawnSession(request, repos, { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag }),
     sessions: (repos) => listClaudeSessions(repos),
     doctor: tmuxChecks,
+    capture: (handle) => captureWindow(handle, { history: false }),
   };
 }
 
@@ -41,5 +42,17 @@ async function tmuxChecks(): Promise<readonly Check[]> {
       ? { level: "ok", message: `tmux server running (sessions: ${sessions.stdout.trim().split("\n").join(", ")})` }
       : { level: "warn", message: "no tmux server — fine; spawn creates the session detached" },
   );
+
+  // Warn, not fail: the sessions are recoverable by hand, and doctor exits
+  // nonzero on fail — a machine with one stuck window is still serving.
+  const stuck = await listStuckWindows();
+  if (stuck.length > 0) {
+    checks.push({
+      level: "warn",
+      message:
+        `${stuck.length} started session(s) never registered — likely waiting on a startup prompt: ` +
+        `${stuck.join(", ")}. Attach with \`tmux attach\` and answer it.`,
+    });
+  }
   return checks;
 }

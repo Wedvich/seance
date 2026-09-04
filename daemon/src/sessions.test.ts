@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RepoEntry } from "@seance/shared";
-import { parsePanes } from "./sessions.ts";
+import { parsePanes, parseStuckWindows } from "./sessions.ts";
 import { slugify } from "./spawn.ts";
 
 const repos: readonly RepoEntry[] = [
@@ -58,6 +58,38 @@ describe("parsePanes", () => {
 
   test("tolerates malformed lines and trailing newline", () => {
     expect(parsePanes("garbage\n\n", repos)).toEqual([]);
+  });
+});
+
+function stuckLine(id: string, ours: string, dead: string, cmd: string, name: string): string {
+  return `${id}|${ours}|${dead}|${cmd}|${name}`;
+}
+
+describe("parseStuckWindows", () => {
+  test("flags a séance window that is alive but never took the version title", () => {
+    const raw = [
+      stuckLine("@1", "1", "0", "claude", "trust-me"),
+      stuckLine("@2", "1", "0", "2.1.220", "running"),
+    ].join("\n");
+    expect(parseStuckWindows(raw)).toEqual(["trust-me"]);
+  });
+
+  test("ignores windows séance did not start — a hand-run shell is not stuck", () => {
+    expect(parseStuckWindows(stuckLine("@3", "0", "0", "zsh", "martin"))).toEqual([]);
+  });
+
+  test("ignores a dead pane — that is the spawn-time claude_died path, already reported", () => {
+    expect(parseStuckWindows(stuckLine("@4", "1", "1", "claude", "died"))).toEqual([]);
+  });
+
+  test("a tmux too old for #{m:} matches nothing rather than flagging everything", () => {
+    const literal = stuckLine("@5", "#{m:*--remote-control*,#{pane_start_command}}", "0", "claude", "old-tmux");
+    expect(parseStuckWindows(literal)).toEqual([]);
+  });
+
+  test("dedups split panes by window id and tolerates malformed lines", () => {
+    const raw = [stuckLine("@6", "1", "0", "claude", "one"), stuckLine("@6", "1", "0", "claude", "one"), "garbage", ""];
+    expect(parseStuckWindows(raw.join("\n"))).toEqual(["one"]);
   });
 });
 
