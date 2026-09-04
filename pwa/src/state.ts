@@ -28,7 +28,14 @@ export type SheetKind = "machine" | "repo" | "model" | "effort";
 export type RescanState = "idle" | "scanning" | "failed";
 
 export type Verdict =
-  | { readonly kind: "ok"; readonly window: string; readonly note?: string; readonly prompt?: string }
+  | {
+      readonly kind: "ok";
+      readonly window: string;
+      readonly note?: string;
+      readonly prompt?: string;
+      /** Started, but never registered — the verdict says so instead of claiming it is running. */
+      readonly pending?: true;
+    }
   | {
       readonly kind: "failed";
       readonly code: SpawnErrorCode;

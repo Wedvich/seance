@@ -151,6 +151,24 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
 }
 
 /**
+ * What the window is showing. `history` pulls the scrollback in too: on the
+ * death path the redraw scrolls the final output out of the visible screen,
+ * leaving only tmux's dead-pane banner. A *live* claude is on the alternate
+ * screen, which has no scrollback, so the stuck path asks for the screen alone.
+ */
+export async function captureWindow(windowId: string, opts: { readonly history: boolean }): Promise<string | null> {
+  const range = opts.history ? ["-S", "-", "-E", "-"] : [];
+  const result = await tmux(["capture-pane", "-p", ...range, "-t", windowId]);
+  if (result.exitCode !== 0) return null;
+  const text = result.stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-20)
+    .join("\n");
+  return text === "" ? null : text;
+}
+
+/**
  * tmux new-window returns 0 as soon as the window frame exists — it knows
  * nothing about whether claude started or died. Keep the pane on exit and
  * poll pane_dead until the deadline: a dead pane means claude failed and
@@ -176,14 +194,9 @@ async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> 
     await Bun.sleep(100);
   }
   if (dead) {
-    // -S -/-E -: the death redraw scrolls the final output into history — the visible screen keeps only the dead-pane banner
-    const captured = (await tmux(["capture-pane", "-p", "-S", "-", "-E", "-", "-t", windowId])).stdout
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .slice(-20)
-      .join("\n");
+    const captured = await captureWindow(windowId, { history: true });
     await tmux(["kill-window", "-t", windowId]);
-    throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured}`);
+    throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
 }
@@ -244,5 +257,5 @@ export async function spawnSession(
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
 
-  return { window: windowName, path: prepared.resultPath };
+  return { window: windowName, path: prepared.resultPath, handle: windowId };
 }
