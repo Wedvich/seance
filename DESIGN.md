@@ -981,7 +981,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   itself is readable from the phone — the screen (`SessionBackend.capture`) rides
   the wire only, because the seed prompt renders in that pane and prompt text is
   never logged. `pending` is a separate flag rather than a note the clients
-  pattern-match, because it changes what each surface *says*: the PWA verdict
+  pattern-match, because it changes what each surface _says_: the PWA verdict
   drops "It's running on X" for "it started, but it's stuck", muted rather than
   green and offering the form back instead of "Start another" (a retry meets the
   same dialog and leaves two stuck windows); Raycast switches the toast to the

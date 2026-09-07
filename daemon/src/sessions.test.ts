@@ -67,10 +67,9 @@ function stuckLine(id: string, ours: string, dead: string, cmd: string, name: st
 
 describe("parseStuckWindows", () => {
   test("flags a séance window that is alive but never took the version title", () => {
-    const raw = [
-      stuckLine("@1", "1", "0", "claude", "trust-me"),
-      stuckLine("@2", "1", "0", "2.1.220", "running"),
-    ].join("\n");
+    const raw = [stuckLine("@1", "1", "0", "claude", "trust-me"), stuckLine("@2", "1", "0", "2.1.220", "running")].join(
+      "\n",
+    );
     expect(parseStuckWindows(raw)).toEqual(["trust-me"]);
   });
 
