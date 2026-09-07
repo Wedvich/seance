@@ -13,16 +13,32 @@ interface Content {
 }
 
 function describe(verdict: Verdict, machineName: string): Content {
+  if (verdict.kind === "ok" && verdict.pending === true) {
+    // The process is up, so this is not a failure — but "It's running" would be
+    // a lie about the only thing you came here to learn, and the detail below
+    // (the session's screen) is the whole point of the verdict.
+    return {
+      glyph: "…",
+      glyphClass: "verdict-glyph verdict-glyph-muted",
+      headline: `It started, but it's stuck on ${machineName}.`,
+      body: "Claude hasn't finished starting up — it's most likely waiting on a prompt that only someone at that machine can answer.",
+      detail: verdict.note === undefined ? verdict.window : `${verdict.window}\n${verdict.note}`,
+      // No "Start another": a retry meets the same prompt and leaves two stuck windows.
+      primary: { label: "Back to the form", onClick: "back" },
+      showBack: false,
+    };
+  }
+
   if (verdict.kind === "ok") {
     return {
       glyph: "✓",
       glyphClass: "verdict-glyph",
       headline: `It's running on ${machineName}.`,
       body: "Open Claude on your phone and continue the session from there.",
-      // A note is non-fatal detail about a spawn that worked. No shipped daemon
-      // emits one — the two that did misdescribed the worktree's base — but the
-      // field is on the wire for a backend to use, and silence would be the
-      // wrong default for something a daemon went out of its way to say.
+      // A note is non-fatal detail about a spawn that worked — in the shipped
+      // daemon, a session that started but never registered, with the screen it
+      // is stuck on. Silence would be the wrong default for something a daemon
+      // went out of its way to say.
       detail: verdict.note === undefined ? verdict.window : `${verdict.window}\n${verdict.note}`,
       primary: { label: "Start another", onClick: "another" },
       showBack: false,

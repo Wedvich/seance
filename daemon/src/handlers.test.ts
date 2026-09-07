@@ -98,7 +98,7 @@ function lateTitlingBackend(blindCalls: number): { readonly backend: SessionBack
   return {
     calls: () => calls,
     backend: {
-      spawn: () => Promise.resolve({ window: SPAWNED.window, path: SPAWNED.path }),
+      spawn: () => Promise.resolve({ window: SPAWNED.window, path: SPAWNED.path, handle: "@7" }),
       sessions: () => {
         calls += 1;
         return Promise.resolve(calls > blindCalls ? [SPAWNED] : []);
@@ -132,5 +132,42 @@ describe("the spawn ack carries the window it announced", () => {
     expect(payload.sessions).toEqual([]);
     // Bounded: a late ack is worse than an incomplete one.
     expect(never.calls()).toBeGreaterThan(1);
+    // …and says so, rather than letting the empty list read as an idle machine.
+    expect(payload.note).toContain("never registered");
+    // The flag, not the prose, is what stops the clients claiming it is running.
+    expect(payload.pending).toBe(true);
   }, 10_000);
+
+  test("the note carries the screen, so the phone reads the dialog it is stuck on", async () => {
+    const never = lateTitlingBackend(Number.POSITIVE_INFINITY);
+    const asked: string[] = [];
+    const payload = await spawnReply({
+      ...never.backend,
+      capture: (handle) => {
+        asked.push(handle);
+        return Promise.resolve("Do you trust the files in this folder?");
+      },
+    });
+    if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
+    expect(asked).toEqual(["@7"]);
+    expect(payload.note).toContain("Do you trust the files in this folder?");
+    // The handle is backend-scoped; a wire payload carrying a tmux window id is a leak.
+    expect(payload).not.toHaveProperty("handle");
+  }, 10_000);
+
+  test("a titled session says nothing extra and never reads the screen", async () => {
+    const prompt = lateTitlingBackend(0);
+    let captured = false;
+    const payload = await spawnReply({
+      ...prompt.backend,
+      capture: () => {
+        captured = true;
+        return Promise.resolve("should not be asked");
+      },
+    });
+    if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
+    expect(payload.note).toBeUndefined();
+    expect(payload.pending).toBeUndefined();
+    expect(captured).toBe(false);
+  });
 });

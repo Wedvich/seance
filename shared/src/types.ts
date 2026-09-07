@@ -294,12 +294,20 @@ export type SpawnResponse =
       readonly window: string;
       readonly path: string;
       /**
-       * Non-fatal detail about a spawn that worked. No shipped path emits one —
-       * the two that did described a worktree base the daemon never controlled —
-       * but a backend is free to (`SessionBackend` in the daemon's `backend.ts`),
-       * and clients render it.
+       * Non-fatal detail about a spawn that worked. The daemon emits one when the
+       * session started but never registered — it is likely sitting on a startup
+       * dialog, and the note carries that screen. A backend may emit others
+       * (`SessionBackend` in the daemon's `backend.ts`); clients render whatever
+       * arrives.
        */
       readonly note?: string;
+      /**
+       * The session started but had not registered by the time the ack went out —
+       * near-certainly blocked on a startup dialog no remote can answer, with the
+       * screen in `note`. Absent means it registered; a daemon a version behind
+       * omits it, which reads as the same thing and is the pre-existing behaviour.
+       */
+      readonly pending?: true;
       readonly sessions: readonly SessionEntry[];
     }
   | { readonly ok: false; readonly code: SpawnErrorCode; readonly message: string };

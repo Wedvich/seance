@@ -778,6 +778,38 @@ describe("store", () => {
     }
   });
 
+  test("a spawn that started but never registered reaches the verdict as pending, screen and all", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Thad"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      spawn: () => ({
+        ok: true,
+        window: "stuck-on-a-dialog",
+        path: "/tmp/w",
+        pending: true,
+        note: "started but never registered — it may be waiting on a prompt on that machine:\nDo you trust the files in this folder?",
+        sessions: [],
+      }),
+    });
+    const { store, waitForApp, stop } = startStore({
+      machineId: deviceId,
+      repos: { [deviceId]: "seance" },
+      prompt: "port the pane",
+    });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      const verdict = store.getState().verdict;
+      if (verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(verdict)}`);
+      // Without this the verdict renders "It's running on Thad" over an empty machine.
+      expect(verdict.pending).toBe(true);
+      expect(verdict.note).toContain("Do you trust the files in this folder?");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
   test("a retry whose rescan never lands says so instead of spawning into the stale cache", async () => {
     const deviceId = nextDeviceId();
     const ops: string[] = [];

@@ -39,6 +39,44 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
   return sessions;
 }
 
+/**
+ * Windows séance started that are alive but still untitled — the steady-state
+ * form of the spawn-time miss in `handleSpawn`. Claude retitles only once it is
+ * past its startup gates, so an alive pane that never took the title is one
+ * sitting on a dialog nobody local is there to answer.
+ *
+ * `pane_start_command` identifies our windows without keeping any state, and
+ * `#{m:...}` reduces it to 0/1 inside tmux — the raw command carries
+ * wire-supplied values (model, effort) that could hold the field separator. A
+ * tmux too old for `m:` renders the format literally, never matches, and the
+ * check just reports nothing.
+ */
+export function parseStuckWindows(raw: string): readonly string[] {
+  const seen = new Set<string>();
+  const stuck: string[] = [];
+  for (const line of raw.split("\n")) {
+    const [windowId, ours, dead, command, ...rest] = line.split(FIELD_SEP);
+    const windowName = rest.join(FIELD_SEP);
+    if (windowId === undefined || ours !== "1" || dead !== "0" || command === undefined) continue;
+    if (CLAUDE_TITLE.test(command) || seen.has(windowId)) continue;
+    seen.add(windowId);
+    stuck.push(windowName === "" ? windowId : windowName);
+  }
+  return stuck;
+}
+
+export async function listStuckWindows(): Promise<readonly string[]> {
+  const result = await tmux([
+    "list-panes",
+    "-a",
+    "-F",
+    `#{window_id}${FIELD_SEP}#{m:*--remote-control*,#{pane_start_command}}${FIELD_SEP}` +
+      `#{pane_dead}${FIELD_SEP}#{pane_current_command}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}`,
+  ]);
+  if (result.exitCode !== 0) return [];
+  return parseStuckWindows(result.stdout);
+}
+
 export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<readonly SessionEntry[]> {
   const result = await tmux([
     "list-panes",

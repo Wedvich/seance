@@ -368,6 +368,7 @@ export class Store {
           kind: "ok",
           window: reply.window,
           ...(reply.note === undefined ? {} : { note: reply.note }),
+          ...(reply.pending === true ? { pending: true as const } : {}),
           ...(prompt === "" ? {} : { prompt }),
         });
       } else {

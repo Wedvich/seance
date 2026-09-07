@@ -63,16 +63,37 @@ const ACK_SETTLE_MS = 2_000;
  * until something else refreshed it. A session that never titles still answers,
  * just with the short list — a late ack is worse than an incomplete one.
  */
-async function sessionsIncluding(ctx: HandlerContext, window: string): Promise<readonly SessionEntry[]> {
+async function sessionsIncluding(ctx: HandlerContext, window: string): Promise<AckSessions> {
   const deadline = Bun.nanoseconds() + ACK_SETTLE_MS * 1e6;
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next, nothing to parallelize
     const sessions = await ctx.backend.sessions(ctx.getRepos());
-    if (sessions.some((entry) => entry.window === window)) return sessions;
-    if (Bun.nanoseconds() >= deadline) return sessions;
+    if (sessions.some((entry) => entry.window === window)) return { sessions, found: true };
+    if (Bun.nanoseconds() >= deadline) return { sessions, found: false };
     // oxlint-disable-next-line no-await-in-loop
     await Bun.sleep(100);
   }
+}
+
+interface AckSessions {
+  readonly sessions: readonly SessionEntry[];
+  /** Whether the spawned window ever appeared — see `stuckNote` for why the miss is worth reporting. */
+  readonly found: boolean;
+}
+
+/**
+ * The spawn worked and the process is alive, yet it never registered: the
+ * fingerprint of a startup gate no remote can answer (a trust or approval
+ * dialog), which otherwise reaches the phone as a machine that simply has no
+ * sessions. The screen is the only place that says *which* gate, so it rides
+ * back on the ack — and only there: the seed prompt renders in that pane, and
+ * prompt text is never logged.
+ */
+async function stuckNote(ctx: HandlerContext, handle: string | undefined): Promise<string> {
+  const base = "started but never registered — it may be waiting on a prompt on that machine";
+  if (handle === undefined || ctx.backend.capture === undefined) return base;
+  const screen = await ctx.backend.capture(handle).catch(() => null);
+  return screen === null ? base : `${base}:\n${screen}`;
 }
 
 async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unknown): Promise<SpawnResponse> {
@@ -84,8 +105,18 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   try {
     const outcome = await ctx.backend.spawn(payload, ctx.getRepos());
     await audit.ok(outcome);
-    const sessions = await sessionsIncluding(ctx, outcome.window);
-    return { ok: true, ...outcome, sessions };
+    const { sessions, found } = await sessionsIncluding(ctx, outcome.window);
+    const notes = [outcome.note, found ? undefined : await stuckNote(ctx, outcome.handle)];
+    const note = notes.filter((n) => n !== undefined).join("\n\n");
+    // Field by field rather than a spread: `handle` is backend-scoped and must not reach the wire.
+    return {
+      ok: true,
+      window: outcome.window,
+      path: outcome.path,
+      ...(note === "" ? {} : { note }),
+      ...(found ? {} : { pending: true as const }),
+      sessions,
+    };
   } catch (err) {
     if (err instanceof SpawnFailure) {
       await audit.failed(err.code);

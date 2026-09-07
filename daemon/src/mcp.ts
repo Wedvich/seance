@@ -444,7 +444,8 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
       const rendered = (reply: SpawnResponse, where: string): ToolResult => {
         if (!reply.ok) return errorResult(`spawn failed (${reply.code}): ${reply.message}`);
         const note = reply.note === undefined ? "" : `\nnote: ${reply.note}`;
-        return textResult(`spawned window ${reply.window} on ${where} at ${reply.path}${note}`);
+        const state = reply.pending === true ? " (started, not registered yet)" : "";
+        return textResult(`spawned window ${reply.window} on ${where} at ${reply.path}${state}${note}`);
       };
 
       if (local !== null && isLocalRef(local, machine)) {
