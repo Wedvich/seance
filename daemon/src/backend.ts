@@ -25,6 +25,13 @@ export interface SpawnOutcome {
   readonly path: string;
   readonly note?: string;
   /**
+   * Whether the session had shown up in `sessions` by the time spawn returned.
+   * `false` is the one outcome the frontend can name but not see: the process
+   * is alive, so this is no failure, yet it never registered — a claude on a
+   * startup dialog no remote can answer. The ack carries it as `pending`.
+   */
+  readonly registered: boolean;
+  /**
    * Backend-scoped token for the thing that was started (the tmux window id
    * here), so the frontend can ask `capture` about it later. Never crosses the
    * wire — `handleSpawn` builds the response field by field to keep it out.

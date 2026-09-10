@@ -94,7 +94,7 @@ describe("spawn audit lines", () => {
 describe("cliSink", () => {
   test("appends to the same log the daemon writes, in the daemon's format", async () => {
     await spawnAudit("cli", cliSink).request({ repo: "myrepo", mode: "here", title: "Local" });
-    await spawnAudit("cli", cliSink).ok({ window: "Local", path: "/repos/myrepo" });
+    await spawnAudit("cli", cliSink).ok({ window: "Local", path: "/repos/myrepo", registered: true });
     const written = await Bun.file(logPath()).text();
     expect(written).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z info audit spawn origin=cli repo="myrepo"/mu);
     expect(written).toContain('audit spawn origin=cli ok window="Local"');

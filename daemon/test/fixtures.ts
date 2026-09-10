@@ -58,11 +58,12 @@ export async function makeGitFixture(base: string): Promise<GitFixture> {
 }
 
 export interface ClaudeStub {
-  /** Wrapper that records its argv to `argvFile` and stays alive — pane shows comm "9.9.9". */
+  /** Wrapper that records its argv to `argvFile`, titles its pane like a started claude, and stays alive. */
   readonly ok: string;
+  /** Like `ok` but never titles the pane — a claude parked on a startup dialog. */
+  readonly stuck: string;
   /** Wrapper that prints an error and exits nonzero — the claude_died case. */
   readonly failing: string;
-  readonly version: string;
   /** Overwritten on every `ok` launch — rm it before a spawn whose argv the test reads. */
   readonly argvFile: string;
   /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
@@ -70,10 +71,13 @@ export interface ClaudeStub {
 }
 
 /**
- * pane_current_command reports the executable's comm name, which macOS sets
- * from the resolved binary's basename. Real claude shows "2.1.220" because
- * its installer stores the executable under a versioned filename. The stub
- * reproduces that: a copy of bun named "9.9.9" running a sleeper script.
+ * Reproduces what tmux sees of a real claude on each host. The native
+ * installer keeps the binary under a versioned filename and execs it through a
+ * `claude` symlink: macOS tmux reports the resolved basename ("2.1.267"), Linux
+ * tmux reports argv[0] ("claude"). A copy of bun named "9.9.9", exec'd with
+ * `-a claude`, shows both faces. Registration is the pane title claude sets
+ * once its TUI is up — the sleeper sets one a beat after starting, or never,
+ * so the alive-but-unregistered path is reachable without a real dialog.
  */
 export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   const dir = join(base, "stub");
@@ -86,13 +90,30 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await chmod(versioned, 0o755);
 
   const sleeper = join(dir, "sleeper.ts");
-  await Bun.write(sleeper, "await Bun.sleep(120_000);\n");
+  await Bun.write(
+    sleeper,
+    [
+      'if (Bun.argv[2] === "titled") {',
+      "  await Bun.sleep(300);",
+      '  process.stdout.write("\\x1b]2;\u2733 stub\\x1b\\\\");',
+      "}",
+      "await Bun.sleep(120_000);",
+      "",
+    ].join("\n"),
+  );
 
   const ok = join(dir, "claude");
   const argvFile = `${ok}.argv`;
   // NUL separators: seed prompts carry newlines, so a line-based record would lie
-  await Bun.write(ok, `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\nexec "${versioned}" "${sleeper}"\n`);
+  await Bun.write(
+    ok,
+    `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\nexec -a claude "${versioned}" "${sleeper}" titled\n`,
+  );
   await chmod(ok, 0o755);
+
+  const stuck = join(dir, "claude-stuck");
+  await Bun.write(stuck, `#!/bin/bash\nexec -a claude "${versioned}" "${sleeper}" untitled\n`);
+  await chmod(stuck, 0o755);
 
   const failing = join(dir, "claude-failing");
   // real claude takes >100ms to fail and reports errors on the pty's stdout;
@@ -113,7 +134,7 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     await pollUntil(written, `claude stub argv at ${argvFile}`);
     return (await Bun.file(argvFile).text()).split("\0").slice(0, -1);
   };
-  return { ok, failing, version: "9.9.9", argvFile, argv };
+  return { ok, stuck, failing, argvFile, argv };
 }
 
 /**

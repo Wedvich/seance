@@ -16,6 +16,19 @@ export class TmuxError extends Error {}
  */
 export const FIELD_SEP = "|";
 
+/**
+ * `1` once claude has set the pane's title, `0` before. Claude titles its
+ * terminal (`✳ <session>`) only when the TUI is up, i.e. past every startup
+ * gate — a trust or approval dialog leaves the title untouched — and a pane
+ * that runs `exec claude` straight from tmux has no shell in between to set
+ * one, so until then it carries tmux's default: the hostname. The comparison
+ * runs inside tmux so no title text (a hand-run claude's is arbitrary) reaches
+ * the format output. A tmux too old for `#{==:}` renders the format literally,
+ * which parses as untitled: the session list goes visibly empty rather than
+ * counting every pane as a session.
+ */
+export const PANE_TITLED = "#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}";
+
 /** Window names reach us as unvalidated wire text; a separator inside one would misparse its pane line. */
 export function sanitizeWindowName(name: string): string {
   return name.replaceAll(FIELD_SEP, "-");

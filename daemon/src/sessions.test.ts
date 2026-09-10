@@ -8,51 +8,64 @@ const repos: readonly RepoEntry[] = [
   { name: "api", path: "/Users/m/repos/api", defaultBranch: "main" },
 ];
 
-function line(id: string, name: string, cmd: string, path: string): string {
-  return `${id}|${name}|${cmd}|${path}`;
+function line(id: string, name: string, cmd: string, titled: "0" | "1", path: string): string {
+  return `${id}|${name}|${cmd}|${titled}|${path}`;
 }
 
 describe("parsePanes", () => {
-  test("detects claude by version-string title, ignores shells", () => {
+  test("a titled claude pane is a session under every name tmux gives the process", () => {
     const raw = [
-      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
-      line("@2", "martin", "zsh", "/Users/m"),
+      line("@1", "mac", "2.1.267", "1", "/Users/m/repos/seance"), // macOS: resolved binary's basename
+      line("@2", "linux", "claude", "1", "/Users/m/repos/api"), // Linux/WSL: argv[0]
+      line("@3", "npm", "node", "1", "/Users/m/repos/api"), // npm install
+      line("@4", "martin", "zsh", "0", "/Users/m"),
     ].join("\n");
-    const sessions = parsePanes(raw, repos);
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0]?.window).toBe("seance");
-    expect(sessions[0]?.repo).toBe("seance");
+    expect(parsePanes(raw, repos).map((s) => s.window)).toEqual(["mac", "linux", "npm"]);
+  });
+
+  test("a claude on a startup dialog — process up, pane still untitled — is not a session", () => {
+    expect(parsePanes(line("@1", "trust-me", "claude", "0", "/Users/m/repos/seance"), repos)).toEqual([]);
+  });
+
+  test("a titled pane that is not claude is not a session either — an editor or shell that set one", () => {
+    const raw = [line("@1", "edit", "vim", "1", "/Users/m/repos/seance"), line("@2", "sh", "zsh", "1", "/Users/m")];
+    expect(parsePanes(raw.join("\n"), repos)).toEqual([]);
+  });
+
+  test("a tmux too old for the title format lists nothing rather than everything", () => {
+    const literal = `@1|seance|claude|#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}|/Users/m/repos/seance`;
+    expect(parsePanes(literal, repos)).toEqual([]);
   });
 
   test("dedups grouped-session repeats and split panes by window id", () => {
     const raw = [
-      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
-      line("@1", "seance", "2.1.220", "/Users/m/repos/seance"),
-      line("@1", "seance", "zsh", "/Users/m/repos/seance"),
+      line("@1", "seance", "claude", "1", "/Users/m/repos/seance"),
+      line("@1", "seance", "claude", "1", "/Users/m/repos/seance"),
+      line("@1", "seance", "zsh", "0", "/Users/m/repos/seance"),
     ].join("\n");
     expect(parsePanes(raw, repos)).toHaveLength(1);
   });
 
   test("maps worktree paths back to their repo", () => {
-    const raw = line("@3", "fix (wt)", "2.1.220", "/Users/m/repos/seance/.claude/worktrees/fix-123");
+    const raw = line("@3", "fix (wt)", "claude", "1", "/Users/m/repos/seance/.claude/worktrees/fix-123");
     const sessions = parsePanes(raw, repos);
     expect(sessions[0]?.repo).toBe("seance");
     expect(sessions[0]?.path).toContain("worktrees/fix-123");
   });
 
   test("repo is null outside every known repo", () => {
-    const raw = line("@4", "scratch", "2.1.220", "/Users/m/elsewhere");
+    const raw = line("@4", "scratch", "claude", "1", "/Users/m/elsewhere");
     expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
   });
 
   test("prefix match does not cross sibling boundaries", () => {
     // /Users/m/repos/api-v2 must not match repo "api"
-    const raw = line("@5", "x", "2.1.220", "/Users/m/repos/api-v2");
+    const raw = line("@5", "x", "claude", "1", "/Users/m/repos/api-v2");
     expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
   });
 
   test("a separator inside the path keeps the line parseable", () => {
-    const raw = line("@6", "seance", "2.1.220", "/Users/m/repos/seance/a|b");
+    const raw = line("@6", "seance", "claude", "1", "/Users/m/repos/seance/a|b");
     expect(parsePanes(raw, repos)[0]?.path).toBe("/Users/m/repos/seance/a|b");
   });
 
@@ -61,33 +74,31 @@ describe("parsePanes", () => {
   });
 });
 
-function stuckLine(id: string, ours: string, dead: string, cmd: string, name: string): string {
-  return `${id}|${ours}|${dead}|${cmd}|${name}`;
+function stuckLine(id: string, ours: string, dead: string, titled: string, name: string): string {
+  return `${id}|${ours}|${dead}|${titled}|${name}`;
 }
 
 describe("parseStuckWindows", () => {
-  test("flags a séance window that is alive but never took the version title", () => {
-    const raw = [stuckLine("@1", "1", "0", "claude", "trust-me"), stuckLine("@2", "1", "0", "2.1.220", "running")].join(
-      "\n",
-    );
+  test("flags a séance window that is alive but never titled its pane", () => {
+    const raw = [stuckLine("@1", "1", "0", "0", "trust-me"), stuckLine("@2", "1", "0", "1", "running")].join("\n");
     expect(parseStuckWindows(raw)).toEqual(["trust-me"]);
   });
 
   test("ignores windows séance did not start — a hand-run shell is not stuck", () => {
-    expect(parseStuckWindows(stuckLine("@3", "0", "0", "zsh", "martin"))).toEqual([]);
+    expect(parseStuckWindows(stuckLine("@3", "0", "0", "0", "martin"))).toEqual([]);
   });
 
   test("ignores a dead pane — that is the spawn-time claude_died path, already reported", () => {
-    expect(parseStuckWindows(stuckLine("@4", "1", "1", "claude", "died"))).toEqual([]);
+    expect(parseStuckWindows(stuckLine("@4", "1", "1", "0", "died"))).toEqual([]);
   });
 
   test("a tmux too old for #{m:} matches nothing rather than flagging everything", () => {
-    const literal = stuckLine("@5", "#{m:*--remote-control*,#{pane_start_command}}", "0", "claude", "old-tmux");
+    const literal = stuckLine("@5", "#{m:*--remote-control*,#{pane_start_command}}", "0", "0", "old-tmux");
     expect(parseStuckWindows(literal)).toEqual([]);
   });
 
   test("dedups split panes by window id and tolerates malformed lines", () => {
-    const raw = [stuckLine("@6", "1", "0", "claude", "one"), stuckLine("@6", "1", "0", "claude", "one"), "garbage", ""];
+    const raw = [stuckLine("@6", "1", "0", "0", "one"), stuckLine("@6", "1", "0", "0", "one"), "garbage", ""];
     expect(parseStuckWindows(raw.join("\n"))).toEqual(["one"]);
   });
 });

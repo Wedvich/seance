@@ -961,26 +961,48 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   (turns a 19ms local walk into a multi-second networked operation that
   fails offline).
 - **Session detection**: list all tmux panes across all sessions, dedup by
-  window id (grouped sessions repeat windows), count a window as claude
-  when `pane_current_command` matches `/^\d+\.\d+\.\d+$/` — claude retitles
-  its process to its bare version string. Repo mapped by longest path
-  prefix; worktrees under `<repo>/.claude/worktrees/*` map to their repo.
-  Undocumented convention; if a release changes it the list goes visibly
-  empty and the pattern is a one-line fix. Rejected: daemon-tracked window
-  ids (manual `/spawn` windows invisible — defeats duplicate avoidance;
-  union variant adds id-reconciliation state for a hedge the visible
-  breakage already covers).
+  window id (grouped sessions repeat windows), count a window as a session when
+  a claude process holds the pane _and_ has titled it. The process test is
+  `pane_current_command`, and what tmux reports there is the host's business,
+  not claude's: macOS tmux reads the kernel's comm — the _resolved_ executable's
+  basename, which under the native installer is the versioned filename
+  (`2.1.267`) — while Linux and WSL tmux read argv[0], the symlink name
+  `claude`; an npm install runs as `node` on both. So the pattern accepts all
+  three. Registration is the pane title: claude sets its terminal title
+  (`✳ <session>`) only once its TUI is up, past every startup gate, and a séance
+  pane runs `exec claude` straight from tmux with no shell to set one earlier, so
+  until then it carries tmux's default, the hostname. `PANE_TITLED` (`tmux.ts`)
+  makes that comparison inside tmux — `#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}` — so
+  no title text reaches the format output. Both halves are needed: the command
+  is present from exec, dialog or not, and a title alone would keep counting a
+  pane whose claude exited to a shell that never reset it. Repo mapped by
+  longest path prefix; worktrees under `<repo>/.claude/worktrees/*` map to
+  their repo. Undocumented conventions; if a release changes them the list goes
+  visibly empty and the pattern is a one-line fix. Superseded (2026-09-10): the
+  belief that claude _retitles its process_ to its version string. It never did
+  — that was macOS's comm reporting the binary's filename — so on Linux the
+  regex matched nothing and every machine read as idle, while on macOS the
+  "title" was there from exec and a stuck claude was listed as running. The
+  test stub reproduced the macOS shape on every platform (a copy of bun named
+  `9.9.9`), which is why the suite was green throughout; it now execs with
+  `-a claude` and titles its pane, showing each host its real face. Rejected:
+  daemon-tracked window ids (manual `/spawn` windows invisible — defeats
+  duplicate avoidance; union variant adds id-reconciliation state for a hedge
+  the visible breakage already covers).
 - **A spawn that starts but never registers is reported, not swallowed**
   (added 2026-09-04). The two liveness notions disagree in exactly one case: pane
   verification asks `pane_dead`, so a claude blocked on a startup dialog no
   remote can answer is "alive" and the spawn acks `ok`, while session detection
-  keys off the version-string retitle, which such a claude has not reached. The
-  phone got a success and an empty machine. `handleSpawn` already polled for the
-  window and already knew it never arrived (`ACK_SETTLE_MS`); the ack now carries
-  `pending: true` plus a `note` holding the pane's visible screen, so the dialog
-  itself is readable from the phone — the screen (`SessionBackend.capture`) rides
-  the wire only, because the seed prompt renders in that pane and prompt text is
-  never logged. `pending` is a separate flag rather than a note the clients
+  wants the title such a claude has not set. The phone got a success and an
+  empty machine. `spawnSession` polls the pane for _either_ death or the title
+  until its deadline (`awaitRegistration` — one predicate shared with the
+  session list, so a `registered` outcome is a window the ack's list contains)
+  and returns the moment the title lands; only a pane that reaches the deadline
+  alive comes back `registered: false`. The ack then carries `pending: true`
+  plus a `note` holding the pane's visible screen, so the dialog itself is
+  readable from the phone — the screen (`SessionBackend.capture`) rides the wire
+  only, because the seed prompt renders in that pane and prompt text is never
+  logged. `pending` is a separate flag rather than a note the clients
   pattern-match, because it changes what each surface _says_: the PWA verdict
   drops "It's running on X" for "it started, but it's stuck", muted rather than
   green and offering the form back instead of "Start another" (a retry meets the

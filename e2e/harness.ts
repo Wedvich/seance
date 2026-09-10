@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
-import { tmux } from "../daemon/src/tmux.ts";
+import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "../daemon/test/fixtures.ts";
 import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/state.ts";
 import { RelayClient, type RelayState } from "@seance/shared";
@@ -80,11 +80,12 @@ export async function startStack(base: string): Promise<Stack> {
     repoRoots: [fixture.root],
     tmuxSession: TMUX_SESSION,
   };
-  // Only a *successful* spawn pays this in full — verifyPaneAlive resolves as soon as
-  // a pane dies — so the default is tuned for the many spawns that work, and the one
+  // Neither outcome pays this in full — awaitRegistration resolves as soon as the pane
+  // dies or the stub titles it — so the budget only bounds a stuck pane, and the one
   // test that asserts a death raises it via restartDaemon. Too low a budget there
-  // reads a slow-starting corpse as a live session: the failing stub is bash + sleep
-  // 0.3, which the shards running concurrently can stretch past a second.
+  // reads a slow-starting corpse as alive-but-unregistered (an ok ack, pending) instead
+  // of dead: the failing stub is bash + sleep 0.3, which the shards running
+  // concurrently can stretch past a second.
   const DEFAULT_SPAWN_WAIT_MS = 1_500;
 
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
@@ -200,6 +201,20 @@ export async function listWindows(): Promise<readonly string[]> {
   const result = await tmux(["list-windows", "-a", "-F", "#{window_name}"]);
   if (result.exitCode !== 0) return [];
   return result.stdout.split("\n").filter((name) => name !== "");
+}
+
+/**
+ * Windows whose pane the stub has titled — what the daemon's session list will
+ * admit. A window exists from new-window time, a beat before the stub registers,
+ * so a test that then asks the daemon for sessions has to wait for this instead.
+ */
+export async function listRegisteredWindows(): Promise<readonly string[]> {
+  const result = await tmux(["list-panes", "-a", "-F", `${PANE_TITLED}|#{window_name}`]);
+  if (result.exitCode !== 0) return [];
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("1|"))
+    .map((line) => line.slice(2));
 }
 
 export async function killWindow(window: string): Promise<void> {

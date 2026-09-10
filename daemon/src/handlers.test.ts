@@ -88,20 +88,20 @@ describe("relay ops are audited", () => {
 const SPAWNED: SessionEntry = { window: "late-riser", repo: "myrepo", path: "/repos/myrepo" };
 
 /**
- * A backend whose spawn succeeds but whose session list only admits the new
- * window after `blindCalls` looks — the real shape of detection keying off a
- * process title claude sets on its own schedule. Implementing the seam rather
- * than mocking past it: an alternative backend is what `SessionBackend` is for.
+ * A backend whose spawn succeeds and reports whether the window registered in
+ * time; its session list holds the window exactly when it did. Implementing
+ * the seam rather than mocking past it: an alternative backend is what
+ * `SessionBackend` is for.
  */
-function lateTitlingBackend(blindCalls: number): { readonly backend: SessionBackend; readonly calls: () => number } {
+function fakeBackend(registered: boolean): { readonly backend: SessionBackend; readonly calls: () => number } {
   let calls = 0;
   return {
     calls: () => calls,
     backend: {
-      spawn: () => Promise.resolve({ window: SPAWNED.window, path: SPAWNED.path, handle: "@7" }),
+      spawn: () => Promise.resolve({ window: SPAWNED.window, path: SPAWNED.path, registered, handle: "@7" }),
       sessions: () => {
         calls += 1;
-        return Promise.resolve(calls > blindCalls ? [SPAWNED] : []);
+        return Promise.resolve(registered ? [SPAWNED] : []);
       },
       doctor: () => Promise.resolve([]),
     },
@@ -115,31 +115,29 @@ async function spawnReply(backend: SessionBackend): Promise<SpawnResponse> {
 }
 
 describe("the spawn ack carries the window it announced", () => {
-  test("the session list is polled until the new window appears, not sampled once", async () => {
-    const late = lateTitlingBackend(2);
-    const payload = await spawnReply(late.backend);
+  test("the session list is read once, after the backend saw the window register", async () => {
+    const up = fakeBackend(true);
+    const payload = await spawnReply(up.backend);
     if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
     // The app writes this list straight into its cache: short by one here and
     // the machine reads as idle until something else refreshes it.
     expect(payload.sessions).toEqual([SPAWNED]);
-    expect(late.calls()).toBe(3);
+    expect(up.calls()).toBe(1);
   });
 
-  test("a session that never titles still answers, with the list as it stands", async () => {
-    const never = lateTitlingBackend(Number.POSITIVE_INFINITY);
+  test("a session that never registers still answers, with the list as it stands", async () => {
+    const never = fakeBackend(false);
     const payload = await spawnReply(never.backend);
     if (!payload.ok) throw new Error(`expected ok, got ${payload.message}`);
     expect(payload.sessions).toEqual([]);
-    // Bounded: a late ack is worse than an incomplete one.
-    expect(never.calls()).toBeGreaterThan(1);
     // …and says so, rather than letting the empty list read as an idle machine.
     expect(payload.note).toContain("never registered");
     // The flag, not the prose, is what stops the clients claiming it is running.
     expect(payload.pending).toBe(true);
-  }, 10_000);
+  });
 
   test("the note carries the screen, so the phone reads the dialog it is stuck on", async () => {
-    const never = lateTitlingBackend(Number.POSITIVE_INFINITY);
+    const never = fakeBackend(false);
     const asked: string[] = [];
     const payload = await spawnReply({
       ...never.backend,
@@ -153,10 +151,10 @@ describe("the spawn ack carries the window it announced", () => {
     expect(payload.note).toContain("Do you trust the files in this folder?");
     // The handle is backend-scoped; a wire payload carrying a tmux window id is a leak.
     expect(payload).not.toHaveProperty("handle");
-  }, 10_000);
+  });
 
-  test("a titled session says nothing extra and never reads the screen", async () => {
-    const prompt = lateTitlingBackend(0);
+  test("a registered session says nothing extra and never reads the screen", async () => {
+    const prompt = fakeBackend(true);
     let captured = false;
     const payload = await spawnReply({
       ...prompt.backend,
