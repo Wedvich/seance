@@ -11,7 +11,17 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
 import { buildMcpServer, LazyRelay, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
-import { killWindow, listWindows, ownMachine, startApp, startStack, TOKEN, wsUrl, type Stack } from "./harness.ts";
+import {
+  killWindow,
+  listRegisteredWindows,
+  listWindows,
+  ownMachine,
+  startApp,
+  startStack,
+  TOKEN,
+  wsUrl,
+  type Stack,
+} from "./harness.ts";
 
 /**
  * The one suite where all three components are real: seanced from daemon/src,
@@ -171,10 +181,12 @@ describe("daemon ↔ relay ↔ app", () => {
       const pending = app.store.pendingSpawn;
       expect(pending).not.toBeNull();
 
-      // Let the daemon finish the spawn nobody heard the answer to (its
-      // window exists from new-window time, well before the verdict).
+      // Let the daemon finish the spawn nobody heard the answer to. The window
+      // exists from new-window time, well before the verdict, but the session
+      // list admits it only once the stub has titled its pane — and that list
+      // is what the relaunched app asks for.
       await pollUntil(async () => {
-        window = (await listWindows()).find((name) => name === "recover-me") ?? null;
+        window = (await listRegisteredWindows()).find((name) => name === "recover-me") ?? null;
         return window !== null;
       }, "the recover-me window on the tmux server");
 

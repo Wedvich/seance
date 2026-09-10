@@ -43,6 +43,21 @@ async function tmuxChecks(): Promise<readonly Check[]> {
       : { level: "warn", message: "no tmux server — fine; spawn creates the session detached" },
   );
 
+  // Detection is two tmux format features (`#{==:}` for the title, `#{m:}`
+  // for our windows) that an old tmux renders literally rather than failing:
+  // the session list reads empty and every spawn acks pending. Probing the
+  // formats beats parsing `tmux -V` ("3.3a", "next-3.5"). display-message
+  // needs a server; without one there is nothing to misreport yet.
+  if (sessions.exitCode === 0) {
+    const probe = await tmux(["display-message", "-p", "#{==:a,a}#{m:*a*,a}"]);
+    if (probe.stdout.trim() !== "11") {
+      checks.push({
+        level: "fail",
+        message: "tmux too old for session detection (needs 3.1+): sessions list empty, every spawn reports pending",
+      });
+    }
+  }
+
   // Warn, not fail: the sessions are recoverable by hand, and doctor exits
   // nonzero on fail — a machine with one stuck window is still serving.
   const stuck = await listStuckWindows();

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
-import { resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
+import { isRegistered } from "./sessions.ts";
+import { FIELD_SEP, PANE_TITLED, resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
 
 function slugCore(src: string): string {
@@ -170,26 +171,34 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
 
 /**
  * tmux new-window returns 0 as soon as the window frame exists — it knows
- * nothing about whether claude started or died. Keep the pane on exit and
- * poll pane_dead until the deadline: a dead pane means claude failed and
- * "spawned" would be a false success. Polling rather than one check at the
- * deadline reports the death as soon as it happens; "alive" still means
- * only "survived waitMs". Ported from /spawn.
+ * nothing about whether claude started, died, or is up. Keep the pane on exit
+ * and poll it until the deadline: a dead pane means claude failed and "spawned"
+ * would be a false success; a titled pane (`PANE_TITLED`) means claude is past
+ * its startup gates — `isRegistered`, the predicate `sessions.ts` lists by, so
+ * `true` here is a window the ack's session list contains. Polling reports either
+ * as soon as it happens; reaching the deadline means only "alive but not
+ * registered", the shape of a claude sitting on a dialog no remote can answer.
+ * Ported from /spawn.
  */
-async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> {
+async function awaitRegistration(windowId: string, waitMs: number): Promise<boolean> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
   const deadline = Bun.nanoseconds() + waitMs * 1e6;
   let dead = false;
+  let titled = false;
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next, nothing to parallelize
-    const panes = await tmux(["list-panes", "-t", windowId, "-F", "#{pane_dead}"]);
+    const panes = await tmux(["list-panes", "-t", windowId, "-F", `#{pane_dead}${FIELD_SEP}${PANE_TITLED}`]);
     // A vanished window is a death that beat remain-on-exit: the pane died
     // before the option landed and tmux closed the window, output and all.
     if (panes.exitCode !== 0) {
       throw new SpawnFailure("claude_died", "claude exited before the session started (window already closed)");
     }
-    dead = panes.stdout.split("\n")[0]?.trim() === "1";
-    if (dead || Bun.nanoseconds() >= deadline) break;
+    const [deadField, titledField] = (panes.stdout.split("\n")[0] ?? "").trim().split(FIELD_SEP);
+    dead = deadField === "1";
+    // This window is ours by construction — the same call `sessions.ts` makes
+    // for it, so what registers here is what the list will hold.
+    titled = isRegistered({ ours: true, titled: titledField === "1", command: "" });
+    if (dead || titled || Bun.nanoseconds() >= deadline) break;
     // oxlint-disable-next-line no-await-in-loop
     await Bun.sleep(100);
   }
@@ -199,6 +208,7 @@ async function verifyPaneAlive(windowId: string, waitMs: number): Promise<void> 
     throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
+  return titled;
 }
 
 export interface SpawnOptions {
@@ -206,6 +216,11 @@ export interface SpawnOptions {
   readonly tmuxSession: string;
   /** Machine tag suffixed onto the remote-control session name; absent means none. */
   readonly machineTag?: string;
+  /**
+   * How long to wait for claude to register before acking it as pending. The
+   * TUI titles the pane within ~0.5s on a warm machine; `--worktree` puts a
+   * fetch before that, so the default leaves room for a slow origin.
+   */
   readonly waitMs?: number;
 }
 
@@ -231,6 +246,7 @@ export async function spawnSession(
 
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
+  let registered: boolean;
   try {
     try {
       windowId = (
@@ -252,10 +268,10 @@ export async function spawnSession(
       throw new SpawnFailure("launch_error", err instanceof TmuxError ? err.message : String(err));
     }
 
-    await verifyPaneAlive(windowId, opts.waitMs ?? 3_000);
+    registered = await awaitRegistration(windowId, opts.waitMs ?? 5_000);
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
 
-  return { window: windowName, path: prepared.resultPath, handle: windowId };
+  return { window: windowName, path: prepared.resultPath, registered, handle: windowId };
 }

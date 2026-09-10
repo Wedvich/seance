@@ -11,10 +11,14 @@ import { sessionName, spawnSession } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
 import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
-const WAIT = { tmuxSession: "main", waitMs: 700 };
-// Failure tests race the stub's actual death (0.3s sleep + process startup,
-// which macOS can stretch under load) against the deadline. verifyPaneAlive
-// polls, so a wide deadline adds no latency to a spawn that really dies.
+// A deadline, not a duration: the wait returns on the stub's title (0.3s after
+// startup, which macOS can stretch under load), so a wide one adds no latency
+// to a spawn that registers. Only the stuck stub ever runs it out, and it
+// gets its own budget below.
+const WAIT = { tmuxSession: "main", waitMs: 5_000 };
+const STUCK_WAIT = { tmuxSession: "main", waitMs: 700 };
+// Failure tests race the stub's actual death (0.3s sleep + process startup)
+// against the deadline the same way; polling makes the width free.
 const FAIL_WAIT = { tmuxSession: "main", waitMs: 5_000 };
 let base: string;
 let fixture: GitFixture;
@@ -79,12 +83,31 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
     expect(windows).toContain("Fix Tests");
 
-    // detection: stub's comm is "9.9.9", pane path is the repo → mapped
+    // detection: the stub titled its pane, pane path is the repo → mapped
+    expect(outcome.registered).toBe(true);
     const found = await waitForSession("Fix Tests");
     expect(found).toBeDefined();
     expect(found?.repo).toBe("myrepo");
 
     await tmux(["kill-window", "-t", "main:Fix Tests"]);
+  });
+
+  // The one case pane liveness and session detection disagree on: a claude
+  // parked on a startup dialog is alive, so this is no failure, but it never
+  // titles the pane and so never registers. The window is left for a human to
+  // attach to, not killed — the ack reports it as pending.
+  test("a claude that never titles its pane is alive but unregistered, and stays up", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.stuck;
+    try {
+      const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Stuck" }, repos, STUCK_WAIT);
+      expect(outcome.registered).toBe(false);
+      const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
+      expect(windows).toContain("Stuck");
+      expect((await listClaudeSessions(repos)).find((s) => s.window === "Stuck")).toBeUndefined();
+      await killWindow(outcome.window);
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+    }
   });
 
   test("a title carrying the format separator stays detectable", async () => {
@@ -302,10 +325,10 @@ async function killWindow(name: string): Promise<void> {
 }
 
 /**
- * The stub reaches its detectable comm only once bash execs it, which the disk
- * contention of parallel test workers can stretch past the pane-alive wait —
- * so poll for the session instead of sampling once. Absence still resolves,
- * leaving the assertion (not a timeout) to report it.
+ * The stub titles its pane only once bash has exec'd it and it has started,
+ * which the disk contention of parallel test workers can stretch — so poll for
+ * the session instead of sampling once. Absence still resolves, leaving the
+ * assertion (not a timeout) to report it.
  */
 async function waitForSession(window: string): Promise<SessionEntry | undefined> {
   const deadline = Bun.nanoseconds() + 5_000 * 1e6;
