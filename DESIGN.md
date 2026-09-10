@@ -961,24 +961,33 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   (turns a 19ms local walk into a multi-second networked operation that
   fails offline).
 - **Session detection**: list all tmux panes across all sessions, dedup by
-  window id (grouped sessions repeat windows), count a window as a session when
-  a claude process holds the pane _and_ has titled it. The process test is
-  `pane_current_command`, and what tmux reports there is the host's business,
-  not claude's: macOS tmux reads the kernel's comm — the _resolved_ executable's
-  basename, which under the native installer is the versioned filename
-  (`2.1.267`) — while Linux and WSL tmux read argv[0], the symlink name
-  `claude`; an npm install runs as `node` on both. So the pattern accepts all
-  three. Registration is the pane title: claude sets its terminal title
+  window id (grouped sessions repeat windows), count a window as a session by
+  one predicate, `isRegistered` in `sessions.ts`, which the spawn path shares.
+  Registration is the pane title: claude sets its terminal title
   (`✳ <session>`) only once its TUI is up, past every startup gate, and a séance
   pane runs `exec claude` straight from tmux with no shell to set one earlier, so
   until then it carries tmux's default, the hostname. `PANE_TITLED` (`tmux.ts`)
   makes that comparison inside tmux — `#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}` — so
-  no title text reaches the format output. Both halves are needed: the command
-  is present from exec, dialog or not, and a title alone would keep counting a
-  pane whose claude exited to a shell that never reset it. Repo mapped by
-  longest path prefix; worktrees under `<repo>/.claude/worktrees/*` map to
-  their repo. Undocumented conventions; if a release changes them the list goes
-  visibly empty and the pattern is a one-line fix. Superseded (2026-09-10): the
+  no title text reaches the format output. A window séance started (the
+  `--remote-control` start-command match below) registers on the title alone:
+  nothing else ever runs in that pane, and what tmux calls its process is the
+  host's business, not claude's — macOS tmux reads the kernel's comm, the
+  _resolved_ executable's basename, so the native installer's versioned
+  filename (`2.1.267`), or `caffeinate` since the spawn line wraps claude in it
+  there; Linux and WSL tmux read argv[0], the symlink name `claude`; an npm
+  install is `node`. A pane séance did _not_ start must also show a
+  claude-named process (`claude` or a version string) — a title alone would
+  count every pane under a title-setting shell, and a pane whose claude exited
+  to a shell that never reset the title. `node` is deliberately not on that
+  list: a dev server under oh-my-zsh is `node` + titled, and would have been
+  listed with a repo mapping; a hand-started npm claude is the cost. Repo
+  mapped by longest path prefix; worktrees under `<repo>/.claude/worktrees/*`
+  map to their repo. Undocumented conventions; if a release changes them the
+  list goes visibly empty and the pattern is a one-line fix. Both formats
+  (`#{==:}`, tmux 2.9; `#{m:}`, 3.1) render literally on an older tmux rather
+  than failing, which reads as untitled/not-ours: the list is empty and every
+  spawn acks `pending` — `doctor` probes both and fails on such a host rather
+  than leaving that to be inferred. Superseded (2026-09-10): the
   belief that claude _retitles its process_ to its version string. It never did
   — that was macOS's comm reporting the binary's filename — so on Linux the
   regex matched nothing and every machine read as idle, while on macOS the
@@ -995,8 +1004,9 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   remote can answer is "alive" and the spawn acks `ok`, while session detection
   wants the title such a claude has not set. The phone got a success and an
   empty machine. `spawnSession` polls the pane for _either_ death or the title
-  until its deadline (`awaitRegistration` — one predicate shared with the
-  session list, so a `registered` outcome is a window the ack's list contains)
+  until its deadline (`awaitRegistration`, calling `isRegistered` for a window
+  that is ours by construction — the same call the session list makes for it,
+  so a `registered` outcome is a window the ack's list contains)
   and returns the moment the title lands; only a pane that reaches the deadline
   alive comes back `registered: false`. The ack then carries `pending: true`
   plus a `note` holding the pane's visible screen, so the dialog itself is

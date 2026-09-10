@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
+import { isRegistered } from "./sessions.ts";
 import { FIELD_SEP, PANE_TITLED, resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
 
@@ -173,8 +174,8 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
  * nothing about whether claude started, died, or is up. Keep the pane on exit
  * and poll it until the deadline: a dead pane means claude failed and "spawned"
  * would be a false success; a titled pane (`PANE_TITLED`) means claude is past
- * its startup gates — the same predicate `sessions.ts` lists by, so `true`
- * here is a window the ack's session list will contain. Polling reports either
+ * its startup gates — `isRegistered`, the predicate `sessions.ts` lists by, so
+ * `true` here is a window the ack's session list contains. Polling reports either
  * as soon as it happens; reaching the deadline means only "alive but not
  * registered", the shape of a claude sitting on a dialog no remote can answer.
  * Ported from /spawn.
@@ -194,7 +195,9 @@ async function awaitRegistration(windowId: string, waitMs: number): Promise<bool
     }
     const [deadField, titledField] = (panes.stdout.split("\n")[0] ?? "").trim().split(FIELD_SEP);
     dead = deadField === "1";
-    titled = titledField === "1";
+    // This window is ours by construction — the same call `sessions.ts` makes
+    // for it, so what registers here is what the list will hold.
+    titled = isRegistered({ ours: true, titled: titledField === "1", command: "" });
     if (dead || titled || Bun.nanoseconds() >= deadline) break;
     // oxlint-disable-next-line no-await-in-loop
     await Bun.sleep(100);

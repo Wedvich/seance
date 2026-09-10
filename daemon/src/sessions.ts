@@ -5,9 +5,32 @@ import { FIELD_SEP, PANE_TITLED, tmux } from "./tmux.ts";
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
 // basename — the native installer keeps the binary under a versioned filename,
 // so "2.1.267" — while Linux (and WSL) tmux reads argv[0], the symlink name
-// "claude". An npm install runs under "node" on both. This only says "some
-// claude"; whether it has registered is the title (`PANE_TITLED`).
-const CLAUDE_COMMAND = /^(?:claude|node|\d+\.\d+\.\d+)$/u;
+// "claude". Not "node": an npm-installed claude runs as one, but so does every
+// dev server, and under a title-setting shell such a pane would list as a
+// session. Hand-started npm claudes are the cost; séance's own are covered
+// below regardless of what the process is called.
+const CLAUDE_COMMAND = /^(?:claude|\d+\.\d+\.\d+)$/u;
+
+/**
+ * The one registration predicate, shared by the session list and the spawn
+ * path so a `registered` outcome is by construction a window the list holds.
+ * A séance window (`ours`: its start command is our `exec … claude
+ * --remote-control` line) registers on the title alone — nothing else ever
+ * runs in that pane, and what tmux calls the process there is a host detail
+ * (`claude`, the versioned filename, `node`, or the `caffeinate` wrapper on
+ * macOS). A pane séance did not start needs a claude-named process too, or a
+ * shell that set a title would count.
+ */
+export function isRegistered(pane: {
+  readonly ours: boolean;
+  readonly titled: boolean;
+  readonly command: string;
+}): boolean {
+  return pane.titled && (pane.ours || CLAUDE_COMMAND.test(pane.command));
+}
+
+/** Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort). */
+const OURS = "#{m:*--remote-control*,#{pane_start_command}}";
 
 const WORKTREE_MARKER = "/.claude/worktrees/";
 
@@ -23,25 +46,25 @@ function repoFor(panePath: string, repos: readonly RepoEntry[]): string | null {
 }
 
 /**
- * Pure parser over `list-panes -a` output — exported for unit tests. A pane is
- * a session when a claude process holds it *and* that claude has titled the
- * pane: the command alone is present from exec, dialog or not, and the title
- * alone would keep counting a pane whose claude exited back to a shell that
- * never reset it.
+ * Pure parser over `list-panes -a` output — exported for unit tests. The title
+ * is what says claude is up: the command is present from exec, dialog or not,
+ * and the title alone would keep counting a pane whose claude exited back to a
+ * shell that never reset it — hence `isRegistered`'s second half for panes
+ * that are not ours.
  */
 export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly SessionEntry[] {
   const seen = new Set<string>();
   const sessions: SessionEntry[] = [];
   for (const line of raw.split("\n")) {
     // Path last and taken as the remainder: a separator inside it can't shift the fields.
-    const [windowId, windowName, command, titled, ...rest] = line.split(FIELD_SEP);
+    const [windowId, windowName, command, ours, titled, ...rest] = line.split(FIELD_SEP);
     const panePath = rest.join(FIELD_SEP);
     if (windowId === undefined || windowName === undefined || command === undefined || panePath === "") {
       continue;
     }
     // Grouped sessions repeat every window; splits repeat the window id too.
     if (seen.has(windowId)) continue;
-    if (!CLAUDE_COMMAND.test(command) || titled !== "1") continue;
+    if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
     seen.add(windowId);
     sessions.push({ window: windowName, repo: repoFor(panePath, repos), path: panePath });
   }
@@ -53,9 +76,7 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
  * form of the spawn-time miss in `spawnSession`. An alive pane whose claude
  * never titled it is one sitting on a dialog nobody local is there to answer.
  *
- * `pane_start_command` identifies our windows without keeping any state, and
- * `#{m:...}` reduces it to 0/1 inside tmux — the raw command carries
- * wire-supplied values (model, effort) that could hold the field separator. A
+ * `pane_start_command` identifies our windows without keeping any state. A
  * tmux too old for `m:` renders the format literally, never matches, and the
  * check just reports nothing.
  */
@@ -78,8 +99,8 @@ export async function listStuckWindows(): Promise<readonly string[]> {
     "list-panes",
     "-a",
     "-F",
-    `#{window_id}${FIELD_SEP}#{m:*--remote-control*,#{pane_start_command}}${FIELD_SEP}` +
-      `#{pane_dead}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}`,
+    `#{window_id}${FIELD_SEP}${OURS}${FIELD_SEP}#{pane_dead}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}` +
+      `#{s/[${FIELD_SEP}]/-/:window_name}`,
   ]);
   if (result.exitCode !== 0) return [];
   return parseStuckWindows(result.stdout);
@@ -93,7 +114,7 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
     // Window names are unvalidated wire text (SpawnRequest.title), so tmux
     // substitutes the separator out of them before the line reaches us.
     `#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}#{pane_current_command}${FIELD_SEP}` +
-      `${PANE_TITLED}${FIELD_SEP}#{pane_current_path}`,
+      `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}#{pane_current_path}`,
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running
   return parsePanes(result.stdout, repos);
