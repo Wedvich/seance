@@ -8,9 +8,10 @@ on:
 permissions:
   contents: read
 
+# Cancelling a main run would kill a deploy-pwa job mid-flight; nothing retries it.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Source analysis is platform-independent, so it runs once instead of per matrix leg.
@@ -71,3 +72,28 @@ jobs:
 
       - name: Test
         run: bun run test
+
+  detect-changes:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pwa: ${{ steps.detect.outputs.pwa }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: detect
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          scripts/paths-changed.sh pwa "$BEFORE" "$GITHUB_SHA" \
+            pwa shared package.json bun.lock .github/workflows/deploy-pwa.yml
+
+  deploy-pwa:
+    needs: [checks, test, detect-changes]
+    if: needs.detect-changes.outputs.pwa == 'true'
+    uses: ./.github/workflows/deploy-pwa.yml
+    secrets: inherit

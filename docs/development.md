@@ -34,6 +34,17 @@ bare `wrangler` and `bun run wrangler` from the repo root both fail; run
 (`~/Library/Preferences/.wrangler` on macOS), so logging in from either workspace
 answers for both; `bun run wrangler whoami` says where you stand.
 
+The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
+workflow_dispatch (from `main` only), and automatically from a push to `main` that
+touches `pwa/`, `shared/`, the root manifest, the lockfile or the deploy workflow
+itself — CI's `deploy-pwa` job calls the same workflow once checks and the test
+matrix pass. Which paths count is decided by CI's
+`detect-changes` job, one `scripts/paths-changed.sh <name> <base> <head> <path>...`
+call per component: the name becomes the job output a deploy gate reads, so adding a
+relay deploy is a step and an output, not a second copy of the diff. It needs the
+repo secret `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
+repository variables; the relay is still deployed by hand.
+
 ## How the tests are layered
 
 - **daemon** — a throwaway in-process relay, a private tmux server
@@ -54,6 +65,10 @@ answers for both; `bun run wrangler whoami` says where you stand.
   covered by `shared/` and e2e. Running under Bun rather than under Raycast is
   what makes those cross-imports possible, and is why nothing in
   `raycast/src/lib/` may import `@raycast/api`.
+- **scripts** — the repo's own tooling. Today that is `paths-changed.sh`, driven
+  against throwaway git repos in a tmpdir, since its undiffable-base fallbacks are
+  what stand between a skipped deploy and a deploy that reports success having
+  shipped nothing.
 
 No Cloudflare account and no real `claude` are needed anywhere; `tmux` and `git` are.
 
