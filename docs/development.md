@@ -37,10 +37,11 @@ answers for both; `bun run wrangler whoami` says where you stand.
 The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
 workflow_dispatch, and automatically from a push to `main` that touches `pwa/`,
 `shared/`, the root manifest or the lockfile — CI's `deploy-pwa` job calls the same
-workflow once checks and the test matrix pass. Which paths count is decided by
-`scripts/paths-changed.sh <base> <head> <path>...`, which takes its paths as
-arguments so a relay deploy gate can reuse it. It needs the repo secret
-`CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
+workflow once checks and the test matrix pass. Which paths count is decided by CI's
+`detect-changes` job, one `scripts/paths-changed.sh <name> <base> <head> <path>...`
+call per component: the name becomes the job output a deploy gate reads, so adding a
+relay deploy is a step and an output, not a second copy of the diff. It needs the
+repo secret `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
 repository variables; the relay is still deployed by hand.
 
 ## How the tests are layered

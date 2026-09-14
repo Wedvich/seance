@@ -73,27 +73,27 @@ jobs:
       - name: Test
         run: bun run test
 
-  pwa-changed:
+  detect-changes:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      changed: ${{ steps.diff.outputs.changed }}
+      pwa: ${{ steps.detect.outputs.pwa }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      - id: diff
+      - id: detect
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          scripts/paths-changed.sh "$BEFORE" "$GITHUB_SHA" \
+          scripts/paths-changed.sh pwa "$BEFORE" "$GITHUB_SHA" \
             pwa shared package.json bun.lock .github/workflows/deploy-pwa.yml
 
   deploy-pwa:
-    needs: [checks, test, pwa-changed]
-    if: needs.pwa-changed.outputs.changed == 'true'
+    needs: [checks, test, detect-changes]
+    if: needs.detect-changes.outputs.pwa == 'true'
     uses: ./.github/workflows/deploy-pwa.yml
     secrets: inherit

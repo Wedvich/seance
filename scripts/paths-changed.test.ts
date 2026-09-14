@@ -26,10 +26,10 @@ async function commit(paths: readonly string[], message: string): Promise<string
 }
 
 /** Runs the gate the way the workflow does, and reads back what the job would see. */
-async function run(base: string, head: string, ...paths: readonly string[]) {
+async function run(name: string, base: string, head: string, ...paths: readonly string[]) {
   const outputFile = join(repo, "github-output");
   await writeFile(outputFile, "");
-  const proc = Bun.spawn([SCRIPT, base, head, ...paths], {
+  const proc = Bun.spawn([SCRIPT, name, base, head, ...paths], {
     cwd: repo,
     env: { ...process.env, GITHUB_OUTPUT: outputFile },
     stdout: "pipe",
@@ -59,25 +59,25 @@ test("a touched path is changed, and the job reads the same value stdout shows",
   const base = await git("rev-parse", "HEAD");
   const head = await commit(["pwa/src/app.tsx"], "app edit");
 
-  const result = await run(base, head, "pwa", "shared");
+  const result = await run("pwa", base, head, "pwa", "shared");
 
   expect(result.exitCode).toBe(0);
-  expect(result.stdout).toBe("changed=true");
-  expect(result.output).toBe("changed=true");
+  expect(result.stdout).toBe("pwa=true");
+  expect(result.output).toBe("pwa=true");
 });
 
 test("an untouched path set is not changed", async () => {
   const base = await git("rev-parse", "HEAD");
   const head = await commit(["daemon/src/exec.ts"], "daemon edit");
 
-  expect((await run(base, head, "pwa", "shared")).output).toBe("changed=false");
+  expect((await run("pwa", base, head, "pwa", "shared")).output).toBe("pwa=false");
 });
 
 test("paths are independent — any one of them matching is enough", async () => {
   const base = await git("rev-parse", "HEAD");
   const head = await commit(["shared/src/types.ts"], "shared edit");
 
-  expect((await run(base, head, "pwa", "shared")).output).toBe("changed=true");
+  expect((await run("pwa", base, head, "pwa", "shared")).output).toBe("pwa=true");
 });
 
 // The three ways a base SHA can be undiffable. Each must deploy: skipping here ships
@@ -89,12 +89,12 @@ test.each([
 ])("%s deploys anyway", async (_name, base) => {
   const head = await commit(["daemon/src/exec.ts"], "unrelated edit");
 
-  expect((await run(base, head, "pwa")).output).toBe("changed=true");
+  expect((await run("pwa", base, head, "pwa")).output).toBe("pwa=true");
 });
 
 /**
  * Regression: `--name-only | grep -q` let grep exit at the first match, and pipefail
- * turned the diff's SIGPIPE into `changed=false`. It only bites once the path list
+ * turned the diff's SIGPIPE into a false answer. It only bites once the path list
  * outgrows the pipe buffer, so this needs to be a genuinely large diff — a directory
  * rename or an asset drop reaches it easily.
  */
@@ -103,13 +103,21 @@ test("a diff too large for a pipe buffer is still changed", async () => {
   const many = Array.from({ length: 500 }, (_, i) => `pwa/src/components/some-long-component-name-${i}.tsx`);
   const head = await commit(many, "big refactor");
 
-  expect((await run(base, head, "pwa")).output).toBe("changed=true");
+  expect((await run("pwa", base, head, "pwa")).output).toBe("pwa=true");
+});
+
+test("the name argument keys the output, so one job can gate several components", async () => {
+  const base = await git("rev-parse", "HEAD");
+  const head = await commit(["relay/src/hub.ts"], "relay edit");
+
+  expect((await run("relay", base, head, "relay", "shared")).output).toBe("relay=true");
+  expect((await run("pwa", base, head, "pwa", "shared")).output).toBe("pwa=false");
 });
 
 test("too few arguments is a usage error, not a silent false", async () => {
   const head = await git("rev-parse", "HEAD");
 
-  const result = await run(head, head);
+  const result = await run("pwa", head, head);
 
   expect(result.exitCode).toBe(2);
   expect(result.output).toBe("");

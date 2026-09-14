@@ -7,26 +7,28 @@
 # Shell rather than TS on purpose: the gate job runs before `bun install`, and giving
 # it a toolchain just to diff two commits would cost more than the job it guards.
 #
-#   paths-changed.sh <base-sha> <head-sha> <path>...
+#   paths-changed.sh <name> <base-sha> <head-sha> <path>...
 #
-# Prints `changed=true|false` on stdout, and appends the same line to $GITHUB_OUTPUT
-# when set. Exit status reports whether the *check ran*, not what it found: a caller
-# must read the value, not `if paths-changed.sh`.
+# Prints `<name>=true|false` on stdout, and appends the same line to $GITHUB_OUTPUT
+# when set — so one step can call it per component and the job exposes each answer
+# under its own output. Exit status reports whether the *check ran*, not what it
+# found: a caller must read the value, not `if paths-changed.sh`.
 set -euo pipefail
 
-if [ "$#" -lt 3 ]; then
-  echo "usage: $0 <base-sha> <head-sha> <path>..." >&2
+if [ "$#" -lt 4 ]; then
+  echo "usage: $0 <name> <base-sha> <head-sha> <path>..." >&2
   exit 2
 fi
 
-base="$1"
-head="$2"
-shift 2
+name="$1"
+base="$2"
+head="$3"
+shift 3
 
 emit() {
-  echo "changed=$1"
+  echo "$name=$1"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "changed=$1" >> "$GITHUB_OUTPUT"
+    echo "$name=$1" >> "$GITHUB_OUTPUT"
   fi
 }
 
