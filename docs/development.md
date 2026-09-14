@@ -34,6 +34,13 @@ bare `wrangler` and `bun run wrangler` from the repo root both fail; run
 (`~/Library/Preferences/.wrangler` on macOS), so logging in from either workspace
 answers for both; `bun run wrangler whoami` says where you stand.
 
+The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
+workflow_dispatch, and automatically from a push to `main` that touches `pwa/`,
+`shared/`, the root manifest or the lockfile — CI's `deploy-pwa` job calls the same
+workflow once checks and the test matrix pass. It needs the repo secret
+`CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
+repository variables; the relay is still deployed by hand.
+
 ## How the tests are layered
 
 - **daemon** — a throwaway in-process relay, a private tmux server
