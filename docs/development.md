@@ -37,7 +37,9 @@ answers for both; `bun run wrangler whoami` says where you stand.
 The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
 workflow_dispatch, and automatically from a push to `main` that touches `pwa/`,
 `shared/`, the root manifest or the lockfile — CI's `deploy-pwa` job calls the same
-workflow once checks and the test matrix pass. It needs the repo secret
+workflow once checks and the test matrix pass. Which paths count is decided by
+`scripts/paths-changed.sh <base> <head> <path>...`, which takes its paths as
+arguments so a relay deploy gate can reuse it. It needs the repo secret
 `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
 repository variables; the relay is still deployed by hand.
 
@@ -61,6 +63,10 @@ repository variables; the relay is still deployed by hand.
   covered by `shared/` and e2e. Running under Bun rather than under Raycast is
   what makes those cross-imports possible, and is why nothing in
   `raycast/src/lib/` may import `@raycast/api`.
+- **scripts** — the repo's own tooling. Today that is `paths-changed.sh`, driven
+  against throwaway git repos in a tmpdir, since its undiffable-base fallbacks are
+  what stand between a skipped deploy and a deploy that reports success having
+  shipped nothing.
 
 No Cloudflare account and no real `claude` are needed anywhere; `tmux` and `git` are.
 

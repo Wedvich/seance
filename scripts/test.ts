@@ -29,6 +29,7 @@ const SHARDS: readonly Shard[] = [
   // Last because it is the fastest: pure logic and a drift guard, no workerd,
   // no tmux, no Raycast host.
   { name: "raycast", paths: ["raycast/"] },
+  { name: "scripts", paths: ["scripts/"] },
 ];
 
 // `bun run test <path>` narrows to one shard, so a single file still runs with

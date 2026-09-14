@@ -72,9 +72,8 @@ jobs:
       - name: Test
         run: bun run test
 
-  # Which of this push's files could change what the app serves. Job-level `paths`
-  # filters don't exist, and the workflow-level one would gate checks and tests too,
-  # so the diff is computed here and read as an output by the deploy gate below.
+  # Which of this push's files could change what the app serves. The gate itself is
+  # scripts/paths-changed.sh — see its header for why it isn't inline here.
   pwa-changed:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -91,20 +90,8 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          # A new branch, a force-push, or a shallow-history miss leaves nothing to
-          # diff against; deploy rather than silently skip.
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
-            || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --name-only "$BEFORE" "$GITHUB_SHA" -- \
-            pwa shared package.json bun.lock .github/workflows/deploy-pwa.yml \
-            | grep -q .; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          scripts/paths-changed.sh "$BEFORE" "$GITHUB_SHA" \
+            pwa shared package.json bun.lock .github/workflows/deploy-pwa.yml
 
   deploy-pwa:
     needs: [checks, test, pwa-changed]
