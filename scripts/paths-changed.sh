@@ -39,8 +39,12 @@ if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
   exit 0
 fi
 
-if git diff --name-only "$base" "$head" -- "$@" | grep -q .; then
-  emit true
-else
+# --quiet rather than piping --name-only into `grep -q`: grep exits at the first
+# match, the diff takes SIGPIPE once its output outgrows the pipe buffer, and
+# `set -o pipefail` turns that into the false branch. A few hundred changed paths
+# is enough — the gate then skips the biggest changes it exists to catch.
+if git diff --quiet "$base" "$head" -- "$@"; then
   emit false
+else
+  emit true
 fi

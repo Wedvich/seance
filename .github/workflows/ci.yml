@@ -8,9 +8,13 @@ on:
 permissions:
   contents: read
 
+# PR pushes supersede each other freely, but a run on main may reach deploy-pwa, and
+# a reusable workflow's jobs belong to *this* run — cancelling here would kill
+# `wrangler deploy` mid-flight, and the superseding run's gate (which diffs only its
+# own push) would never deploy what the cancelled one carried.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Source analysis is platform-independent, so it runs once instead of per matrix leg.

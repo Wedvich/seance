@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "paths-changed.sh");
 
@@ -14,9 +14,13 @@ async function git(...args: readonly string[]): Promise<string> {
   return out.trim();
 }
 
-async function commit(path: string, message: string): Promise<string> {
-  await writeFile(join(repo, path), `${message}\n`);
-  await git("add", path);
+/** Paths are written as the workflow passes them: files nested under a watched dir. */
+async function commit(paths: readonly string[], message: string): Promise<string> {
+  for (const path of paths) {
+    await mkdir(dirname(join(repo, path)), { recursive: true });
+    await writeFile(join(repo, path), `${message}\n`);
+  }
+  await git("add", "-A");
   await git("commit", "-m", message);
   return git("rev-parse", "HEAD");
 }
@@ -53,7 +57,7 @@ afterEach(async () => {
 
 test("a touched path is changed, and the job reads the same value stdout shows", async () => {
   const base = await git("rev-parse", "HEAD");
-  const head = await commit("pwa", "app edit");
+  const head = await commit(["pwa/src/app.tsx"], "app edit");
 
   const result = await run(base, head, "pwa", "shared");
 
@@ -64,14 +68,14 @@ test("a touched path is changed, and the job reads the same value stdout shows",
 
 test("an untouched path set is not changed", async () => {
   const base = await git("rev-parse", "HEAD");
-  const head = await commit("daemon", "daemon edit");
+  const head = await commit(["daemon/src/exec.ts"], "daemon edit");
 
   expect((await run(base, head, "pwa", "shared")).output).toBe("changed=false");
 });
 
 test("paths are independent — any one of them matching is enough", async () => {
   const base = await git("rev-parse", "HEAD");
-  const head = await commit("shared", "shared edit");
+  const head = await commit(["shared/src/types.ts"], "shared edit");
 
   expect((await run(base, head, "pwa", "shared")).output).toBe("changed=true");
 });
@@ -83,7 +87,21 @@ test.each([
   ["an empty base", ""],
   ["a base the clone can't reach, as after a force-push", "0".repeat(39) + "1"],
 ])("%s deploys anyway", async (_name, base) => {
-  const head = await commit("daemon", "unrelated edit");
+  const head = await commit(["daemon/src/exec.ts"], "unrelated edit");
+
+  expect((await run(base, head, "pwa")).output).toBe("changed=true");
+});
+
+/**
+ * Regression: `--name-only | grep -q` let grep exit at the first match, and pipefail
+ * turned the diff's SIGPIPE into `changed=false`. It only bites once the path list
+ * outgrows the pipe buffer, so this needs to be a genuinely large diff — a directory
+ * rename or an asset drop reaches it easily.
+ */
+test("a diff too large for a pipe buffer is still changed", async () => {
+  const base = await git("rev-parse", "HEAD");
+  const many = Array.from({ length: 500 }, (_, i) => `pwa/src/components/some-long-component-name-${i}.tsx`);
+  const head = await commit(many, "big refactor");
 
   expect((await run(base, head, "pwa")).output).toBe("changed=true");
 });
