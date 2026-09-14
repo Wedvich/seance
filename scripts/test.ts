@@ -27,8 +27,6 @@ const SHARDS: readonly Shard[] = [
   { name: "relay", paths: ["relay/"] },
   { name: "pwa", paths: ["pwa/"] },
   { name: "raycast", paths: ["raycast/"] },
-  // Last because they are the fastest: pure logic and drift guards, no workerd, no
-  // tmux, no Raycast host.
   { name: "scripts", paths: ["scripts/"] },
 ];
 
