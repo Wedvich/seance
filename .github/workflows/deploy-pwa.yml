@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-# One deploy at a time: two overlapping runs would race for the same Worker, and the
-# loser's assets would win. Queue rather than cancel — a half-run deploy is worse than
-# a waiting one. This group only serializes; it cannot save a deploy from the *caller's*
-# cancellation, which is why ci.yml doesn't cancel in-progress runs on main.
 concurrency:
   group: deploy-pwa
   cancel-in-progress: false
@@ -35,8 +31,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Build and deploy are one step by design: wrangler ships ./dist, and the CSP
-      # in dist/_headers is pinned to VITE_RELAY_URL at build time.
       - name: Deploy
         working-directory: pwa
         env:
