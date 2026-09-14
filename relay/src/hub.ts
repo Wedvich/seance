@@ -28,6 +28,25 @@ function wireLog(event: string, env: Envelope, extra = ""): void {
 }
 
 /**
+ * A socket stays listed until its close handler runs, so writing to one that
+ * has just gone throws — and a throw escaping `webSocketMessage` strands
+ * whoever was waiting. Returns the error rather than swallowing it: a failure
+ * that isn't that race (an oversized frame) must not go unlogged.
+ */
+function trySend(ws: WebSocket, text: string): string | null {
+  try {
+    ws.send(text);
+    return null;
+  } catch (err) {
+    return String(err);
+  }
+}
+
+function failSuffix(failures: readonly string[]): string {
+  return failures.length === 0 ? "" : ` failed=${failures.length} err=${failures[0]}`;
+}
+
+/**
  * Four machines today. 32 leaves room for reinstalls — each one mints a new
  * deviceId — while keeping a bearer-token holder from growing storage without
  * bound. Reaching it is recoverable from the app: a retired machine's entry can
@@ -336,20 +355,16 @@ export class Hub implements DurableObject {
       const frame: RelayToAppFrame = { t: "msg", env };
       const text = JSON.stringify(frame);
       const apps = this.#ctx.getWebSockets("app");
-      // Per-socket for the reason the daemon fanout below is: a tab closing as
-      // we write throws, and one throw must not swallow the rest of the tail.
+      // Per-socket: one dead tab must not swallow the rest of the tail.
       let fanned = 0;
-      let failed = 0;
+      const failures: string[] = [];
       for (const app of apps) {
-        try {
-          app.send(text);
-          fanned += 1;
-        } catch {
-          failed += 1;
-        }
+        const err = trySend(app, text);
+        if (err === null) fanned += 1;
+        else failures.push(err);
       }
       // Zero apps is the lost-reply case DESIGN.md reconciles from the session list.
-      wireLog("fanout", env, ` apps=${fanned}${failed > 0 ? ` failed=${failed}` : ""}`);
+      wireLog("fanout", env, ` apps=${fanned}${failSuffix(failures)}`);
       return;
     }
 
@@ -363,21 +378,17 @@ export class Hub implements DurableObject {
       const frame: RelayToDaemonFrame = { t: "msg", env };
       const text = JSON.stringify(frame);
       let fanned = 0;
-      let failed = 0;
+      const failures: string[] = [];
       for (const daemon of this.#ctx.getWebSockets("daemon")) {
         const deviceId = this.#deviceIdOf(daemon);
         if (deviceId === null || deviceId === env.from) continue;
-        // Per-socket, because a broadcast has many recipients: a socket closing
-        // as we write (the sweep and `superseded` both leave one briefly listed)
-        // throws on send, and one throw must not swallow the whole tail.
-        try {
-          daemon.send(text);
-          fanned += 1;
-        } catch {
-          failed += 1;
-        }
+        // Per-socket: the sweep and `superseded` both leave one briefly listed,
+        // and one dead socket must not swallow the whole tail.
+        const err = trySend(daemon, text);
+        if (err === null) fanned += 1;
+        else failures.push(err);
       }
-      wireLog("fanout", env, ` daemons=${fanned}${failed > 0 ? ` failed=${failed}` : ""}`);
+      wireLog("fanout", env, ` daemons=${fanned}${failSuffix(failures)}`);
       return;
     }
 
@@ -389,20 +400,18 @@ export class Hub implements DurableObject {
       .getWebSockets("daemon")
       .filter((ws) => this.#deviceIdOf(ws) === env.to)
       .toSorted((a, b) => this.#connectedAtOf(b) - this.#connectedAtOf(a));
+    const text = JSON.stringify({ t: "msg", env } satisfies RelayToDaemonFrame);
     for (const target of targets) {
-      // Same race the broadcast above guards, and the same per-socket try: a
-      // socket closing as we write throws. Escaping this handler would strand
-      // the app, which waits on a reply or an undeliverable and would get
-      // neither — so a throw falls through to the next candidate and, past the
-      // last one, to the notice below.
-      try {
-        const frame: RelayToDaemonFrame = { t: "msg", env };
-        target.send(JSON.stringify(frame));
+      // A failure falls through to the next candidate and, past the last, to
+      // the notice below — throwing here would strand the app, which is waiting
+      // for one or the other. Logged with the error because that fallthrough
+      // reports `offline`, which the app promotes to *proven* offline.
+      const err = trySend(target, text);
+      if (err === null) {
         wireLog("deliver", env, ` role=${senderRole}`);
         return;
-      } catch {
-        wireLog("dropped", env, " reason=send-failed");
       }
+      wireLog("dropped", env, ` reason=send-failed err=${err}`);
     }
 
     // Only an app can act on the notice, and `env.to === APP_ID` was handled
@@ -416,8 +425,10 @@ export class Hub implements DurableObject {
     const code: UndeliverableCode = known === undefined ? "unknown" : "offline";
     // Correlated by `iv`: the request `id` is inside the ciphertext.
     const notice: RelayToAppFrame = { t: "undeliverable", to: env.to, iv: env.iv, code };
-    sender.send(JSON.stringify(notice));
-    wireLog("undeliverable", env, ` code=${code}`);
+    // The `await` above yields the isolate — the window the app tab vanishes in.
+    const noticeErr = trySend(sender, JSON.stringify(notice));
+    if (noticeErr !== null) wireLog("dropped", env, ` reason=notice-send-failed err=${noticeErr}`);
+    else wireLog("undeliverable", env, ` code=${code}`);
   }
 
   /** Only daemon sockets carry an identity, so an app socket closing is a no-op. */
@@ -442,7 +453,12 @@ export class Hub implements DurableObject {
     if (apps.length === 0) return;
     const frame: RelayToAppFrame = { t: "registry", entries: await this.#views(exclude) };
     const text = JSON.stringify(frame);
-    for (const app of apps) app.send(text);
+    // Per-socket: a throw would escape the caller (`#register`, `alarm`,
+    // `webSocketClose`) and starve every app behind it of its only presence signal.
+    for (const app of apps) {
+      const err = trySend(app, text);
+      if (err !== null) console.log(`registry push failed: ${err}`);
+    }
   }
 
   async #views(exclude: readonly WebSocket[]): Promise<RegistryView[]> {

@@ -202,7 +202,10 @@ describe("routing", () => {
     app.close();
   });
 
-  test("delivers to the newest socket when a machine has just reconnected", async () => {
+  // Scoped to what the wire can force: the supersede close can't be held open
+  // from out here, so this gates delivery across a reconnect, not the
+  // newest-first ordering itself — that rests on the production stack trace.
+  test("delivers to the surviving socket when a machine has just reconnected", async () => {
     const deviceId = nextDeviceId();
     const app = await connectApp(relay);
     const stale = await registeredDaemon(app, deviceId);
