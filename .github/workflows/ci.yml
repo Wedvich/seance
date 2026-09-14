@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
 
+# Cancelling a main run would kill a deploy-pwa job mid-flight; nothing retries it.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -72,8 +73,6 @@ jobs:
       - name: Test
         run: bun run test
 
-  # Which of this push's files could change what the app serves. The gate itself is
-  # scripts/paths-changed.sh — see its header for why it isn't inline here.
   pwa-changed:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
