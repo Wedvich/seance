@@ -16,6 +16,9 @@ concurrency:
 
 jobs:
   deploy:
+    # workflow_dispatch takes any ref, and only the workflow_call path is behind the
+    # test matrix — so a dispatch off a feature branch would ship it to production.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -113,7 +113,10 @@ VITE_RELAY_URL=wss://seance-relay.<subdomain>.workers.dev/app bun run deploy
 ```
 
 Or put it in a gitignored `pwa/.env` (see `.env.example`) and just
-`bun run deploy`. This hostname is new too — the step 2 propagation note
+`bun run deploy`. This first deploy is by hand; afterwards CI redeploys the app on
+every push to `main` that touches it, which needs the same value as a `VITE_RELAY_URL`
+repository variable plus a `CLOUDFLARE_API_TOKEN` secret and `CLOUDFLARE_ACCOUNT_ID`
+variable. This hostname is new too — the step 2 propagation note
 applies again.
 
 ### 4. Install seanced on each machine
@@ -319,7 +322,6 @@ approval rather than allowlisting it.
 ```sh
 git pull && bun daemon/src/main.ts restart    # daemon, on one machine
 bun run --cwd relay deploy                    # relay
-VITE_RELAY_URL=... bun run --cwd pwa deploy   # app
 ```
 
 Daemons self-propagate: the restarted daemon notices its version changed and
@@ -328,7 +330,9 @@ its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
 A machine that was asleep or offline catches up on its next reconnect. A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` on that machine shows its version
-and its last update outcome. Relay and app deploys stay manual wrangler steps.
+and its last update outcome. The relay deploy stays a manual wrangler step; the app
+deploys itself from CI on a push to `main` that touches it (`Deploy PWA` in Actions
+also runs on demand), so deploying it by hand would race that.
 
 The Raycast extension does not self-propagate: it is a built copy, so a machine
 that has it needs `seanced raycast install` re-run after the pull. `seanced

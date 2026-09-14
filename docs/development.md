@@ -35,9 +35,10 @@ bare `wrangler` and `bun run wrangler` from the repo root both fail; run
 answers for both; `bun run wrangler whoami` says where you stand.
 
 The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
-workflow_dispatch, and automatically from a push to `main` that touches `pwa/`,
-`shared/`, the root manifest or the lockfile — CI's `deploy-pwa` job calls the same
-workflow once checks and the test matrix pass. Which paths count is decided by CI's
+workflow_dispatch (from `main` only), and automatically from a push to `main` that
+touches `pwa/`, `shared/`, the root manifest, the lockfile or the deploy workflow
+itself — CI's `deploy-pwa` job calls the same workflow once checks and the test
+matrix pass. Which paths count is decided by CI's
 `detect-changes` job, one `scripts/paths-changed.sh <name> <base> <head> <path>...`
 call per component: the name becomes the job output a deploy gate reads, so adding a
 relay deploy is a step and an output, not a second copy of the diff. It needs the
