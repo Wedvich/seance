@@ -202,6 +202,22 @@ describe("routing", () => {
     app.close();
   });
 
+  test("delivers to the newest socket when a machine has just reconnected", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const stale = await registeredDaemon(app, deviceId);
+    const fresh = await registeredDaemon(app, deviceId);
+    expect(await stale.waitClosed()).toBe(1000);
+
+    const env = envelope(deviceId, APP_ID);
+    app.send({ t: "msg", env });
+
+    expect((await fresh.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    await app.expectNo("undeliverable");
+    fresh.close();
+    app.close();
+  });
+
   test("fans a machines broadcast to every other registered daemon, never the sender", async () => {
     const senderId = nextDeviceId();
     const receiverId = nextDeviceId();

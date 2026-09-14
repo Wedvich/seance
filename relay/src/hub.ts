@@ -183,6 +183,12 @@ export class Hub implements DurableObject {
     return this.#ctx.getTags(ws).includes("daemon") ? "daemon" : "app";
   }
 
+  /** Accept time, for ordering two sockets that share a deviceId across a reconnect. */
+  #connectedAtOf(ws: WebSocket): number {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    return attachment?.connectedAt ?? 0;
+  }
+
   #deviceIdOf(ws: WebSocket): string | null {
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     return attachment?.identity?.deviceId ?? null;
@@ -330,9 +336,20 @@ export class Hub implements DurableObject {
       const frame: RelayToAppFrame = { t: "msg", env };
       const text = JSON.stringify(frame);
       const apps = this.#ctx.getWebSockets("app");
-      for (const app of apps) app.send(text);
+      // Per-socket for the reason the daemon fanout below is: a tab closing as
+      // we write throws, and one throw must not swallow the rest of the tail.
+      let fanned = 0;
+      let failed = 0;
+      for (const app of apps) {
+        try {
+          app.send(text);
+          fanned += 1;
+        } catch {
+          failed += 1;
+        }
+      }
       // Zero apps is the lost-reply case DESIGN.md reconciles from the session list.
-      wireLog("fanout", env, ` apps=${apps.length}`);
+      wireLog("fanout", env, ` apps=${fanned}${failed > 0 ? ` failed=${failed}` : ""}`);
       return;
     }
 
@@ -364,12 +381,28 @@ export class Hub implements DurableObject {
       return;
     }
 
-    const target = this.#ctx.getWebSockets("daemon").find((ws) => this.#deviceIdOf(ws) === env.to);
-    if (target !== undefined) {
-      const frame: RelayToDaemonFrame = { t: "msg", env };
-      target.send(JSON.stringify(frame));
-      wireLog("deliver", env, ` role=${senderRole}`);
-      return;
+    // Newest first: a reconnecting daemon briefly leaves two sockets on one
+    // deviceId — `superseded` closes the loser, but it stays listed until its
+    // close handler runs — and picking the first match can pick the dead one
+    // while the live socket sits behind it.
+    const targets = this.#ctx
+      .getWebSockets("daemon")
+      .filter((ws) => this.#deviceIdOf(ws) === env.to)
+      .toSorted((a, b) => this.#connectedAtOf(b) - this.#connectedAtOf(a));
+    for (const target of targets) {
+      // Same race the broadcast above guards, and the same per-socket try: a
+      // socket closing as we write throws. Escaping this handler would strand
+      // the app, which waits on a reply or an undeliverable and would get
+      // neither — so a throw falls through to the next candidate and, past the
+      // last one, to the notice below.
+      try {
+        const frame: RelayToDaemonFrame = { t: "msg", env };
+        target.send(JSON.stringify(frame));
+        wireLog("deliver", env, ` role=${senderRole}`);
+        return;
+      } catch {
+        wireLog("dropped", env, " reason=send-failed");
+      }
     }
 
     // Only an app can act on the notice, and `env.to === APP_ID` was handled
