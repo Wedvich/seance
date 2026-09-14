@@ -460,7 +460,12 @@ bare `"ping"`/`"pong"` heartbeat as the daemon leg (30s beat, 10s pong
 deadline, a miss re-dials — see Presence & identity). Inbound:
 `registry { entries }` pushed on connect **and on every change** (so presence
 needs no polling); `msg { envelope }` for daemon replies; and
-`undeliverable { to, iv, code }` when the target daemon has no open socket.
+`undeliverable { to, iv, code }` when the target daemon has no open socket —
+or has one that is already closing, since a socket stays listed until its close
+handler runs and writing to it throws. Both cases report `offline`, which the
+app promotes to _proven_ offline; a reconnect blip therefore marks the machine
+offline rather than leaving the request hanging, and the relay log carries the
+send error that caused it.
 
 - **Auth is `?t=<token>`**, because browsers cannot set WebSocket headers.
   The token therefore lands in Cloudflare's request logs — accepted: TLS
