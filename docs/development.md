@@ -34,16 +34,22 @@ bare `wrangler` and `bun run wrangler` from the repo root both fail; run
 (`~/Library/Preferences/.wrangler` on macOS), so logging in from either workspace
 answers for both; `bun run wrangler whoami` says where you stand.
 
-The pwa also deploys from CI (`.github/workflows/deploy-pwa.yml`): manually via
-workflow_dispatch (from `main` only), and automatically from a push to `main` that
-touches `pwa/`, `shared/`, the root manifest, the lockfile or the deploy workflow
-itself — CI's `deploy-pwa` job calls the same workflow once checks and the test
-matrix pass. Which paths count is decided by CI's
-`detect-changes` job, one `scripts/paths-changed.sh <name> <base> <head> <path>...`
-call per component: the name becomes the job output a deploy gate reads, so adding a
-relay deploy is a step and an output, not a second copy of the diff. It needs the
-repo secret `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID` and `VITE_RELAY_URL`
-repository variables; the relay is still deployed by hand.
+Both also deploy from CI through one workflow, `.github/workflows/deploy.yml`, taking
+the component as an input: manually via workflow_dispatch (from `main` only), and
+automatically from a push to `main` whose changes touch the component's directory
+(minus its `test/`), `shared/`, the root manifest, the lockfile or `deploy.yml` — CI's
+`deploy-relay` and `deploy-pwa` jobs call it once checks and the test matrix pass, the
+pwa after the relay so a wire change never reaches clients first. Which paths count is
+decided by CI's `detect-changes` job, one `scripts/paths-changed.sh <name> <base>
+<head> <path>...` call per component: the name becomes the job output a deploy gate
+reads. The base is the last green CI run on `main`, not the push's parent, so a run
+that failed or was replaced while pending leaves its changes for the next one. They
+need the repo secret `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID`
+repository variable; the pwa also needs the `VITE_RELAY_URL` variable. The relay's
+`BEARER_TOKEN` secret is not CI's business — it stays a one-time `wrangler secret put`,
+and a deploy leaves it in place. Nothing gates Durable Object migrations: a change to
+`migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
+a production change.
 
 ## How the tests are layered
 

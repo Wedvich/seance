@@ -80,6 +80,26 @@ test("paths are independent — any one of them matching is enough", async () =>
   expect((await run("pwa", base, head, "pwa", "shared")).output).toBe("pwa=true");
 });
 
+// CI diffs from the last green run, not the push's parent, so a change in a run that
+// failed or was replaced while pending still counts when a later push doesn't touch it.
+test("a change anywhere between base and head counts, not just in the last commit", async () => {
+  const base = await git("rev-parse", "HEAD");
+  await commit(["relay/src/hub.ts"], "relay edit, never deployed");
+  const head = await commit(["daemon/src/exec.ts"], "daemon edit");
+
+  expect((await run("relay", base, head, "relay")).output).toBe("relay=true");
+});
+
+test("an excluded subtree doesn't count, the rest of its parent still does", async () => {
+  const base = await git("rev-parse", "HEAD");
+  const testsOnly = await commit(["relay/test/hub.test.ts"], "test edit");
+
+  expect((await run("relay", base, testsOnly, "relay", ":!relay/test")).output).toBe("relay=false");
+
+  const source = await commit(["relay/src/hub.ts"], "source edit");
+  expect((await run("relay", testsOnly, source, "relay", ":!relay/test")).output).toBe("relay=true");
+});
+
 // The three ways a base SHA can be undiffable. Each must deploy: skipping here ships
 // nothing and reports success.
 test.each([

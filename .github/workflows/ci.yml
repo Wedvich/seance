@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# Cancelling a main run would kill a deploy-pwa job mid-flight; nothing retries it.
+# Cancelling a main run would kill a deploy job mid-flight.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -77,23 +77,57 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
       pwa: ${{ steps.detect.outputs.pwa }}
+      relay: ${{ steps.detect.outputs.relay }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
+      # Diff from the last green run on main, not event.before: a run that failed, or
+      # was pending when a newer push replaced it in the concurrency group, deployed
+      # nothing, and diffing only this push would skip its changes for good. A green
+      # run means every deploy it gated either shipped or wasn't needed. No green run
+      # yet leaves the base empty, which paths-changed.sh treats as deploy.
+      - id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
       - id: detect
         env:
-          BEFORE: ${{ github.event.before }}
+          BASE: ${{ steps.base.outputs.sha }}
         run: |
-          scripts/paths-changed.sh pwa "$BEFORE" "$GITHUB_SHA" \
-            pwa shared package.json bun.lock .github/workflows/deploy-pwa.yml
+          scripts/paths-changed.sh pwa "$BASE" "$GITHUB_SHA" \
+            pwa ':!pwa/test' shared package.json bun.lock .github/workflows/deploy.yml
+          scripts/paths-changed.sh relay "$BASE" "$GITHUB_SHA" \
+            relay ':!relay/test' shared package.json bun.lock .github/workflows/deploy.yml
 
-  deploy-pwa:
+  deploy-relay:
     needs: [checks, test, detect-changes]
-    if: needs.detect-changes.outputs.pwa == 'true'
-    uses: ./.github/workflows/deploy-pwa.yml
+    if: needs.detect-changes.outputs.relay == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      component: relay
+    secrets: inherit
+
+  # After the relay, so a wire change never reaches clients before the relay that
+  # accepts it. A skipped relay deploy must not skip this one, hence !cancelled().
+  deploy-pwa:
+    needs: [checks, test, detect-changes, deploy-relay]
+    if: >-
+      !cancelled() && needs.detect-changes.outputs.pwa == 'true'
+      && needs.checks.result == 'success' && needs.test.result == 'success'
+      && needs.deploy-relay.result != 'failure'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      component: pwa
     secrets: inherit

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Answers "did this push touch any of these paths?" for a workflow's deploy gate.
+# Answers "did anything since <base> touch these paths?" for a workflow's deploy gate.
 #
 # Job-level `paths` filters don't exist in Actions, and the workflow-level one would
 # gate the checks and the test matrix too — so the deploy jobs ask this instead.
@@ -32,8 +32,8 @@ emit() {
   fi
 }
 
-# A new branch, a force-push over the base, or a shallow clone that doesn't reach it
-# leaves nothing to diff against. Deploy rather than silently skip: a redundant deploy
+# No green run yet, a zero SHA, or a base the clone can't reach (force-push, shallow
+# clone) leaves nothing to diff against. Deploy rather than silently skip: a redundant deploy
 # is cheap, a missed one ships nothing and says it succeeded.
 if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
   || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
