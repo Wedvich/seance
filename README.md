@@ -91,6 +91,11 @@ bun run wrangler secret put BEARER_TOKEN   # paste the bearer token
 bun run deploy                             # prints https://seance-relay.<subdomain>.workers.dev
 ```
 
+This first deploy is by hand; afterwards CI redeploys the relay on every push to
+`main` that touches it, which needs a `CLOUDFLARE_API_TOKEN` repository secret and a
+`CLOUDFLARE_ACCOUNT_ID` repository variable. The bearer token stays a Worker secret
+and a CI deploy leaves it alone.
+
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
 
@@ -115,9 +120,8 @@ VITE_RELAY_URL=wss://seance-relay.<subdomain>.workers.dev/app bun run deploy
 Or put it in a gitignored `pwa/.env` (see `.env.example`) and just
 `bun run deploy`. This first deploy is by hand; afterwards CI redeploys the app on
 every push to `main` that touches it, which needs the same value as a `VITE_RELAY_URL`
-repository variable plus a `CLOUDFLARE_API_TOKEN` secret and `CLOUDFLARE_ACCOUNT_ID`
-variable. This hostname is new too — the step 2 propagation note
-applies again.
+repository variable on top of step 2's secret and variable. This hostname is new
+too — the step 2 propagation note applies again.
 
 ### 4. Install seanced on each machine
 
@@ -321,7 +325,6 @@ approval rather than allowlisting it.
 
 ```sh
 git pull && bun daemon/src/main.ts restart    # daemon, on one machine
-bun run --cwd relay deploy                    # relay
 ```
 
 Daemons self-propagate: the restarted daemon notices its version changed and
@@ -330,9 +333,9 @@ its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
 A machine that was asleep or offline catches up on its next reconnect. A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` on that machine shows its version
-and its last update outcome. The relay deploy stays a manual wrangler step; the app
-deploys itself from CI on a push to `main` that touches it (`Deploy PWA` in Actions
-also runs on demand), so deploying it by hand would race that.
+and its last update outcome. The relay and the app deploy themselves from CI on a
+push to `main` that touches them (`Deploy` in Actions also runs on demand, per
+component), so deploying either by hand would race that.
 
 The Raycast extension does not self-propagate: it is a built copy, so a machine
 that has it needs `seanced raycast install` re-run after the pull. `seanced
