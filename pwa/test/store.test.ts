@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import { RelayClient } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
-import { installBrowserGlobals } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -166,5 +166,116 @@ describe("clearing the prompt", () => {
     detach();
 
     expect(timer.armed()).toBe(false);
+  });
+});
+
+describe("layers and history", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("stacked layers record their depth and back closes them one at a time", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openSheet("model");
+    expect(fake.entries()).toMatchObject([null, { seance: "layer", depth: 1 }, { seance: "layer", depth: 2 }]);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().sheet).toBeNull();
+    expect(store.getState().settings).toBe(true);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().settings).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a sheet already open is replaced without a second entry", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSheet("model");
+    store.openSheet("effort");
+
+    expect(fake.entries()).toHaveLength(2);
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().sheet).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  // A reload with settings open (saving credentials, a service worker update)
+  // resumes on its entry with nothing showing; back from there must be the OS's.
+  test("launching on an entry whose layers are gone steps back to the base", () => {
+    fake = fakeHistory([null, { seance: "layer", depth: 1 }, { seance: "layer", depth: 2 }]);
+    const store = new Store(idleClient());
+
+    const detach = store.attach();
+    fake.settle(store);
+    detach();
+
+    expect(fake.index()).toBe(0);
+  });
+
+  test("entries from before depth was recorded are skipped one per popstate", () => {
+    fake = fakeHistory([null, { seance: "layer" }, { seance: "layer" }, { seance: "layer" }]);
+    const store = new Store(idleClient());
+
+    const detach = store.attach();
+    fake.settle(store);
+    detach();
+
+    expect(fake.index()).toBe(0);
+  });
+
+  // Opened before the launch-time skip ran: the sheet's own depth is 1, the same
+  // as the stale entry under it, so only the owner tells them apart.
+  test("back onto a stale entry under a live layer skips past it", () => {
+    fake = fakeHistory([null, { seance: "layer", depth: 1 }]);
+    const store = new Store(idleClient());
+
+    store.openSheet("model");
+    store.dismissLayer();
+    fake.settle(store);
+
+    expect(store.getState().sheet).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  // Forward can't reopen the layer an entry was pushed for, so it steps back off
+  // it; left in place, the next layer's back would land on it and close nothing.
+  test("forward onto a closed layer's entry steps back, and the next back still closes", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    fake.forward();
+    fake.settle(store);
+    expect(fake.index()).toBe(0);
+
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().settings).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("picking a machine closes the sheet without touching settings beneath it", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openSheet("machine");
+    store.selectMachine("m-1");
+    fake.settle(store);
+
+    expect(store.getState().sheet).toBeNull();
+    expect(store.getState().settings).toBe(true);
+    expect(fake.index()).toBe(1);
   });
 });
