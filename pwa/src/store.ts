@@ -22,6 +22,28 @@ import { resolveMachine, resolveRepo } from "./view.ts";
  * Keeping that here rather than in a component is what keeps push and pop
  * symmetrical.
  */
+/**
+ * History outlives the layers it was pushed for: a reload (the service worker's
+ * update, saving credentials) or Android restoring a discarded PWA brings the
+ * app back on a layer entry with nothing open. Back from there lands on another
+ * entry the app has nothing to close for, so it neither exits nor visibly does
+ * anything. So each entry names the document that pushed it, and how many
+ * layers were open while it was current: one this document didn't push is
+ * stale by definition, and its depth is how far back its own base lies. Entries
+ * pushed before either was recorded read as depth one, so a run of them is
+ * still skipped, one per popstate.
+ */
+type LayerEntry = { readonly owner: unknown; readonly depth: number };
+
+function layerEntry(state: unknown): LayerEntry | null {
+  if (typeof state !== "object" || state === null || !("seance" in state) || state.seance !== "layer") return null;
+  const depth = "depth" in state ? state.depth : undefined;
+  return {
+    owner: "owner" in state ? state.owner : undefined,
+    depth: typeof depth === "number" && Number.isInteger(depth) && depth > 0 ? depth : 1,
+  };
+}
+
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
 
@@ -40,6 +62,8 @@ export class Store {
    */
   #wokenAt = new Map<string, number>();
   #pending: PendingSpawn | null = null;
+  /** Tells this document's history entries from ones a previous load left behind. */
+  readonly #owner = crypto.randomUUID();
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
     this.#client = client;
@@ -75,6 +99,7 @@ export class Store {
       this.#client.reconnect();
     };
     document.addEventListener("visibilitychange", onVisible);
+    this.#skipStaleEntries();
     this.#onRelay();
     return () => {
       unsubscribe();
@@ -224,8 +249,13 @@ export class Store {
 
   /** Restores that machine's last repo (falling back to its first) and clears any verdict. */
   selectMachine(machineId: string): void {
+    // Counted before the patch: clearing the verdict here would otherwise leave
+    // its entry behind once the sheet's back had been spent. Settings is not the
+    // sheet's to close.
+    const { sheet, verdict } = this.#state;
+    const open = (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
     this.#patch({ form: { ...this.#state.form, machineId }, verdict: null });
-    this.dismissLayer();
+    if (open > 0) history.go(-open);
   }
 
   /**
@@ -266,25 +296,52 @@ export class Store {
     this.#patch({ form: { ...this.#state.form, worktree: !this.#state.form.worktree } });
   }
 
+  /** A layer already showing is replaced in place: one entry per layer, never two. */
   openSheet(sheet: SheetKind): void {
-    history.pushState({ seance: "layer" }, "");
+    if (this.#state.sheet === null) this.#pushLayer();
     this.#patch({ sheet });
   }
 
   /** The settings screen is a layer like the sheets: one entry, popped by back. */
   openSettings(): void {
-    history.pushState({ seance: "layer" }, "");
+    if (!this.#state.settings) this.#pushLayer();
     this.#patch({ settings: true });
   }
 
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
-    if (this.#state.sheet === null && this.#state.verdict === null && !this.#state.settings) return;
+    if (this.#openLayers() === 0) return;
     history.back();
   }
 
-  /** Called from the popstate listener; clears whichever layer is showing. */
+  /**
+   * Called from the popstate listener. Closes layers down to the depth of the
+   * entry back landed on; every entry this document pushed sits above any it
+   * didn't, so landing on a stale one closes them all and skips past it.
+   */
   onPopState(): void {
+    const entry = layerEntry(history.state);
+    const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
+    while (this.#openLayers() > depth) this.#closeTopLayer();
+    this.#skipStaleEntries();
+  }
+
+  #openLayers(): number {
+    const { sheet, settings, verdict } = this.#state;
+    return (sheet === null ? 0 : 1) + (settings ? 1 : 0) + (verdict === null ? 0 : 1);
+  }
+
+  /** Before the patch that opens the layer, so the depth counts it. */
+  #pushLayer(): void {
+    history.pushState({ seance: "layer", owner: this.#owner, depth: this.#openLayers() + 1 }, "");
+  }
+
+  #skipStaleEntries(): void {
+    const entry = layerEntry(history.state);
+    if (entry !== null && entry.owner !== this.#owner) history.go(-entry.depth);
+  }
+
+  #closeTopLayer(): void {
     const sheet = this.#state.sheet;
     if (sheet !== null) {
       // Cleared on the way out, not on the next open: a failure that landed while
@@ -301,7 +358,7 @@ export class Store {
   }
 
   #showVerdict(verdict: Verdict): void {
-    history.pushState({ seance: "layer" }, "");
+    if (this.#state.verdict === null) this.#pushLayer();
     this.#patch({ verdict });
   }
 

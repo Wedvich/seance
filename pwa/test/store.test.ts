@@ -168,3 +168,145 @@ describe("clearing the prompt", () => {
     expect(timer.armed()).toBe(false);
   });
 });
+
+/**
+ * A session history with real entries, for the layer tests: traversals queue
+ * like the browser's (async, popstate after the move) and are delivered by
+ * `settle`, which is where the store's own follow-up traversals get applied too.
+ */
+function fakeHistory(entries: unknown[] = [null]): {
+  settle: (store: Store) => void;
+  entries: () => readonly unknown[];
+  index: () => number;
+  restore: () => void;
+} {
+  const stack = [...entries];
+  let index = stack.length - 1;
+  const queued: number[] = [];
+  Object.defineProperty(globalThis, "history", {
+    value: {
+      get state(): unknown {
+        return stack[index];
+      },
+      pushState(data: unknown): void {
+        stack.splice(index + 1, Infinity, data);
+        index += 1;
+      },
+      replaceState(data: unknown): void {
+        stack[index] = data;
+      },
+      back(): void {
+        queued.push(-1);
+      },
+      go(delta: number): void {
+        queued.push(delta);
+      },
+    },
+    configurable: true,
+  });
+  return {
+    settle: (store) => {
+      for (let delta = queued.shift(); delta !== undefined; delta = queued.shift()) {
+        const target = index + delta;
+        // Past the first entry is the OS's back: the app is gone, nothing pops.
+        if (target < 0) throw new Error("traversed out of the app");
+        index = target;
+        store.onPopState();
+      }
+    },
+    entries: () => stack,
+    index: () => index,
+    restore: installBrowserGlobals,
+  };
+}
+
+describe("layers and history", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("stacked layers record their depth and back closes them one at a time", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openSheet("model");
+    expect(fake.entries()).toMatchObject([null, { seance: "layer", depth: 1 }, { seance: "layer", depth: 2 }]);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().sheet).toBeNull();
+    expect(store.getState().settings).toBe(true);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().settings).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a sheet already open is replaced without a second entry", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSheet("model");
+    store.openSheet("effort");
+
+    expect(fake.entries()).toHaveLength(2);
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().sheet).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  // A reload with settings open (saving credentials, a service worker update)
+  // resumes on its entry with nothing showing; back from there must be the OS's.
+  test("launching on an entry whose layers are gone steps back to the base", () => {
+    fake = fakeHistory([null, { seance: "layer", depth: 1 }, { seance: "layer", depth: 2 }]);
+    const store = new Store(idleClient());
+
+    const detach = store.attach();
+    fake.settle(store);
+    detach();
+
+    expect(fake.index()).toBe(0);
+  });
+
+  test("entries from before depth was recorded are skipped one per popstate", () => {
+    fake = fakeHistory([null, { seance: "layer" }, { seance: "layer" }, { seance: "layer" }]);
+    const store = new Store(idleClient());
+
+    const detach = store.attach();
+    fake.settle(store);
+    detach();
+
+    expect(fake.index()).toBe(0);
+  });
+
+  // Opened before the launch-time skip ran: the sheet's own depth is 1, the same
+  // as the stale entry under it, so only the owner tells them apart.
+  test("back onto a stale entry under a live layer skips past it", () => {
+    fake = fakeHistory([null, { seance: "layer", depth: 1 }]);
+    const store = new Store(idleClient());
+
+    store.openSheet("model");
+    store.dismissLayer();
+    fake.settle(store);
+
+    expect(store.getState().sheet).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  test("picking a machine closes the sheet without touching settings beneath it", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openSheet("machine");
+    store.selectMachine("m-1");
+    fake.settle(store);
+
+    expect(store.getState().sheet).toBeNull();
+    expect(store.getState().settings).toBe(true);
+    expect(fake.index()).toBe(1);
+  });
+});

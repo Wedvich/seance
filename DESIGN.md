@@ -1215,6 +1215,17 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict and the Settings screen all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
+  History outlives the document, though: a reload (a service-worker update, saving
+  credentials) or Android restoring a discarded PWA resumes on a layer entry with
+  nothing open, and back from the form then lands on an entry the app has nothing
+  to close for — no exit, just a blank screen. So each entry carries the pushing
+  document's random `owner` id and the layer `depth` it was pushed at. An entry
+  some other document pushed is stale by definition: at launch, and whenever back
+  lands on one, the store closes everything and `history.go(-depth)`s past it to
+  its base. That base is the entry back from the form must leave through. Entries
+  can't be deleted, only skipped, and skipping is invisible because they are all
+  the same URL. A layer that is already open is replaced in place rather than
+  pushed again, so one layer never costs two backs.
 - **Relay status is a passive dot, settings is the button, and they share one
   pill.** The header control is a segmented pill on the `.seg` track/face idiom:
   a flat left area holding the status dot and a raised cog on the right. The

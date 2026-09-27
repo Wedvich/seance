@@ -10,7 +10,9 @@ declare var document: {
 };
 
 declare var history: {
+  readonly state: unknown;
   pushState(data: unknown, unused: string): void;
   replaceState(data: unknown, unused: string): void;
   back(): void;
+  go(delta: number): void;
 };
