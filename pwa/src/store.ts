@@ -64,6 +64,12 @@ export class Store {
   #pending: PendingSpawn | null = null;
   /** Tells this document's history entries from ones a previous load left behind. */
   readonly #owner = crypto.randomUUID();
+  /**
+   * The entry a retried verdict leaves behind, kept for whatever layer opens next.
+   * Retry can't go back instead: the back is delivered later, and a verdict that
+   * lands first (a rescan with no socket fails at once) would be the one it closes.
+   */
+  #held = false;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
     this.#client = client;
@@ -320,6 +326,8 @@ export class Store {
    * didn't, so landing on a stale one closes them all and skips past it.
    */
   onPopState(): void {
+    // Any traversal leaves the entry that was current, held or not.
+    this.#held = false;
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -333,12 +341,29 @@ export class Store {
 
   /** Before the patch that opens the layer, so the depth counts it. */
   #pushLayer(): void {
-    history.pushState({ seance: "layer", owner: this.#owner, depth: this.#openLayers() + 1 }, "");
+    const entry = { seance: "layer", owner: this.#owner, depth: this.#openLayers() + 1 };
+    if (this.#held) history.replaceState(entry, "");
+    else history.pushState(entry, "");
+    this.#held = false;
   }
 
+  /** A retry that ended without a verdict gives its entry back, as a dismissal would have. */
+  #releaseHeld(): void {
+    if (!this.#held) return;
+    this.#held = false;
+    history.back();
+  }
+
+  /**
+   * An entry deeper than what is open is skipped back to its match: another
+   * document's (its depth counts from its own base), or this one's reached by
+   * Forward after its layer closed, which can't be reopened from the entry alone.
+   */
   #skipStaleEntries(): void {
     const entry = layerEntry(history.state);
-    if (entry !== null && entry.owner !== this.#owner) history.go(-entry.depth);
+    if (entry === null) return;
+    const stale = entry.owner === this.#owner ? entry.depth - this.#openLayers() : entry.depth;
+    if (stale > 0) history.go(-stale);
   }
 
   #closeTopLayer(): void {
@@ -472,12 +497,13 @@ export class Store {
    * verdict for the same reason `reusePrompt` does.
    */
   retrySpawn(verdict: Verdict): void {
-    this.dismissLayer();
-    if (verdict.kind === "failed" && verdict.code === "repo_not_found") {
-      void this.#rescanThenRetry(verdict);
-      return;
+    if (this.#state.verdict !== null) {
+      this.#held = true;
+      this.#patch({ verdict: null });
     }
-    void this.spawn();
+    const retry =
+      verdict.kind === "failed" && verdict.code === "repo_not_found" ? this.#rescanThenRetry(verdict) : this.spawn();
+    void retry.finally(() => this.#releaseHeld());
   }
 
   async #rescanThenRetry(verdict: Extract<Verdict, { kind: "failed" }>): Promise<void> {

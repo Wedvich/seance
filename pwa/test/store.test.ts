@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import { RelayClient } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
-import { installBrowserGlobals } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -169,57 +169,6 @@ describe("clearing the prompt", () => {
   });
 });
 
-/**
- * A session history with real entries, for the layer tests: traversals queue
- * like the browser's (async, popstate after the move) and are delivered by
- * `settle`, which is where the store's own follow-up traversals get applied too.
- */
-function fakeHistory(entries: unknown[] = [null]): {
-  settle: (store: Store) => void;
-  entries: () => readonly unknown[];
-  index: () => number;
-  restore: () => void;
-} {
-  const stack = [...entries];
-  let index = stack.length - 1;
-  const queued: number[] = [];
-  Object.defineProperty(globalThis, "history", {
-    value: {
-      get state(): unknown {
-        return stack[index];
-      },
-      pushState(data: unknown): void {
-        stack.splice(index + 1, Infinity, data);
-        index += 1;
-      },
-      replaceState(data: unknown): void {
-        stack[index] = data;
-      },
-      back(): void {
-        queued.push(-1);
-      },
-      go(delta: number): void {
-        queued.push(delta);
-      },
-    },
-    configurable: true,
-  });
-  return {
-    settle: (store) => {
-      for (let delta = queued.shift(); delta !== undefined; delta = queued.shift()) {
-        const target = index + delta;
-        // Past the first entry is the OS's back: the app is gone, nothing pops.
-        if (target < 0) throw new Error("traversed out of the app");
-        index = target;
-        store.onPopState();
-      }
-    },
-    entries: () => stack,
-    index: () => index,
-    restore: installBrowserGlobals,
-  };
-}
-
 describe("layers and history", () => {
   let fake: ReturnType<typeof fakeHistory>;
 
@@ -293,6 +242,26 @@ describe("layers and history", () => {
     fake.settle(store);
 
     expect(store.getState().sheet).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  // Forward can't reopen the layer an entry was pushed for, so it steps back off
+  // it; left in place, the next layer's back would land on it and close nothing.
+  test("forward onto a closed layer's entry steps back, and the next back still closes", () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    fake.forward();
+    fake.settle(store);
+    expect(fake.index()).toBe(0);
+
+    store.openSettings();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().settings).toBe(false);
     expect(fake.index()).toBe(0);
   });
 

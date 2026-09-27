@@ -9,7 +9,7 @@ import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
-import { installBrowserGlobals } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -897,6 +897,43 @@ describe("store", () => {
       expect(store.getState().rescan).toBe("idle");
     } finally {
       stop();
+      daemon.close();
+    }
+  });
+
+  // A dismissal's back is delivered later, so a retry that went back would close
+  // whichever verdict had landed by then — here the rescan's own report.
+  test("a retry's verdict survives the history the failed one left", async () => {
+    const deviceId = nextDeviceId();
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+      spawn: () => ({ ok: false, code: "repo_not_found", message: "no repo named seance" }),
+    });
+    const history = fakeHistory();
+    const { store, waitForApp, stop } = startStore(
+      { machineId: deviceId, repos: { [deviceId]: "seance" } },
+      { timeouts: { rescan: 300 } },
+    );
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.spawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
+
+      store.retrySpawn(failed);
+      await waitForApp((s) => s.verdict?.kind === "failed" && s.verdict.rescan === "unreachable", "rescan reported");
+      history.settle(store);
+
+      expect(store.getState().verdict).toMatchObject({ kind: "failed", rescan: "unreachable" });
+      // The retried verdict took over the failed one's entry: one layer, one back.
+      expect(history.entries()).toHaveLength(2);
+      store.dismissLayer();
+      history.settle(store);
+      expect(store.getState().verdict).toBeNull();
+      expect(history.index()).toBe(0);
+    } finally {
+      stop();
+      history.restore();
       daemon.close();
     }
   });
