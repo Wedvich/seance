@@ -203,6 +203,17 @@ export async function listPanes(): Promise<readonly PaneInfo[]> {
   return parsePaneInfo(result.stdout);
 }
 
+/**
+ * One pane by id, null once it is gone — what a caller watching a single pane
+ * polls, rather than listing every pane on the server each time. `paneId` must
+ * already be a validated `%n`: it is a `-t` target.
+ */
+export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
+  const result = await tmux(["display-message", "-p", "-t", paneId, PANE_INFO_FORMAT]);
+  if (result.exitCode !== 0) return null;
+  return parsePaneInfo(result.stdout).find((pane) => pane.paneId === paneId) ?? null;
+}
+
 /** What the list-panes fields settle alone; null when only the screen can tell. */
 function stateWithoutScreen(pane: PaneInfo): PaneState | null {
   if (pane.dead) return "dead";

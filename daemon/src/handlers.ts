@@ -19,7 +19,7 @@ import {
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
-import { DespawnFailure, SpawnFailure, type SessionBackend } from "./backend.ts";
+import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
 
 export interface HandlerContext {
@@ -127,12 +127,9 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
     await audit.failed("internal_error");
     return { ok: false, code: "internal_error", message: "this machine's session backend cannot despawn" };
   }
+  let result: DespawnResult;
   try {
-    const result = await ctx.backend.despawn(payload.id, { force: payload.force === true });
-    await audit.ok(result);
-    // After the outcome, so the list the caller caches no longer holds the window.
-    const sessions = await ctx.backend.sessions(ctx.getRepos());
-    return { ok: true, window: result.window, outcome: result.outcome, sessions };
+    result = await ctx.backend.despawn(payload.id, { force: payload.force === true });
   } catch (err) {
     if (err instanceof DespawnFailure) {
       await audit.failed(err.code);
@@ -142,6 +139,11 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
     await audit.failed("internal_error");
     return { ok: false, code: "internal_error", message: String(err) };
   }
+  await audit.ok(result);
+  // After the outcome, so the list the caller caches no longer holds the window.
+  // Outside the try: a listing that fails must not audit a done despawn as failed.
+  const sessions = await ctx.backend.sessions(ctx.getRepos());
+  return { ok: true, window: result.window, outcome: result.outcome, sessions };
 }
 
 /**

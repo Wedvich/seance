@@ -213,6 +213,8 @@ export async function cmdDespawn(argv: readonly string[]): Promise<void> {
       console.error(`despawn failed [${err.code}] — ${err.message}`);
       process.exit(1);
     }
+    // As the handler does, so an `origin=cli` request line never ends without an outcome.
+    await audit.failed("internal_error");
     throw err;
   }
 }

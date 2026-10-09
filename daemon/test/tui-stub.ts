@@ -74,7 +74,14 @@ function press(key: string): void {
 
 note(`pid ${process.pid}`);
 process.stdout.write("\u001B[?1049h\u001B]2;✳ stub\u001B\\");
-if (mode === "deaf") process.on("SIGHUP", () => {});
+if (mode === "deaf") {
+  process.on("SIGHUP", () => {});
+  // The pty closing ends stdin, and with it the event loop: without a handle of
+  // its own this stub would exit unprompted, and the escalation tests that rely
+  // on it outliving its pane would pass with no escalation at all.
+  setInterval(() => {}, 1 << 30);
+  process.stdin.on("error", () => {});
+}
 redraw();
 process.stdin.setRawMode(true);
 process.stdin.on("data", (chunk: Buffer) => {

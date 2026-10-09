@@ -199,8 +199,8 @@ export interface DespawnAudit {
 
 /**
  * Despawns audit like spawns — same origins, same sink — since ending a session
- * is as much "something used my machine" as starting one. The window name is
- * recorded verbatim, as spawn's titles are; the id is quoted, being wire text.
+ * is as much "something used my machine" as starting one. The id and window
+ * name are both wire text, so both are quoted, as spawn's title is.
  */
 export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit {
   const emit = async (rest: string): Promise<void> => {

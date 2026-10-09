@@ -1,6 +1,6 @@
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { exec } from "./exec.ts";
-import { classifyPane, isRegistered, listPanes, type PaneInfo } from "./sessions.ts";
+import { classifyPane, isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
 
 /**
@@ -33,9 +33,9 @@ export async function despawnSession(id: string, opts: DespawnOptions): Promise<
   if (!PANE_ID.test(id)) {
     throw new DespawnFailure("invalid_target", `"${id}" is not a session id — take one from the session list (%12)`);
   }
-  const pane = (await listPanes()).find((candidate) => candidate.paneId === id);
+  const pane = await paneInfo(id);
   // The session list's own predicate: despawn reaches exactly what a list offered.
-  if (pane === undefined || !isRegistered(pane)) {
+  if (pane === null || !isRegistered(pane)) {
     throw new DespawnFailure("session_not_found", `no session in pane ${id} — it may have exited already`);
   }
   const window = pane.windowName;
@@ -83,8 +83,8 @@ async function exitGracefully(pane: PaneInfo, graceMs: number): Promise<boolean>
   else await askToExit(pane.paneId);
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- polling: each check gates the next
-    const now = (await listPanes()).find((candidate) => candidate.paneId === pane.paneId);
-    if (now === undefined) return true;
+    const now = await paneInfo(pane.paneId);
+    if (now === null) return true;
     // oxlint-disable-next-line no-await-in-loop
     const state = await classifyPane(now);
     // claude has gone; what is left is a pane remain-on-exit kept, or the shell a
@@ -110,12 +110,16 @@ async function exitGracefully(pane: PaneInfo, graceMs: number): Promise<boolean>
  * claude. On macOS the pane's process is `caffeinate`, with claude its child,
  * so a claude that ignores SIGHUP would run on with no window and no parent.
  * The pane's process and its children are recorded first and escalated to
- * SIGTERM, then SIGKILL, if they outlive the pane.
+ * SIGTERM, then SIGKILL, if they outlive the pane. A dead pane (remain-on-exit)
+ * still reports its long-reaped `pane_pid`, which may name an unrelated process
+ * by now, so nothing is watched there.
  */
 async function killPane(paneId: string, waitMs: number): Promise<void> {
-  const field = await tmux(["display-message", "-p", "-t", paneId, "#{pane_pid}"]);
-  const pid = Number(field.stdout.trim());
-  const watched = field.exitCode === 0 && pid > 0 ? [pid, ...(await childrenOf(pid))] : [];
+  const field = await tmux(["display-message", "-p", "-t", paneId, "#{pane_dead} #{pane_pid}"]);
+  const [dead, pidText] = field.stdout.trim().split(" ");
+  const pid = Number(pidText);
+  const live = field.exitCode === 0 && dead === "0" && pid > 0;
+  const watched = live ? [pid, ...(await childrenOf(pid))] : [];
   await tmux(["kill-pane", "-t", paneId]);
   let alive = await survivors(watched, waitMs);
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {

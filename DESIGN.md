@@ -1146,7 +1146,17 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   outlive it; a test asserts it with a SIGHUP-ignoring stub under real
   `caffeinate`. Audited like spawn (`despawnAudit`): request with the target
   quoted, then outcome with the window. An older daemon ignores the unknown op,
-  so a despawn aimed at one rides the 20s `OP_TIMEOUT_MS` backstop. Rejected:
+  so a despawn aimed at one rides the 20s `OP_TIMEOUT_MS` backstop. Known
+  limits, accepted for now: the "Background work is running" dialog is not
+  answered (choosing between stopping the tasks and backgrounding them is not
+  despawn's call), so such a session waits out the grace and is `killed`; the
+  escalation watches one level of children, so on macOS — where that level is
+  claude itself — claude's own children (MCP servers, background shells) are
+  left to claude's SIGHUP/SIGTERM handling; and pids are signalled up to ~4s
+  after they were recorded, a reuse window that signalling by pid can't close.
+  A dead pane (remain-on-exit) reports a long-reaped `pane_pid`, so nothing is
+  watched there at all. The grace poll asks tmux about the one pane
+  (`paneInfo`), not the whole server. Rejected:
   `kill-window` (takes a split's other panes along); targeting by window name
   (wire text, not unique); answering the exit prompt with "Remove worktree"
   (deletes work — reap removes worktrees under its own rules).
