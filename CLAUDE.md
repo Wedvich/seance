@@ -74,7 +74,7 @@ green:
 - Parallelism lives between shard processes (`scripts/test.ts`), never `bun test --parallel` at the
   top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
   once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
-  across files, so no in-process cache can survive it. `--parallel` inside the daemon shard is fine.
+  across files, so no in-process cache can survive it. `--parallel` inside the two daemon shards is fine — two because a GitHub-runner `--parallel` run stops dead past ~64 KiB of output (`SHARDS` says more).
 - Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare. Its worker bundle is
   memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
   fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
