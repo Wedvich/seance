@@ -12,6 +12,11 @@
  * sweep daemon/test/relay.test.ts. Counts must add up to a plain run's, which the
  * coverage check below enforces — every tracked test file has to fall in a shard.
  */
+import { mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TEST_RUN_DIR_ENV } from "./test-run-dir.ts";
+
 const TIMEOUT_MS = 15_000;
 
 interface Shard {
@@ -81,6 +86,77 @@ if (filters.length === 0) {
   }
 }
 
+/**
+ * Suites' private tmux sockets land here (`usePrivateTmux`), and the sweep below
+ * runs however the run ends. Their own teardown covers a clean finish; this
+ * covers the ones that never reach it — a suite timing out in beforeAll, a
+ * shard crashing, the run signalled — where a tmux server (holding a claude
+ * stub) would otherwise outlive the run. bun test fires no exit hooks, so this
+ * can only live in the parent.
+ */
+const runDir = await mkdtemp(join(tmpdir(), "seance-run-"));
+// Passed explicitly: Bun.spawn's default env is the startup snapshot, blind to process.env writes.
+const shardEnv = { ...process.env, [TEST_RUN_DIR_ENV]: runDir };
+const running = new Set<Bun.Subprocess>();
+/** Bounds each kill-server: a wedged server must not hang the run's exit. */
+const KILL_SERVER_TIMEOUT_MS = 10_000;
+
+let sweep: Promise<void> | null = null;
+
+/**
+ * Moves the run dir aside before reading it: tmux won't create a socket's parent
+ * directory, so from the rename on, a shard still booting a server fails to
+ * bind instead of leaving one the sweep's listing missed. Everything in the
+ * moved dir is a socket by construction; kill-server on a dead one just fails.
+ * Memoized because the signal path and the main path both end here.
+ */
+function sweepRunDir(): Promise<void> {
+  sweep ??= (async () => {
+    const swept = `${runDir}-swept`;
+    try {
+      await rename(runDir, swept);
+    } catch {
+      return; // never created, or already swept
+    }
+    const entries = await readdir(swept);
+    await Promise.all(
+      entries.map(
+        (name) =>
+          Bun.spawn(["tmux", "-S", join(swept, name), "kill-server"], {
+            stdout: "ignore",
+            stderr: "ignore",
+            timeout: KILL_SERVER_TIMEOUT_MS,
+          }).exited,
+      ),
+    );
+    await rm(swept, { recursive: true, force: true });
+  })();
+  return sweep;
+}
+
+/** How long a signalled shard gets to exit before the sweep goes ahead without it. */
+const SHARD_EXIT_GRACE_MS = 5_000;
+let signalExitCode: number | null = null;
+
+/**
+ * Only signals sent to the runner itself land here (CI cancel, `kill`). A ^C at
+ * a terminal mostly doesn't: under the pty wrapper `script` puts the tty in raw
+ * mode, so the keystroke interrupts only the shard reading it, and the run
+ * finishes and sweeps on the normal path.
+ */
+function onSignal(signal: "SIGINT" | "SIGTERM", code: number): void {
+  signalExitCode ??= code;
+  const exits = [...running].map((proc) => {
+    proc.kill(signal);
+    return proc.exited;
+  });
+  void Promise.race([Promise.all(exits), Bun.sleep(SHARD_EXIT_GRACE_MS)])
+    .then(sweepRunDir)
+    .finally(() => process.exit(code));
+}
+process.on("SIGINT", () => onSignal("SIGINT", 130));
+process.on("SIGTERM", () => onSignal("SIGTERM", 143));
+
 interface Result {
   readonly name: string;
   readonly exitCode: number;
@@ -141,15 +217,18 @@ async function runShard(shard: Shard): Promise<Result> {
   if (argv === null) return { name: shard.name, exitCode: 0, output: "skipped — claude not on PATH", skipped: true };
 
   const proc = Bun.spawn(command(argv), {
+    env: shardEnv,
     stdin: usePty ? "inherit" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
+  running.add(proc);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+  running.delete(proc);
   return { name: shard.name, exitCode, output: clean(`${stdout}${stderr}`) };
 }
 
@@ -231,7 +310,14 @@ function plural(count: number, noun: string): string {
 }
 
 const started = Bun.nanoseconds();
-const results = await Promise.all(shards.map(runShard));
+let results: Result[];
+try {
+  results = await Promise.all(shards.map(runShard));
+} finally {
+  await sweepRunDir();
+}
+// The signal handler owns the exit code; killed shards resolving here must not report over it.
+if (signalExitCode !== null) process.exit(signalExitCode);
 const elapsedMs = Math.round((Bun.nanoseconds() - started) / 1e6);
 
 for (const result of results) {

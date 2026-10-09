@@ -11,7 +11,14 @@ import { localRequest, LocalUnavailable, localSocketReachable } from "../src/loc
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { scanRepos } from "../src/scan.ts";
 import { tmux } from "../src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
+import {
+  makeClaudeStub,
+  makeGitFixture,
+  usePrivateTmux,
+  type ClaudeStub,
+  type GitFixture,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 /**
  * The local op path with everything under it real: socket, handler, backend,
@@ -20,6 +27,7 @@ import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from
  */
 
 let base: string;
+let privateTmux: PrivateTmux | undefined;
 let sockPath: string;
 let fixture: GitFixture;
 let stub: ClaudeStub;
@@ -32,7 +40,7 @@ const logged = (): string => lines.join("\n");
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-sock-"));
   sockPath = join(base, "seanced.sock");
-  process.env["SEANCE_TMUX_SOCKET"] = `seance-sock-test-${process.pid}`;
+  privateTmux = usePrivateTmux(base, "sock");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   fixture = await makeGitFixture(base);
   stub = await makeClaudeStub(base);
@@ -59,8 +67,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   socket.stop();
-  await tmux(["kill-server"]);
-  delete process.env["SEANCE_TMUX_SOCKET"];
+  await privateTmux?.dispose();
   delete process.env["SEANCE_CLAUDE_BIN"];
   delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });

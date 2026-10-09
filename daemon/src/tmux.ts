@@ -1,10 +1,14 @@
 import { homedir } from "node:os";
 import { exec, type ExecResult } from "./exec.ts";
 
-/** SEANCE_TMUX_SOCKET points tests at a private tmux server (`tmux -L`). */
+/**
+ * SEANCE_TMUX_SOCKET points tests at a private tmux server. A path (`-S`), not a
+ * name (`-L`): tmux never unlinks its socket, so a name leaves a file in the
+ * shared `tmux-$UID` dir per run; a path lets the test own where it lands.
+ */
 export async function tmux(args: readonly string[]): Promise<ExecResult> {
   const socket = process.env["SEANCE_TMUX_SOCKET"];
-  return exec(["tmux", ...(socket ? ["-L", socket] : []), ...args], { timeoutMs: 10_000 });
+  return exec(["tmux", ...(socket ? ["-S", socket] : []), ...args], { timeoutMs: 10_000 });
 }
 
 export class TmuxError extends Error {}

@@ -55,7 +55,14 @@ a production change.
 
 - **daemon** — a throwaway in-process relay, a private tmux server
   (`SEANCE_TMUX_SOCKET`), and a stub claude binary (`SEANCE_CLAUDE_BIN`). Needs real
-  `tmux` and `git` on PATH.
+  `tmux` and `git` on PATH. Suites (and e2e) get their server from `usePrivateTmux` in
+  `daemon/test/fixtures.ts`, never by setting the env var by hand: tmux never unlinks
+  its socket, so the helper puts it by path in the per-run directory `scripts/test.ts`
+  creates (`SEANCE_TEST_RUN_DIR`). When the run ends — normally, on a shard crash, or
+  on SIGINT/SIGTERM to the runner — the runner kills any server still behind a socket
+  there and removes the directory, so a suite that never reached its teardown leaks
+  nothing either. A ^C at a terminal reaches only the shard reading the tty (the pty
+  wrapper puts it in raw mode); the rest finish and the sweep runs as usual.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
