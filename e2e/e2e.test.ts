@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
-import { pollUntil } from "../daemon/test/fixtures.ts";
+import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -31,12 +31,13 @@ import {
  */
 
 let base: string;
+let privateTmux: PrivateTmux | undefined;
 let stack: Stack;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-e2e-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
-  process.env["SEANCE_TMUX_SOCKET"] = `seance-e2e-${process.pid}`;
+  privateTmux = usePrivateTmux(base, "e2e");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   stack = await startStack(base);
 });
@@ -44,9 +45,13 @@ beforeAll(async () => {
 afterAll(async () => {
   // startStack failing in beforeAll leaves stack unset; a teardown TypeError
   // here would mask the real error.
-  await stack?.dispose();
+  try {
+    await stack?.dispose();
+  } finally {
+    // A relay teardown error must not leave the server (and its claude stub) running.
+    await privateTmux?.dispose();
+  }
   delete process.env["SEANCE_STATE_DIR"];
-  delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
   delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });

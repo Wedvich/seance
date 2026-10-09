@@ -8,8 +8,10 @@ import {
   awaitWatcherLive,
   makeConfigTrigger,
   makeGitFixture,
+  usePrivateTmux,
   type ConfigTrigger,
   type GitFixture,
+  type PrivateTmux,
 } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 import { tmux } from "../src/tmux.ts";
@@ -20,6 +22,7 @@ const TOKEN = "reload-bearer";
 const DEBOUNCE_MS = 30;
 
 let base: string;
+let privateTmux: PrivateTmux | undefined;
 let fixture: GitFixture;
 let appKey: CryptoKey;
 let supervisor: SupervisorHandle | null = null;
@@ -30,14 +33,13 @@ beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-reload-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   // every daemon start publishes the machine tag to tmux; keep it off the real server
-  process.env["SEANCE_TMUX_SOCKET"] = `seance-reload-test-${process.pid}`;
+  privateTmux = usePrivateTmux(base, "reload");
   fixture = await makeGitFixture(base);
   appKey = await importPsk(PSK);
 });
 
 afterAll(async () => {
-  await tmux(["kill-server"]);
-  delete process.env["SEANCE_TMUX_SOCKET"];
+  await privateTmux?.dispose();
   delete process.env["SEANCE_STATE_DIR"];
   await rm(base, { recursive: true, force: true });
 });

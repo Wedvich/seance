@@ -3,6 +3,8 @@ import { chmod, link, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
+import { tmux } from "../src/tmux.ts";
+import { TEST_RUN_DIR_ENV } from "../../scripts/test-run-dir.ts";
 
 async function run(argv: readonly string[], cwd?: string): Promise<void> {
   const result = await exec(argv, cwd !== undefined ? { cwd } : {});
@@ -238,6 +240,29 @@ export async function awaitWatcherLive(dir: string): Promise<void> {
     (probe as ReturnType<typeof watch> | null)?.close();
     await rm(sentinel, { force: true });
   }
+}
+
+export interface PrivateTmux {
+  readonly dispose: () => Promise<void>;
+}
+
+/**
+ * Points SEANCE_TMUX_SOCKET at a private server for one suite. tmux never
+ * unlinks its socket, so it goes in a directory something else removes: the
+ * run dir scripts/test.ts sweeps (which also kills a server whose suite never
+ * reached teardown), else `base`, which the suite removes itself — never the
+ * shared `tmux-$UID` dir. `label` keeps suites apart when `--parallel` gives
+ * several the same pid. Keep it short: macOS caps a socket path at 104 bytes
+ * and its tmpdir alone is ~48.
+ */
+export function usePrivateTmux(base: string, label: string): PrivateTmux {
+  process.env["SEANCE_TMUX_SOCKET"] = join(process.env[TEST_RUN_DIR_ENV] ?? base, `${label}-${process.pid}.sock`);
+  return {
+    dispose: async () => {
+      await tmux(["kill-server"]);
+      delete process.env["SEANCE_TMUX_SOCKET"];
+    },
+  };
 }
 
 /**

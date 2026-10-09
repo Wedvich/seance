@@ -60,7 +60,8 @@ export interface Stack {
 
 /**
  * Env seams must be set before this runs: SEANCE_STATE_DIR (one per suite —
- * one stable deviceId), SEANCE_TMUX_SOCKET, SEANCE_CLAUDE_BIN. The caller owns
+ * one stable deviceId), SEANCE_TMUX_SOCKET (`usePrivateTmux`, whose server
+ * outlives dispose), SEANCE_CLAUDE_BIN. The caller owns
  * them because they are process-global and the daemon suite plays the same
  * game in its own files.
  */
@@ -120,7 +121,6 @@ export async function startStack(base: string): Promise<Stack> {
     },
     dispose: async (): Promise<void> => {
       daemon.stop();
-      await tmux(["kill-server"]);
       await relay.dispose();
     },
   };

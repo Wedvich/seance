@@ -18,19 +18,27 @@ import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, pollUntil, type GitFixture } from "./fixtures.ts";
+import {
+  makeClaudeStub,
+  makeGitFixture,
+  pollUntil,
+  usePrivateTmux,
+  type GitFixture,
+  type PrivateTmux,
+} from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(3));
 const TOKEN = "test-bearer";
 let base: string;
+let privateTmux: PrivateTmux | undefined;
 let fixture: GitFixture;
 let appKey: CryptoKey;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-relay-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
-  process.env["SEANCE_TMUX_SOCKET"] = `seance-relay-test-${process.pid}`;
+  privateTmux = usePrivateTmux(base, "relay");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   fixture = await makeGitFixture(base);
   const stub = await makeClaudeStub(base);
@@ -39,9 +47,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await tmux(["kill-server"]);
+  await privateTmux?.dispose();
   delete process.env["SEANCE_STATE_DIR"];
-  delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
   delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });

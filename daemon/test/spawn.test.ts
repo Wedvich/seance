@@ -9,7 +9,15 @@ import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
 import { sessionName, spawnSession } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
-import { addWorktree, makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
+import {
+  addWorktree,
+  makeClaudeStub,
+  makeGitFixture,
+  usePrivateTmux,
+  type ClaudeStub,
+  type GitFixture,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 // A deadline, not a duration: the wait returns on the stub's title (0.3s after
 // startup, which macOS can stretch under load), so a wide one adds no latency
@@ -21,13 +29,14 @@ const STUCK_WAIT = { tmuxSession: "main", waitMs: 700 };
 // against the deadline the same way; polling makes the width free.
 const FAIL_WAIT = { tmuxSession: "main", waitMs: 5_000 };
 let base: string;
+let privateTmux: PrivateTmux | undefined;
 let fixture: GitFixture;
 let stub: ClaudeStub;
 let repos: readonly RepoEntry[];
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-spawn-"));
-  process.env["SEANCE_TMUX_SOCKET"] = `seance-spawn-test-${process.pid}`;
+  privateTmux = usePrivateTmux(base, "spawn");
   // A tag in the environment the private tmux server boots from — as when the
   // suite runs inside a séance session — which no window may inherit.
   process.env["SEANCE_MACHINE_TAG"] = "outer";
@@ -39,8 +48,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await tmux(["kill-server"]);
-  delete process.env["SEANCE_TMUX_SOCKET"];
+  await privateTmux?.dispose();
   delete process.env["SEANCE_CLAUDE_BIN"];
   delete process.env["SEANCE_MACHINE_TAG"];
   delete process.env["CLAUDE_CONFIG_DIR"];
