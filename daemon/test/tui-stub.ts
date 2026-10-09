@@ -73,7 +73,6 @@ function press(key: string): void {
 }
 
 note(`pid ${process.pid}`);
-process.stdout.write("\u001B[?1049h\u001B]2;✳ stub\u001B\\");
 if (mode === "deaf") {
   process.on("SIGHUP", () => {});
   // The pty closing ends stdin, and with it the event loop: without a handle of
@@ -82,10 +81,15 @@ if (mode === "deaf") {
   setInterval(() => {}, 1 << 30);
   process.stdin.on("error", () => {});
 }
-redraw();
+// Raw and listening before the title goes up: the title is what tells a test
+// (and despawn) the TUI is ready for keys. A key sent earlier meets the tty in
+// cooked mode, where Enter's \r is rewritten to \n on arrival — on a slow CI
+// runner that lost the very Enter a test was waiting on.
 process.stdin.setRawMode(true);
 process.stdin.on("data", (chunk: Buffer) => {
   if (mode === "deaf") return;
   for (const key of chunk.toString()) press(key);
   redraw();
 });
+process.stdout.write("\u001B[?1049h\u001B]2;✳ stub\u001B\\");
+redraw();
