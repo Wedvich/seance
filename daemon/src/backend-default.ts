@@ -1,6 +1,7 @@
 import type { SessionBackend } from "./backend.ts";
 import type { Check } from "./check.ts";
 import type { Config } from "./config.ts";
+import { despawnSession } from "./despawn.ts";
 import { listClaudeSessions, listStuckWindows } from "./sessions.ts";
 import { captureWindow, publishMachineTag, spawnSession } from "./spawn.ts";
 import { tmux } from "./tmux.ts";
@@ -17,6 +18,7 @@ export function createBackend(config: Config, opts: { readonly waitMs?: number }
     spawn: (request, repos) =>
       spawnSession(request, repos, { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag }),
     sessions: (repos) => listClaudeSessions(repos),
+    despawn: (id, { force }) => despawnSession(id, { force }),
     doctor: tmuxChecks,
     capture: (handle) => captureWindow(handle, { history: false }),
     start: () => publishMachineTag(config.tmuxSession, config.machineTag),

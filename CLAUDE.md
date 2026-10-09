@@ -109,7 +109,8 @@ green:
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
-  allowlist is `sessions` and `spawn` only; widening it is a threat-model change, not a tweak.
+  allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
+  tweak (DESIGN.md's "Local op socket" records why `despawn` got in).
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws

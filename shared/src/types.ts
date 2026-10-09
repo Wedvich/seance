@@ -124,7 +124,7 @@ export interface RegistryEntry {
  */
 export type RegistryView = RegistryEntry & { readonly connected: boolean };
 
-export type OpName = "sessions" | "spawn" | "rescan" | "machine-info" | "update-available";
+export type OpName = "sessions" | "spawn" | "despawn" | "rescan" | "machine-info" | "update-available";
 
 /**
  * Ops that expect a response; `machine-info` is a stored blob and
@@ -135,12 +135,14 @@ export type RequestOp = Exclude<OpName, "machine-info" | "update-available">;
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
  * the daemon returns a structured error on its own — so spawn's ceiling clears
- * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check.
+ * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check, and
+ * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
   rescan: 15_000,
   spawn: 90_000,
+  despawn: 20_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -175,6 +177,11 @@ export interface RepoEntry {
 }
 
 export interface SessionEntry {
+  /**
+   * The backend's handle on the session — a tmux pane id (`%12`) — and what
+   * `despawn` targets. Optional: a daemon a version behind omits it.
+   */
+  readonly id?: string;
   readonly window: string;
   /** Repo name mapped by path prefix — a linked worktree's through its main clone; null when outside every known repo. */
   readonly repo: string | null;
@@ -311,6 +318,36 @@ export type SpawnResponse =
       readonly sessions: readonly SessionEntry[];
     }
   | { readonly ok: false; readonly code: SpawnErrorCode; readonly message: string };
+
+/**
+ * Ends one session: claude is asked to exit, and its pane is killed if it
+ * hasn't within a few seconds. The window only — a worktree and its branch are
+ * left for `seanced reap`.
+ */
+export interface DespawnRequest {
+  /** `SessionEntry.id` from a session list — the daemon accepts nothing else as a target. */
+  readonly id: string;
+  /** Skip the graceful exit and kill the pane outright. */
+  readonly force?: boolean;
+  /** Which app-role client formed the request, as on `SpawnRequest` — audit trail only. */
+  readonly client?: string;
+}
+
+export const DESPAWN_ERROR_CODES = ["invalid_target", "session_not_found", "internal_error"] as const;
+
+export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
+
+/** `exited`: claude left on its own once asked. `killed`: it didn't, or `force` said not to wait. */
+export type DespawnOutcome = "exited" | "killed";
+
+export type DespawnResponse =
+  | {
+      readonly ok: true;
+      readonly window: string;
+      readonly outcome: DespawnOutcome;
+      readonly sessions: readonly SessionEntry[];
+    }
+  | { readonly ok: false; readonly code: DespawnErrorCode; readonly message: string };
 
 export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];

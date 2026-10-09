@@ -2,8 +2,15 @@ import { constants } from "node:fs";
 import { access, appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, quote, type SpawnRequest, type UpdateOutcome } from "@seance/shared";
-import type { SpawnOutcome } from "./backend.ts";
+import {
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  quote,
+  type DespawnRequest,
+  type SpawnRequest,
+  type UpdateOutcome,
+} from "@seance/shared";
+import type { DespawnResult, SpawnOutcome } from "./backend.ts";
 import type { Check } from "./check.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
@@ -173,6 +180,40 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
     },
     ok: async (outcome: SpawnOutcome): Promise<void> => {
       await emit(`ok window=${quote(outcome.window)} path=${quote(outcome.path)}`);
+    },
+    failed: async (code: string): Promise<void> => {
+      await emit(`failed code=${code}`);
+    },
+    rejected: async (reason: string): Promise<void> => {
+      await emit(`rejected ${reason}`);
+    },
+  };
+}
+
+export interface DespawnAudit {
+  readonly request: (request: DespawnRequest) => Promise<void>;
+  readonly ok: (result: DespawnResult) => Promise<void>;
+  readonly failed: (code: string) => Promise<void>;
+  readonly rejected: (reason: string) => Promise<void>;
+}
+
+/**
+ * Despawns audit like spawns — same origins, same sink — since ending a session
+ * is as much "something used my machine" as starting one. The window name is
+ * recorded verbatim, as spawn's titles are; the id is quoted, being wire text.
+ */
+export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit despawn origin=${origin} ${rest}`);
+  };
+  return {
+    request: async (request: DespawnRequest): Promise<void> => {
+      const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
+      const forceNote = request.force === true ? " force=true" : "";
+      await emit(`${clientNote}target=${quote(request.id)}${forceNote}`);
+    },
+    ok: async (result: DespawnResult): Promise<void> => {
+      await emit(`ok window=${quote(result.window)} outcome=${result.outcome}`);
     },
     failed: async (code: string): Promise<void> => {
       await emit(`failed code=${code}`);

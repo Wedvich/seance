@@ -1,4 +1,6 @@
 import type {
+  DespawnRequest,
+  DespawnResponse,
   ErrorResponse,
   Plain,
   RepoEntry,
@@ -9,8 +11,15 @@ import type {
   UpdateAvailable,
 } from "@seance/shared";
 import { quote } from "@seance/shared";
-import { spawnAudit, type AuditSink, type SpawnAudit, type SpawnOrigin } from "./audit.ts";
-import { SpawnFailure, type SessionBackend } from "./backend.ts";
+import {
+  despawnAudit,
+  spawnAudit,
+  type AuditSink,
+  type DespawnAudit,
+  type SpawnAudit,
+  type SpawnOrigin,
+} from "./audit.ts";
+import { DespawnFailure, SpawnFailure, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
 
 export interface HandlerContext {
@@ -39,6 +48,16 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
   if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
+  return true;
+}
+
+/** Shape only: what the id may name is the backend's to decide, and it does. */
+function isDespawnRequest(payload: unknown): payload is DespawnRequest {
+  if (typeof payload !== "object" || payload === null) return false;
+  const obj = payload as Record<string, unknown>;
+  if (typeof obj["id"] !== "string" || obj["id"] === "") return false;
+  if (obj["force"] !== undefined && typeof obj["force"] !== "boolean") return false;
+  if (obj["client"] !== undefined && typeof obj["client"] !== "string") return false;
   return true;
 }
 
@@ -98,6 +117,33 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   }
 }
 
+async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: unknown): Promise<DespawnResponse> {
+  if (!isDespawnRequest(payload)) {
+    await audit.rejected("malformed request");
+    return { ok: false, code: "internal_error", message: "malformed despawn request" };
+  }
+  await audit.request(payload);
+  if (ctx.backend.despawn === undefined) {
+    await audit.failed("internal_error");
+    return { ok: false, code: "internal_error", message: "this machine's session backend cannot despawn" };
+  }
+  try {
+    const result = await ctx.backend.despawn(payload.id, { force: payload.force === true });
+    await audit.ok(result);
+    // After the outcome, so the list the caller caches no longer holds the window.
+    const sessions = await ctx.backend.sessions(ctx.getRepos());
+    return { ok: true, window: result.window, outcome: result.outcome, sessions };
+  } catch (err) {
+    if (err instanceof DespawnFailure) {
+      await audit.failed(err.code);
+      return { ok: false, code: err.code, message: err.message };
+    }
+    log.error(`despawn crashed: ${String(err)}`);
+    await audit.failed("internal_error");
+    return { ok: false, code: "internal_error", message: String(err) };
+  }
+}
+
 /**
  * Routes decrypted request ops to their implementations and wraps the reply.
  * `origin` tags everything this handler audits; the daemon builds one per
@@ -109,6 +155,7 @@ export function createHandler(
   origin: SpawnOrigin = "relay",
 ): (plain: Plain) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
+  const despawnTrail = despawnAudit(origin, ctx.auditSink);
   return async (plain: Plain): Promise<Plain | null> => {
     // Every op, not just spawn: with a stolen PSK, "something enumerated my
     // sessions at 3am" is the same signal as "something spawned" — and the
@@ -132,6 +179,8 @@ export function createHandler(
         }
         case "spawn":
           return reply(await handleSpawn(ctx, audit, plain.payload));
+        case "despawn":
+          return reply(await handleDespawn(ctx, despawnTrail, plain.payload));
         case "rescan": {
           const repos = await ctx.rescan();
           const payload: RescanResponse = { repos, scannedAt: Date.now() };

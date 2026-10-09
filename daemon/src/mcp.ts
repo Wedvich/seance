@@ -7,6 +7,8 @@ import {
   importPsk,
   RelayClient,
   RequestFailure,
+  type DespawnRequest,
+  type DespawnResponse,
   type ErrorResponse,
   type Machine,
   type RelayState,
@@ -303,8 +305,8 @@ function failureText(op: string, err: unknown): string {
 }
 
 /**
- * The MCP face of Séance: three tools mapping 1:1 onto the registry and the
- * `sessions`/`spawn` ops. Anything this hands to the relay rides the same
+ * The MCP face of Séance: four tools mapping 1:1 onto the registry and the
+ * `sessions`/`spawn`/`despawn` ops. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface.
  *
  * `local` is what makes a self-targeted call skip the relay: the per-machine
@@ -481,6 +483,58 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
           return rendered(await client.request<SpawnResponse>(target.deviceId, "spawn", request), target.name);
         } catch (err) {
           return errorResult(failureText("spawn_session", err));
+        }
+      });
+    },
+  );
+
+  server.registerTool(
+    "despawn_session",
+    {
+      title: "End a Claude Code session",
+      description:
+        "End a running Claude Code session on a machine and close its window. Asks claude to /exit — a worktree session keeps its worktree — and kills it if it hasn't exited within about five seconds; force kills straight away. Take the id from get_sessions. Naming this machine goes straight to the local daemon.",
+      inputSchema: z.object({
+        machine: z.string().describe("Machine name (or deviceId) from list_machines"),
+        id: z.string().describe('The session\'s id from get_sessions, e.g. "%12"'),
+        force: z.boolean().optional().describe("Kill without asking claude to exit first"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ machine, id, force }) => {
+      const request: DespawnRequest = {
+        id,
+        client: "mcp" satisfies SpawnClient,
+        ...(force === true ? { force } : {}),
+      };
+      // An `ErrorResponse` (a crashed handler) is `ok: false` too, and renders the same way.
+      const rendered = (reply: DespawnResponse | ErrorResponse, where: string): ToolResult => {
+        if (!reply.ok) return errorResult(`despawn failed (${reply.code}): ${reply.message}`);
+        return textResult(`${reply.outcome} ${reply.window} on ${where}`);
+      };
+
+      if (local !== null && isLocalRef(local, machine)) {
+        try {
+          return rendered(await local.request<DespawnResponse | ErrorResponse>("despawn", request), local.name);
+        } catch (err) {
+          return errorResult(localFailureText("despawn_session", err));
+        }
+      }
+
+      return withRelay(async (client) => {
+        const resolved = resolveMachine(client.getState().machines, machine);
+        if ("error" in resolved) return errorResult(resolved.error);
+        const target = resolved.machine;
+        if (!target.connected) {
+          return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
+        }
+        try {
+          return rendered(
+            await client.request<DespawnResponse | ErrorResponse>(target.deviceId, "despawn", request),
+            target.name,
+          );
+        } catch (err) {
+          return errorResult(failureText("despawn_session", err));
         }
       });
     },

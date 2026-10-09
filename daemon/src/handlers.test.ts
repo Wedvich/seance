@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { OpName, Plain, RepoEntry, SessionEntry, SpawnResponse } from "@seance/shared";
+import type { DespawnResponse, OpName, Plain, RepoEntry, SessionEntry, SpawnResponse } from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
@@ -167,5 +167,56 @@ describe("the spawn ack carries the window it announced", () => {
     expect(payload.note).toBeUndefined();
     expect(payload.pending).toBeUndefined();
     expect(captured).toBe(false);
+  });
+});
+
+describe("despawn is audited and answers with the list it left", () => {
+  // The real backend refuses this shape before tmux, so the audit path runs
+  // without a machine underneath it.
+  const despawnBad = (extra: Record<string, unknown> = {}): Plain => request("despawn", { id: "main:1", ...extra });
+
+  async function despawnReply(backend: SessionBackend, id: string): Promise<DespawnResponse> {
+    const reply = await createHandler({ ...ctx, backend })(request("despawn", { id }));
+    if (reply === null) throw new Error("despawn produced no reply");
+    return reply.payload as DespawnResponse;
+  }
+
+  test("each surface tags its own despawns, with the target quoted as the wire text it is", async () => {
+    await createHandler(ctx, "local")(despawnBad({ client: "mcp", force: true }));
+    expect(logged()).toContain('audit despawn origin=local client="mcp" target="main:1" force=true');
+    expect(logged()).toContain("audit despawn origin=local failed code=invalid_target");
+  });
+
+  test("a malformed payload is recorded as rejected rather than passing silently", async () => {
+    await createHandler(ctx)(request("despawn", { id: "%1", force: "yes" }));
+    expect(logged()).toContain("audit despawn origin=relay rejected");
+  });
+
+  test("an outcome is recorded with the window, and the reply's list is read after it", async () => {
+    let gone = false;
+    const payload = await despawnReply(
+      {
+        spawn: () => Promise.reject(new Error("not under test")),
+        despawn: () => {
+          gone = true;
+          return Promise.resolve({ window: "late-riser", outcome: "exited" });
+        },
+        sessions: () => Promise.resolve(gone ? [] : [{ ...SPAWNED, id: "%7" }]),
+        doctor: () => Promise.resolve([]),
+      },
+      "%7",
+    );
+    expect(payload).toEqual({ ok: true, window: "late-riser", outcome: "exited", sessions: [] });
+    expect(logged()).toContain('audit despawn origin=relay ok window="late-riser" outcome=exited');
+  });
+
+  test("a backend that can't despawn answers with a code instead of dropping the request", async () => {
+    const startOnly: SessionBackend = {
+      spawn: () => Promise.reject(new Error("not under test")),
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+    };
+    expect(await despawnReply(startOnly, "%7")).toMatchObject({ ok: false, code: "internal_error" });
+    expect(logged()).toContain("audit despawn origin=relay failed code=internal_error");
   });
 });

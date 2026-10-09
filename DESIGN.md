@@ -107,6 +107,7 @@ reads as one to any EDR:
 | `caffeinate -is` per spawn + the AC-power hold                       | T1653 Power Settings              |
 | depth-2 `.git` scan of `repoRoots`                                   | T1083                             |
 | tmux pane enumeration                                                | T1057                             |
+| `despawn`: keys into a session's pane, `kill-pane`, signals          | T1489-adjacent (stopping work)    |
 | `git pull` + service kickstart as the update path                    | T1195.001                         |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
@@ -288,7 +289,9 @@ nothing checked it. The last is the gap they leave.
   keyboard. Adding a surface means adding an origin, never reusing one — an
   indistinguishable path is what makes the invariant stop meaning what it says.
   The origin also rides the per-op `audit request` line, not just the spawn
-  lines, because enumeration is the same signal as spawning. The daemon writes
+  lines, because enumeration is the same signal as spawning. Ending a session
+  is the same signal too: every despawn path audits through its own one
+  formatter (`despawnAudit`), under the same three origins. The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -425,23 +428,24 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                         | Handled in                                                                                                      |
-| ----------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts`                      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                        | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                      | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                    | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`             | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
-| `registry`                          | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
-| `undeliverable`                     | `relay/src/hub.ts`                                | `shared/src/app-client.ts`                                                                                      |
-| `forget`                            | `shared/src/app-client.ts`                        | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
-| `forget-refused`                    | `relay/src/hub.ts`                                | `shared/src/app-client.ts` — logged, never modelled                                                             |
-| `"ping"` / `"pong"`                 | both socket legs                                  | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                            | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+| Frame / op                          | Sent from                                          | Handled in                                                                                                      |
+| ----------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts`                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
+| `registry`                          | `relay/src/hub.ts`                                 | `shared/src/app-client.ts`                                                                                      |
+| `undeliverable`                     | `relay/src/hub.ts`                                 | `shared/src/app-client.ts`                                                                                      |
+| `forget`                            | `shared/src/app-client.ts`                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
+| `forget-refused`                    | `relay/src/hub.ts`                                 | `shared/src/app-client.ts` — logged, never modelled                                                             |
+| `"ping"` / `"pong"`                 | both socket legs                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                             | same file — both ends share it, or nothing decrypts                                                             |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`  | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`  | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 
-`sessions` and `spawn` have a second, relay-free sender: `daemon/src/local-client.ts`
+`sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
 The daemon builds one handler per surface over a single context, so the two differ
 only in the audit origin they are tagged with — see "Local op socket".
@@ -1108,6 +1112,44 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   list runs on every phone refresh and needs none of this. On macOS `pane_pid`
   is `caffeinate`, with claude as its child — whatever kills a pane has to
   account for that.
+- **Despawn** (designed 2026-08-21, built 2026-10-09; `despawn.ts`): ends one
+  session — the window only; its worktree and branch are `seanced reap`'s. The
+  wire op `despawn { id, force?, client? }`, `seanced despawn <id> [--force]`
+  and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. No PWA
+  or Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
+  the session list now carries (optional on the wire, so an older daemon simply
+  omits it). A wire-supplied id must match `^%\d+$` before tmux sees it —
+  `-t` would also resolve `main:1.0`, `{marked}` or `=name` — and must name a
+  pane the session list's own predicate (`isRegistered`) accepts, so despawn
+  reaches exactly what a list offered; `invalid_target` and `session_not_found`
+  are security outcomes in the way `repo_not_found` is. Graceful first, then
+  force, and the reply says which happened (`outcome: "exited" | "killed"`):
+  Esc (interrupts a running turn), Ctrl+C (clears the draft), literal `/exit`,
+  Enter, then a ~5s poll through the pane classifier. The Ctrl+C is not in the
+  2026-08-21 decision and was added on measurement: one Esc does _not_ clear a
+  draft on 2.1.295 — it only arms "Esc again to clear", and a second Esc clears
+  only inside a short window — so `/exit` was appended to whatever was typed
+  and Enter sent the lot as a prompt. Ctrl+U clears one line of a multi-line
+  draft; Ctrl+C clears it all, and on an empty box only arms "press again to
+  exit", which typing disarms. A named worktree session then stops on the exit
+  prompt, answered with Enter on the preselected Keep (exit 0, worktree kept),
+  never Esc, which cancels the exit; a pane already on that prompt gets Enter
+  alone for the same reason. A hand-started claude exits back to its shell
+  (`shell`), and the pane is closed with it, since closing the window was the
+  request. Past the grace, or with `force`, `kill-pane` — the pane, not the
+  window, so a split's other panes survive. The pty closing sends SIGHUP, which
+  is what normally ends claude; but on macOS the pane's process is `caffeinate`
+  and claude its child, so a claude that ignores SIGHUP would outlive its window
+  with no parent. The pane's process and its children (`pgrep -P`, absent on a
+  minimal Linux image, where only the pane's own process is watched) are
+  recorded before the kill and escalated to SIGTERM, then SIGKILL, if they
+  outlive it; a test asserts it with a SIGHUP-ignoring stub under real
+  `caffeinate`. Audited like spawn (`despawnAudit`): request with the target
+  quoted, then outcome with the window. An older daemon ignores the unknown op,
+  so a despawn aimed at one rides the 20s `OP_TIMEOUT_MS` backstop. Rejected:
+  `kill-window` (takes a split's other panes along); targeting by window name
+  (wire text, not unique); answering the exit prompt with "Remove worktree"
+  (deletes work — reap removes worktrees under its own rules).
 - **Logging**: plain text (`ISO-timestamp level message`) to
   stdout/stderr; the launchd plist (macOS) and the systemd unit's
   `StandardOutput=append:` (WSL) redirect both to
@@ -1417,9 +1459,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   nobody is looking at. Rejected: connect-per-call (pays connect latency and
   the registry settle on every call), always-on (idle sockets × sessions).
 - **Tools**: `list_machines` (registry + presence, works for offline machines
-  because repos ride the register blob), `get_sessions { machine }`, and
+  because repos ride the register blob), `get_sessions { machine }`,
   `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort?, plan? }`
-  mapping 1:1 onto the `sessions`/`spawn` ops with the existing
+  and `despawn_session { machine, id, force? }` (added 2026-10-09, see
+  "Despawn") mapping 1:1 onto the `sessions`/`spawn`/`despawn` ops with the existing
   `OP_TIMEOUT_MS`. `machine` is the config `name` resolved against the live
   registry; ambiguity or a miss returns candidates, `deviceId` is the
   exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
@@ -1482,7 +1525,8 @@ field is display-only, so validation would buy nothing.
   structured payloads only does and does not mean"). Accepted: one human owns
   every device, the PSK is already the sole boundary, and Claude Code's
   per-tool approval is the gate — read-only tools are safe to allowlist,
-  `spawn_session` is not. Rejected: a server-side `--allow-spawn` flag
+  `spawn_session` is not, and nor is `despawn_session`, which can end a
+  session mid-turn on any machine. Rejected: a server-side `--allow-spawn` flag
   (friction in the wrong place; the approving human is at the Claude session,
   not the config file), a read-only server (defers the point of the thing).
 - No new key at rest, but a new _process_ holding the imported PSK — on a
@@ -1528,14 +1572,20 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   a relayed spawn's. A local spawn differs from a relayed one in exactly one
   observable way: the origin tag.
 - **Semantic ops, never the key.** A peer sends a `Plain` and gets a `Plain`
-  back; the ops it may ask for are `sessions` and `spawn` and nothing else.
-  `rescan` is out of scope and `update-available` is refused structurally — it is
-  fire-and-forget, drives the self-updater, and must not be reachable from a
-  surface whose premise is skipping the envelope. Same posture as the broadcast
-  allowlist in `relay-client.ts`. Rejected: a crypto oracle (seal/open on
-  request), which is what the open item warned against — same-uid peers make it
-  unpoliceable, and it hands out the relay's whole reach rather than two ops
-  against this box.
+  back; the ops it may ask for are `sessions`, `spawn` and `despawn` and nothing
+  else. `despawn` joined on 2026-10-09, deliberately — widening this list is a
+  threat-model change, so the reasoning is kept here: without it the
+  `despawn_session` tool cannot end a session on the box it runs on whenever the
+  relay is out of reach, which on a credential-delivered machine is always; and
+  it is the same kind of op as `spawn`, an action on this box's own tmux,
+  recorded `origin=local`, granting nothing a same-uid process lacks (it can
+  `tmux kill-pane` directly). `rescan` is out of scope and `update-available` is
+  refused structurally — it is fire-and-forget, drives the self-updater, and
+  must not be reachable from a surface whose premise is skipping the envelope.
+  Same posture as the broadcast allowlist in `relay-client.ts`. Rejected: a
+  crypto oracle (seal/open on request), which is what the open item warned
+  against — same-uid peers make it unpoliceable, and it hands out the relay's
+  whole reach rather than three ops against this box.
 - **The 0700 directory is the access control**, not the socket's mode. The
   socket lives at `stateDir()/run/seanced.sock`, in a directory the daemon
   creates 0700 and re-tightens on every start. `Bun.listen({ unix })` creates
@@ -1548,7 +1598,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 - **It grants no authority a same-uid process did not already have.** Such a
   process can read `config.json` (0600, same uid) and take the PSK outright, run
   `seanced spawn`, or drive the tmux server directly. The socket is strictly
-  less: two named ops, no way to address another machine, no way to reach the
+  less: three named ops, no way to address another machine, no way to reach the
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
   origin on the `audit request` line too.

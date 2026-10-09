@@ -9,8 +9,16 @@ const repos: readonly RepoEntry[] = [
   { name: "api", path: "/Users/m/repos/api", defaultBranch: "main" },
 ];
 
-function line(id: string, name: string, cmd: string, titled: "0" | "1", path: string, ours: "0" | "1" = "0"): string {
-  return `${id}|${name}|${cmd}|${ours}|${titled}|${path}`;
+function line(
+  id: string,
+  name: string,
+  cmd: string,
+  titled: "0" | "1",
+  path: string,
+  ours: "0" | "1" = "0",
+  pane = `%${id.slice(1)}`,
+): string {
+  return `${pane}|${id}|${name}|${cmd}|${ours}|${titled}|${path}`;
 }
 
 describe("parsePanes", () => {
@@ -48,7 +56,7 @@ describe("parsePanes", () => {
   });
 
   test("a tmux too old for the title format lists nothing rather than everything", () => {
-    const literal = `@1|seance|claude|1|#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}|/Users/m/repos/seance`;
+    const literal = `%1|@1|seance|claude|1|#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}|/Users/m/repos/seance`;
     expect(parsePanes(literal, repos)).toEqual([]);
   });
 
@@ -59,6 +67,14 @@ describe("parsePanes", () => {
       line("@1", "seance", "zsh", "0", "/Users/m/repos/seance"),
     ].join("\n");
     expect(parsePanes(raw, repos)).toHaveLength(1);
+  });
+
+  test("a session carries its claude pane's id, not the id of a split's first pane", () => {
+    const raw = [
+      line("@1", "seance", "zsh", "0", "/Users/m/repos/seance", "0", "%10"),
+      line("@1", "seance", "claude", "1", "/Users/m/repos/seance", "0", "%11"),
+    ].join("\n");
+    expect(parsePanes(raw, repos).map((s) => s.id)).toEqual(["%11"]);
   });
 
   test("maps worktree paths back to their repo", () => {

@@ -1,4 +1,11 @@
-import type { RepoEntry, SessionEntry, SpawnErrorCode, SpawnRequest } from "@seance/shared";
+import type {
+  DespawnErrorCode,
+  DespawnOutcome,
+  RepoEntry,
+  SessionEntry,
+  SpawnErrorCode,
+  SpawnRequest,
+} from "@seance/shared";
 import type { Check } from "./check.ts";
 
 /**
@@ -18,6 +25,23 @@ export class SpawnFailure extends Error {
     super(message);
     this.name = "SpawnFailure";
   }
+}
+
+/** `SpawnFailure`'s counterpart for `despawn`: a wire code plus a message for the human. */
+export class DespawnFailure extends Error {
+  constructor(
+    readonly code: DespawnErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DespawnFailure";
+  }
+}
+
+export interface DespawnResult {
+  /** The window the session ran in, for the audit line and the reply. */
+  readonly window: string;
+  readonly outcome: DespawnOutcome;
 }
 
 export interface SpawnOutcome {
@@ -46,6 +70,13 @@ export interface SessionBackend {
    */
   readonly spawn: (request: SpawnRequest, repos: readonly RepoEntry[]) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
+  /**
+   * Ends the session `id` names — a `SessionEntry.id` this backend handed out,
+   * which it must validate before acting on: the id is wire-supplied. Throws
+   * `DespawnFailure` with a wire code. Optional: a backend that can't stop a
+   * session can still start them, and the frontend answers for it.
+   */
+  readonly despawn?: (id: string, opts: { readonly force: boolean }) => Promise<DespawnResult>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**

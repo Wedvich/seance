@@ -1,7 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { cmdInstall, parseInstallArgs, parseModArgs, parseRaycastArgs, parseSpawnArgs } from "./cli.ts";
+import {
+  cmdInstall,
+  parseDespawnArgs,
+  parseInstallArgs,
+  parseModArgs,
+  parseRaycastArgs,
+  parseSpawnArgs,
+} from "./cli.ts";
 import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 import { systemdRunning } from "./systemd.ts";
+
+describe("parseDespawnArgs", () => {
+  test("takes one id, with --force on either side of it", () => {
+    expect(parseDespawnArgs(["%12"])).toEqual({ id: "%12", force: false });
+    expect(parseDespawnArgs(["--force", "%12"])).toEqual({ id: "%12", force: true });
+    expect(parseDespawnArgs(["%12", "--force"])).toEqual({ id: "%12", force: true });
+  });
+
+  test("no id, two ids, or an unknown flag is a usage error, not a guess", () => {
+    for (const argv of [[], ["%1", "%2"], ["%1", "-f"], ["--force"]]) {
+      expect(() => parseDespawnArgs(argv)).toThrow("usage: seanced despawn");
+    }
+  });
+});
 
 describe("parseSpawnArgs", () => {
   test("repo only", () => {

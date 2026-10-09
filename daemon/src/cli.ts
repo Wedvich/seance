@@ -1,10 +1,17 @@
 import { chmod, mkdir, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
-import { auditLogChecks, cliSink, spawnAudit } from "./audit.ts";
+import {
+  DAEMON_PATH,
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  fromBase64,
+  type DespawnRequest,
+  type SpawnRequest,
+} from "@seance/shared";
+import { auditLogChecks, cliSink, despawnAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
-import { SpawnFailure } from "./backend.ts";
+import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
   bearerTokenWarnings,
   configSkeleton,
@@ -160,6 +167,50 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
     if (err instanceof SpawnFailure) {
       await audit.failed(err.code);
       console.error(`spawn failed [${err.code}] — ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+export interface DespawnCliArgs {
+  readonly id: string;
+  readonly force: boolean;
+}
+
+const DESPAWN_USAGE = "usage: seanced despawn <session id, e.g. %12> [--force]";
+
+/** Exported for tests. */
+export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
+  const force = argv.includes("--force");
+  const ids = argv.filter((arg) => arg !== "--force");
+  const [id] = ids;
+  if (id === undefined || ids.length !== 1 || id.startsWith("-")) throw new Error(DESPAWN_USAGE);
+  return { id, force };
+}
+
+/**
+ * The relay-free despawn, as `cmdSpawn` is the relay-free spawn: the same
+ * backend call the app request runs, audited `origin=cli`.
+ */
+export async function cmdDespawn(argv: readonly string[]): Promise<void> {
+  const args = parseDespawnArgs(argv);
+  const backend = createBackend(await loadConfig());
+  const audit = despawnAudit("cli", cliSink);
+  const request: DespawnRequest = { id: args.id, ...(args.force ? { force: true } : {}) };
+  await audit.request(request);
+  if (backend.despawn === undefined) {
+    await audit.failed("internal_error");
+    throw new Error("this machine's session backend cannot despawn");
+  }
+  try {
+    const result = await backend.despawn(args.id, { force: args.force });
+    await audit.ok(result);
+    console.log(`${result.outcome} '${result.window}' (${args.id})`);
+  } catch (err) {
+    if (err instanceof DespawnFailure) {
+      await audit.failed(err.code);
+      console.error(`despawn failed [${err.code}] — ${err.message}`);
       process.exit(1);
     }
     throw err;
@@ -511,8 +562,9 @@ export async function cmdSessions(): Promise<void> {
   const backend = createBackend(await loadConfig());
   const state = await loadOrInitState();
   const sessions = await backend.sessions(state.repos);
+  // The id first: it is what `seanced despawn` takes.
   for (const s of sessions) {
-    console.log(`${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
+    console.log(`${(s.id ?? "-").padEnd(6)} ${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
   }
   console.log(`\n${sessions.length} running claude session${sessions.length === 1 ? "" : "s"}`);
 }

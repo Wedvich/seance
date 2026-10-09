@@ -156,7 +156,8 @@ than at startup, and ops aimed at the machine the server runs on take the daemon
 local op socket instead of the relay — which needs no key at all. So on a box whose
 key exists only as a TPM-sealed blob behind a system unit:
 
-- `list_machines`, `get_sessions` and `spawn_session` **for that machine** work.
+- `list_machines`, `get_sessions`, `spawn_session` and `despawn_session` **for that
+  machine** work.
   `list_machines` reports only that machine, with a note saying why.
 - Anything aimed at another machine reports the missing key, naming the fact that
   local spawns need none.
