@@ -219,7 +219,10 @@ const OPTIONS_FROM_BOTTOM = 3;
  * The two exit dialogs, each recognised by its heading above its own two
  * options, the last of them at the bottom of the screen. Wording from Claude
  * Code 2.1.295; a release that rewords them reads as `live`, which is only
- * ever reported, never acted on.
+ * ever reported, never acted on. The worktree prompt counts only with the
+ * cursor (`❯`) on Keep, where claude puts it: Enter takes the highlighted
+ * option, so a prompt someone arrowed down to Remove and walked away from must
+ * not read as one Enter can safely answer.
  */
 export function screenState(screen: string): "exit-prompt" | "background-prompt" | null {
   const lines = screen.split("\n").filter((line) => line.trim() !== "");
@@ -231,7 +234,7 @@ export function screenState(screen: string): "exit-prompt" | "background-prompt"
     if (secondAt === -1 || secondAt < bottom || firstAt === -1 || firstAt > secondAt) return false;
     return lines.slice(0, firstAt).some((line) => heading.test(line));
   };
-  if (showing(/Exiting worktree session/u, /\b1\.\s+Keep worktree/u, /\b2\.\s+Remove worktree/u)) {
+  if (showing(/Exiting worktree session/u, /❯\s*1\.\s+Keep worktree/u, /\b2\.\s+Remove worktree/u)) {
     return "exit-prompt";
   }
   if (showing(/Background work is running/u, /\b1\.\s+Exit and stop tasks/u, /\b2\.\s+Move to background and exit/u)) {

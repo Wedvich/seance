@@ -54,6 +54,9 @@ describe("classifyPane (real tmux, stub claude)", () => {
     await tmuxOk(["set-option", "-w", "-t", paneId, "remain-on-exit", "on"]);
     await tmuxOk(["wait-for", "-S", "classify-dead"]);
     await settlesAs(paneId, "dead");
+    // tmux marks the pane dead when its pty closes but stamps the time only once
+    // it reaps the process, so the two can be a moment apart (seen on Ubuntu CI).
+    await pollUntil(async () => (await pane(paneId))?.deadAt !== null, "tmux to stamp the death time");
     expect((await pane(paneId))?.deadAt).toBeGreaterThan(Date.now() - 60_000);
   });
 

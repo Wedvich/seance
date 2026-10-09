@@ -270,6 +270,15 @@ describe("screenState", () => {
     expect(screenState(prose)).toBeNull();
   });
 
+  test("a prompt with the cursor moved off Keep is not one Enter may answer", () => {
+    const onRemove = EXIT_PROMPT_SCREEN.replace("❯ 1. Keep worktree", "  1. Keep worktree").replace(
+      "  2. Remove worktree",
+      "❯ 2. Remove worktree",
+    );
+    expect(onRemove).toContain("❯ 2. Remove worktree");
+    expect(screenState(onRemove)).toBeNull();
+  });
+
   test("the heading alone, or the options alone, is not the prompt", () => {
     expect(screenState(" Exiting worktree session\n\n> ")).toBeNull();
     expect(screenState(" ❯ 1. Keep worktree\n   2. Remove worktree")).toBeNull();

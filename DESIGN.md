@@ -1097,7 +1097,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   reading as one, since claude's input box (four lines) always sits under what it
   printed. Wording and layout checked against a real 2.1.295 (2026-10-09), where
   Enter on the preselected Keep exits 0 and leaves the worktree; a release that
-  rewords it reads as `live`, which callers only ever report. `live` covers idle and mid-turn alike:
+  rewords it reads as `live`, which callers only ever report. It counts only
+  with the cursor (`❯`) on Keep: Enter takes whatever is highlighted, and a
+  prompt someone arrowed to Remove and left must never be answered blind by a
+  3am reap. `live` covers idle and mid-turn alike:
   the title glyph that would separate them is kept out of the format output by
   `PANE_TITLED`, deliberately. The capture costs one tmux exec per pane, so the
   classifier is cheap first — the list-panes fields settle `dead`, `shell` and
