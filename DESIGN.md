@@ -1090,11 +1090,14 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   outlives the exit the phone asked for. The title can't tell it from an idle
   claude, so it is a `capture-pane -p` of the visible screen (the TUI is on the
   alternate screen; no scrollback). Recognised as heading above both options with
-  the last option within 8 non-blank lines of the bottom: a dialog renders at the
-  bottom, and anchoring there is what stops a transcript that merely _quotes_
-  the prompt — a session working on this very code — from reading as one.
-  Wording from Claude Code 2.1.295's binary; a release that rewords it reads as
-  `live`, which callers only ever report. `live` covers idle and mid-turn alike:
+  the last option within 3 non-blank lines of the bottom: the dialog replaces the
+  input box, leaving only its hint line under the options, plus a line of slack
+  for a wrapped option description. Anchoring there is what stops a transcript
+  that merely _quotes_ the prompt — a session working on this very code — from
+  reading as one, since claude's input box (four lines) always sits under what it
+  printed. Wording and layout checked against a real 2.1.295 (2026-10-09), where
+  Enter on the preselected Keep exits 0 and leaves the worktree; a release that
+  rewords it reads as `live`, which callers only ever report. `live` covers idle and mid-turn alike:
   the title glyph that would separate them is kept out of the format output by
   `PANE_TITLED`, deliberately. The capture costs one tmux exec per pane, so the
   classifier is cheap first — the list-panes fields settle `dead`, `shell` and

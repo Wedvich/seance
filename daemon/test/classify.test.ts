@@ -48,9 +48,11 @@ async function settlesAs(paneId: string, expected: PaneState | "gone"): Promise<
 
 describe("classifyPane (real tmux, stub claude)", () => {
   test("a séance claude whose process exited is dead, with the time it died", async () => {
-    const paneId = await ours(stub.failing);
-    // Before the stub's 0.3s exit, as spawn.ts sets it — otherwise tmux closes the window.
+    // Gated until remain-on-exit is on, as spawn.ts has it before claude can die —
+    // racing the stub's exit instead would let tmux close the window first.
+    const paneId = await open(`tmux wait-for classify-dead; exec ${stub.failing} --remote-control`);
     await tmuxOk(["set-option", "-w", "-t", paneId, "remain-on-exit", "on"]);
+    await tmuxOk(["wait-for", "-S", "classify-dead"]);
     await settlesAs(paneId, "dead");
     expect((await pane(paneId))?.deadAt).toBeGreaterThan(Date.now() - 60_000);
   });

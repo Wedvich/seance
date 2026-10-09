@@ -251,6 +251,25 @@ describe("screenState", () => {
     expect(screenState(quoted.join("\n"))).toBeNull();
   });
 
+  test("a quote whose options end just above claude's input box is not the prompt", () => {
+    const quoted = [
+      "⏺ The dialog reads:",
+      "  Exiting worktree session",
+      "  1. Keep worktree",
+      "  2. Remove worktree",
+      "────────────────",
+      "> ",
+      "────────────────",
+      "  ? for shortcuts",
+    ];
+    expect(screenState(quoted.join("\n"))).toBeNull();
+  });
+
+  test("prose naming the background options is not the background prompt", () => {
+    const prose = " Background work is running.\n Pick Exit and stop tasks\n or Move to background and exit";
+    expect(screenState(prose)).toBeNull();
+  });
+
   test("the heading alone, or the options alone, is not the prompt", () => {
     expect(screenState(" Exiting worktree session\n\n> ")).toBeNull();
     expect(screenState(" ❯ 1. Keep worktree\n   2. Remove worktree")).toBeNull();

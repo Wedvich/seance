@@ -27,7 +27,11 @@ export function isRegistered(pane: {
   readonly titled: boolean;
   readonly command: string;
 }): boolean {
-  return pane.titled && (pane.ours || CLAUDE_COMMAND.test(pane.command));
+  return pane.titled && runsClaude(pane);
+}
+
+function runsClaude(pane: { readonly ours: boolean; readonly command: string }): boolean {
+  return pane.ours || CLAUDE_COMMAND.test(pane.command);
 }
 
 /** Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort). */
@@ -196,18 +200,20 @@ export async function listPanes(): Promise<readonly PaneInfo[]> {
 /** What the list-panes fields settle alone; null when only the screen can tell. */
 function stateWithoutScreen(pane: PaneInfo): PaneState | null {
   if (pane.dead) return "dead";
-  if (!pane.ours && !CLAUDE_COMMAND.test(pane.command)) return "shell";
+  if (!runsClaude(pane)) return "shell";
   if (!pane.titled) return "starting";
   return null;
 }
 
 /**
- * How far up from the bottom of the screen a dialog's last option may sit. A
- * dialog renders at the bottom, under at most a hint line and a status line;
- * anchoring there keeps a transcript that merely quotes the prompt (a session
- * discussing this very code) from reading as the prompt.
+ * How far up from the bottom of the screen a dialog's last option may sit. The
+ * dialog replaces claude's input box, so on 2.1.295 only the hint line is under
+ * it (measured), with one line spare for its description wrapping. Claude's
+ * input box (rule, prompt, rule, hint) sits under anything it has printed, so a
+ * transcript that merely quotes the prompt (a session discussing this very
+ * code) ends at least four lines up and can't read as the prompt.
  */
-const OPTIONS_FROM_BOTTOM = 8;
+const OPTIONS_FROM_BOTTOM = 3;
 
 /**
  * The two exit dialogs, each recognised by its heading above its own two
@@ -228,7 +234,7 @@ export function screenState(screen: string): "exit-prompt" | "background-prompt"
   if (showing(/Exiting worktree session/u, /\b1\.\s+Keep worktree/u, /\b2\.\s+Remove worktree/u)) {
     return "exit-prompt";
   }
-  if (showing(/Background work is running/u, /Exit and stop tasks/u, /Move to background and exit/u)) {
+  if (showing(/Background work is running/u, /\b1\.\s+Exit and stop tasks/u, /\b2\.\s+Move to background and exit/u)) {
     return "background-prompt";
   }
   return null;
