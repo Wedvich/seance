@@ -272,6 +272,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     stop: (): void => {
       stopped = true;
       clearInterval(rescanTimer);
+      handlerCtx.backend.stop?.();
       if (reapTimer !== null) clearInterval(reapTimer);
       reapAbort.abort();
       // Before the relay client, so a reload's stop→start sequence has the path

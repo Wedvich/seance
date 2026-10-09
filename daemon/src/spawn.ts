@@ -50,13 +50,23 @@ export function slugify(src: string): string {
 /**
  * Puts the tag in the tmux server's global environment, so a `claude` run by
  * hand in any later window carries SEANCE_MACHINE_TAG just as a spawn does —
- * the tmux-rename mod reads nothing else. Creates the session group when no
+ * and the tmux-rename mod reads it here at rename time. Creates the session group when no
  * server is up: the daemon starts at login, before any terminal, and a tag set
  * on no server would be lost. Empty when untagged, which overwrites a stale one.
  */
 export async function publishMachineTag(group: string, tag?: string): Promise<void> {
   await resolveTargetSession(group);
   await tmuxOk(["set-environment", "-g", "SEANCE_MACHINE_TAG", machineTagSlug(tag)]);
+}
+
+/**
+ * `publishMachineTag` again, for whatever tmux server is up now — one started
+ * after the daemon has none of it. Never creates a server: `set-environment`
+ * with none running just fails, and there is then nothing to tag. Silent on
+ * failure, since it runs on a timer and no server is a normal state.
+ */
+export async function republishMachineTag(tag?: string): Promise<void> {
+  await tmux(["set-environment", "-g", "SEANCE_MACHINE_TAG", machineTagSlug(tag)]).catch(() => undefined);
 }
 
 export function sessionName(slug: string, tag?: string): string {

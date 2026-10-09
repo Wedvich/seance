@@ -3,8 +3,17 @@ import type { Check } from "./check.ts";
 import type { Config } from "./config.ts";
 import { despawnSession } from "./despawn.ts";
 import { listClaudeSessions, listStuckWindows } from "./sessions.ts";
-import { captureWindow, publishMachineTag, spawnSession } from "./spawn.ts";
+import { captureWindow, publishMachineTag, republishMachineTag, spawnSession } from "./spawn.ts";
 import { tmux } from "./tmux.ts";
+
+/**
+ * How often the machine tag is re-set on the tmux server. A restarted server
+ * starts with an empty global environment and tmux has no server-start hook
+ * the daemon could listen on, so this bounds how long hand-run sessions on a
+ * fresh server launch untagged — the tmux-rename mod reads the server's value
+ * at rename time, so even those pick it up afterwards. One tmux exec a minute.
+ */
+const REPUBLISH_TAG_MS = 60_000;
 
 /**
  * The shipped backend: one claude window per session in a tmux session group.
@@ -13,7 +22,11 @@ import { tmux } from "./tmux.ts";
  * also the only place that reads `config.tmuxSession`, `config.machineTag` and
  * the pane-death budget, all of which used to thread through the frontend.
  */
-export function createBackend(config: Config, opts: { readonly waitMs?: number } = {}): SessionBackend {
+export function createBackend(
+  config: Config,
+  opts: { readonly waitMs?: number; readonly republishTagMs?: number } = {},
+): SessionBackend {
+  let republish: ReturnType<typeof setInterval> | null = null;
   return {
     spawn: (request, repos) =>
       spawnSession(request, repos, { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag }),
@@ -21,7 +34,18 @@ export function createBackend(config: Config, opts: { readonly waitMs?: number }
     despawn: (id, { force }) => despawnSession(id, { force }),
     doctor: tmuxChecks,
     capture: (handle) => captureWindow(handle, { history: false }),
-    start: () => publishMachineTag(config.tmuxSession, config.machineTag),
+    start: async () => {
+      // Armed before the first publish, so one that throws is still repaired.
+      republish ??= setInterval(
+        () => void republishMachineTag(config.machineTag),
+        opts.republishTagMs ?? REPUBLISH_TAG_MS,
+      );
+      await publishMachineTag(config.tmuxSession, config.machineTag);
+    },
+    stop: () => {
+      if (republish !== null) clearInterval(republish);
+      republish = null;
+    },
   };
 }
 

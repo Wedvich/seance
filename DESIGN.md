@@ -1954,17 +1954,28 @@ tmux window to the untagged name.
   `claude` run by hand in any later window carries it too: the mod has to work
   in every session, not only spawned ones. The daemon creates the session group
   first when no server is up, since it starts at login before any terminal and a
-  value set on no server is lost. A shell already open when the tag changes
-  keeps the old one until a new window. Each spawn also passes it with `tmux
-new-window -e` (argv, never the shell string), so a spawn never depends on the
-  global one having been set. The mod counts only an exact ` (<tag>)` suffix as
+  value set on no server is lost. A tmux server started later — the first one
+  killed, a reboot's terminal racing the daemon — begins with an empty global
+  environment, and tmux has no server-start hook to listen on, so the daemon
+  also re-sets it every minute (`republishMachineTag`); that one never creates a
+  server, since with none up there is nothing to tag. Each spawn also passes it
+  with `tmux new-window -e` (argv, never the shell string), so a spawn never
+  depends on the global one having been set.
+- **The mod reads the tag from the tmux server at rename time** (`tmux
+show-environment -g`), falling back to its own process env only when the
+  server has none (another tmux server, a failed query). Claude copies its env
+  once at launch, so a process-env-only mod left any session started on an
+  untagged server untagged for good — even after the republish — and one open
+  across a tag edit kept the old tag. Changed 2026-10-09, after exactly that
+  happened: a tmux server restarted hours after the daemon. An empty value on
+  the server means untagged and wins over the process's. The mod counts only an exact ` (<tag>)` suffix as
   the tag: one already present isn't doubled or kept in the window, while any
   other trailing parenthetical (`fix login (urgent)`) is the user's and stays in
   both. Empty or unset — an untagged machine, or a session outside séance's
   tmux server — the name passes through whole. Rejected: the mod reading
   `config.json` (restates the config path and slug rules in a second runtime);
   a `seanced tag` command the mod runs (a new command and a process per rename
-  for what one tmux call at startup covers — though, unlike it, it would reach
+  for what the tmux server's environment already holds — though, unlike it, it would reach
   a `claude` outside tmux); exporting the tag from shell dotfiles (a second copy
   that drifts from config); stripping any trailing parenthetical as the tag (the
   first draft — eats user text).

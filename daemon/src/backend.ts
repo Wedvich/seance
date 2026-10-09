@@ -91,4 +91,6 @@ export interface SessionBackend {
    * the daemon whole. Optional; a failure is logged, never fatal.
    */
   readonly start?: () => Promise<void>;
+  /** Undoes whatever `start` left running; called on every daemon stop, started or not. */
+  readonly stop?: () => void;
 }
