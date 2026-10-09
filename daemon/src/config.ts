@@ -22,6 +22,34 @@ export interface Config {
    * from `name`, which is a display string and makes an ugly tag.
    */
   readonly machineTag?: string;
+  /** `seanced reap`'s settings; absent means the defaults, with the schedule off. */
+  readonly reap?: ReapConfig;
+}
+
+export interface ReapConfig {
+  /** How often the daemon reaps on its own; 0 is off, the default. */
+  readonly intervalHours: number;
+  /** A worktree touched more recently than this is kept. Shared by the CLI and the schedule. */
+  readonly minAgeDays: number;
+}
+
+export const REAP_DEFAULTS: ReapConfig = { intervalHours: 0, minAgeDays: 7 };
+
+function parseReap(raw: unknown, path: string): ReapConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new TypeError(`config at ${path}: "reap" must be an object`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const number = (key: keyof ReapConfig): number => {
+    // Absent takes the default; present-but-null is a mistake worth naming.
+    const value = key in obj ? obj[key] : REAP_DEFAULTS[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      throw new TypeError(`config at ${path}: "reap.${key}" must be a number ≥ 0`);
+    }
+    return value;
+  };
+  return { intervalHours: number("intervalHours"), minAgeDays: number("minAgeDays") };
 }
 
 export function configSkeleton(machineName: string): string {
@@ -65,7 +93,9 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   if (!Array.isArray(roots) || roots.length === 0 || roots.some((r) => typeof r !== "string")) {
     throw new TypeError(`config at ${path}: "repoRoots" must be a non-empty array of strings`);
   }
+  const reap = parseReap(obj["reap"], path);
   return {
+    ...(reap === undefined ? {} : { reap }),
     name: requireString(obj, "name", path),
     relayUrl: requireString(obj, "relayUrl", path),
     bearerToken: requireString(obj, "bearerToken", path),

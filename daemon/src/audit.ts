@@ -224,6 +224,49 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
   };
 }
 
+/**
+ * What ran a reap: the human at the keyboard (`cli`), or the daemon's own timer
+ * (`schedule`). A new surface, so a new origin — never `cli` reused for the
+ * timer, which would make a 3am cleanup read as someone at the desk.
+ */
+export type ReapOrigin = "cli" | "schedule";
+
+export interface ReapAudit {
+  readonly start: (repos: number) => Promise<void>;
+  readonly removedWorktree: (repo: string, path: string, branch: string | null, head: string) => Promise<void>;
+  /** The full tip sha is the recovery: `git branch <name> <sha>` brings the branch back. */
+  readonly deletedBranch: (repo: string, name: string, sha: string, reason: string) => Promise<void>;
+  readonly closedPane: (paneId: string, window: string, reason: string) => Promise<void>;
+  readonly done: (counts: {
+    readonly worktrees: number;
+    readonly branches: number;
+    readonly panes: number;
+  }) => Promise<void>;
+}
+
+/**
+ * Reap audits what it destroyed, one line per thing, through the same sink as
+ * spawns. Only actions: a dry run changes nothing and records nothing. Paths,
+ * branch and window names are quoted — a branch name is whatever a session
+ * pushed, and a window name is wire text.
+ */
+export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit reap origin=${origin} ${rest}`);
+  };
+  return {
+    start: (repos) => emit(`start repos=${repos}`),
+    removedWorktree: (repo, path, branch, head) =>
+      emit(
+        `removed-worktree repo=${quote(repo)} path=${quote(path)} branch=${quote(branch ?? "(detached)")} head=${head}`,
+      ),
+    deletedBranch: (repo, name, sha, reason) =>
+      emit(`deleted-branch repo=${quote(repo)} branch=${quote(name)} sha=${sha} reason=${reason}`),
+    closedPane: (paneId, window, reason) => emit(`closed-pane pane=${paneId} window=${quote(window)} reason=${reason}`),
+    done: (counts) => emit(`done worktrees=${counts.worktrees} branches=${counts.branches} panes=${counts.panes}`),
+  };
+}
+
 /** What triggered a self-update check: a fleet announce, or this daemon's own register. */
 export type UpdateOrigin = "announce" | "register";
 

@@ -1,11 +1,12 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo, type UpdateAvailable } from "@seance/shared";
-import { daemonSink, ensureAuditLog } from "./audit.ts";
+import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
-import { loadConfig, loadPsk, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
+import { loadConfig, loadPsk, REAP_DEFAULTS, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
+import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
@@ -13,6 +14,12 @@ import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
+/**
+ * The schedule asks whether a reap is due this often, against `lastReapAt`
+ * in state.json — never on a bare interval from start, which the daemon's
+ * frequent restarts (updates, config reloads) would keep resetting.
+ */
+const REAP_CHECK_INTERVAL_MS = 600_000;
 
 export interface DaemonHandle {
   readonly client: RelayClient;
@@ -31,6 +38,8 @@ export interface RunOpts {
   /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
   readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
+  /** How often the reap schedule asks whether a run is due; tests shorten it. */
+  readonly reapCheckIntervalMs?: number;
   /**
    * A psk the caller already resolved, to skip re-reading the platform store.
    * The supervisor passes it so a reload spawns one `security`/DPAPI read
@@ -223,12 +232,48 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   void rescan();
   const rescanTimer = setInterval(() => void rescan(), opts.rescanIntervalMs ?? RESCAN_INTERVAL_MS);
 
+  // Off unless configured. The report goes to the log, one line each; what it
+  // destroyed is in the audit trail as origin=schedule. A run the CLI already
+  // holds the lock for is skipped and tried at the next check.
+  const reapSettings = config.reap ?? REAP_DEFAULTS;
+  const reapEveryMs = reapSettings.intervalHours * 3_600_000;
+  const reapAbort = new AbortController();
+  let reaping = false;
+  const reapIfDue = async (): Promise<void> => {
+    if (reaping || stopped || Date.now() - (state.lastReapAt ?? 0) < reapEveryMs) return;
+    reaping = true;
+    try {
+      const report = await withReapLock(() =>
+        runReap({
+          repos: state.repos,
+          dryRun: false,
+          minAgeMs: reapSettings.minAgeDays * DAY_MS,
+          audit: reapAudit("schedule", daemonSink),
+          signal: reapAbort.signal,
+        }),
+      );
+      for (const line of formatReport(report)) log.info(`reap: ${line}`);
+      // A run the stop cut short isn't the one the schedule promised.
+      if (stopped) return;
+      state = { ...state, lastReapAt: Date.now() };
+      await saveState(state);
+    } catch (err) {
+      log.warn(err instanceof ReapBusy ? `reap: skipped — ${err.message}` : `reap failed: ${String(err)}`);
+    } finally {
+      reaping = false;
+    }
+  };
+  const reapTimer =
+    reapEveryMs > 0 ? setInterval(() => void reapIfDue(), opts.reapCheckIntervalMs ?? REAP_CHECK_INTERVAL_MS) : null;
+
   return {
     client,
     localSocket: local.path,
     stop: (): void => {
       stopped = true;
       clearInterval(rescanTimer);
+      if (reapTimer !== null) clearInterval(reapTimer);
+      reapAbort.abort();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

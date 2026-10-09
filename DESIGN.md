@@ -108,6 +108,7 @@ reads as one to any EDR:
 | depth-2 `.git` scan of `repoRoots`                                   | T1083                             |
 | tmux pane enumeration                                                | T1057                             |
 | `despawn`: keys into a session's pane, `kill-pane`, signals          | T1489-adjacent (stopping work)    |
+| `reap`: git fetch/status, worktree removal, branch deletion per repo | T1070.004-adjacent (deletion)     |
 | `git pull` + service kickstart as the update path                    | T1195.001                         |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
@@ -291,7 +292,10 @@ nothing checked it. The last is the gap they leave.
   The origin also rides the per-op `audit request` line, not just the spawn
   lines, because enumeration is the same signal as spawning. Ending a session
   is the same signal too: every despawn path audits through its own one
-  formatter (`despawnAudit`), under the same three origins. The daemon writes
+  formatter (`despawnAudit`), under the same three origins. Reap destroys
+  things — worktrees, branches, windows — and audits each one (`reapAudit`)
+  under `cli` or under `schedule`, the fourth origin, which is the daemon's own
+  timer: a 3am cleanup must not read as someone at the desk. The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -1184,6 +1188,97 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   not the daemon. Both caffeinate call sites are already platform-gated.
 - Config file: relay URL, bearer token, PSK, deviceId, machine name, repo
   roots.
+
+## Reap (`seanced reap`) — designed 2026-10-09
+
+Remote sessions leave residue: linked worktrees, the branches they were on,
+and séance windows that never closed (see the exit prompt under "Pane
+classifier"). `seanced reap` cleans up all three, by default acting and with
+`--dry-run` previewing — a dry run writes nothing, a fetch's refs included, so
+it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
+`reap-git.ts` (every git call).
+
+- **Scope is the scan set** (`repoRoots`), the same repos the phone can spawn
+  in, enumerated per main clone through `git worktree list --porcelain -z` —
+  which reaches both layouts in use, `<repo>/.claude/worktrees/<name>` and a
+  sibling `<root>/<repo>-<name>` that the scan doesn't register (see "Repo
+  discovery"). `git worktree prune` clears entries whose directory is gone.
+- **Windows first.** Séance windows only (`OURS`); a hand-started pane is never
+  reap's to close. A `dead` pane goes once it has been dead a minute — younger,
+  it may be `spawnSession`'s own, held by remain-on-exit while it checks
+  registration (a tmux with no `pane_dead_time` leaves it alone). A claude on
+  the worktree exit prompt is re-classified right before the key, then
+  answered with Enter on Keep: it exits and the window closes, and the
+  worktree it kept goes through the rules below on a later run, once it is
+  old enough. The background-work prompt, a live claude (idle or working,
+  archived from the app or not) and a stuck one are reported with the pane id
+  `seanced despawn` takes, never acted on.
+- **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
+  inside it (any pane, hand-started included); its branch — or detached HEAD —
+  merged by the rules below; untouched for `reap.minAgeDays` (default 7); and
+  clean. Removal is `git worktree remove` without `--force`, so git's own
+  refusal (changes, untracked files, submodules) is a second gate, reported as
+  a failure. Ignored files don't count as dirty and are lost — a copied `.env`
+  among them, accepted. Dirty worktrees are reported, never removed.
+- **"Untouched"** is the newest mtime among the worktree's git-dir `HEAD`,
+  `index` and reflog, the worktree root, and the newest Claude transcript for
+  its path (`~/.claude/projects/<path, non-alphanumerics as dashes>`). It is
+  read before reap's own `status`, and every reap git call sets
+  `GIT_OPTIONAL_LOCKS=0`, so measuring the age doesn't reset it. The transcript
+  is the cheap answer to a session outside tmux — an editor's claude, a plain
+  terminal — which the pane check can't see: a few `stat`s cover any claude
+  wherever it runs. Rejected: a process-cwd sweep (`lsof -d cwd`), which on
+  macOS costs a second or more per run and still misses an editor whose cwd is
+  elsewhere; the age gate is the backstop for what neither sees.
+- **Branches**: every local branch except the default and anything still
+  checked out — a worktree removed in this pass frees its branch for the same
+  pass. Merged, against `origin/<default>`, means one of: an ancestor; or
+  squash-equivalent — `git merge-tree --write-tree` of the tip into the default
+  branch yields the default branch's own tree, i.e. the combined diff is
+  already there, which is what a squash-merged PR leaves (local, no `gh`; a
+  conflict or a git without `--write-tree` reads as not merged, the safe side);
+  or upstream gone with every commit's patch upstream (`git cherry` shows no
+  `+`), which catches a rebase-merge once the default branch has since edited
+  the same lines and the tree check conflicts. Upstream gone with commits whose
+  patch is nowhere upstream is unpushed work: kept and reported. Deletion is
+  `update-ref -d <ref> <sha>`, a compare-and-delete that refuses a branch that
+  moved since it was judged, then its config section, as `git branch -D` would.
+  Every deletion's audit line carries the full tip sha — `git branch <name>
+<sha>` is the recovery.
+- **Network**: `git fetch --prune origin` only when the newest `FETCH_HEAD` (the
+  clone's, or a worktree's own) is over a day old — Claude Code's rule for its
+  own `--worktree` fetch. It must not hang on credentials: stdin ignored,
+  `GIT_TERMINAL_PROMPT=0`, a 30s timeout; a failure is reported and the run
+  judges by stale refs, which only ever makes fewer things look merged. A repo
+  with no `origin/HEAD` on disk (about a third) gets `git remote set-head origin
+--auto`, bounded the same way, since "merged" needs something to measure
+  against; still none, and the repo is skipped and named.
+- **Repo-local config executes.** Reap is the first thing to run git in every
+  scanned repo, and git runs what a repo's config says. `core.fsmonitor` (a hook,
+  or a daemon per worktree) and hooks (`reference-transaction` fires on the
+  ref updates reap makes) are off for every call (`-c core.fsmonitor=false -c
+core.hooksPath=/dev/null`). What still runs is what a fetch needs —
+  credential helpers, `core.sshCommand`, `remote.*.uploadpack`. These are the
+  owner's own clones, so the residual risk is low, and recorded here rather
+  than defended further.
+- **Bounded**: four repos at a time (`mapLimit`, shared with the scan in
+  `concurrency.ts`), four panes at a time for the screen captures; nothing
+  here is on the session list's path.
+- **One at a time**: an `O_EXCL` lockfile in the 0700 run directory, holding the
+  pid; a holder that is gone is a crashed run and is taken over. The CLI exits
+  on a live one; the schedule skips and tries again at its next check.
+- **Surfaces**: `seanced reap [--dry-run] [--min-age-days <n>]`, audited
+  `origin=cli`, and a timer inside the daemon, audited `origin=schedule`, which
+  logs its report one `reap:` line at a time. The schedule is off unless
+  `reap.intervalHours` is set; it checks every 10 minutes against `lastReapAt`
+  in state.json rather than running on an interval from start, which the
+  daemon's frequent restarts (updates, config reloads) would keep deferring,
+  and a stop aborts it between repos. Not on MCP, deliberately: a local session
+  can already run the CLI through Bash, so a tool would add discoverability
+  but no authority, and leaving it out keeps the local socket's allowlist at
+  the three ops it has. No relay op, no PWA. Rejected: `--force` removal, a
+  `gh`-based merge check (network and an auth dependency for what the local
+  objects answer), and an MCP tool (above).
 
 ## Self-update (added 2026-08-02)
 

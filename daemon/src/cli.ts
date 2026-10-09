@@ -8,7 +8,7 @@ import {
   type DespawnRequest,
   type SpawnRequest,
 } from "@seance/shared";
-import { auditLogChecks, cliSink, despawnAudit, spawnAudit } from "./audit.ts";
+import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
@@ -18,6 +18,7 @@ import {
   loadConfig,
   loadPsk,
   pskFingerprint,
+  REAP_DEFAULTS,
   runnableProblems,
   type Config,
 } from "./config.ts";
@@ -42,6 +43,7 @@ import {
   uninstallService,
   uninstallSystemService,
 } from "./service.ts";
+import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
@@ -215,6 +217,63 @@ export async function cmdDespawn(argv: readonly string[]): Promise<void> {
     }
     // As the handler does, so an `origin=cli` request line never ends without an outcome.
     await audit.failed("internal_error");
+    throw err;
+  }
+}
+
+export interface ReapCliArgs {
+  readonly dryRun: boolean;
+  readonly minAgeDays?: number;
+}
+
+const REAP_USAGE = "usage: seanced reap [--dry-run] [--min-age-days <n>]";
+
+/** Exported for tests. */
+export function parseReapArgs(argv: readonly string[]): ReapCliArgs {
+  let dryRun = false;
+  let minAgeDays: number | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--dry-run") {
+      dryRun = true;
+    } else if (arg === "--min-age-days") {
+      i += 1;
+      const value = Number(argv[i]);
+      if (argv[i] === undefined || !Number.isFinite(value) || value < 0) throw new Error(REAP_USAGE);
+      minAgeDays = value;
+    } else {
+      throw new Error(REAP_USAGE);
+    }
+  }
+  return { dryRun, ...(minAgeDays === undefined ? {} : { minAgeDays }) };
+}
+
+/**
+ * Cleans up after remote sessions on this machine — what `runReap` says — and
+ * prints the report. Audited `origin=cli`; a dry run changes and records
+ * nothing.
+ */
+export async function cmdReap(argv: readonly string[]): Promise<void> {
+  const args = parseReapArgs(argv);
+  const config = await loadConfig();
+  const state = await loadOrInitState();
+  const repos = state.repos.length > 0 ? state.repos : await scanRepos(config.repoRoots);
+  const minAgeDays = args.minAgeDays ?? (config.reap ?? REAP_DEFAULTS).minAgeDays;
+  try {
+    const report = await withReapLock(() =>
+      runReap({
+        repos,
+        dryRun: args.dryRun,
+        minAgeMs: minAgeDays * DAY_MS,
+        audit: reapAudit("cli", cliSink),
+      }),
+    );
+    for (const line of formatReport(report)) console.log(line);
+  } catch (err) {
+    if (err instanceof ReapBusy) {
+      console.error(err.message);
+      process.exit(1);
+    }
     throw err;
   }
 }

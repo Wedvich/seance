@@ -19,6 +19,11 @@ export interface State {
   /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
   readonly lastRunSha?: string;
   readonly lastUpdate?: UpdateReport;
+  /**
+   * When the schedule last reaped, epoch ms. Persisted so the daemon's frequent
+   * restarts (updates, config reloads) neither repeat a run nor keep deferring one.
+   */
+  readonly lastReapAt?: number;
 }
 
 function freshState(): State {
