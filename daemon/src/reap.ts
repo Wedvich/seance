@@ -1,11 +1,11 @@
-import { mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
-import { inspectCheckout } from "./gitdir.ts";
+import { canonical, inspectCheckout } from "./gitdir.ts";
 import { runDir } from "./paths.ts";
 import {
   classifyTip,
@@ -103,38 +103,39 @@ export class ReapBusy extends Error {
 
 /**
  * One reap at a time per machine — the CLI and the daemon's schedule would
- * otherwise race on the same worktrees. Taken with `O_EXCL`, so creating it is
- * the test; a file whose pid is gone is a crashed run's, and is taken over.
+ * otherwise race on the same worktrees. Taken by `link`ing a file that already
+ * holds the pid, so creating it is the test and no contender ever reads it
+ * empty (an `O_EXCL` create then a write would read as a dead holder in
+ * between, and be stolen); a file whose pid is gone is a crashed run's, and is
+ * taken over.
  */
 export async function withReapLock<T>(fn: () => Promise<T>, path: string = join(runDir(), "reap.lock")): Promise<T> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  for (let attempt = 0; ; attempt++) {
-    try {
-      // oxlint-disable-next-line no-await-in-loop -- one retry, after clearing a dead holder's file
-      const handle = await open(path, "wx", 0o600);
+  const staged = `${path}.${process.pid}`;
+  await writeFile(staged, String(process.pid), { mode: 0o600 });
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one retry, after clearing a dead holder's file
+        await link(staged, path);
+        break;
+      } catch (err) {
+        if (!(err instanceof Error && "code" in err && err.code === "EEXIST") || attempt > 0) throw err;
+      }
       // oxlint-disable-next-line no-await-in-loop
-      await handle.writeFile(String(process.pid));
+      const holder = Number((await readFile(path, "utf8").catch(() => "")).trim());
+      if (holder > 0 && pidAlive(holder)) throw new ReapBusy(holder);
       // oxlint-disable-next-line no-await-in-loop
-      await handle.close();
-      break;
-    } catch (err) {
-      if (!(err instanceof Error && "code" in err && err.code === "EEXIST") || attempt > 0) throw err;
+      await unlink(path).catch(() => {});
     }
-    // oxlint-disable-next-line no-await-in-loop
-    const holder = Number((await readFile(path, "utf8").catch(() => "")).trim());
-    if (holder > 0 && pidAlive(holder)) throw new ReapBusy(holder);
-    // oxlint-disable-next-line no-await-in-loop
-    await unlink(path).catch(() => {});
+  } finally {
+    await unlink(staged).catch(() => {});
   }
   try {
     return await fn();
   } finally {
     await unlink(path).catch(() => {});
   }
-}
-
-async function canonical(path: string): Promise<string> {
-  return realpath(path).catch(() => path);
 }
 
 function inside(dir: string, path: string): boolean {
@@ -183,14 +184,15 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
   const deadMinAge = opts.deadPaneMinAgeMs ?? DEAD_PANE_MIN_AGE_MS;
   // Séance's own windows only: a hand-started pane is never reap's to close.
   const ours = (await listPanes()).filter((pane) => pane.ours);
-  const outcomes = await mapLimit(ours, PANE_CONCURRENCY, async (pane): Promise<PaneOutcome> => {
+  const outcomes = await mapLimit(ours, PANE_CONCURRENCY, async (pane): Promise<PaneOutcome | null> => {
     const note = { paneId: pane.paneId, window: pane.windowName };
     const state = await classifyPane(pane);
     if (state === "dead") {
       // No death time (an old tmux) can't be told from spawn's own pane: leave it.
       if (pane.deadAt === null || now - pane.deadAt < deadMinAge) return { open: { ...note, state } };
       if (!opts.dryRun) {
-        await tmux(["kill-pane", "-t", pane.paneId]);
+        const killed = await tmux(["kill-pane", "-t", pane.paneId]);
+        if (killed.exitCode !== 0) return { open: { ...note, state } };
         await opts.audit.closedPane(pane.paneId, pane.windowName, "dead");
       }
       return { closed: { ...note, why: "dead" } };
@@ -200,7 +202,8 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
     // Looked at again right before the key: Enter on anything but the prompt
     // would send whatever draft that pane holds.
     const fresh = await paneInfo(pane.paneId);
-    if (fresh === null) return { closed: { ...note, why: "exit-prompt" } };
+    // Gone on its own: reap closed nothing, so it neither reports nor audits it.
+    if (fresh === null) return null;
     const current = await classifyPane(fresh);
     if (current !== "exit-prompt") return { open: { ...note, state: current } };
     await answerKeepWorktree(pane.paneId);
@@ -209,8 +212,8 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
     return { closed: { ...note, why: "exit-prompt" } };
   });
   return {
-    closedPanes: outcomes.flatMap((outcome) => ("closed" in outcome ? [outcome.closed] : [])),
-    openPanes: outcomes.flatMap((outcome) => ("open" in outcome ? [outcome.open] : [])),
+    closedPanes: outcomes.flatMap((outcome) => (outcome !== null && "closed" in outcome ? [outcome.closed] : [])),
+    openPanes: outcomes.flatMap((outcome) => (outcome !== null && "open" in outcome ? [outcome.open] : [])),
   };
 }
 
@@ -244,9 +247,8 @@ function skipped(repo: string, why: string): RepoReport {
   return { ...emptyRepoReport(repo), skipped: why };
 }
 
-function emptyRepoReport(repo: string): RepoReport {
+function emptyLists(): RepoLists {
   return {
-    repo,
     removedWorktrees: [],
     deletedBranches: [],
     pruned: [],
@@ -254,9 +256,12 @@ function emptyRepoReport(repo: string): RepoReport {
     keptBranches: [],
     inUse: [],
     locked: [],
-    young: 0,
     failed: [],
   };
+}
+
+function emptyRepoReport(repo: string): RepoReport {
+  return { repo, ...emptyLists(), young: 0 };
 }
 
 function isMerged(verdict: BranchVerdict): verdict is Merged {
@@ -328,25 +333,17 @@ async function reapRepo(
     };
   }
   const base = `refs/remotes/origin/${defaultBranch}`;
-  const [baseOk, worktrees, branches] = await Promise.all([
-    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", base]),
+  const [baseTreeOut, worktrees, branches] = await Promise.all([
+    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", `${base}^{tree}`]),
     listWorktrees(repo.path),
     listBranches(repo.path),
   ]);
-  if (baseOk.exitCode !== 0) return skipped(repo.name, `${base} does not exist`);
+  if (baseTreeOut.exitCode !== 0) return skipped(repo.name, `${base} does not exist`);
   if (worktrees === null || branches === null)
     return skipped(repo.name, "git could not list its worktrees or branches");
+  const baseTree = baseTreeOut.stdout.trim();
 
-  const report: RepoLists = {
-    removedWorktrees: [],
-    deletedBranches: [],
-    pruned: [],
-    dirty: [],
-    keptBranches: [],
-    inUse: [],
-    locked: [],
-    failed: [],
-  };
+  const report = emptyLists();
   let young = 0;
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
@@ -356,18 +353,20 @@ async function reapRepo(
     const cached = verdicts.get(key);
     if (cached !== undefined) return cached;
     const gone = branch === null ? false : (byName.get(branch)?.upstreamGone ?? false);
-    const verdict = await classifyTip(repo.path, sha, base, gone);
+    const verdict = await classifyTip(repo.path, sha, base, baseTree, gone);
     verdicts.set(key, verdict);
     return verdict;
   };
 
   // The main worktree comes first and is never a candidate.
   const linked = worktrees.slice(1);
-  const freed = new Set<string>();
+  // By worktree, not branch name: a branch checked out twice (`worktree add
+  // --force`) is still held by the worktree this pass keeps.
+  const released = new Set<string>();
   const prunable = linked.filter((worktree) => worktree.prunable);
   for (const worktree of prunable) {
     report.pruned.push(worktree.path);
-    if (worktree.branch !== null) freed.add(worktree.branch);
+    released.add(worktree.path);
   }
   if (prunable.length > 0 && !opts.dryRun) {
     const pruned = await pruneWorktrees(repo.path);
@@ -423,13 +422,25 @@ async function reapRepo(
       await opts.audit.removedWorktree(repo.name, worktree.path, worktree.branch, worktree.head);
     }
     report.removedWorktrees.push({ path: worktree.path, branch: worktree.branch, why: verdict, idleDays });
-    if (worktree.branch !== null) freed.add(worktree.branch);
+    released.add(worktree.path);
   }
 
   // Whatever is still checked out stays — the main checkout's branch always.
-  const checkedOut = new Set(
-    worktrees.flatMap((worktree) => (worktree.branch === null || freed.has(worktree.branch) ? [] : [worktree.branch])),
-  );
+  // Listed again rather than carried from the start: a worktree a spawn added
+  // since then is in it, and its fresh branch, an ancestor of the default,
+  // would otherwise read as merged and free. A dry run removed nothing, so it
+  // takes the first list less what it would have.
+  const current = opts.dryRun
+    ? worktrees.filter((worktree) => !released.has(worktree.path))
+    : await listWorktrees(repo.path);
+  if (current === null) {
+    report.failed.push({
+      what: "worktree list",
+      detail: "git could not list worktrees again before deleting branches",
+    });
+    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+  }
+  const checkedOut = new Set(current.flatMap((worktree) => (worktree.branch === null ? [] : [worktree.branch])));
   for (const branch of branches) {
     if (branch.name === defaultBranch || checkedOut.has(branch.name)) continue;
     // oxlint-disable-next-line no-await-in-loop -- sequential within a repo

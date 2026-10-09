@@ -144,22 +144,20 @@ export async function listBranches(repoPath: string): Promise<readonly BranchRec
 export type Merged = "ancestor" | "squash" | "gone";
 export type BranchVerdict = Merged | "unmerged-gone" | "active";
 
+/** `baseTree` is `base^{tree}`, resolved once per repo by the caller rather than once per tip. */
 export async function classifyTip(
   repoPath: string,
   tip: string,
   base: string,
+  baseTree: string,
   upstreamGone: boolean,
 ): Promise<BranchVerdict> {
   const ancestor = await reapGit(repoPath, ["merge-base", "--is-ancestor", tip, base]);
   if (ancestor.exitCode === 0) return "ancestor";
   // A conflict (exit 1) or a git without --write-tree (exit 129) reads as not
   // merged: the safe direction. Writes a few loose objects, which gc collects.
-  const [merged, baseTree] = await Promise.all([
-    reapGit(repoPath, ["merge-tree", "--write-tree", base, tip]),
-    reapGit(repoPath, ["rev-parse", `${base}^{tree}`]),
-  ]);
-  const mergedTree = merged.stdout.split("\n")[0]?.trim();
-  if (merged.exitCode === 0 && baseTree.exitCode === 0 && mergedTree === baseTree.stdout.trim()) return "squash";
+  const merged = await reapGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
+  if (merged.exitCode === 0 && merged.stdout.split("\n")[0]?.trim() === baseTree) return "squash";
   if (!upstreamGone) return "active";
   const cherry = await reapGit(repoPath, ["cherry", base, tip]);
   if (cherry.exitCode !== 0) return "unmerged-gone";
@@ -175,10 +173,18 @@ export async function commitsAhead(repoPath: string, tip: string, base: string):
 /**
  * Lines of `status --porcelain`: tracked changes and untracked files. Ignored
  * files don't count — `git worktree remove` deletes them, a `.env` copy among
- * them, and that is accepted. Null when status itself failed.
+ * them, and that is accepted. Null when status itself failed. Untracked and
+ * submodule reporting are pinned against repo config: `git worktree remove`'s
+ * own clean check is a bare `status`, so under `status.showUntrackedFiles=no`
+ * it deletes untracked files unseen, and this is the only gate left.
  */
 export async function pendingChanges(worktree: string): Promise<number | null> {
-  const result = await reapGit(worktree, ["status", "--porcelain"]);
+  const result = await reapGit(worktree, [
+    "status",
+    "--porcelain",
+    "--untracked-files=normal",
+    "--ignore-submodules=none",
+  ]);
   if (result.exitCode !== 0) return null;
   return result.stdout.split("\n").filter((line) => line !== "").length;
 }

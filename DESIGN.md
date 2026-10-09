@@ -1216,9 +1216,11 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 - **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
   inside it (any pane, hand-started included); its branch — or detached HEAD —
   merged by the rules below; untouched for `reap.minAgeDays` (default 7); and
-  clean. Removal is `git worktree remove` without `--force`, so git's own
-  refusal (changes, untracked files, submodules) is a second gate, reported as
-  a failure. Ignored files don't count as dirty and are lost — a copied `.env`
+  clean — reap's `status` pins `--untracked-files=normal`, because git's own
+  clean check honours `status.showUntrackedFiles=no` and would delete
+  untracked files unseen. Removal is `git worktree remove` without `--force`,
+  so git's own refusal (changes, submodules) is a second gate, reported as a
+  failure. Ignored files don't count as dirty and are lost — a copied `.env`
   among them, accepted. Dirty worktrees are reported, never removed.
 - **"Untouched"** is the newest mtime among the worktree's git-dir `HEAD`,
   `index` and reflog, the worktree root, and the newest Claude transcript for
@@ -1264,8 +1266,10 @@ core.hooksPath=/dev/null`). What still runs is what a fetch needs —
 - **Bounded**: four repos at a time (`mapLimit`, shared with the scan in
   `concurrency.ts`), four panes at a time for the screen captures; nothing
   here is on the session list's path.
-- **One at a time**: an `O_EXCL` lockfile in the 0700 run directory, holding the
-  pid; a holder that is gone is a crashed run and is taken over. The CLI exits
+- **One at a time**: a lockfile in the 0700 run directory, `link`ed into place
+  already holding the pid — an `O_EXCL` create then a write reads empty in
+  between, which a contender would take for a dead holder. A holder that is
+  gone is a crashed run and is taken over. The CLI exits
   on a live one; the schedule skips and tries again at its next check.
 - **Surfaces**: `seanced reap [--dry-run] [--min-age-days <n>]`, audited
   `origin=cli`, and a timer inside the daemon, audited `origin=schedule`, which

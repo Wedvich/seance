@@ -227,13 +227,15 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(await git(repo.path, "rev-parse", "wip")).toBe(tip);
   });
 
-  test("a dirty worktree is reported and left; ignored files alone don't make one dirty", async () => {
+  test("a dirty worktree is reported and left, whatever showUntrackedFiles says; ignored files alone don't make one dirty", async () => {
     const repo = await freshRepo();
     const dirty = join(repo.path, ".claude", "worktrees", "dirty");
     const ignored = join(repo.path, ".claude", "worktrees", "ignored");
     await addWorktree(repo.path, dirty);
     await addWorktree(repo.path, ignored);
     await appendFile(join(repo.path, ".git", "info", "exclude"), ".env\n");
+    // Hides the untracked file from a bare status — `git worktree remove`'s own check included.
+    await git(repo.path, "config", "status.showUntrackedFiles", "no");
     await writeFile(join(dirty, "notes.txt"), "half done\n");
     await writeFile(join(ignored, ".env"), "SECRET=copied-from-main\n");
     await age(dirty);
@@ -388,7 +390,10 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
     const dead = await openWindow(`tmux wait-for reap-dead; exec ${stub.failing} --remote-control`);
     await tmuxOk(["set-option", "-w", "-t", dead, "remain-on-exit", "on"]);
     await tmuxOk(["wait-for", "-S", "reap-dead"]);
-    await pollUntil(async () => (await listPanes()).some((p) => p.paneId === dead && p.dead), "pane to die");
+    await pollUntil(
+      async () => (await listPanes()).some((p) => p.paneId === dead && p.deadAt !== null),
+      "pane to die and tmux to stamp when",
+    );
     const live = await openWindow(`exec ${stub.ok} --remote-control`);
     await pollUntil(async () => (await listPanes()).some((p) => p.paneId === live && p.titled), "live pane to title");
 
