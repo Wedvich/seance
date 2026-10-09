@@ -5,7 +5,16 @@ import { sessionName, windowName } from "./register.ts";
 
 type Recorded = { readonly renames: string[]; readonly tmux: string[][] };
 
-function record(on: On, env: Readonly<Record<string, string>>, exitCode = 0): Recorded {
+/**
+ * `serverTag` is the tmux server's global SEANCE_MACHINE_TAG: undefined answers
+ * `show-environment` the way tmux does for an unset variable. `tmux` records
+ * every other tmux call — the rename-window.
+ */
+function record(
+  on: On,
+  env: Readonly<Record<string, string>>,
+  { exitCode = 0, serverTag }: { readonly exitCode?: number; readonly serverTag?: string } = {},
+): Recorded {
   const recorded: Recorded = { renames: [], tmux: [] };
   mock.env(on, env);
   on("command.run", (_$, e) => {
@@ -13,10 +22,17 @@ function record(on: On, env: Readonly<Record<string, string>>, exitCode = 0): Re
     return { text: "renamed" };
   });
   on("process.run", (_$, e) => {
+    const truncated = { isStdoutTruncated: false, isStderrTruncated: false };
+    if (e.argv[1] === "show-environment") {
+      return {
+        value:
+          serverTag === undefined
+            ? { exitCode: 1, stdout: "", stderr: "unknown variable: SEANCE_MACHINE_TAG", ...truncated }
+            : { exitCode: 0, stdout: `SEANCE_MACHINE_TAG=${serverTag}\n`, stderr: "", ...truncated },
+      };
+    }
     recorded.tmux.push([...e.argv]);
-    return {
-      value: { exitCode, stdout: "", stderr: "no such pane", isStdoutTruncated: false, isStderrTruncated: false },
-    };
+    return { value: { exitCode, stdout: "", stderr: "no such pane", ...truncated } };
   });
   return recorded;
 }
@@ -116,8 +132,27 @@ describe("/rename", () => {
     expect(recorded.tmux).toEqual([]);
   });
 
+  test("the tmux server's tag reaches a session launched before it was set", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7" }, { serverTag: "mac" });
+    await rename($, "bla-bla (mac)");
+    expect(recorded.renames).toEqual(["bla-bla (mac)"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
+  });
+
+  test("the tmux server's tag beats a stale one in the process env", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "old-box" }, { serverTag: "new-box" });
+    await rename($, "bla-bla");
+    expect(recorded.renames).toEqual(["bla-bla (new-box)"]);
+  });
+
+  test("an empty tag on the tmux server means untagged", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "old-box" }, { serverTag: "" });
+    await rename($, "bla-bla");
+    expect(recorded.renames).toEqual(["bla-bla"]);
+  });
+
   test("a failing tmux still lets the rename through", async ($, on) => {
-    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" }, { exitCode: 1 });
     expect(await rename($, "bla-bla")).toEqual({ text: "renamed" });
     expect(recorded.renames).toEqual(["bla-bla (wsl-box)"]);
   });

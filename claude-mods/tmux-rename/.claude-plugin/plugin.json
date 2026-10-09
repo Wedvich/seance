@@ -1,5 +1,5 @@
 {
   "name": "tmux-rename",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keeps /rename tagged with séance's machine tag and the tmux window bare"
 }
