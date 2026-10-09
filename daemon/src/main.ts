@@ -9,6 +9,7 @@ import {
   cmdMod,
   cmdPskImport,
   cmdRaycast,
+  cmdReap,
   cmdRestart,
   cmdScan,
   cmdSessions,
@@ -41,6 +42,7 @@ usage: seanced [command]
   sessions    list running claude tmux windows, each with the id despawn takes
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
+  reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
@@ -109,6 +111,9 @@ try {
       break;
     case "despawn":
       await cmdDespawn(rest);
+      break;
+    case "reap":
+      await cmdReap(rest);
       break;
     case "mcp":
       await cmdMcp(rest);

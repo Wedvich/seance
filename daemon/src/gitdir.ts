@@ -85,7 +85,7 @@ export async function inspectCheckout(dir: string): Promise<Checkout> {
 }
 
 /** Canonical, so it compares equal however each checkout's pointer spelled it. */
-async function canonical(p: string): Promise<string> {
+export async function canonical(p: string): Promise<string> {
   return realpath(p).catch(() => p);
 }
 

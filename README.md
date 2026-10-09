@@ -164,6 +164,9 @@ Edit `~/.config/seance/config.json`:
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
+- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
+  from the daemon every day, with its report in the log. Without `intervalHours` the
+  schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
 
 A running daemon watches this file and reloads within a second of a save, so
 edits need no restart — including ones made by a Claude Code session on the
@@ -297,6 +300,7 @@ seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
+seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
 seanced status                # this machine: service, relay, repo count, running vs on-disk sha
 seanced doctor                # preflight config, binaries, roots, relay, service
 seanced help                  # every command
@@ -320,7 +324,17 @@ in the checkout you already have.
 
 `despawn` closes the window only. A worktree session is told to keep its worktree on
 the way out, so the work stays where it was; cleaning up worktrees and branches is
-not its job.
+`reap`'s job.
+
+`reap` cleans up after sessions across every repo the daemon scans. It removes a
+linked worktree only when no tmux pane is inside it, it is clean, its branch is merged
+(including squash-merged — checked locally, no `gh`), and nothing has touched it for a
+week (`--min-age-days` to change). It deletes merged branches, closes séance windows
+that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
+reports what it left: dirty worktrees, branches whose upstream is gone but which hold
+unpushed commits, and live sessions with the id `despawn` takes. Every deleted branch
+is in the audit log with its sha, so `git branch <name> <sha>` brings it back. It acts
+by default; run `--dry-run` first.
 
 `status` reports the machine you run it on — including the sha the daemon is running
 versus the one on disk, which is how you spot a `git pull` that still needs a

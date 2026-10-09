@@ -74,7 +74,7 @@ green:
 - Parallelism lives between shard processes (`scripts/test.ts`), never `bun test --parallel` at the
   top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
   once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
-  across files, so no in-process cache can survive it. `--parallel` inside the daemon shard is fine.
+  across files, so no in-process cache can survive it. `--parallel` inside the two daemon shards is fine — two because a GitHub-runner `--parallel` run stops dead past ~64 KiB of output (`SHARDS` says more).
 - Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare. Its worker bundle is
   memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
   fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
@@ -101,8 +101,9 @@ green:
   (`update.ts`). Resolving at _use_ time is always fine; the hazard is only what outlives the process.
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
-  resolves repos by name against the cached scan set, every spawn path audits through one formatter
-  under its own origin (`relay`, `cli`, `local` — a new surface adds an origin, never reuses one),
+  resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
+  through its one formatter under its own origin (`relay`, `cli`, `local`, and `schedule` for the
+  daemon's reap timer — a new surface adds an origin, never reuses one),
   prompt text is never logged, and a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session). Don't let changes drift from them.

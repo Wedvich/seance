@@ -1,6 +1,7 @@
 import { readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
+import { mapLimit } from "./concurrency.ts";
 import { git } from "./exec.ts";
 import { inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
@@ -55,17 +56,10 @@ async function canonical(p: string): Promise<string> {
 
 /**
  * Bounded so a root holding thousands of entries can't put every `readdir`/
- * `stat` in flight at once and hit the fd ceiling. Results keep input order.
+ * `stat` in flight at once and hit the fd ceiling.
  */
-async function mapLimit<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
-  const queue = items.entries();
-  const results: R[] = [];
-  const worker = async (): Promise<void> => {
-    // oxlint-disable-next-line no-await-in-loop -- sequential inside one worker is the point; the fan-out is the worker pool
-    for (const [index, item] of queue) results[index] = await fn(item);
-  };
-  await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, items.length) }, worker));
-  return results;
+function scanLimit<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  return mapLimit(items, SCAN_CONCURRENCY, fn);
 }
 
 async function discoverRepoPaths(roots: readonly string[]): Promise<readonly string[]> {
@@ -84,21 +78,21 @@ async function discoverRepoPaths(roots: readonly string[]): Promise<readonly str
 
   // A root that is itself a repo stops the walk there: descending would register
   // its submodules as separate repos.
-  const rootHits = await mapLimit(roots, collect);
+  const rootHits = await scanLimit(roots, collect);
   const level1 = (
-    await mapLimit(
+    await scanLimit(
       roots.filter((_, i) => rootHits[i] === false),
       listDirs,
     )
   ).flat();
-  const missed = await mapLimit(level1, collect);
+  const missed = await scanLimit(level1, collect);
   const level2 = (
-    await mapLimit(
+    await scanLimit(
       level1.filter((_, i) => missed[i] === false),
       listDirs,
     )
   ).flat();
-  await mapLimit(level2, collect);
+  await scanLimit(level2, collect);
   return [...found];
 }
 

@@ -33,7 +33,13 @@ interface Shard {
 
 // Slowest first, so the short shards fill in behind the critical path.
 const SHARDS: readonly Shard[] = [
-  { name: "daemon+shared", paths: ["daemon/", "shared/"], parallel: true },
+  // Two shards, not one: on GitHub's Ubuntu runner a `bun test --parallel`
+  // (1.4.2) run that has written about 64 KiB of reporter output stops dead —
+  // exit 1, the output cut mid-line, no summary, no test named. It never
+  // reproduced locally or in an ubuntu:24.04 container; the whole daemon suite
+  // crossed that size with the reap tests. Each half stays well under it.
+  { name: "daemon/test", paths: ["daemon/test/"], parallel: true },
+  { name: "daemon/src+shared", paths: ["daemon/src/", "shared/"], parallel: true },
   { name: "e2e", paths: ["e2e/"] },
   { name: "relay", paths: ["relay/"] },
   { name: "pwa", paths: ["pwa/"] },

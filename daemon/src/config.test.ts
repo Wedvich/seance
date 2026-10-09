@@ -90,6 +90,28 @@ describe("loadConfig", () => {
     await writeFile(path, JSON.stringify(rest));
     expect(loadConfig(path)).rejects.toThrow("repoRoots");
   });
+
+  test("reap is optional, and a partial block takes the defaults — schedule off, a week's age gate", async () => {
+    const dir = await tempDir();
+    const bare = join(dir, "bare.json");
+    await writeFile(bare, JSON.stringify(VALID));
+    expect((await loadConfig(bare)).reap).toBeUndefined();
+
+    const partial = join(dir, "partial.json");
+    await writeFile(partial, JSON.stringify({ ...VALID, reap: { intervalHours: 24 } }));
+    expect((await loadConfig(partial)).reap).toEqual({ intervalHours: 24, minAgeDays: 7 });
+  });
+
+  test("a reap value that isn't a non-negative number is a config error, not a silent default", async () => {
+    const dir = await tempDir();
+    for (const reap of [{ minAgeDays: -1 }, { intervalHours: "daily" }, { minAgeDays: null }, "weekly"]) {
+      const path = join(dir, `bad-${JSON.stringify(reap).length}.json`);
+      // oxlint-disable-next-line no-await-in-loop
+      await writeFile(path, JSON.stringify({ ...VALID, reap }));
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(loadConfig(path)).rejects.toThrow("reap");
+    }
+  });
 });
 
 describe("runnableProblems", () => {

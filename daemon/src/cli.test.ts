@@ -5,10 +5,24 @@ import {
   parseInstallArgs,
   parseModArgs,
   parseRaycastArgs,
+  parseReapArgs,
   parseSpawnArgs,
 } from "./cli.ts";
 import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 import { systemdRunning } from "./systemd.ts";
+
+describe("parseReapArgs", () => {
+  test("acts by default; --dry-run previews; --min-age-days overrides the configured gate", () => {
+    expect(parseReapArgs([])).toEqual({ dryRun: false });
+    expect(parseReapArgs(["--dry-run", "--min-age-days", "3"])).toEqual({ dryRun: true, minAgeDays: 3 });
+  });
+
+  test("a missing or nonsense age, or an unknown flag, is a usage error rather than a default", () => {
+    for (const argv of [["--min-age-days"], ["--min-age-days", "soon"], ["--min-age-days", "-1"], ["--force"]]) {
+      expect(() => parseReapArgs(argv)).toThrow("usage: seanced reap");
+    }
+  });
+});
 
 describe("parseDespawnArgs", () => {
   test("takes one id, with --force on either side of it", () => {
