@@ -13,6 +13,6 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.0"
+    "@types/bun": "^1.4.2"
   }
 }
