@@ -208,6 +208,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   log.info(`seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos`);
   client.start();
 
+  try {
+    await handlerCtx.backend.start?.();
+  } catch (err) {
+    log.warn(`backend start failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
   const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local") });

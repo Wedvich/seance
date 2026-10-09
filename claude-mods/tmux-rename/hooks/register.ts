@@ -2,27 +2,39 @@ import type { Register } from "claude-code";
 
 /**
  * Séance names a spawned session `slug (machineTag)` but its window just
- * `slug` (DESIGN.md, "Session name vs window name"). The daemon hands the
- * session its tag as SEANCE_MACHINE_TAG, so only that exact suffix is
- * dropped: a name that merely ends in a parenthetical keeps it.
+ * `slug` (DESIGN.md, "Session name vs window name"), and hands the session its
+ * tag as SEANCE_MACHINE_TAG. A /rename keeps both shapes: the session name
+ * gains the suffix when missing, the window drops it. Only the exact
+ * ` (<tag>)` counts, so `fix login (urgent)` is the user's text, never the tag.
  */
-export function windowName(sessionName: string, tag: string | undefined): string {
-  const name = sessionName.trim();
-  if (tag === undefined || tag === "") return name;
+function splitTag(name: string, tag: string | undefined): { readonly bare: string; readonly suffix: string } {
+  const trimmed = name.trim();
+  if (tag === undefined || tag === "") return { bare: trimmed, suffix: "" };
   const suffix = ` (${tag})`;
-  return name.endsWith(suffix) ? name.slice(0, -suffix.length).trimEnd() : name;
+  const bare = trimmed.endsWith(suffix) ? trimmed.slice(0, -suffix.length).trimEnd() : trimmed;
+  return { bare, suffix };
+}
+
+export function sessionName(name: string, tag: string | undefined): string {
+  const { bare, suffix } = splitTag(name, tag);
+  return `${bare}${suffix}`;
+}
+
+export function windowName(name: string, tag: string | undefined): string {
+  return splitTag(name, tag).bare;
 }
 
 export const register: Register = (on) => {
   on("command.run", { command: "rename" }, async ($, e, next) => {
-    const result = await next(e);
     // bare /rename lets Claude pick the name, which this hook can't see
-    if (e.args.trim() === "") return result;
+    if (e.args.trim() === "") return next(e);
+
+    const tag = await $.env.get("SEANCE_MACHINE_TAG");
+    const name = windowName(e.args, tag);
+    const result = await next({ ...e, args: sessionName(e.args, tag) });
 
     const pane = await $.env.get("TMUX_PANE");
     if (pane === undefined || pane === "") return result;
-    const name = windowName(e.args, await $.env.get("SEANCE_MACHINE_TAG"));
-    if (name === "") return result;
 
     // -t pane id: rename Claude's own window, not whichever has focus;
     // `--` so a name like `-wip fix` isn't read as tmux flags

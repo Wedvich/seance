@@ -55,4 +55,9 @@ export interface SessionBackend {
    * screen to read omits it and the ack just says less.
    */
   readonly capture?: (handle: string) => Promise<string | null>;
+  /**
+   * Runs on every daemon start — boot and each config reload, which restarts
+   * the daemon whole. Optional; a failure is logged, never fatal.
+   */
+  readonly start?: () => Promise<void>;
 }
