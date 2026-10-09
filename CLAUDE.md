@@ -52,6 +52,11 @@ green:
   machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
   in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
   legitimate — a non-event can't be polled — so leave those alone.
+- Never let a test's first exec of a freshly written executable land inside a timed window. macOS
+  scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
+  queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
+  this stays green in CI while failing every local run. Link rather than copy, and exec it once in
+  setup — `makeClaudeStub` shows both and carries the measurements.
 - `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.
