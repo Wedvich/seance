@@ -1,5 +1,5 @@
 import { watch } from "node:fs";
-import { chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
@@ -70,11 +70,13 @@ export interface ClaudeStub {
   readonly argv: () => Promise<readonly string[]>;
 }
 
+const WARM_FLAG = "--stub-warm";
+
 /**
  * Reproduces what tmux sees of a real claude on each host. The native
  * installer keeps the binary under a versioned filename and execs it through a
  * `claude` symlink: macOS tmux reports the resolved basename ("2.1.267"), Linux
- * tmux reports argv[0] ("claude"). A copy of bun named "9.9.9", exec'd with
+ * tmux reports argv[0] ("claude"). Bun under the name "9.9.9", exec'd with
  * `-a claude`, shows both faces. Registration is the pane title claude sets
  * once its TUI is up — the sleeper sets one a beat after starting, or never,
  * so the alive-but-unregistered path is reachable without a real dialog.
@@ -83,11 +85,20 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   const dir = join(base, "stub");
   await mkdir(dir, { recursive: true });
 
-  const bunPath = Bun.which("bun");
-  if (bunPath === null) throw new Error("bun not on PATH");
   const versioned = join(dir, "9.9.9");
-  await Bun.write(versioned, Bun.file(bunPath));
-  await chmod(versioned, 0o755);
+  // A hard link, not a copy: macOS scans every never-executed file on its first
+  // exec (XprotectService), one file at a time machine-wide, ~0.8s for bun — so
+  // five suites' copies queued each first spawn seconds past its registration
+  // budget. A link is the running bun's own inode, already scanned; the kernel
+  // still reports the link's name. That inode *is* the install, so nothing may
+  // write or chmod through it: the rm makes both paths start from no file, and
+  // the copy (for where a link can't reach — another filesystem, Linux's
+  // protected_hardlinks) is then always a new inode.
+  await rm(versioned, { force: true });
+  await link(process.execPath, versioned).catch(async () => {
+    await Bun.write(versioned, Bun.file(process.execPath));
+    await chmod(versioned, 0o755);
+  });
 
   const sleeper = join(dir, "sleeper.ts");
   await Bun.write(
@@ -102,24 +113,35 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     ].join("\n"),
   );
 
+  // Each wrapper is new, so each pays the first-exec scan above (~0.2s idle,
+  // seconds behind a busy queue). The warm-up below pays it here, in setup,
+  // rather than inside the first spawn's registration budget; the flag exits
+  // before the argv record is touched.
+  const head = `#!/bin/bash\n[ "$1" = ${WARM_FLAG} ] && exit 0\n`;
+
   const ok = join(dir, "claude");
   const argvFile = `${ok}.argv`;
   // NUL separators: seed prompts carry newlines, so a line-based record would lie
   await Bun.write(
     ok,
-    `#!/bin/bash\nprintf '%s\\0' "$@" > "${argvFile}"\nexec -a claude "${versioned}" "${sleeper}" titled\n`,
+    `${head}printf '%s\\0' "$@" > "${argvFile}"\nexec -a claude "${versioned}" "${sleeper}" titled\n`,
   );
   await chmod(ok, 0o755);
 
   const stuck = join(dir, "claude-stuck");
-  await Bun.write(stuck, `#!/bin/bash\nexec -a claude "${versioned}" "${sleeper}" untitled\n`);
+  await Bun.write(stuck, `${head}exec -a claude "${versioned}" "${sleeper}" untitled\n`);
   await chmod(stuck, 0o755);
 
   const failing = join(dir, "claude-failing");
   // real claude takes >100ms to fail and reports errors on the pty's stdout;
   // instant exit + stderr would lose the output race and the capture
-  await Bun.write(failing, `#!/bin/bash\nsleep 0.3\necho "boom: untrusted workspace"\nexit 2\n`);
+  await Bun.write(failing, `${head}sleep 0.3\necho "boom: untrusted workspace"\nexit 2\n`);
   await chmod(failing, 0o755);
+
+  await Promise.all([
+    run([versioned, "--version"]),
+    ...[ok, stuck, failing].map((wrapper) => run([wrapper, WARM_FLAG])),
+  ]);
 
   const argv = async (): Promise<readonly string[]> => {
     // the redirect creates the file before printf writes a byte, so existence is

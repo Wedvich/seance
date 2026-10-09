@@ -326,7 +326,7 @@ async function killWindow(name: string): Promise<void> {
 
 /**
  * The stub titles its pane only once bash has exec'd it and it has started,
- * which the disk contention of parallel test workers can stretch — so poll for
+ * which a loaded machine can stretch past the spawn's own wait — so poll for
  * the session instead of sampling once. Absence still resolves, leaving the
  * assertion (not a timeout) to report it.
  */
