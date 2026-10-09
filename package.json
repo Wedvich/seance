@@ -22,10 +22,10 @@
     "typecheck": "tsc --noEmit && bun run --filter '*' typecheck"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.2",
     "oxfmt": "0.60.0",
     "oxlint": "1.75.0",
     "typescript": "^7.0.2"
   },
-  "packageManager": "bun@1.4.0"
+  "packageManager": "bun@1.4.2"
 }
