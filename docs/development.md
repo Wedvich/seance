@@ -76,7 +76,15 @@ a production change.
   what stand between a skipped deploy and a deploy that reports success having
   shipped nothing.
 
-No Cloudflare account and no real `claude` are needed anywhere; `tmux` and `git` are.
+- **claude-mods** — each mod under `claude-mods/`, run by `claude plugin test <dir>`
+  rather than bun: a mod's tests import `claude-code/testing`, which only Claude Code
+  provides. The kit stands in for the engine (`mock.env`, a `process.run` hook in place
+  of tmux), so nothing real is touched. Skipped, and named as skipped in the total,
+  where `claude` isn't on PATH — CI included. `claude plugin validate <dir>` is the
+  quick check of what the engine will load.
+
+No Cloudflare account is needed anywhere and no real `claude` outside the
+claude-mods shard; `tmux` and `git` are.
 
 ## The Raycast extension
 

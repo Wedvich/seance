@@ -1701,6 +1701,58 @@ stay on `^26` even though the runtime is Node 22: the 22.x types declare
 `CryptoKey` only inside the `webcrypto` namespace, so matching the runtime
 version breaks the build.
 
+## Claude Code mods (`claude-mods/`) — designed 2026-10-09
+
+Function-hook plugins ("mods") for the Claude Code sessions séance spawns. One
+today: **tmux-rename**, which renames a session's tmux window after a `/rename`.
+
+- **Why it lives here, not in dotfiles**: it reverses a séance decision ("Session
+  name vs window name" above) — the session is named `slug (machineTag)`, the
+  window `slug`, and a `/rename` that keeps the tag should leave the window bare
+  again. Kept in dotfiles it would restate séance's name format in a second repo
+  with nothing tying them together, and the format has already changed once
+  (`@` → parens). Only séance knows the tag, so only here can the mod strip
+  exactly it.
+- **The tag reaches the session as `SEANCE_MACHINE_TAG`**, set with `tmux
+new-window -e` (argv, never the shell string; the value is the slugified tag,
+  the same `machineTagSlug` the session name uses). The mod drops only an exact
+  ` (<tag>)` suffix; any other trailing parenthetical (`fix login (urgent)`) is
+  the user's and stays. Empty or unset — an untagged machine, or a session
+  séance didn't spawn — the name passes through whole. It is passed on every
+  spawn, empty when untagged: omitted, the window would inherit whatever the
+  tmux server's own environment holds, and a server booted from inside a séance
+  session carries that session's tag. Rejected: the mod reading `config.json` (restates the config
+  path in a second runtime, and answers with the _current_ tag where the
+  session was named with the one at spawn time); stripping any trailing
+  parenthetical (the first draft — eats user text).
+- **Fails open**: a tmux error (nonzero exit, or tmux failing to start) costs a
+  toast, never the rename; a `.catch` on the hook covers anything else. The name
+  goes after `--`, so one led by a dash isn't read as tmux flags. A bare `/rename` (Claude picks the name, which the hook can't see)
+  and sessions outside tmux leave the window alone.
+- **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
+  the repo root lists the mods; `seanced mod install` runs `claude plugin
+marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
+  A directory marketplace is read in place, never copied, so unlike the Raycast
+  import a `git pull` (or a self-update) reaches the next session with nothing
+  re-run. `marketplace add` is idempotent and repoints in place when the name is
+  registered from another folder, carrying installed plugins along — so no
+  remove-first, unlike `mcp install`: removing a marketplace cascade-uninstalls
+  its plugins and deletes their saved options and data. `mod uninstall` is that
+  removal, deliberately. The marketplace is named `seance`, not `Séance`: plugin ids
+  (`<mod>@<marketplace>`) are ASCII-only, and Claude refuses to install from a
+  marketplace whose name breaks that; lowercase matches the repo, the CLI and
+  the MCP server name. `doctor` warns when a mod is missing, disabled, or read
+  from a different checkout. Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
+  `~/.claude/settings.json` (Claude's development path — hot-reloads on every
+  save), installing from GitHub (`<owner>/<repo>`; a copy that only `claude plugin
+update` refreshes, and the checkout already on the machine is the version the
+  daemon runs).
+- **Tested by `claude plugin test`, not `bun:test`** — the one exception to the
+  runner rule: a mod's tests import `claude-code/testing`, which only Claude
+  Code provides. `scripts/test.ts` runs them as their own shard (the summary
+  format matches bun's), and skips that shard, visibly, where `claude` isn't on
+  PATH — which today includes CI.
+
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on

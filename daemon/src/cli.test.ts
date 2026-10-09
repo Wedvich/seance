@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cmdInstall, parseInstallArgs, parseRaycastArgs, parseSpawnArgs } from "./cli.ts";
+import { cmdInstall, parseInstallArgs, parseModArgs, parseRaycastArgs, parseSpawnArgs } from "./cli.ts";
 import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 import { systemdRunning } from "./systemd.ts";
 
@@ -119,5 +119,15 @@ describe("plistBunPath", () => {
 
   test("null when there are no ProgramArguments — a parse miss must not read as drift", () => {
     expect(plistBunPath("<plist><dict></dict></plist>")).toBeNull();
+  });
+});
+
+describe("parseModArgs", () => {
+  test("accepts exactly install or uninstall, with no extra arguments", () => {
+    expect(parseModArgs(["install"])).toBe("install");
+    expect(parseModArgs(["uninstall"])).toBe("uninstall");
+    expect(() => parseModArgs([])).toThrow("usage:");
+    expect(() => parseModArgs(["reinstall"])).toThrow(/unknown mod subcommand "reinstall"/u);
+    expect(() => parseModArgs(["install", "--force"])).toThrow(/takes no arguments/u);
   });
 });

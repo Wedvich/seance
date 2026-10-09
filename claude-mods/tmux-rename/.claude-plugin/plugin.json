@@ -1,0 +1,5 @@
+{
+  "name": "tmux-rename",
+  "version": "0.1.0",
+  "description": "Renames the tmux window to match /rename, minus séance's machine-tag suffix"
+}

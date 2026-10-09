@@ -18,6 +18,12 @@ interface Shard {
   readonly name: string;
   readonly paths: readonly string[];
   readonly parallel?: boolean;
+  /**
+   * Claude Code mods import `claude-code/testing`, which only `claude plugin test`
+   * provides — one plugin folder per path. Its summary is bun's format, so the
+   * tally below reads it unchanged.
+   */
+  readonly runner?: "claude-plugin";
 }
 
 // Slowest first, so the short shards fill in behind the critical path.
@@ -28,12 +34,35 @@ const SHARDS: readonly Shard[] = [
   { name: "pwa", paths: ["pwa/"] },
   { name: "raycast", paths: ["raycast/"] },
   { name: "scripts", paths: ["scripts/"] },
+  { name: "claude-mods", paths: ["claude-mods/tmux-rename"], runner: "claude-plugin" },
 ];
 
-// `bun run test <path>` narrows to one shard, so a single file still runs with
+// `bun run test <path>` narrows to one bun shard (plus one for mods), so a single file still runs with
 // the timeout the workerd-booting suites need.
 const filters = process.argv.slice(2);
-const shards: readonly Shard[] = filters.length === 0 ? SHARDS : [{ name: filters.join(" "), paths: filters }];
+// A filter overlapping a mod's folder (`claude-mods/`, the folder, a file inside it)
+// goes to `claude plugin test` as that folder: bun can't import the mods' tests,
+// and `claude plugin test` takes only plugin folders.
+const modFolders = SHARDS.filter((shard) => shard.runner === "claude-plugin").flatMap((shard) => shard.paths);
+const modsUnder = (filter: string): string[] =>
+  modFolders.filter((folder) => filter.startsWith(folder) || folder.startsWith(filter));
+const bunFilters = filters.filter((f) => modsUnder(f).length === 0);
+const modFilters = filters.filter((f) => modsUnder(f).length > 0);
+const shards: readonly Shard[] =
+  filters.length === 0
+    ? SHARDS
+    : [
+        ...(bunFilters.length === 0 ? [] : [{ name: bunFilters.join(" "), paths: bunFilters }]),
+        ...(modFilters.length === 0
+          ? []
+          : [
+              {
+                name: modFilters.join(" "),
+                paths: [...new Set(modFilters.flatMap(modsUnder))],
+                runner: "claude-plugin" as const,
+              },
+            ]),
+      ];
 
 /**
  * The shard paths are prefixes, so a test file added outside all of them would simply
@@ -56,6 +85,7 @@ interface Result {
   readonly name: string;
   readonly exitCode: number;
   readonly output: string;
+  readonly skipped?: boolean;
 }
 
 /**
@@ -76,12 +106,12 @@ function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;
 }
 
-function command(args: readonly string[]): string[] {
-  if (!usePty) return ["bun", ...args];
+function command(argv: readonly string[]): string[] {
+  if (!usePty) return [...argv];
   // BSD script takes the command as argv; util-linux needs -c with one string.
   return process.platform === "darwin"
-    ? ["script", "-q", "/dev/null", "bun", ...args]
-    : ["script", "-qec", ["bun", ...args].map(shellQuote).join(" "), "/dev/null"];
+    ? ["script", "-q", "/dev/null", ...argv]
+    : ["script", "-qec", argv.map(shellQuote).join(" "), "/dev/null"];
 }
 
 /** A pty gives every line CRLF, and script opens with a stray EOT + backspaces. */
@@ -94,11 +124,23 @@ function clean(text: string): string {
   return text.slice(start).replaceAll("\r\n", "\n");
 }
 
-async function runShard(shard: Shard): Promise<Result> {
-  const args = ["test", ...shard.paths, "--timeout", String(TIMEOUT_MS)];
-  if (shard.parallel === true) args.push("--parallel");
+function shardArgv(shard: Shard): string[] | null {
+  if (shard.runner === "claude-plugin") {
+    const claude = Bun.which("claude");
+    return claude === null ? null : [claude, "plugin", "test", ...shard.paths];
+  }
+  const argv = ["bun", "test", ...shard.paths, "--timeout", String(TIMEOUT_MS)];
+  if (shard.parallel === true) argv.push("--parallel");
+  return argv;
+}
 
-  const proc = Bun.spawn(command(args), {
+async function runShard(shard: Shard): Promise<Result> {
+  const argv = shardArgv(shard);
+  // Skipped, not failed: Claude Code is a runtime dependency of the mods, not of
+  // the repo — CI has no claude. Named in its header and the total so it can't pass unseen.
+  if (argv === null) return { name: shard.name, exitCode: 0, output: "skipped — claude not on PATH", skipped: true };
+
+  const proc = Bun.spawn(command(argv), {
     stdin: usePty ? "inherit" : "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -193,7 +235,8 @@ const results = await Promise.all(shards.map(runShard));
 const elapsedMs = Math.round((Bun.nanoseconds() - started) / 1e6);
 
 for (const result of results) {
-  const status = result.exitCode === 0 ? "pass" : `FAIL (exit ${result.exitCode})`;
+  const status =
+    result.skipped === true ? "skipped" : result.exitCode === 0 ? "pass" : `FAIL (exit ${result.exitCode})`;
   console.log(`\n${"═".repeat(72)}\n${result.name} — ${status}\n${"═".repeat(72)}`);
   console.log(result.output.trimEnd());
 }
@@ -205,7 +248,8 @@ const verdict =
     : `${plural(failed.length, "shard")} of ${results.length} failed: ${failed.map((r) => r.name).join(", ")}`;
 
 const summary = results.map((r) => parseSummary(r.output));
-const unparsed = results.filter((_, i) => summary[i]?.tests === undefined);
+const unparsed = results.filter((r, i) => r.skipped !== true && summary[i]?.tests === undefined);
+const skipped = results.filter((r) => r.skipped === true);
 const totals = tally(summary);
 
 console.log(`\n${"═".repeat(72)}\ntotal — ${verdict}\n${"═".repeat(72)}`);
@@ -223,5 +267,6 @@ console.log(`Ran ${plural(totals.tests, "test")} across ${plural(totals.files, "
 // total would quietly under-report the suite.
 if (unparsed.length > 0)
   console.log(paint("red", `warning: no summary from ${unparsed.map((r) => r.name).join(", ")}`));
+if (skipped.length > 0) console.log(`skipped shards: ${skipped.map((r) => r.name).join(", ")}`);
 
 process.exit(failed.length === 0 ? 0 : 1);
