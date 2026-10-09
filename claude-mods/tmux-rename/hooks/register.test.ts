@@ -74,6 +74,21 @@ describe("/rename", () => {
     expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
   });
 
+  test("padding is trimmed from both names, tagged or not", async ($, on) => {
+    const tagged = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
+    await rename($, "  bla-bla (wsl-box)  ");
+    await rename($, "  bla-bla  ");
+    expect(tagged.renames).toEqual(["bla-bla (wsl-box)", "bla-bla (wsl-box)"]);
+    expect(tagged.tmux.map((argv) => argv.at(-1))).toEqual(["bla-bla", "bla-bla"]);
+  });
+
+  test("untagged, padding is trimmed too", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7" });
+    await rename($, "  bla-bla  ");
+    expect(recorded.renames).toEqual(["bla-bla"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
+  });
+
   test("outside a séance spawn the name passes through whole", async ($, on) => {
     const recorded = record(on, { TMUX_PANE: "%7" });
     await rename($, "bla-bla");
