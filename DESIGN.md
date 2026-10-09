@@ -1704,31 +1704,38 @@ version breaks the build.
 ## Claude Code mods (`claude-mods/`) — designed 2026-10-09
 
 Function-hook plugins ("mods") for the Claude Code sessions séance spawns. One
-today: **tmux-rename**, which renames a session's tmux window after a `/rename`.
+today: **tmux-rename**, which keeps a `/rename` tagged and renames the session's
+tmux window to the untagged name.
 
-- **Why it lives here, not in dotfiles**: it reverses a séance decision ("Session
+- **Why it lives here, not in dotfiles**: it extends a séance decision ("Session
   name vs window name" above) — the session is named `slug (machineTag)`, the
-  window `slug`, and a `/rename` that keeps the tag should leave the window bare
-  again. Kept in dotfiles it would restate séance's name format in a second repo
-  with nothing tying them together, and the format has already changed once
-  (`@` → parens). Only séance knows the tag, so only here can the mod strip
-  exactly it.
+  window `slug`, and a `/rename` should keep both shapes: tagged for the
+  cross-machine lists, bare for the window. Kept in dotfiles it would restate séance's name
+  format in a second repo with nothing tying them together, and the format has
+  already changed once (`@` → parens). Only séance knows the tag, so only here
+  can the mod add exactly it.
+- **`/rename abc` and `/rename abc (tag)` mean the same**: session `abc (tag)`,
+  window `abc`. The mod rewrites the command's args before Claude Code's own
+  `/rename` runs. Changed 2026-10-09: the first version only stripped the tag
+  for the window, so a `/rename` without it left the session untagged.
 - **The tag reaches the session as `SEANCE_MACHINE_TAG`**, set with `tmux
 new-window -e` (argv, never the shell string; the value is the slugified tag,
-  the same `machineTagSlug` the session name uses). The mod drops only an exact
-  ` (<tag>)` suffix; any other trailing parenthetical (`fix login (urgent)`) is
-  the user's and stays. Empty or unset — an untagged machine, or a session
+  the same `machineTagSlug` the session name uses). The mod counts only an
+  exact ` (<tag>)` suffix as the tag: one already present isn't doubled or kept
+  in the window, while any other trailing parenthetical (`fix login (urgent)`)
+  is the user's and stays in both. Empty or unset — an untagged machine, or a session
   séance didn't spawn — the name passes through whole. It is passed on every
   spawn, empty when untagged: omitted, the window would inherit whatever the
   tmux server's own environment holds, and a server booted from inside a séance
   session carries that session's tag. Rejected: the mod reading `config.json` (restates the config
   path in a second runtime, and answers with the _current_ tag where the
   session was named with the one at spawn time); stripping any trailing
-  parenthetical (the first draft — eats user text).
+  parenthetical as the tag (the first draft — eats user text).
 - **Fails open**: a tmux error (nonzero exit, or tmux failing to start) costs a
   toast, never the rename; a `.catch` on the hook covers anything else. The name
   goes after `--`, so one led by a dash isn't read as tmux flags. A bare `/rename` (Claude picks the name, which the hook can't see)
-  and sessions outside tmux leave the window alone.
+  is passed through untouched; outside tmux the name is still tagged, only the
+  window step is skipped.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
   the repo root lists the mods; `seanced mod install` runs `claude plugin
 marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.

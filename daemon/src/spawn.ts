@@ -249,8 +249,8 @@ export async function spawnSession(
   const prepared = request.mode === "here" ? prepareHere(repo) : prepareWorktree(repo, worktreeName);
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
 
-  // For the tmux-rename mod (claude-mods/), which strips exactly this suffix off
-  // a `/rename` to keep the window bare. An env var rather than the mod reading
+  // For the tmux-rename mod (claude-mods/), which keeps exactly this suffix on a
+  // `/rename`'s session name and off its window. An env var rather than the mod reading
   // config.json: it is the tag this session was *named* with, even if config
   // changes under it. `-e` is argv, so the tag never reaches the shell string.
   // Always passed, empty when untagged: omitted, the window would inherit

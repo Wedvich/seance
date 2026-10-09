@@ -1,19 +1,24 @@
 import { describe, expect, mock, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
-import { windowName } from "./register.ts";
+import { sessionName, windowName } from "./register.ts";
 
-function recordTmux(on: On, env: Readonly<Record<string, string>>, exitCode = 0): string[][] {
-  const runs: string[][] = [];
+type Recorded = { readonly renames: string[]; readonly tmux: string[][] };
+
+function record(on: On, env: Readonly<Record<string, string>>, exitCode = 0): Recorded {
+  const recorded: Recorded = { renames: [], tmux: [] };
   mock.env(on, env);
-  on("command.run", () => ({ text: "renamed" }));
+  on("command.run", (_$, e) => {
+    recorded.renames.push(e.args);
+    return { text: "renamed" };
+  });
   on("process.run", (_$, e) => {
-    runs.push([...e.argv]);
+    recorded.tmux.push([...e.argv]);
     return {
       value: { exitCode, stdout: "", stderr: "no such pane", isStdoutTruncated: false, isStderrTruncated: false },
     };
   });
-  return runs;
+  return recorded;
 }
 
 async function rename($: Engine, args: string): Promise<unknown> {
@@ -25,52 +30,80 @@ async function rename($: Engine, args: string): Promise<unknown> {
   });
 }
 
+describe("sessionName", () => {
+  test("appends the machine tag once", () => {
+    expect(sessionName("bla-bla", "wsl-box")).toBe("bla-bla (wsl-box)");
+    expect(sessionName("  bla-bla (wsl-box)  ", "wsl-box")).toBe("bla-bla (wsl-box)");
+  });
+
+  test("any other parenthetical isn't the tag", () => {
+    expect(sessionName("fix login (urgent)", "wsl-box")).toBe("fix login (urgent) (wsl-box)");
+  });
+
+  test("untagged, the name passes through", () => {
+    expect(sessionName("bla-bla", undefined)).toBe("bla-bla");
+    expect(sessionName("bla-bla", "")).toBe("bla-bla");
+  });
+});
+
 describe("windowName", () => {
   test("drops exactly the machine tag", () => {
     expect(windowName("bla-bla (wsl-box)", "wsl-box")).toBe("bla-bla");
-    expect(windowName("  bla-bla (wsl-box)  ", "wsl-box")).toBe("bla-bla");
+    expect(windowName("  bla-bla  ", "wsl-box")).toBe("bla-bla");
   });
 
   test("keeps any other parenthetical", () => {
     expect(windowName("fix login (urgent)", "wsl-box")).toBe("fix login (urgent)");
-    expect(windowName("fix login (urgent)", undefined)).toBe("fix login (urgent)");
     expect(windowName("bla-bla(wsl-box)", "wsl-box")).toBe("bla-bla(wsl-box)");
+    expect(windowName("bla-bla (wsl-box)", undefined)).toBe("bla-bla (wsl-box)");
   });
 });
 
 describe("/rename", () => {
-  test("renames the pane's own window to the bare slug", async ($, on) => {
-    const runs = recordTmux(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
-    expect(await rename($, "bla-bla (wsl-box)")).toEqual({ text: "renamed" });
-    expect(runs).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
+  test("tags the session and leaves the window bare", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
+    expect(await rename($, "bla-bla")).toEqual({ text: "renamed" });
+    expect(recorded.renames).toEqual(["bla-bla (wsl-box)"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
+  });
+
+  test("an already-tagged name keeps its one tag", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
+    await rename($, "bla-bla (wsl-box)");
+    expect(recorded.renames).toEqual(["bla-bla (wsl-box)"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
   });
 
   test("outside a séance spawn the name passes through whole", async ($, on) => {
-    const runs = recordTmux(on, { TMUX_PANE: "%7" });
-    await rename($, "bla-bla (wsl-box)");
-    expect(runs).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla (wsl-box)"]]);
+    const recorded = record(on, { TMUX_PANE: "%7" });
+    await rename($, "bla-bla");
+    expect(recorded.renames).toEqual(["bla-bla"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
   });
 
   test("a dash-led name reaches tmux as the name, not as flags", async ($, on) => {
-    const runs = recordTmux(on, { TMUX_PANE: "%7" });
+    const recorded = record(on, { TMUX_PANE: "%7" });
     await rename($, "-wip fix");
-    expect(runs).toEqual([["tmux", "rename-window", "-t", "%7", "--", "-wip fix"]]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "-wip fix"]]);
   });
 
-  test("leaves tmux alone outside tmux", async ($, on) => {
-    const runs = recordTmux(on, { SEANCE_MACHINE_TAG: "wsl-box" });
-    await rename($, "bla-bla (wsl-box)");
-    expect(runs).toEqual([]);
+  test("outside tmux the session is still tagged", async ($, on) => {
+    const recorded = record(on, { SEANCE_MACHINE_TAG: "wsl-box" });
+    await rename($, "bla-bla");
+    expect(recorded.renames).toEqual(["bla-bla (wsl-box)"]);
+    expect(recorded.tmux).toEqual([]);
   });
 
-  test("leaves tmux alone on a bare /rename", async ($, on) => {
-    const runs = recordTmux(on, { TMUX_PANE: "%7" });
+  test("a bare /rename is left alone", async ($, on) => {
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
     await rename($, "  ");
-    expect(runs).toEqual([]);
+    expect(recorded.renames).toEqual(["  "]);
+    expect(recorded.tmux).toEqual([]);
   });
 
   test("a failing tmux still lets the rename through", async ($, on) => {
-    recordTmux(on, { TMUX_PANE: "%7" }, 1);
+    const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
     expect(await rename($, "bla-bla")).toEqual({ text: "renamed" });
+    expect(recorded.renames).toEqual(["bla-bla (wsl-box)"]);
   });
 });
