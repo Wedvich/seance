@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
+import { addWorktree, makeClone } from "../test/fixtures.ts";
 import { readDefaultBranch, repoSetsEqual, scanRepos } from "./scan.ts";
 
 const cleanups: string[] = [];
@@ -95,6 +96,58 @@ describe("scanRepos", () => {
     const previous = [{ name: "latecomer", path, defaultBranch: null }];
     const repos = await scanRepos([root], previous);
     expect(repos[0]?.defaultBranch).toBe("main");
+  });
+
+  test("registers main clones only — never a linked worktree, in either layout", async () => {
+    const root = await makeRoot();
+    const web = await makeClone(root, "web");
+    const utils = await makeClone(root, "org/utils");
+    await addWorktree(web, join(root, "web-pr633")); // sibling at depth 1
+    await addWorktree(utils, join(root, "org", "utils-pen-2524")); // sibling at depth 2
+    await addWorktree(web, join(web, ".claude", "worktrees", "fix")); // nested
+
+    const repos = await scanRepos([root]);
+    expect(repos.map((r) => [r.name, r.path])).toEqual([
+      ["utils", utils],
+      ["web", web],
+    ]);
+  });
+
+  test("a root that is itself a linked worktree registers nothing, not even its main clone", async () => {
+    const parent = await makeRoot();
+    const web = await makeClone(parent, "web");
+    const worktree = join(parent, "web-pr633");
+    await addWorktree(web, worktree);
+    expect(await scanRepos([worktree])).toEqual([]);
+  });
+
+  // Broken `.git`s still stop the walk: descending would surface what is nested
+  // inside as repos of their own.
+  test("a broken checkout registers nothing and isn't descended into", async () => {
+    const root = await makeRoot();
+    const garbled = join(root, "garbled");
+    await mkdir(garbled);
+    await writeFile(join(garbled, ".git"), "not a pointer\n");
+    await makeRepo(garbled, "vendored", "main");
+    const web = await makeClone(root, "web");
+    await addWorktree(web, join(root, "web-pr633"));
+    await rm(web, { recursive: true, force: true }); // main clone deleted, sibling worktree left behind
+    expect(await scanRepos([root])).toEqual([]);
+  });
+
+  // A same-basename worktree used to join the collision group (as `wt/utils`);
+  // with it gone the two clones must still be told apart by their parents.
+  test("colliding basenames stay disambiguated with worktrees out of the set", async () => {
+    const root = await makeRoot();
+    const a = await makeClone(root, "appfarm/utils");
+    const b = await makeClone(root, "pengefix/utils");
+    await addWorktree(b, join(root, "wt", "utils"));
+    await addWorktree(b, join(root, "pengefix", "utils-pr1"));
+    const repos = await scanRepos([root]);
+    expect(repos.map((r) => [r.name, r.path])).toEqual([
+      ["appfarm/utils", a],
+      ["pengefix/utils", b],
+    ]);
   });
 
   test("missing root scans to empty, not an error", async () => {

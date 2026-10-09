@@ -952,8 +952,25 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   repo counts as that one repo and is not descended into — it lets a lone
   clone (`~/dotfiles`) be exposed without making its parent a root, and
   stopping the walk keeps submodules and linked worktrees inside it from
-  registering as separate repos. Measured: 19ms for 58
-  repos — the walk is free. Scans run at startup, hourly, and on explicit
+  registering as separate repos. Only main clones register: a `.git`
+  directory, or a `gitdir:` pointer whose git dir has no `commondir` file (a
+  submodule or `--separate-git-dir` clone — its own repo). A linked worktree's
+  git dir carries `commondir`, so a sibling worktree (`~/pengefix/<repo>-pr633`,
+  `<repo>-pen-2524`) stops the walk and registers nothing — it used to list as a
+  repo of its own, one per worktree, in the spawn picker. A root that is itself
+  a linked worktree likewise registers nothing, not even its main clone: roots
+  bound what a machine exposes, and the main clone sits wherever the pointer
+  says, possibly outside every root. Expose it by rooting it (or its parent).
+  Any `.git` stops the walk, registered or not: one that is unparsable, names a
+  git dir that is gone (a main clone deleted under its worktrees; a Windows
+  `C:/…` pointer seen from WSL) or can't be read registers nothing — never
+  falls back to main — and isn't descended into either.
+  The test is a few file reads, no `git` subprocess per directory. Rejected:
+  `git rev-parse --git-common-dir` per candidate (a process per directory
+  for an answer `commondir` already holds); registering a worktree under its
+  main clone's name (two paths behind one name, and spawn needs one). Measured:
+  19ms for 58 repos — the walk is free (2026-10-09, one dev machine: 20ms for 33, down from
+  26ms for 46 with the 13 worktrees). Scans run at startup, hourly, and on explicit
   `rescan` — never implicitly from PWA activity. Results cached in
   state.json (restart re-registers instantly from cache); re-register only
   when the set changed. `defaultBranch` is best-effort from local refs only
@@ -986,8 +1003,26 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   to a shell that never reset the title. `node` is deliberately not on that
   list: a dev server under oh-my-zsh is `node` + titled, and would have been
   listed with a repo mapping; a hand-started npm claude is the cost. Repo
-  mapped by longest path prefix; worktrees under `<repo>/.claude/worktrees/*`
-  map to their repo. Undocumented conventions; if a release changes them the
+  attribution is one rule (`repoFor` in `sessions.ts`): a pane inside a linked
+  worktree — walking up past any non-worktree checkout (a submodule or vendored
+  clone inside it) to its `gitdir:` → `commondir` — belongs to the registered
+  repo with the same common dir; otherwise the longest registered path prefix.
+  The common dir is the match, not a path derived from it: a
+  `--separate-git-dir` clone's or a submodule's isn't `<main>/.git`, and nothing
+  in it points back to the main working tree. One rule covers both layouts —
+  `<repo>/.claude/worktrees/<name>` and the sibling `<root>/<repo>-<name>`,
+  which the scan doesn't register so no prefix reaches it — replacing a
+  `/.claude/worktrees/` path marker that only knew the first. A
+  `.claude/worktrees` pane whose worktree was removed under it, or a worktree
+  of an unregistered repo inside a registered one, still maps by prefix. The
+  list is rebuilt on every request, so resolution is file reads only and
+  memoized — per pane path and per repo path, pruned to the live set each
+  listing, holding promises so overlapping listings never prune what another
+  is reading. A null an I/O error produced isn't kept. Rejected: a second
+  marker for sibling names (`<repo>-*` guesses — `api-v2` is a repo, not a
+  worktree of `api`); deriving the main clone as the common dir's parent (fails
+  the separate-git-dir and submodule cases above); `git rev-parse` per pane (a
+  subprocess per listing per pane). Undocumented conventions; if a release changes them the
   list goes visibly empty and the pattern is a one-line fix. Both formats
   (`#{==:}`, tmux 2.9; `#{m:}`, 3.1) render literally on an older tmux rather
   than failing, which reads as untitled/not-ours: the list is empty and every

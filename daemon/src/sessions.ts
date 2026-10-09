@@ -1,4 +1,5 @@
 import type { RepoEntry, SessionEntry } from "@seance/shared";
+import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
 import { FIELD_SEP, PANE_TITLED, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
@@ -32,14 +33,36 @@ export function isRegistered(pane: {
 /** Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort). */
 const OURS = "#{m:*--remote-control*,#{pane_start_command}}";
 
-const WORKTREE_MARKER = "/.claude/worktrees/";
+/**
+ * Git facts read off disk for attribution, kept out of the parser so it stays
+ * pure: a pane path → the common dir of the linked worktree it sits in, and a
+ * registered repo's path → its common dir. Both canonical.
+ */
+export interface GitLinks {
+  readonly paneCommonDirs: ReadonlyMap<string, string>;
+  readonly repoCommonDirs: ReadonlyMap<string, string>;
+}
 
-function repoFor(panePath: string, repos: readonly RepoEntry[]): string | null {
-  const markerAt = panePath.indexOf(WORKTREE_MARKER);
-  const effective = markerAt === -1 ? panePath : panePath.slice(0, markerAt);
+const NO_LINKS: GitLinks = { paneCommonDirs: new Map(), repoCommonDirs: new Map() };
+
+/**
+ * The one attribution rule. A pane in a linked worktree belongs to the
+ * registered repo it shares a common dir with, wherever the worktree sits —
+ * `<repo>/.claude/worktrees/<name>` or a sibling `<root>/<repo>-<name>` the scan
+ * doesn't register — and whatever the common dir is called (a
+ * `--separate-git-dir` clone's or a submodule's isn't `.git`). Otherwise the
+ * longest registered prefix, which also still maps a `.claude/worktrees` pane
+ * whose worktree is gone.
+ */
+function repoFor(path: string, repos: readonly RepoEntry[], links: GitLinks): string | null {
+  const commonDir = links.paneCommonDirs.get(path);
+  if (commonDir !== undefined) {
+    const owner = repos.find((repo) => links.repoCommonDirs.get(repo.path) === commonDir);
+    if (owner !== undefined) return owner.name;
+  }
   let best: RepoEntry | null = null;
   for (const repo of repos) {
-    if (effective !== repo.path && !effective.startsWith(`${repo.path}/`)) continue;
+    if (path !== repo.path && !path.startsWith(`${repo.path}/`)) continue;
     if (best === null || repo.path.length > best.path.length) best = repo;
   }
   return best?.name ?? null;
@@ -52,9 +75,22 @@ function repoFor(panePath: string, repos: readonly RepoEntry[]): string | null {
  * shell that never reset it — hence `isRegistered`'s second half for panes
  * that are not ours.
  */
-export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly SessionEntry[] {
+export function parsePanes(raw: string, repos: readonly RepoEntry[], links = NO_LINKS): readonly SessionEntry[] {
+  return attribute(registeredPanes(raw), repos, links);
+}
+
+interface Pane {
+  readonly window: string;
+  readonly path: string;
+}
+
+function attribute(panes: readonly Pane[], repos: readonly RepoEntry[], links: GitLinks): readonly SessionEntry[] {
+  return panes.map((pane) => ({ window: pane.window, repo: repoFor(pane.path, repos, links), path: pane.path }));
+}
+
+function registeredPanes(raw: string): readonly Pane[] {
   const seen = new Set<string>();
-  const sessions: SessionEntry[] = [];
+  const panes: Pane[] = [];
   for (const line of raw.split("\n")) {
     // Path last and taken as the remainder: a separator inside it can't shift the fields.
     const [windowId, windowName, command, ours, titled, ...rest] = line.split(FIELD_SEP);
@@ -66,9 +102,9 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[]): readonly S
     if (seen.has(windowId)) continue;
     if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
     seen.add(windowId);
-    sessions.push({ window: windowName, repo: repoFor(panePath, repos), path: panePath });
+    panes.push({ window: windowName, path: panePath });
   }
-  return sessions;
+  return panes;
 }
 
 /**
@@ -117,5 +153,61 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
       `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}#{pane_current_path}`,
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running
-  return parsePanes(result.stdout, repos);
+  const panes = registeredPanes(result.stdout);
+  const [paneCommonDirs, repoCommonDirs] = await Promise.all([
+    resolveLive(
+      paneMemo,
+      panes.map((pane) => pane.path),
+      async (path) => {
+        const { commonDir, definitive } = await enclosingWorktreeCommonDir(path);
+        return { value: commonDir, keep: definitive };
+      },
+    ),
+    resolveLive(
+      repoMemo,
+      repos.map((repo) => repo.path),
+      async (path) => ({
+        value: await resolveCommonDir(path),
+        keep: true,
+      }),
+    ),
+  ]);
+  return attribute(panes, repos, { paneCommonDirs, repoCommonDirs });
+}
+
+/**
+ * The session list is rebuilt on every listing, and neither a path's worktree
+ * nor a repo's common dir changes under it, so each key resolves once; keys no
+ * pane or repo holds any more drop out per listing, keeping each memo to the
+ * live set. The memos hold promises, entered before any await: listings overlap
+ * (the local socket doesn't serialize requests), and each one reads only the
+ * promises it took itself, so another's pruning can't strip a mapping
+ * mid-listing nor a late resolution re-add a pruned key.
+ */
+const paneMemo = new Map<string, Promise<string | null>>();
+const repoMemo = new Map<string, Promise<string | null>>();
+
+/** `keep: false` evicts the answer once settled — a null an I/O error produced shouldn't outlive the pane. */
+async function resolveLive(
+  memo: Map<string, Promise<string | null>>,
+  keys: readonly string[],
+  compute: (key: string) => Promise<{ readonly value: string | null; readonly keep: boolean }>,
+): Promise<ReadonlyMap<string, string>> {
+  const live = new Set(keys);
+  for (const key of memo.keys()) if (!live.has(key)) memo.delete(key);
+  const pending = [...live].map(async (key): Promise<readonly [string, string | null]> => {
+    let entry = memo.get(key);
+    if (entry === undefined) {
+      const created: Promise<string | null> = compute(key).then(({ value, keep }) => {
+        if (!keep && memo.get(key) === created) memo.delete(key);
+        return value;
+      });
+      memo.set(key, created);
+      entry = created;
+    }
+    return [key, await entry];
+  });
+  const resolved = new Map<string, string>();
+  for (const [key, value] of await Promise.all(pending)) if (value !== null) resolved.set(key, value);
+  return resolved;
 }

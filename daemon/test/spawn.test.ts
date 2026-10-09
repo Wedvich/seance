@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
@@ -9,7 +9,7 @@ import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
 import { sessionName, spawnSession } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
+import { addWorktree, makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "./fixtures.ts";
 
 // A deadline, not a duration: the wait returns on the stub's title (0.3s after
 // startup, which macOS can stretch under load), so a wide one adds no latency
@@ -289,6 +289,25 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       expect(await stub.argv()).not.toContain("--permission-mode");
     } finally {
       await killWindow(ambient.window);
+    }
+  });
+
+  // The `~/pengefix/<repo>-<name>` layout: a hand-made worktree beside the clone,
+  // which the scan no longer registers, so no path prefix can attribute it.
+  test("a claude in a sibling worktree is listed under the main clone's repo", async () => {
+    const sibling = join(fixture.root, "myrepo-pr633");
+    await addWorktree(fixture.repoPath, sibling);
+    try {
+      expect((await scanRepos([fixture.root])).map((r) => r.name)).toEqual(["myrepo"]);
+      await tmuxOk(["new-session", "-d", "-s", "sibling", "-n", "Sibling", "-c", sibling, stub.ok]);
+      const found = await waitForSession("Sibling");
+      expect(found?.path).toBe(await realpath(sibling));
+      expect(found?.repo).toBe("myrepo");
+    } finally {
+      await tmux(["kill-session", "-t", "sibling"]);
+      await git(fixture.repoPath, ["worktree", "remove", "--force", sibling]);
+      // The fixture repo is shared by the whole file; leave no branch behind.
+      await git(fixture.repoPath, ["branch", "-D", "wt-myrepo-pr633"]);
     }
   });
 });

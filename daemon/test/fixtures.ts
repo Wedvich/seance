@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 import { chmod, link, mkdir, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
 
@@ -55,6 +55,29 @@ export async function makeGitFixture(base: string): Promise<GitFixture> {
   };
 
   return { root: await realpath(root), repoPath, barePath: await realpath(barePath), advanceOrigin };
+}
+
+/** A local clone with one commit — `git worktree add` needs one to branch from. Returns its canonical path. */
+export async function makeClone(root: string, rel: string): Promise<string> {
+  const repo = join(root, rel);
+  await mkdir(repo, { recursive: true });
+  await run(["git", "init", "-q", "-b", "main"], repo);
+  await run(["git", ...GIT_ID, "commit", "-q", "--allow-empty", "-m", "init"], repo);
+  return realpath(repo);
+}
+
+/** Like `makeClone`, but with its git dir at `gitDir` and only a pointer file at `.git`. */
+export async function makeSeparateGitDirClone(root: string, rel: string, gitDir: string): Promise<string> {
+  const repo = join(root, rel);
+  await mkdir(dirname(gitDir), { recursive: true }); // git won't create the git dir's parent
+  await run(["git", "init", "-q", "-b", "main", "--separate-git-dir", gitDir, repo]);
+  await run(["git", ...GIT_ID, "commit", "-q", "--allow-empty", "-m", "init"], repo);
+  return realpath(repo);
+}
+
+/** A linked worktree of `main` at `path`, on a new branch named after it. */
+export async function addWorktree(main: string, path: string, ...config: readonly string[]): Promise<void> {
+  await run(["git", ...config, "worktree", "add", "-q", "-b", `wt-${basename(path)}`, path], main);
 }
 
 export interface ClaudeStub {

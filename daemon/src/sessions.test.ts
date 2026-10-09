@@ -67,6 +67,29 @@ describe("parsePanes", () => {
     expect(sessions[0]?.path).toContain("worktrees/fix-123");
   });
 
+  test("a pane in a linked worktree goes to the repo sharing its common dir, wherever the worktree sits", () => {
+    const links = {
+      paneCommonDirs: new Map([["/Users/m/repos/api-pr633/src", "/Users/m/repos/api/.git"]]),
+      repoCommonDirs: new Map([
+        ["/Users/m/repos/seance", "/Users/m/repos/seance/.git"],
+        ["/Users/m/repos/api", "/Users/m/repos/api/.git"],
+      ]),
+    };
+    const raw = line("@7", "pr", "claude", "1", "/Users/m/repos/api-pr633/src");
+    expect(parsePanes(raw, repos, links)[0]?.repo).toBe("api");
+    expect(parsePanes(raw, repos)[0]?.repo).toBeNull(); // no prefix reaches a sibling worktree
+  });
+
+  // A worktree of an unregistered repo placed inside a registered one.
+  test("a common dir no registered repo shares falls back to the path prefix", () => {
+    const path = "/Users/m/repos/seance/vendor/lib-wt";
+    const links = {
+      paneCommonDirs: new Map([[path, "/Users/m/elsewhere/lib/.git"]]),
+      repoCommonDirs: new Map([["/Users/m/repos/seance", "/Users/m/repos/seance/.git"]]),
+    };
+    expect(parsePanes(line("@8", "lib", "claude", "1", path), repos, links)[0]?.repo).toBe("seance");
+  });
+
   test("repo is null outside every known repo", () => {
     const raw = line("@4", "scratch", "claude", "1", "/Users/m/elsewhere");
     expect(parsePanes(raw, repos)[0]?.repo).toBeNull();
