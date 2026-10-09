@@ -295,7 +295,8 @@ seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
-seanced sessions              # running claude windows: window, repo, path
+seanced sessions              # running claude windows: id, window, repo, path
+seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced status                # this machine: service, relay, repo count, running vs on-disk sha
 seanced doctor                # preflight config, binaries, roots, relay, service
 seanced help                  # every command
@@ -317,6 +318,10 @@ that reports success on an offline machine may be on an older base than you expe
 instead; that is claude's setting, not séance's.) `--here` skips the worktree and runs
 in the checkout you already have.
 
+`despawn` closes the window only. A worktree session is told to keep its worktree on
+the way out, so the work stays where it was; cleaning up worktrees and branches is
+not its job.
+
 `status` reports the machine you run it on — including the sha the daemon is running
 versus the one on disk, which is how you spot a `git pull` that still needs a
 `restart`. The cross-machine view is the app, or `list_machines` over MCP.
@@ -324,8 +329,8 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 ### From another Claude Code session
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
-query running sessions, and spawn sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`. The server reads the daemon's own
+query running sessions, and spawn and end sessions on other machines through the relay:
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 Naming _this_ machine skips the relay entirely: the request goes straight to the
@@ -336,8 +341,8 @@ backend and audit trail either way — the log says `origin=local` instead of
 If a remote machine shares this one's name, local wins; reach the remote one by its
 `deviceId`.
 
-Treat `spawn_session` like the remote it is: leave it behind Claude Code's per-tool
-approval rather than allowlisting it.
+Treat `spawn_session` and `despawn_session` like the remotes they are: leave them
+behind Claude Code's per-tool approval rather than allowlisting them.
 
 ## Updating
 

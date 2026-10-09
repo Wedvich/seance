@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import {
+  cmdDespawn,
   cmdDoctor,
   cmdInit,
   cmdInstall,
@@ -37,8 +38,9 @@ usage: seanced [command]
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
   scan        discover repos now; caches for the next start unless a daemon is running
-  sessions    list running claude tmux windows
+  sessions    list running claude tmux windows, each with the id despawn takes
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
+  despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
@@ -104,6 +106,9 @@ try {
       break;
     case "spawn":
       await cmdSpawn(rest);
+      break;
+    case "despawn":
+      await cmdDespawn(rest);
       break;
     case "mcp":
       await cmdMcp(rest);

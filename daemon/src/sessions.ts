@@ -84,12 +84,18 @@ export function parsePanes(raw: string, repos: readonly RepoEntry[], links = NO_
 }
 
 interface Pane {
+  readonly id: string;
   readonly window: string;
   readonly path: string;
 }
 
 function attribute(panes: readonly Pane[], repos: readonly RepoEntry[], links: GitLinks): readonly SessionEntry[] {
-  return panes.map((pane) => ({ window: pane.window, repo: repoFor(pane.path, repos, links), path: pane.path }));
+  return panes.map((pane) => ({
+    id: pane.id,
+    window: pane.window,
+    repo: repoFor(pane.path, repos, links),
+    path: pane.path,
+  }));
 }
 
 function registeredPanes(raw: string): readonly Pane[] {
@@ -97,16 +103,16 @@ function registeredPanes(raw: string): readonly Pane[] {
   const panes: Pane[] = [];
   for (const line of raw.split("\n")) {
     // Path last and taken as the remainder: a separator inside it can't shift the fields.
-    const [windowId, windowName, command, ours, titled, ...rest] = line.split(FIELD_SEP);
+    const [paneId, windowId, windowName, command, ours, titled, ...rest] = line.split(FIELD_SEP);
     const panePath = rest.join(FIELD_SEP);
-    if (windowId === undefined || windowName === undefined || command === undefined || panePath === "") {
-      continue;
-    }
+    if (paneId === undefined || windowId === undefined || windowName === undefined || command === undefined) continue;
+    if (panePath === "") continue;
     // Grouped sessions repeat every window; splits repeat the window id too.
     if (seen.has(windowId)) continue;
     if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
     seen.add(windowId);
-    panes.push({ window: windowName, path: panePath });
+    // The registered pane's id, not the window's first: in a split it is claude's that `despawn` must reach.
+    panes.push({ id: paneId, window: windowName, path: panePath });
   }
   return panes;
 }
@@ -197,6 +203,17 @@ export async function listPanes(): Promise<readonly PaneInfo[]> {
   return parsePaneInfo(result.stdout);
 }
 
+/**
+ * One pane by id, null once it is gone — what a caller watching a single pane
+ * polls, rather than listing every pane on the server each time. `paneId` must
+ * already be a validated `%n`: it is a `-t` target.
+ */
+export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
+  const result = await tmux(["display-message", "-p", "-t", paneId, PANE_INFO_FORMAT]);
+  if (result.exitCode !== 0) return null;
+  return parsePaneInfo(result.stdout).find((pane) => pane.paneId === paneId) ?? null;
+}
+
 /** What the list-panes fields settle alone; null when only the screen can tell. */
 function stateWithoutScreen(pane: PaneInfo): PaneState | null {
   if (pane.dead) return "dead";
@@ -282,7 +299,8 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
     "-F",
     // Window names are unvalidated wire text (SpawnRequest.title), so tmux
     // substitutes the separator out of them before the line reaches us.
-    `#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}#{pane_current_command}${FIELD_SEP}` +
+    `#{pane_id}${FIELD_SEP}#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}` +
+      `#{pane_current_command}${FIELD_SEP}` +
       `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}#{pane_current_path}`,
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running

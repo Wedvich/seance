@@ -15,7 +15,7 @@ import { runDir, socketPath } from "./paths.ts";
  * daemon's own websocket.
  *
  * Why this shape rather than handing the key out or letting a second process
- * drive tmux itself: a peer here can ask for two named ops and nothing else. It
+ * drive tmux itself: a peer here can ask for three named ops and nothing else. It
  * cannot address another machine, cannot reach the `"machines"` group address,
  * and every request it makes lands in the audit log tagged `origin=local`. That
  * is DESIGN.md's "op-level proxy … never the raw key", as opposed to a crypto
@@ -28,14 +28,18 @@ import { runDir, socketPath } from "./paths.ts";
  */
 
 /**
- * Ops reachable from the socket. `rescan` is out of scope, and
+ * Ops reachable from the socket. `despawn` is here for the reason `spawn` is:
+ * an MCP session ending a session on its own box must not need the relay, which
+ * on a credential-delivered machine is unreachable by construction — and it is
+ * the same kind of op, an action on this box's own tmux, audited `origin=local`.
+ * `rescan` is out of scope, and
  * `update-available` is broadcast-shaped — it is fire-and-forget, unauthenticated
  * by construction, and drives the self-updater, so it must not be reachable from
  * a surface whose whole premise is that it skips the envelope. Same posture as
  * the broadcast allowlist in `relay-client.ts`, and for the same reason: the
  * refusal is structural, not a policy check someone can forget to apply.
  */
-const LOCAL_OPS: ReadonlySet<string> = new Set<OpName>(["sessions", "spawn"]);
+const LOCAL_OPS: ReadonlySet<string> = new Set<OpName>(["sessions", "spawn", "despawn"]);
 
 /**
  * A spawn payload carries a free-text prompt, so the cap is generous; it exists

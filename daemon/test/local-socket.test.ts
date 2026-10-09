@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Plain, RepoEntry, SessionsResponse, SpawnResponse } from "@seance/shared";
+import type { DespawnResponse, Plain, RepoEntry, SessionsResponse, SpawnResponse } from "@seance/shared";
 import type { AuditSink } from "../src/audit.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
@@ -154,6 +154,29 @@ describe("the local op socket", () => {
     expect(reply.ok).toBe(false);
     if (reply.ok) throw new Error("expected a failure");
     expect(reply.code).toBe("repo_not_found");
+  });
+
+  test("despawn is on the allowlist: a session it spawned is ended over the socket, audited as origin=local", async () => {
+    const spawned = await localRequest<SpawnResponse>(
+      "spawn",
+      { repo: "myrepo", mode: "here", title: "Short Lived" },
+      { path: sockPath },
+    );
+    if (!spawned.ok) throw new Error(spawned.message);
+    const id = spawned.sessions.find((entry) => entry.window === "Short Lived")?.id;
+    if (id === undefined) throw new Error("the spawn ack listed no id for its window");
+    lines.length = 0;
+
+    const reply = await localRequest<DespawnResponse>(
+      "despawn",
+      { id, force: true, client: "mcp" },
+      { path: sockPath },
+    );
+    expect(reply).toMatchObject({ ok: true, window: "Short Lived", outcome: "killed" });
+    if (!reply.ok) throw new Error(reply.message);
+    expect(reply.sessions.some((entry) => entry.id === id)).toBe(false);
+    expect(logged()).toContain(`audit despawn origin=local client="mcp" target="${id}" force=true`);
+    expect(logged()).toContain('audit despawn origin=local ok window="Short Lived" outcome=killed');
   });
 
   test("a request too big for one write still arrives whole", async () => {

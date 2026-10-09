@@ -94,6 +94,10 @@ export interface ClaudeStub {
    * Enter exits 0, as Keep does; Esc cancels back to an idle screen and stays up.
    */
   readonly exitPrompt: string;
+  /** An idle claude that takes keys the way the real one does — see tui-stub.ts. */
+  readonly repl: string;
+  /** A wedged claude: ignores every key and SIGHUP. */
+  readonly deaf: string;
   /** Overwritten on every `ok` launch — rm it before a spawn whose argv the test reads. */
   readonly argvFile: string;
   /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
@@ -104,25 +108,9 @@ export interface ClaudeStub {
 
 const WARM_FLAG = "--stub-warm";
 
-/**
- * The visible screen of Claude Code 2.1.295 at `/exit` in a named worktree
- * session, captured from a real one (2026-10-09) — the dialog replaces the
- * input box, so the hint line is the bottom of the screen. The classifier's unit
- * tests read it and the `exitPrompt` stub draws it, so the two can't drift.
- */
-export const EXIT_PROMPT_SCREEN = [
-  "> fix the flaky test",
-  "⏺ Done — the test now polls instead of sleeping.",
-  "─".repeat(80),
-  "   Exiting worktree session",
-  "",
-  '   This session was named "flaky test (mac)". Keep the worktree to resume it later, or remove it to clean up.',
-  "",
-  "   ❯ 1. Keep worktree    Stays at /Users/m/repos/seance/.claude/worktrees/flaky-test",
-  "     2. Remove worktree  Clean up the worktree directory.",
-  "",
-  "   Enter to confirm · Esc to cancel",
-].join("\n");
+export { EXIT_PROMPT_SCREEN } from "./exit-prompt-screen.ts";
+
+const TUI_STUB = join(import.meta.dir, "tui-stub.ts");
 
 /**
  * Reproduces what tmux sees of a real claude on each host. The native
@@ -199,38 +187,19 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await Bun.write(failing, `${head}sleep 0.3\necho "boom: untrusted workspace"\nexit 2\n`);
   await chmod(failing, 0o755);
 
-  // On the alternate screen, as the real TUI is, with raw keys: Enter answers
-  // the prompt the way the real dialog takes it (exit 0), Esc cancels it back
-  // to an idle claude, which a capture then shows without the prompt.
-  const dialog = join(dir, "dialog.ts");
-  await Bun.write(
-    dialog,
-    [
-      `const PROMPT = ${JSON.stringify(EXIT_PROMPT_SCREEN.split("\n"))};`,
-      'const IDLE = ["> ", "  ? for shortcuts"];',
-      'const draw = (lines: string[]) => process.stdout.write(`\\x1b[H\\x1b[2J${lines.join("\\r\\n")}`);',
-      'process.stdout.write("\\x1b[?1049h\\x1b]2;✳ stub\\x1b\\\\");',
-      "let atPrompt = true;",
-      "draw(PROMPT);",
-      "process.stdin.setRawMode(true);",
-      'process.stdin.on("data", (chunk) => {',
-      "  const keys = chunk.toString();",
-      '  if (atPrompt && keys === "\\r") process.exit(0);',
-      '  if (atPrompt && keys === "\\x1b") {',
-      "    atPrompt = false;",
-      "    draw(IDLE);",
-      "  }",
-      "});",
-      "",
-    ].join("\n"),
-  );
-  const exitPrompt = join(dir, "claude-exit-prompt");
-  await Bun.write(exitPrompt, `${head}exec -a claude "${versioned}" "${dialog}"\n`);
-  await chmod(exitPrompt, 0o755);
+  // Keyed TUIs (tui-stub.ts says what each mode does); argv passes through, so
+  // `--worktree` and `--stub-record` reach the stub.
+  const tui = async (mode: string): Promise<string> => {
+    const wrapper = join(dir, `claude-${mode}`);
+    await Bun.write(wrapper, `${head}exec -a claude "${versioned}" "${TUI_STUB}" ${mode} "$@"\n`);
+    await chmod(wrapper, 0o755);
+    return wrapper;
+  };
+  const [exitPrompt, repl, deaf] = await Promise.all([tui("exit-prompt"), tui("repl"), tui("deaf")]);
 
   await Promise.all([
     run([versioned, "--version"]),
-    ...[ok, stuck, failing, exitPrompt].map((wrapper) => run([wrapper, WARM_FLAG])),
+    ...[ok, stuck, failing, exitPrompt, repl, deaf].map((wrapper) => run([wrapper, WARM_FLAG])),
   ]);
 
   const argv = async (): Promise<readonly string[]> => {
@@ -252,7 +221,7 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
       .text()
       .catch(() => null);
   };
-  return { ok, stuck, failing, exitPrompt, argvFile, argv, machineTag };
+  return { ok, stuck, failing, exitPrompt, repl, deaf, argvFile, argv, machineTag };
 }
 
 /**

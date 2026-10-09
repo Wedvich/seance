@@ -366,7 +366,7 @@ function sessionsFor(state: AppState, deviceId: string): readonly SessionEntry[]
 }
 
 describe("mcp ↔ relay ↔ daemon", () => {
-  test("the MCP tools list, spawn, and see the session — over the real relay", async () => {
+  test("the MCP tools list, spawn, see and despawn the session — over the real relay", async () => {
     const lazy = new LazyRelay({
       create: () =>
         new RelayClient({
@@ -408,8 +408,16 @@ describe("mcp ↔ relay ↔ daemon", () => {
       expect(spawned).toContain("spawned window haunt-the-relay on TestMac");
       expect(await listWindows()).toContain(window);
 
-      const sessions = await text("get_sessions", { machine: "TestMac" });
-      expect(JSON.parse(sessions).map((entry: SessionEntry) => entry.window)).toContain(window);
+      const sessions: readonly SessionEntry[] = JSON.parse(await text("get_sessions", { machine: "TestMac" }));
+      const listed = sessions.find((entry) => entry.window === window);
+      expect(listed?.id).toMatch(/^%\d+$/u);
+
+      // Forced: the stub claude takes no keys, so the graceful path would only
+      // spend its grace before the same kill — that path is daemon/test's.
+      const despawned = await text("despawn_session", { machine: "TestMac", id: listed?.id, force: true });
+      expect(despawned).toBe(`killed ${window} on TestMac`);
+      expect(await listWindows()).not.toContain(window);
+      window = null;
     } finally {
       if (window !== null) await killWindow(window);
       await client.close();

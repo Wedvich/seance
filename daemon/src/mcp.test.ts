@@ -592,3 +592,43 @@ describe("the local short circuit", () => {
     lazy.stop();
   });
 });
+
+describe("despawn_session", () => {
+  test("reaches a remote machine through the relay, tagged as the mcp client, and reports the outcome", async () => {
+    const fake = fakeRelay([machine()], () => ({ ok: true, window: "task", outcome: "exited", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "despawn_session", arguments: { machine: "MacBook Pro", id: "%12" } });
+    expect(result.isError).toBeFalsy();
+    expect(toolText(result)).toBe("exited task on MacBook Pro");
+    expect(fake.requests[0]?.op).toBe("despawn");
+    // Nobody asked for force, so it must not ride along.
+    expect(fake.requests[0]?.payload).toEqual({ id: "%12", client: "mcp" });
+    lazy.stop();
+  });
+
+  test("a self-targeted despawn goes to the daemon on this box and never dials the relay", async () => {
+    const fake = fakeRelay([machine()]);
+    const local = fakeLocal(() => ({ ok: true, window: "task", outcome: "killed", sessions: [] }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+    const result = await client.callTool({
+      name: "despawn_session",
+      arguments: { machine: "MacBook Pro", id: "%12", force: true },
+    });
+    expect(toolText(result)).toBe("killed task on MacBook Pro");
+    expect(local.requests).toEqual([{ op: "despawn", payload: { id: "%12", client: "mcp", force: true } }]);
+    expect(fake.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
+  test("a structured failure surfaces its code, so the model knows to fetch a fresh id", async () => {
+    const local = fakeLocal(() => ({ ok: false, code: "session_not_found", message: "no session in pane %12" }));
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
+    const client = await connectedClient(lazy, local);
+    const result = await client.callTool({ name: "despawn_session", arguments: { machine: "MacBook Pro", id: "%12" } });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain("despawn failed (session_not_found)");
+    lazy.stop();
+  });
+});
