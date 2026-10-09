@@ -89,6 +89,11 @@ export interface ClaudeStub {
   readonly stuck: string;
   /** Wrapper that prints an error and exits nonzero — the claude_died case. */
   readonly failing: string;
+  /**
+   * A titled claude already showing the worktree exit prompt (`EXIT_PROMPT_SCREEN`):
+   * Enter exits 0, as Keep does; Esc cancels back to an idle screen and stays up.
+   */
+  readonly exitPrompt: string;
   /** Overwritten on every `ok` launch — rm it before a spawn whose argv the test reads. */
   readonly argvFile: string;
   /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
@@ -98,6 +103,25 @@ export interface ClaudeStub {
 }
 
 const WARM_FLAG = "--stub-warm";
+
+/**
+ * The visible screen of Claude Code 2.1.295 at `/exit` in a named worktree
+ * session — the wording is the binary's, the layout the TUI's. The classifier's
+ * unit tests read it and the `exitPrompt` stub draws it, so the two can't drift.
+ */
+export const EXIT_PROMPT_SCREEN = [
+  "> fix the flaky test",
+  "⏺ Done — the test now polls instead of sleeping.",
+  "",
+  " Exiting worktree session",
+  "",
+  ' This session was named "flaky test (mac)". Keep the worktree to resume it later, or remove it to clean up.',
+  "",
+  " ❯ 1. Keep worktree",
+  "   2. Remove worktree",
+  "",
+  " Enter to confirm · Esc to cancel",
+].join("\n");
 
 /**
  * Reproduces what tmux sees of a real claude on each host. The native
@@ -174,9 +198,38 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   await Bun.write(failing, `${head}sleep 0.3\necho "boom: untrusted workspace"\nexit 2\n`);
   await chmod(failing, 0o755);
 
+  // On the alternate screen, as the real TUI is, with raw keys: Enter answers
+  // the prompt the way the real dialog takes it (exit 0), Esc cancels it back
+  // to an idle claude, which a capture then shows without the prompt.
+  const dialog = join(dir, "dialog.ts");
+  await Bun.write(
+    dialog,
+    [
+      `const PROMPT = ${JSON.stringify(EXIT_PROMPT_SCREEN.split("\n"))};`,
+      'const IDLE = ["> ", "  ? for shortcuts"];',
+      'const draw = (lines: string[]) => process.stdout.write(`\\x1b[H\\x1b[2J${lines.join("\\r\\n")}`);',
+      'process.stdout.write("\\x1b[?1049h\\x1b]2;✳ stub\\x1b\\\\");',
+      "let atPrompt = true;",
+      "draw(PROMPT);",
+      "process.stdin.setRawMode(true);",
+      'process.stdin.on("data", (chunk) => {',
+      "  const keys = chunk.toString();",
+      '  if (atPrompt && keys === "\\r") process.exit(0);',
+      '  if (atPrompt && keys === "\\x1b") {',
+      "    atPrompt = false;",
+      "    draw(IDLE);",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+  );
+  const exitPrompt = join(dir, "claude-exit-prompt");
+  await Bun.write(exitPrompt, `${head}exec -a claude "${versioned}" "${dialog}"\n`);
+  await chmod(exitPrompt, 0o755);
+
   await Promise.all([
     run([versioned, "--version"]),
-    ...[ok, stuck, failing].map((wrapper) => run([wrapper, WARM_FLAG])),
+    ...[ok, stuck, failing, exitPrompt].map((wrapper) => run([wrapper, WARM_FLAG])),
   ]);
 
   const argv = async (): Promise<readonly string[]> => {
@@ -198,7 +251,7 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
       .text()
       .catch(() => null);
   };
-  return { ok, stuck, failing, argvFile, argv, machineTag };
+  return { ok, stuck, failing, exitPrompt, argvFile, argv, machineTag };
 }
 
 /**

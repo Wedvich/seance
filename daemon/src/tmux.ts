@@ -65,3 +65,14 @@ export async function resolveTargetSession(group: string): Promise<string> {
   await tmuxOk(["new-session", "-d", "-s", group, "-c", homedir()]);
   return group;
 }
+
+/**
+ * What a pane is showing, or null when tmux can't say (the pane is gone).
+ * `history` pulls the scrollback in too; a live claude is on the alternate
+ * screen, which has none, so the screen alone is what it is showing now.
+ */
+export async function capturePane(target: string, opts: { readonly history: boolean }): Promise<string | null> {
+  const range = opts.history ? ["-S", "-", "-E", "-"] : [];
+  const result = await tmux(["capture-pane", "-p", ...range, "-t", target]);
+  return result.exitCode === 0 ? result.stdout : null;
+}

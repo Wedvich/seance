@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { RepoEntry } from "@seance/shared";
-import { parsePanes, parseStuckWindows } from "./sessions.ts";
+import { EXIT_PROMPT_SCREEN } from "../test/fixtures.ts";
+import { parsePaneInfo, parsePanes, screenState, stuckWindows } from "./sessions.ts";
 import { slugify } from "./spawn.ts";
 
 const repos: readonly RepoEntry[] = [
@@ -111,32 +112,152 @@ describe("parsePanes", () => {
   });
 });
 
-function stuckLine(id: string, ours: string, dead: string, titled: string, name: string): string {
-  return `${id}|${ours}|${dead}|${titled}|${name}`;
+interface InfoLine {
+  readonly pane: string;
+  readonly window?: string;
+  readonly cmd?: string;
+  readonly ours?: string;
+  readonly dead?: string;
+  readonly deadTime?: string;
+  readonly titled?: string;
+  readonly name?: string;
+  readonly path?: string;
 }
 
-describe("parseStuckWindows", () => {
+/** One `list-panes` line in `PANE_INFO_FORMAT` order. */
+function infoLine(fields: InfoLine): string {
+  return [
+    fields.pane,
+    fields.window ?? "@1",
+    fields.cmd ?? "claude",
+    fields.ours ?? "1",
+    fields.dead ?? "0",
+    fields.deadTime ?? "",
+    fields.titled ?? "1",
+    fields.name ?? "task",
+    fields.path ?? "/Users/m/repos/seance",
+  ].join("|");
+}
+
+describe("parsePaneInfo", () => {
+  test("reads every field, with the death time in ms only for a dead pane", () => {
+    const raw = [
+      infoLine({ pane: "%1", window: "@1", name: "alive", deadTime: "1760000000" }),
+      infoLine({ pane: "%2", window: "@2", name: "died", dead: "1", deadTime: "1760000000", titled: "0" }),
+    ].join("\n");
+    expect(parsePaneInfo(raw)).toEqual([
+      {
+        paneId: "%1",
+        windowId: "@1",
+        windowName: "alive",
+        ours: true,
+        dead: false,
+        deadAt: null,
+        titled: true,
+        command: "claude",
+        path: "/Users/m/repos/seance",
+      },
+      {
+        paneId: "%2",
+        windowId: "@2",
+        windowName: "died",
+        ours: true,
+        dead: true,
+        deadAt: 1_760_000_000_000,
+        titled: false,
+        command: "claude",
+        path: "/Users/m/repos/seance",
+      },
+    ]);
+  });
+
+  test("a dead pane on a tmux without pane_dead_time has no death time rather than a bogus one", () => {
+    expect(parsePaneInfo(infoLine({ pane: "%1", dead: "1", deadTime: "" }))[0]?.deadAt).toBeNull();
+  });
+
+  test("dedups grouped-session repeats by pane id but keeps a split's panes apart", () => {
+    const raw = [
+      infoLine({ pane: "%1", window: "@1" }),
+      infoLine({ pane: "%1", window: "@1" }),
+      infoLine({ pane: "%2", window: "@1" }),
+    ].join("\n");
+    expect(parsePaneInfo(raw).map((pane) => pane.paneId)).toEqual(["%1", "%2"]);
+  });
+
+  test("a separator inside the path keeps the line parseable", () => {
+    expect(parsePaneInfo(infoLine({ pane: "%1", path: "/tmp/a|b" }))[0]?.path).toBe("/tmp/a|b");
+  });
+
+  test("tolerates malformed lines and a trailing newline", () => {
+    expect(parsePaneInfo("garbage\n%1|@1\n\n")).toEqual([]);
+  });
+});
+
+describe("stuckWindows", () => {
   test("flags a séance window that is alive but never titled its pane", () => {
-    const raw = [stuckLine("@1", "1", "0", "0", "trust-me"), stuckLine("@2", "1", "0", "1", "running")].join("\n");
-    expect(parseStuckWindows(raw)).toEqual(["trust-me"]);
+    const raw = [
+      infoLine({ pane: "%1", window: "@1", titled: "0", name: "trust-me" }),
+      infoLine({ pane: "%2", window: "@2", name: "running" }),
+    ].join("\n");
+    expect(stuckWindows(parsePaneInfo(raw))).toEqual(["trust-me"]);
   });
 
   test("ignores windows séance did not start — a hand-run shell is not stuck", () => {
-    expect(parseStuckWindows(stuckLine("@3", "0", "0", "0", "martin"))).toEqual([]);
+    expect(stuckWindows(parsePaneInfo(infoLine({ pane: "%3", ours: "0", cmd: "zsh", titled: "0" })))).toEqual([]);
   });
 
   test("ignores a dead pane — that is the spawn-time claude_died path, already reported", () => {
-    expect(parseStuckWindows(stuckLine("@4", "1", "1", "0", "died"))).toEqual([]);
+    expect(stuckWindows(parsePaneInfo(infoLine({ pane: "%4", dead: "1", titled: "0" })))).toEqual([]);
   });
 
   test("a tmux too old for #{m:} matches nothing rather than flagging everything", () => {
-    const literal = stuckLine("@5", "#{m:*--remote-control*,#{pane_start_command}}", "0", "0", "old-tmux");
-    expect(parseStuckWindows(literal)).toEqual([]);
+    const literal = infoLine({ pane: "%5", ours: "#{m:*--remote-control*,#{pane_start_command}}", titled: "0" });
+    expect(stuckWindows(parsePaneInfo(literal))).toEqual([]);
   });
 
-  test("dedups split panes by window id and tolerates malformed lines", () => {
-    const raw = [stuckLine("@6", "1", "0", "0", "one"), stuckLine("@6", "1", "0", "0", "one"), "garbage", ""];
-    expect(parseStuckWindows(raw.join("\n"))).toEqual(["one"]);
+  test("dedups split panes by window id", () => {
+    const raw = [
+      infoLine({ pane: "%6", window: "@6", titled: "0", name: "one" }),
+      infoLine({ pane: "%7", window: "@6", titled: "0", name: "one" }),
+    ].join("\n");
+    expect(stuckWindows(parsePaneInfo(raw))).toEqual(["one"]);
+  });
+});
+
+const BACKGROUND_PROMPT = [
+  " Background work is running",
+  " The following will stop when you exit:",
+  "   · bun run dev",
+  "",
+  " ❯ 1. Exit and stop tasks",
+  "   2. Move to background and exit",
+].join("\n");
+
+describe("screenState", () => {
+  test("recognises the worktree exit prompt", () => {
+    expect(screenState(EXIT_PROMPT_SCREEN)).toBe("exit-prompt");
+  });
+
+  test("recognises the background-work prompt", () => {
+    expect(screenState(BACKGROUND_PROMPT)).toBe("background-prompt");
+  });
+
+  test("a transcript that quotes the prompt is not the prompt — the options have to sit at the bottom", () => {
+    const quoted = [
+      EXIT_PROMPT_SCREEN,
+      ...Array.from({ length: 10 }, (_, i) => `⏺ discussing the prompt, line ${i}`),
+      "> ",
+    ];
+    expect(screenState(quoted.join("\n"))).toBeNull();
+  });
+
+  test("the heading alone, or the options alone, is not the prompt", () => {
+    expect(screenState(" Exiting worktree session\n\n> ")).toBeNull();
+    expect(screenState(" ❯ 1. Keep worktree\n   2. Remove worktree")).toBeNull();
+  });
+
+  test("an idle claude's screen reads as neither", () => {
+    expect(screenState("⏺ Done.\n\n> \n  ? for shortcuts")).toBeNull();
   });
 });
 

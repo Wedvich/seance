@@ -5,7 +5,16 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
 import { isRegistered } from "./sessions.ts";
-import { FIELD_SEP, PANE_TITLED, resolveTargetSession, sanitizeWindowName, tmux, tmuxOk, TmuxError } from "./tmux.ts";
+import {
+  capturePane,
+  FIELD_SEP,
+  PANE_TITLED,
+  resolveTargetSession,
+  sanitizeWindowName,
+  tmux,
+  tmuxOk,
+  TmuxError,
+} from "./tmux.ts";
 import { ensureRepoTrusted } from "./trust.ts";
 
 function slugCore(src: string): string {
@@ -175,10 +184,9 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
  * screen, which has no scrollback, so the stuck path asks for the screen alone.
  */
 export async function captureWindow(windowId: string, opts: { readonly history: boolean }): Promise<string | null> {
-  const range = opts.history ? ["-S", "-", "-E", "-"] : [];
-  const result = await tmux(["capture-pane", "-p", ...range, "-t", windowId]);
-  if (result.exitCode !== 0) return null;
-  const text = result.stdout
+  const screen = await capturePane(windowId, opts);
+  if (screen === null) return null;
+  const text = screen
     .split("\n")
     .filter((line) => line.trim() !== "")
     .slice(-20)
