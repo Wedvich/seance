@@ -38,6 +38,18 @@ export function slugify(src: string): string {
  * through to slugify's "session" fallback and stamp a phantom `(session)`
  * host on every spawn.
  */
+/**
+ * Puts the tag in the tmux server's global environment, so a `claude` run by
+ * hand in any later window carries SEANCE_MACHINE_TAG just as a spawn does —
+ * the tmux-rename mod reads nothing else. Creates the session group when no
+ * server is up: the daemon starts at login, before any terminal, and a tag set
+ * on no server would be lost. Empty when untagged, which overwrites a stale one.
+ */
+export async function publishMachineTag(group: string, tag?: string): Promise<void> {
+  await resolveTargetSession(group);
+  await tmuxOk(["set-environment", "-g", "SEANCE_MACHINE_TAG", machineTagSlug(tag)]);
+}
+
 export function sessionName(slug: string, tag?: string): string {
   const suffix = machineTagSlug(tag);
   return suffix === "" ? slug : `${slug} (${suffix})`;
@@ -250,12 +262,12 @@ export async function spawnSession(
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
 
   // For the tmux-rename mod (claude-mods/), which keeps exactly this suffix on a
-  // `/rename`'s session name and off its window. An env var rather than the mod reading
-  // config.json: it is the tag this session was *named* with, even if config
-  // changes under it. `-e` is argv, so the tag never reaches the shell string.
-  // Always passed, empty when untagged: omitted, the window would inherit
-  // whatever the tmux server's own environment holds — a server started from
-  // inside a séance session carries that session's tag.
+  // `/rename`'s session name and off its window. Per window as well as
+  // `publishMachineTag`'s global one, so a spawn never depends on that having
+  // succeeded. `-e` is argv, so the tag never reaches the shell string. Always
+  // passed, empty when untagged: omitted, the window would inherit whatever the
+  // tmux server's environment holds — a server started from inside a séance
+  // session carries that session's tag.
   const tagEnv = ["-e", `SEANCE_MACHINE_TAG=${machineTagSlug(opts.machineTag)}`];
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;

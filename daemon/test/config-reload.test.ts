@@ -12,6 +12,7 @@ import {
   type GitFixture,
 } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
+import { tmux } from "../src/tmux.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 const TOKEN = "reload-bearer";
@@ -28,11 +29,15 @@ let relay: TestRelay | null = null;
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-reload-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
+  // every daemon start publishes the machine tag to tmux; keep it off the real server
+  process.env["SEANCE_TMUX_SOCKET"] = `seance-reload-test-${process.pid}`;
   fixture = await makeGitFixture(base);
   appKey = await importPsk(PSK);
 });
 
 afterAll(async () => {
+  await tmux(["kill-server"]);
+  delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_STATE_DIR"];
   await rm(base, { recursive: true, force: true });
 });
@@ -45,7 +50,7 @@ afterEach(() => {
   relay = null;
 });
 
-async function writeConfig(path: string, name: string, relayUrl: string): Promise<void> {
+async function writeConfig(path: string, name: string, relayUrl: string, machineTag?: string): Promise<void> {
   const config = {
     name,
     relayUrl,
@@ -53,6 +58,7 @@ async function writeConfig(path: string, name: string, relayUrl: string): Promis
     psk: PSK,
     repoRoots: [fixture.root],
     tmuxSession: "main",
+    ...(machineTag !== undefined ? { machineTag } : {}),
   };
   await Bun.write(path, `${JSON.stringify(config, null, 2)}\n`);
 }
@@ -112,6 +118,11 @@ async function reload(): Promise<void> {
   await supervisor!.current();
 }
 
+/** What a hand-run `claude` in a new tmux window inherits, for the tmux-rename mod. */
+async function tagInTmux(): Promise<string> {
+  return (await tmux(["show-environment", "-g", "SEANCE_MACHINE_TAG"])).stdout.trim();
+}
+
 /** One config file per test: the watcher is per-directory, so shared dirs cross-talk. */
 async function configFile(): Promise<string> {
   return join(await mkdtemp(join(base, "cfg-")), "config.json");
@@ -135,6 +146,19 @@ describe("config hot reload", () => {
     const info = await registerAs(relay, "AfterEdit");
     expect(info.repos.some((r) => r.name === "myrepo")).toBe(true);
     expect(process.pid).toBe(pid);
+  });
+
+  test("the machine tag reaches tmux's global environment, and follows an edit", async () => {
+    relay = startTestRelay(TOKEN);
+    const path = await configFile();
+    await writeConfig(path, "Tagged", relay.url, "WSL Box");
+
+    await startSupervised(path);
+    expect(await tagInTmux()).toBe("SEANCE_MACHINE_TAG=wsl-box");
+
+    await writeConfig(path, "Tagged", relay.url);
+    await reload();
+    expect(await tagInTmux()).toBe("SEANCE_MACHINE_TAG=");
   });
 
   test("a config replaced by rename is still watched on the next save", async () => {

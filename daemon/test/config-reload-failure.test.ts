@@ -8,6 +8,7 @@ import { startDaemon, type DaemonHandle, type RunOpts } from "../src/run.ts";
 import { startSupervisor, type SuperviseOpts, type SupervisorHandle } from "../src/supervise.ts";
 import { makeConfigTrigger, makeGitFixture, pollUntil, type ConfigTrigger, type GitFixture } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
+import { tmux } from "../src/tmux.ts";
 
 /**
  * What the supervisor does when a *swap* fails, which is separate from the
@@ -31,11 +32,15 @@ let relay: TestRelay | null = null;
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-reload-fail-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
+  // every daemon start publishes the machine tag to tmux; keep it off the real server
+  process.env["SEANCE_TMUX_SOCKET"] = `seance-reload-fail-test-${process.pid}`;
   fixture = await makeGitFixture(base);
   appKey = await importPsk(PSK);
 });
 
 afterAll(async () => {
+  await tmux(["kill-server"]);
+  delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_STATE_DIR"];
   await rm(base, { recursive: true, force: true });
 });

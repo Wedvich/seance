@@ -2,7 +2,7 @@ import type { SessionBackend } from "./backend.ts";
 import type { Check } from "./check.ts";
 import type { Config } from "./config.ts";
 import { listClaudeSessions, listStuckWindows } from "./sessions.ts";
-import { captureWindow, spawnSession } from "./spawn.ts";
+import { captureWindow, publishMachineTag, spawnSession } from "./spawn.ts";
 import { tmux } from "./tmux.ts";
 
 /**
@@ -19,6 +19,7 @@ export function createBackend(config: Config, opts: { readonly waitMs?: number }
     sessions: (repos) => listClaudeSessions(repos),
     doctor: tmuxChecks,
     capture: (handle) => captureWindow(handle, { history: false }),
+    start: () => publishMachineTag(config.tmuxSession, config.machineTag),
   };
 }
 

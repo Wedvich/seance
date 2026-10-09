@@ -1718,19 +1718,27 @@ tmux window to the untagged name.
   window `abc`. The mod rewrites the command's args before Claude Code's own
   `/rename` runs. Changed 2026-10-09: the first version only stripped the tag
   for the window, so a `/rename` without it left the session untagged.
-- **The tag reaches the session as `SEANCE_MACHINE_TAG`**, set with `tmux
-new-window -e` (argv, never the shell string; the value is the slugified tag,
-  the same `machineTagSlug` the session name uses). The mod counts only an
-  exact ` (<tag>)` suffix as the tag: one already present isn't doubled or kept
-  in the window, while any other trailing parenthetical (`fix login (urgent)`)
-  is the user's and stays in both. Empty or unset — an untagged machine, or a session
-  séance didn't spawn — the name passes through whole. It is passed on every
-  spawn, empty when untagged: omitted, the window would inherit whatever the
-  tmux server's own environment holds, and a server booted from inside a séance
-  session carries that session's tag. Rejected: the mod reading `config.json` (restates the config
-  path in a second runtime, and answers with the _current_ tag where the
-  session was named with the one at spawn time); stripping any trailing
-  parenthetical as the tag (the first draft — eats user text).
+- **The tag reaches the session as `SEANCE_MACHINE_TAG`**, from two places
+  (the value is the slugified tag, the same `machineTagSlug` the session name
+  uses, empty when untagged). Each daemon start — boot and every config reload —
+  sets it in the tmux server's global environment (`set-environment -g`), so a
+  `claude` run by hand in any later window carries it too: the mod has to work
+  in every session, not only spawned ones. The daemon creates the session group
+  first when no server is up, since it starts at login before any terminal and a
+  value set on no server is lost. A shell already open when the tag changes
+  keeps the old one until a new window. Each spawn also passes it with `tmux
+new-window -e` (argv, never the shell string), so a spawn never depends on the
+  global one having been set. The mod counts only an exact ` (<tag>)` suffix as
+  the tag: one already present isn't doubled or kept in the window, while any
+  other trailing parenthetical (`fix login (urgent)`) is the user's and stays in
+  both. Empty or unset — an untagged machine, or a session outside séance's
+  tmux server — the name passes through whole. Rejected: the mod reading
+  `config.json` (restates the config path and slug rules in a second runtime);
+  a `seanced tag` command the mod runs (a new command and a process per rename
+  for what one tmux call at startup covers — though, unlike it, it would reach
+  a `claude` outside tmux); exporting the tag from shell dotfiles (a second copy
+  that drifts from config); stripping any trailing parenthetical as the tag (the
+  first draft — eats user text).
 - **Fails open**: a tmux error (nonzero exit, or tmux failing to start) costs a
   toast, never the rename; a `.catch` on the hook covers anything else. The name
   goes after `--`, so one led by a dash isn't read as tmux flags. A bare `/rename` (Claude picks the name, which the hook can't see)

@@ -244,11 +244,13 @@ artifacts; Raycast keeps listing the extension until you also remove it in
 seanced mod install    # installs this checkout's Claude Code mods (user scope)
 ```
 
-After a `/rename` in a spawned session, the remote-control name keeps this
-machine's ` (machineTag)` suffix — added when you leave it out — and the tmux
-window takes the name without it, so `/rename fix-auth` and
-`/rename fix-auth (thad)` both name the session `fix-auth (thad)` and the window
-`fix-auth`. The mod is read in
+After a `/rename` in any Claude session in tmux — spawned or started by hand —
+the remote-control name keeps this machine's ` (machineTag)` suffix (added when
+you leave it out) and the tmux window takes the name without it, so
+`/rename fix-auth` and `/rename fix-auth (thad)` both name the session
+`fix-auth (thad)` and the window `fix-auth`. The daemon puts the tag in tmux's
+global environment when it starts, so a shell opened before that (or before a
+tag change) needs a new window. The mod is read in
 place from the checkout, so a `git pull` reaches new sessions with nothing re-run
 (running ones on `/reload-plugins`). `seanced mod uninstall` removes it;
 `seanced doctor` reports whether it is installed from this checkout. Like
