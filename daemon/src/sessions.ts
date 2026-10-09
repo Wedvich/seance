@@ -1,6 +1,6 @@
 import type { RepoEntry, SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { FIELD_SEP, PANE_TITLED, tmux } from "./tmux.ts";
+import { capturePane, FIELD_SEP, PANE_TITLED, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
@@ -27,7 +27,11 @@ export function isRegistered(pane: {
   readonly titled: boolean;
   readonly command: string;
 }): boolean {
-  return pane.titled && (pane.ours || CLAUDE_COMMAND.test(pane.command));
+  return pane.titled && runsClaude(pane);
+}
+
+function runsClaude(pane: { readonly ours: boolean; readonly command: string }): boolean {
+  return pane.ours || CLAUDE_COMMAND.test(pane.command);
 }
 
 /** Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort). */
@@ -108,38 +112,167 @@ function registeredPanes(raw: string): readonly Pane[] {
 }
 
 /**
- * Windows séance started that are alive but still untitled — the steady-state
- * form of the spawn-time miss in `spawnSession`. An alive pane whose claude
- * never titled it is one sitting on a dialog nobody local is there to answer.
- *
- * `pane_start_command` identifies our windows without keeping any state. A
- * tmux too old for `m:` renders the format literally, never matches, and the
- * check just reports nothing.
+ * One pane as the classifier sees it. Every pane, not only claude's: what a
+ * pane is doing is the classifier's question, and which panes are worth asking
+ * about is the caller's.
  */
-export function parseStuckWindows(raw: string): readonly string[] {
+export interface PaneInfo {
+  readonly paneId: string;
+  readonly windowId: string;
+  readonly windowName: string;
+  /** Started by séance — the `OURS` start-command match. */
+  readonly ours: boolean;
+  readonly dead: boolean;
+  /** When the pane died, epoch ms; null while alive, or on a tmux without `pane_dead_time`. */
+  readonly deadAt: number | null;
+  readonly titled: boolean;
+  readonly command: string;
+  readonly path: string;
+}
+
+/**
+ * What a pane is doing:
+ * - `dead` — its process exited and the pane stayed (only while remain-on-exit is on).
+ * - `shell` — a pane séance did not start whose foreground is no longer claude:
+ *   claude exited back to the shell that ran it, or never ran there. Never one
+ *   of ours — séance `exec`s claude, so it is the pane's own process.
+ * - `starting` — alive and untitled: claude has not cleared its startup gates,
+ *   which in steady state is a dialog nobody local is there to answer.
+ * - `exit-prompt` — claude is asking whether to keep or remove its worktree on
+ *   the way out. Every named worktree session's `/exit` stops here.
+ * - `background-prompt` — claude is asking whether to stop background work on
+ *   the way out.
+ * - `live` — any other claude, idle or mid-turn: the screen can't tell them
+ *   apart, and the title glyph that could is kept out of the format output.
+ */
+export type PaneState = "dead" | "shell" | "starting" | "exit-prompt" | "background-prompt" | "live";
+
+/**
+ * Path last and taken as the remainder. The window name is unvalidated wire
+ * text and the command a process name, so tmux substitutes the separator out of
+ * both before the line reaches us.
+ */
+const PANE_INFO_FORMAT = [
+  "#{pane_id}",
+  "#{window_id}",
+  `#{s/[${FIELD_SEP}]/-/:pane_current_command}`,
+  OURS,
+  "#{pane_dead}",
+  "#{pane_dead_time}",
+  PANE_TITLED,
+  `#{s/[${FIELD_SEP}]/-/:window_name}`,
+  "#{pane_current_path}",
+].join(FIELD_SEP);
+
+/** Pure parser over `list-panes -a` in `PANE_INFO_FORMAT` — exported for unit tests. */
+export function parsePaneInfo(raw: string): readonly PaneInfo[] {
+  const seen = new Set<string>();
+  const panes: PaneInfo[] = [];
+  for (const line of raw.split("\n")) {
+    const [paneId, windowId, command, ours, dead, deadTime, titled, windowName, ...rest] = line.split(FIELD_SEP);
+    if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
+    if (deadTime === undefined || windowName === undefined || rest.length === 0) continue;
+    // Grouped sessions repeat every pane; a split's panes are distinct.
+    if (seen.has(paneId)) continue;
+    seen.add(paneId);
+    const deadSeconds = Number(deadTime);
+    panes.push({
+      paneId,
+      windowId,
+      windowName,
+      ours: ours === "1",
+      dead: dead === "1",
+      deadAt: dead === "1" && deadSeconds > 0 ? deadSeconds * 1000 : null,
+      titled: titled === "1",
+      command,
+      path: rest.join(FIELD_SEP),
+    });
+  }
+  return panes;
+}
+
+export async function listPanes(): Promise<readonly PaneInfo[]> {
+  const result = await tmux(["list-panes", "-a", "-F", PANE_INFO_FORMAT]);
+  if (result.exitCode !== 0) return []; // no tmux server — no panes
+  return parsePaneInfo(result.stdout);
+}
+
+/** What the list-panes fields settle alone; null when only the screen can tell. */
+function stateWithoutScreen(pane: PaneInfo): PaneState | null {
+  if (pane.dead) return "dead";
+  if (!runsClaude(pane)) return "shell";
+  if (!pane.titled) return "starting";
+  return null;
+}
+
+/**
+ * How far up from the bottom of the screen a dialog's last option may sit. The
+ * dialog replaces claude's input box, so on 2.1.295 only the hint line is under
+ * it (measured), with one line spare for its description wrapping. Claude's
+ * input box (rule, prompt, rule, hint) sits under anything it has printed, so a
+ * transcript that merely quotes the prompt (a session discussing this very
+ * code) ends at least four lines up and can't read as the prompt.
+ */
+const OPTIONS_FROM_BOTTOM = 3;
+
+/**
+ * The two exit dialogs, each recognised by its heading above its own two
+ * options, the last of them at the bottom of the screen. Wording from Claude
+ * Code 2.1.295; a release that rewords them reads as `live`, which is only
+ * ever reported, never acted on. The worktree prompt counts only with the
+ * cursor (`❯`) on Keep, where claude puts it: Enter takes the highlighted
+ * option, so a prompt someone arrowed down to Remove and walked away from must
+ * not read as one Enter can safely answer.
+ */
+export function screenState(screen: string): "exit-prompt" | "background-prompt" | null {
+  const lines = screen.split("\n").filter((line) => line.trim() !== "");
+  const bottom = lines.length - OPTIONS_FROM_BOTTOM;
+  const lastAt = (pattern: RegExp): number => lines.findLastIndex((line) => pattern.test(line));
+  const showing = (heading: RegExp, first: RegExp, second: RegExp): boolean => {
+    const secondAt = lastAt(second);
+    const firstAt = lastAt(first);
+    if (secondAt === -1 || secondAt < bottom || firstAt === -1 || firstAt > secondAt) return false;
+    return lines.slice(0, firstAt).some((line) => heading.test(line));
+  };
+  if (showing(/Exiting worktree session/u, /❯\s*1\.\s+Keep worktree/u, /\b2\.\s+Remove worktree/u)) {
+    return "exit-prompt";
+  }
+  if (showing(/Background work is running/u, /\b1\.\s+Exit and stop tasks/u, /\b2\.\s+Move to background and exit/u)) {
+    return "background-prompt";
+  }
+  return null;
+}
+
+/**
+ * Cheap first: only a titled, live claude costs a `capture-pane`, which is why
+ * this stays off the session list's path. A pane gone by the time it is
+ * captured reads as `live` — reported, never acted on.
+ */
+export async function classifyPane(pane: PaneInfo): Promise<PaneState> {
+  const settled = stateWithoutScreen(pane);
+  if (settled !== null) return settled;
+  const screen = await capturePane(pane.paneId, { history: false });
+  return (screen === null ? null : screenState(screen)) ?? "live";
+}
+
+/**
+ * Windows séance started that are alive but still untitled — the steady-state
+ * form of the spawn-time miss in `spawnSession`. A tmux too old for `m:`
+ * renders `OURS` literally, never matches, and this reports nothing.
+ */
+export function stuckWindows(panes: readonly PaneInfo[]): readonly string[] {
   const seen = new Set<string>();
   const stuck: string[] = [];
-  for (const line of raw.split("\n")) {
-    const [windowId, ours, dead, titled, ...rest] = line.split(FIELD_SEP);
-    const windowName = rest.join(FIELD_SEP);
-    if (windowId === undefined || ours !== "1" || dead !== "0" || titled === undefined) continue;
-    if (titled === "1" || seen.has(windowId)) continue;
-    seen.add(windowId);
-    stuck.push(windowName === "" ? windowId : windowName);
+  for (const pane of panes) {
+    if (!pane.ours || stateWithoutScreen(pane) !== "starting" || seen.has(pane.windowId)) continue;
+    seen.add(pane.windowId);
+    stuck.push(pane.windowName === "" ? pane.windowId : pane.windowName);
   }
   return stuck;
 }
 
 export async function listStuckWindows(): Promise<readonly string[]> {
-  const result = await tmux([
-    "list-panes",
-    "-a",
-    "-F",
-    `#{window_id}${FIELD_SEP}${OURS}${FIELD_SEP}#{pane_dead}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}` +
-      `#{s/[${FIELD_SEP}]/-/:window_name}`,
-  ]);
-  if (result.exitCode !== 0) return [];
-  return parseStuckWindows(result.stdout);
+  return stuckWindows(await listPanes());
 }
 
 export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<readonly SessionEntry[]> {

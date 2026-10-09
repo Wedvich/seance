@@ -1073,6 +1073,41 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   platform-specific parsing for what a format string already answers);
   pre-answering more dialogs — `trust.ts` does that for the one gate whose config
   key is known, and detection is what covers the ones that aren't.
+- **Pane classifier** (added 2026-10-09, `classifyPane` in `sessions.ts`): what a
+  pane is _doing_, for the code that acts on sessions rather than lists them —
+  closing one window (`despawn`) and cleaning up after many (`reap`). Six states:
+  `dead` (`pane_dead`, which exists only while remain-on-exit holds the pane),
+  `shell` (a pane séance did not start whose foreground is no longer
+  claude-named — claude exited back to the shell that ran it; never one of ours,
+  where claude _is_ the pane's process because the spawn line `exec`s it),
+  `starting` (alive, untitled — the stuck window above, which `doctor` now finds
+  through the same predicate), and three that only the screen can tell:
+  `exit-prompt`, `background-prompt` and `live`. The exit prompt is why this
+  exists. `/exit` in a worktree removes the worktree and exits silently only for
+  an _unnamed_ session with nothing to lose; a named one asks "Keep worktree /
+  Remove worktree" and waits, and every séance session is named (`-n`, and
+  `/rename` names one too). Claude stays alive on that dialog, so the window
+  outlives the exit the phone asked for. The title can't tell it from an idle
+  claude, so it is a `capture-pane -p` of the visible screen (the TUI is on the
+  alternate screen; no scrollback). Recognised as heading above both options with
+  the last option within 3 non-blank lines of the bottom: the dialog replaces the
+  input box, leaving only its hint line under the options, plus a line of slack
+  for a wrapped option description. Anchoring there is what stops a transcript
+  that merely _quotes_ the prompt — a session working on this very code — from
+  reading as one, since claude's input box (four lines) always sits under what it
+  printed. Wording and layout checked against a real 2.1.295 (2026-10-09), where
+  Enter on the preselected Keep exits 0 and leaves the worktree; a release that
+  rewords it reads as `live`, which callers only ever report. It counts only
+  with the cursor (`❯`) on Keep: Enter takes whatever is highlighted, and a
+  prompt someone arrowed to Remove and left must never be answered blind by a
+  3am reap. `live` covers idle and mid-turn alike:
+  the title glyph that would separate them is kept out of the format output by
+  `PANE_TITLED`, deliberately. The capture costs one tmux exec per pane, so the
+  classifier is cheap first — the list-panes fields settle `dead`, `shell` and
+  `starting` without one — and stays off the session list's path entirely: the
+  list runs on every phone refresh and needs none of this. On macOS `pane_pid`
+  is `caffeinate`, with claude as its child — whatever kills a pane has to
+  account for that.
 - **Logging**: plain text (`ISO-timestamp level message`) to
   stdout/stderr; the launchd plist (macOS) and the systemd unit's
   `StandardOutput=append:` (WSL) redirect both to
