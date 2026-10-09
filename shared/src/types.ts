@@ -176,7 +176,7 @@ export interface RepoEntry {
 
 export interface SessionEntry {
   readonly window: string;
-  /** Repo name mapped by path prefix; null when outside every known repo. */
+  /** Repo name mapped by path prefix — a linked worktree's through its main clone; null when outside every known repo. */
   readonly repo: string | null;
   readonly path: string;
 }

@@ -1,34 +1,10 @@
-import { access, readdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { git } from "./exec.ts";
+import { inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
 const SCAN_CONCURRENCY = 16;
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** `.git` may be a dir (main clone) or a `gitdir:` pointer file (linked worktree). */
-async function resolveGitDir(repoPath: string): Promise<string | null> {
-  const dotGit = join(repoPath, ".git");
-  try {
-    const info = await stat(dotGit);
-    if (info.isDirectory()) return dotGit;
-    const content = await Bun.file(dotGit).text();
-    const match = content.match(/^gitdir:\s*(.+)\s*$/mu);
-    if (!match?.[1]) return null;
-    const target = match[1].trim();
-    return isAbsolute(target) ? target : resolve(repoPath, target);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Local-only — never touches the network. Loose ref file first (free);
@@ -49,9 +25,9 @@ export async function readDefaultBranch(repoPath: string): Promise<string | null
 }
 
 async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
-  const gitDir = await resolveGitDir(repoPath);
-  if (gitDir === null) return null;
-  const headFile = Bun.file(join(gitDir, "refs", "remotes", "origin", "HEAD"));
+  const commonDir = await resolveCommonDir(repoPath);
+  if (commonDir === null) return null;
+  const headFile = Bun.file(join(commonDir, "refs", "remotes", "origin", "HEAD"));
   if (!(await headFile.exists())) return null;
   const match = (await headFile.text()).match(/^ref: refs\/remotes\/origin\/(.+)$/mu);
   return match?.[1]?.trim() ?? null;
@@ -94,14 +70,20 @@ async function mapLimit<T, R>(items: readonly T[], fn: (item: T) => Promise<R>):
 
 async function discoverRepoPaths(roots: readonly string[]): Promise<readonly string[]> {
   const found = new Set<string>();
+  // Any `.git` stops the walk, but only a main clone registers. A linked
+  // worktree's repo is its main clone's: listed when a root reaches that clone,
+  // never under the worktree's own path — a root that is a worktree included.
+  // A broken or unreadable `.git` registers nothing and still stops the walk, so
+  // what is nested under it can't surface as repos of their own.
   const collect = async (dir: string): Promise<boolean> => {
-    if (!(await exists(join(dir, ".git")))) return false;
-    found.add(await canonical(dir));
+    const { kind } = await inspectCheckout(dir);
+    if (kind === "none") return false;
+    if (kind === "main") found.add(await canonical(dir));
     return true;
   };
 
   // A root that is itself a repo stops the walk there: descending would register
-  // its submodules and linked worktrees as separate repos.
+  // its submodules as separate repos.
   const rootHits = await mapLimit(roots, collect);
   const level1 = (
     await mapLimit(
