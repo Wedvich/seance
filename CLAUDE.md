@@ -6,6 +6,8 @@ Séance spawns remote-controlled Claude Code sessions on dev machines via a blin
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
 (Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
 envelope crypto + the app-role RelayClient), `e2e/` (full-stack test suite, no shipped code).
+`claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
+`seanced mod install` (DESIGN.md, "Claude Code mods").
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:
 
@@ -46,8 +48,10 @@ green:
 - Run the suite with `bun run test` (`scripts/test.ts`), never bare `bun test` — the last bullet
   below is why.
 - Runner is `bun:test`, not Vitest — deliberate (DESIGN.md), don't introduce Vitest idioms.
+  The one exception is `claude-mods/`, whose tests only `claude plugin test` can run.
 - The daemon suites' isolation env vars (`SEANCE_TMUX_SOCKET`, `SEANCE_CLAUDE_BIN`) are set by the
-  tests themselves — useful to know when debugging.
+  tests themselves — useful to know when debugging. `spawn.test.ts` also sets
+  `SEANCE_MACHINE_TAG` before its tmux server boots, to prove an untagged spawn overrides it.
 - A fixed sleep before a _positive_ assertion is a latent flake: it has to outlast the slowest
   machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
   in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is

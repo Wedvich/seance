@@ -28,6 +28,9 @@ let repos: readonly RepoEntry[];
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-spawn-"));
   process.env["SEANCE_TMUX_SOCKET"] = `seance-spawn-test-${process.pid}`;
+  // A tag in the environment the private tmux server boots from — as when the
+  // suite runs inside a séance session — which no window may inherit.
+  process.env["SEANCE_MACHINE_TAG"] = "outer";
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   fixture = await makeGitFixture(base);
   stub = await makeClaudeStub(base);
@@ -39,6 +42,7 @@ afterAll(async () => {
   await tmux(["kill-server"]);
   delete process.env["SEANCE_TMUX_SOCKET"];
   delete process.env["SEANCE_CLAUDE_BIN"];
+  delete process.env["SEANCE_MACHINE_TAG"];
   delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });
 });
@@ -253,6 +257,8 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     try {
       const argv = await stub.argv();
       expect(argv[argv.indexOf("-n") + 1]).toBe("tagged-run (thad)");
+      // What the tmux-rename mod strips off a /rename: the suffix exactly as named.
+      expect(await stub.machineTag()).toBe("thad");
       // The window is local; the machine is never in question there.
       expect(outcome.window).toBe("Tagged Run");
       const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
@@ -269,6 +275,8 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     try {
       const argv = await stub.argv();
       expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("plan");
+      // untagged machine: set empty, so the server's "outer" never leaks through
+      expect(await stub.machineTag()).toBe("");
     } finally {
       await killWindow(planned.window);
     }

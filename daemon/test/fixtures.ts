@@ -68,6 +68,8 @@ export interface ClaudeStub {
   readonly argvFile: string;
   /** Polls for the record (pane startup can lag the spawn), then returns the argv. */
   readonly argv: () => Promise<readonly string[]>;
+  /** SEANCE_MACHINE_TAG as the launch saw it, null when unset. Read alongside `argv`, which it waits on. */
+  readonly machineTag: () => Promise<string | null>;
 }
 
 const WARM_FLAG = "--stub-warm";
@@ -116,15 +118,24 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   // Each wrapper is new, so each pays the first-exec scan above (~0.2s idle,
   // seconds behind a busy queue). The warm-up below pays it here, in setup,
   // rather than inside the first spawn's registration budget; the flag exits
-  // before the argv record is touched.
+  // before the tag or argv record is touched.
   const head = `#!/bin/bash\n[ "$1" = ${WARM_FLAG} ] && exit 0\n`;
 
   const ok = join(dir, "claude");
   const argvFile = `${ok}.argv`;
-  // NUL separators: seed prompts carry newlines, so a line-based record would lie
+  const tagFile = `${ok}.tag`;
+  // NUL separators: seed prompts carry newlines, so a line-based record would lie.
+  // The tag is written first, so a complete argv record implies it landed.
   await Bun.write(
     ok,
-    `${head}printf '%s\\0' "$@" > "${argvFile}"\nexec -a claude "${versioned}" "${sleeper}" titled\n`,
+    head +
+      [
+        `rm -f "${tagFile}"`,
+        `if [ -n "\${SEANCE_MACHINE_TAG+x}" ]; then printf '%s' "$SEANCE_MACHINE_TAG" > "${tagFile}"; fi`,
+        `printf '%s\\0' "$@" > "${argvFile}"`,
+        `exec -a claude "${versioned}" "${sleeper}" titled`,
+        "",
+      ].join("\n"),
   );
   await chmod(ok, 0o755);
 
@@ -156,7 +167,13 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     await pollUntil(written, `claude stub argv at ${argvFile}`);
     return (await Bun.file(argvFile).text()).split("\0").slice(0, -1);
   };
-  return { ok, stuck, failing, argvFile, argv };
+  const machineTag = async (): Promise<string | null> => {
+    await argv();
+    return Bun.file(tagFile)
+      .text()
+      .catch(() => null);
+  };
+  return { ok, stuck, failing, argvFile, argv, machineTag };
 }
 
 /**

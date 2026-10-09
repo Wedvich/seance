@@ -238,6 +238,20 @@ the imported copy. `seanced raycast uninstall` removes the import and the build
 artifacts; Raycast keeps listing the extension until you also remove it in
 **Manage Extensions** (⌘⇧E), which no command can do for you.
 
+### 8. Optional: keep tmux window names in step with `/rename`
+
+```sh
+seanced mod install    # installs this checkout's Claude Code mods (user scope)
+```
+
+After a `/rename` in a spawned session, its tmux window takes the new name, minus
+this machine's ` (machineTag)` suffix, so `/rename fix-auth (thad)` keeps the
+remote-control name tagged and leaves the window as `fix-auth`. The mod is read in
+place from the checkout, so a `git pull` reaches new sessions with nothing re-run
+(running ones on `/reload-plugins`). `seanced mod uninstall` removes it;
+`seanced doctor` reports whether it is installed from this checkout. Like
+`mcp install`, it is per Claude config directory.
+
 ## Usage
 
 ### From the phone

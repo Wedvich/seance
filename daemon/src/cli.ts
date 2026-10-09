@@ -3,6 +3,7 @@ import { homedir, hostname } from "node:os";
 import { DAEMON_PATH, DEFAULT_EFFORT, DEFAULT_MODEL, fromBase64, type SpawnRequest } from "@seance/shared";
 import { auditLogChecks, cliSink, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
+import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { SpawnFailure } from "./backend.ts";
 import {
   bearerTokenWarnings,
@@ -298,9 +299,10 @@ export async function cmdDoctor(): Promise<void> {
   else ok(`git at ${gitBin}`);
   // Independent, and the claude-CLI probe is a 15s-bounded spawn — no reason
   // for the rest to queue behind it. Rendered in the order they are declared.
-  const [cli, mcp, ray] = await Promise.all([cliOnPath(), mcpChecks(), raycastChecks()]);
+  const [cli, mcp, mods, ray] = await Promise.all([cliOnPath(), mcpChecks(), modChecks(), raycastChecks()]);
   render([cli]);
   render(mcp);
+  render(mods);
   render(ray);
 
   if (config !== undefined) {
@@ -632,6 +634,29 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
       ? "registered — Claude Code sessions can now list machines, query sessions, and spawn via the relay"
       : "removed — Claude Code no longer loads the séance MCP server",
   );
+}
+
+export const MOD_USAGE = "usage: seanced mod install | seanced mod uninstall";
+
+/** Same shape as `parseRaycastArgs`. Exported for tests. */
+export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
+  const [sub, ...extra] = argv;
+  if (sub === undefined) throw new Error(`seanced mod needs a subcommand\n${MOD_USAGE}`);
+  if (sub !== "install" && sub !== "uninstall") throw new Error(`unknown mod subcommand "${sub}"\n${MOD_USAGE}`);
+  if (extra.length > 0) throw new Error(`mod ${sub} takes no arguments\n${MOD_USAGE}`);
+  return sub;
+}
+
+/** Like `mcp install`, Claude's own CLI does the writing — see claude-mod.ts. */
+export async function cmdMod(argv: readonly string[]): Promise<void> {
+  if (parseModArgs(argv) === "install") {
+    const market = await installMods();
+    for (const plugin of market.plugins) console.log(`installed ${plugin.name}@${market.name}`);
+    console.log("read in place from this checkout: new sessions pick it up, running ones on /reload-plugins");
+    return;
+  }
+  const { market, removed } = await uninstallMods();
+  console.log(removed ? `removed the ${market.name} marketplace and every mod installed from it` : "nothing installed");
 }
 
 export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast uninstall";

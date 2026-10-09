@@ -1,0 +1,5 @@
+{
+  "name": "seance",
+  "owner": { "name": "Séance" },
+  "plugins": [{ "name": "tmux-rename", "source": "./claude-mods/tmux-rename" }]
+}
