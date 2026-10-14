@@ -1,6 +1,7 @@
 import { APP_ID, importPsk, seal, type Envelope, type MachineInfo, type UpdateAvailable } from "@seance/shared";
 import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
+import { brokerRelay, createBroker } from "./broker.ts";
 import type { SessionBackend } from "./backend.ts";
 import { loadConfig, loadPsk, REAP_DEFAULTS, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
@@ -223,9 +224,17 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     log.warn(`backend start failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Built over the key imported above — never a second lookup — and dials
+  // nothing until a peer first asks it to reach another machine.
+  const broker = createBroker({
+    selfDeviceId: state.deviceId,
+    relay: brokerRelay(config, key),
+    auditSink: daemonSink,
+  });
+
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
-  const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local") });
+  const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local"), broker: broker.handle });
 
   // Cached repos registered instantly above; refresh in the background now,
   // then hourly. Explicit rescans arrive as ops.
@@ -275,6 +284,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       handlerCtx.backend.stop?.();
       if (reapTimer !== null) clearInterval(reapTimer);
       reapAbort.abort();
+      // Its app-role socket and timers go with this handle: a reload builds a
+      // fresh broker, and an orphaned one would hold a relay socket forever.
+      broker.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

@@ -125,9 +125,10 @@ const SETTLE_MS = 1_500;
  * registry on every app connect, so the timer is a bound for the abnormal case,
  * not the expected path. Lives here, not in consumers: the client sees every
  * registry frame — including an empty one, which pushes no state change a
- * subscriber could await.
+ * subscriber could await. Exported for consumers that budget a deadline around
+ * a first connect, as the daemon's fleet broker does.
  */
-const REGISTRY_SETTLE_MS = 1_500;
+export const REGISTRY_SETTLE_MS = 1_500;
 
 const INITIAL_STATE: RelayState = {
   status: "connecting",

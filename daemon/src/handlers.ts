@@ -39,7 +39,7 @@ export interface HandlerContext {
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
 }
 
-function isSpawnRequest(payload: unknown): payload is SpawnRequest {
+export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (typeof payload !== "object" || payload === null) return false;
   const obj = payload as Record<string, unknown>;
   if (typeof obj["repo"] !== "string" || obj["repo"] === "") return false;
@@ -52,7 +52,7 @@ function isSpawnRequest(payload: unknown): payload is SpawnRequest {
 }
 
 /** Shape only: what the id may name is the backend's to decide, and it does. */
-function isDespawnRequest(payload: unknown): payload is DespawnRequest {
+export function isDespawnRequest(payload: unknown): payload is DespawnRequest {
   if (typeof payload !== "object" || payload === null) return false;
   const obj = payload as Record<string, unknown>;
   if (typeof obj["id"] !== "string" || obj["id"] === "") return false;
