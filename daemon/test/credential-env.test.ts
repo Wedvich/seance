@@ -2,10 +2,14 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { toBase64 } from "@seance/shared";
+import { importPsk, toBase64 } from "@seance/shared";
 import { loadPsk, type Config } from "../src/config.ts";
 import { credentialPskPath } from "../src/credential.ts";
 import { exec } from "../src/exec.ts";
+import { RelayClient } from "../src/relay-client.ts";
+import type { DaemonHandle, RunOpts } from "../src/run.ts";
+import { startSupervisor } from "../src/supervise.ts";
+import { makeConfigTrigger } from "./fixtures.ts";
 
 /**
  * The two halves of the credential scrub, together: children must not inherit
@@ -72,6 +76,45 @@ describe("a delivered credential survives the daemon's own spawning", () => {
       expect(result.stdout.trim()).toBe("absent");
       expect(result.exitCode).toBe(0);
     } finally {
+      if (original === undefined) delete process.env["CREDENTIALS_DIRECTORY"];
+      else process.env["CREDENTIALS_DIRECTORY"] = original;
+    }
+  });
+
+  test("a config reload hands the daemon a credential-sourced key again, so it keeps brokering", async () => {
+    // run.ts builds the fleet broker only for `source: "credential"`, and the
+    // supervisor re-resolves the key on every reload: the source has to survive
+    // that hop, not just the key.
+    const original = process.env["CREDENTIALS_DIRECTORY"];
+    process.env["CREDENTIALS_DIRECTORY"] = await deliveredCredential();
+    const dir = await mkdtemp(join(tmpdir(), "seance-creds-reload-"));
+    cleanups.push(dir);
+    const path = join(dir, "config.json");
+    await writeFile(path, JSON.stringify({ ...CONFIG, name: "Before" }));
+    const key = await importPsk(PSK);
+    const sources: (string | undefined)[] = [];
+    // Records what each start was handed; never dials, so no relay is needed.
+    const start = async (opts: RunOpts): Promise<DaemonHandle> => {
+      sources.push(opts.resolvedPsk?.source);
+      const client = new RelayClient({
+        url: CONFIG.relayUrl,
+        bearerToken: CONFIG.bearerToken,
+        deviceId: "dev",
+        key,
+        buildInfo: () => Promise.reject(new Error("never registers")),
+        handle: () => Promise.resolve(null),
+      });
+      return { client, stop: (): void => {}, updater: null, localSocket: null };
+    };
+    const trigger = makeConfigTrigger();
+    const supervisor = await startSupervisor({ configPath: path, startDaemon: start, watch: trigger.watch });
+    try {
+      await writeFile(path, JSON.stringify({ ...CONFIG, name: "After" }));
+      trigger.fire();
+      await supervisor.current();
+      expect(sources).toEqual(["credential", "credential"]);
+    } finally {
+      supervisor.stop();
       if (original === undefined) delete process.env["CREDENTIALS_DIRECTORY"];
       else process.env["CREDENTIALS_DIRECTORY"] = original;
     }
