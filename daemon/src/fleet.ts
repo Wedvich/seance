@@ -75,6 +75,34 @@ export function brokerFailureText(err: BrokerError): string {
   return err.message;
 }
 
+const NO_KEY = "no PSK is readable by this process, so other machines are reached through the seanced daemon";
+const LOCAL_STILL_WORKS = "Spawning on this machine needs neither.";
+
+/** What the reader can do about this cause — each broker code fails for a different reason. */
+function unreachableAdvice(cause: unknown): string {
+  if (!(cause instanceof BrokerError)) return `${NO_KEY}, which could not be used (${String(cause)}). ${LOCAL_STILL_WORKS}`;
+  const { code, message } = cause;
+  switch (code) {
+    case "daemon_unreachable":
+      return (
+        `${NO_KEY}, and none is reachable: it is not running, or too old to have the socket (${message}). ` +
+        "Check it with `seanced status` — is seanced running? Where only the seanced service can read the key it must be " +
+        "running; elsewhere fill the psk field in config.json or run `seanced psk-import`. " +
+        LOCAL_STILL_WORKS
+      );
+    case "relay_unavailable":
+      return `${NO_KEY}. The daemon is running but could not reach the relay (${message}). ${LOCAL_STILL_WORKS}`;
+    case "busy":
+      return `${NO_KEY}. The daemon is busy (${message}) — try again in a moment. ${LOCAL_STILL_WORKS}`;
+    case "daemon_timeout":
+      return `${NO_KEY}. The daemon did not answer in time (${message}) — try again. ${LOCAL_STILL_WORKS}`;
+    case "bad_reply":
+      return `${NO_KEY}. The daemon's answer was not readable (${message}) — a mismatched seanced version? ${LOCAL_STILL_WORKS}`;
+    default:
+      return `${NO_KEY}. The daemon refused (${code}: ${message}). ${LOCAL_STILL_WORKS}`;
+  }
+}
+
 /**
  * Neither transport is available: no PSK in this process, and no daemon to
  * broker for it. Distinct from a direct-path failure, which is the relay's and
@@ -82,12 +110,7 @@ export function brokerFailureText(err: BrokerError): string {
  */
 export class FleetUnreachable extends Error {
   constructor(cause: unknown) {
-    const detail = cause instanceof BrokerError ? brokerFailureText(cause) : String(cause);
-    super(
-      `no PSK is readable by this process, and the daemon could not reach other machines for it (${detail}). ` +
-        "Where only the seanced service can read the key, keep seanced running; elsewhere fill the psk field " +
-        "in config.json or run `seanced psk-import`. Spawning on this machine needs neither.",
-    );
+    super(unreachableAdvice(cause));
     this.name = "FleetUnreachable";
   }
 }

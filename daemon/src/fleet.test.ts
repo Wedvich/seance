@@ -133,6 +133,28 @@ describe("selectFleet", () => {
     expect(message).toContain("seanced psk-import");
   });
 
+  test("each broker failure gets advice for its own cause, not the missing-daemon advice", async () => {
+    const cases: [BrokerError["code"], string][] = [
+      ["relay_unavailable", "could not reach the relay"],
+      ["busy", "busy"],
+      ["daemon_timeout", "did not answer in time"],
+      ["bad_reply", "not readable"],
+    ];
+    for (const [code, expected] of cases) {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => countingFleet([]),
+        broker: countingFleet([], new BrokerError(code, "detail")),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one cause at a time, each asserted alone
+      const message = String(await fleet.open().catch((caught: unknown) => caught));
+      expect(message).toContain(expected);
+      expect(message).toContain("detail");
+      expect(message).not.toContain("psk-import");
+      expect(message).not.toContain("is seanced running?");
+    }
+  });
+
   test("concurrent first calls share one key lookup", async () => {
     let lookups = 0;
     const fleet = selectFleet({
