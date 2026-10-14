@@ -183,7 +183,7 @@ bun daemon/src/main.ts install   # macOS: launchd agent (RunAtLoad + KeepAlive)
 
 On systemd ≥ 256 with the PSK in a TPM-sealed blob the daemon needs a root-owned unit
 instead, so PID 1 can unseal the key and hand it over —
-`sudo --preserve-env=PATH seanced install --system`, details in
+`sudo --preserve-env=PATH "$(command -v seanced)" install --system`, details in
 [docs/psk.md](docs/psk.md) and [docs/platform-notes.md](docs/platform-notes.md).
 
 Both platforms have sharp edges worth knowing about — linger on a headless Linux

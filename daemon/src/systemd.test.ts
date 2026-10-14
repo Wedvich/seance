@@ -26,6 +26,7 @@ import {
   userInstanceMissingMessage,
   type UnitOptions,
 } from "./systemd.ts";
+import { SUDO_SEANCED } from "./target-user.ts";
 
 function userUnit(bunPath = "/opt/bun", mainPath = "/repo/daemon/src/main.ts", pathEnv = "/usr/bin"): string {
   return unitContent({ scope: "user", bunPath, mainPath, pathEnv, logFile: logPath() });
@@ -311,7 +312,7 @@ describe("scopeChecks", () => {
       unitText: installed,
       expectedUnit: installed.replace("Restart=always", "Restart=on-failure"),
     });
-    expect(messages(drifted)).toContain("sudo seanced install --system");
+    expect(messages(drifted)).toContain(`${SUDO_SEANCED} install --system`);
   });
 
   test("a sealed blob the unit doesn't deliver is the one silent misconfiguration left", async () => {
@@ -339,7 +340,7 @@ describe("conflictingScopeMessage", () => {
       "`seanced uninstall` as that user",
     );
     expect(conflictingScopeMessage("user", "/etc/systemd/system/seanced.service")).toContain(
-      "sudo seanced uninstall --system",
+      `${SUDO_SEANCED} uninstall --system`,
     );
   });
 });

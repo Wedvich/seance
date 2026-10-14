@@ -20,15 +20,21 @@ a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncryp
 
 ```sh
 seanced uninstall                                   # if a user unit is installed
-sudo --preserve-env=PATH seanced install --system   # or: sudo seanced install --system --path "$PATH"
+sudo --preserve-env=PATH "$(command -v seanced)" install --system
+# or: sudo env PATH="$PATH" seanced install --system
 ```
 
-`--preserve-env=PATH` is not decoration. Everything the unit records is written out
-literally — a `User=` system unit inherits nothing from your shell — and under a plain
-`sudo` the PATH on offer is `secure_path`, which holds no mise shim, no `~/.local/bin`
-and so neither bun nor claude. `install --system` refuses rather than write a unit that
-starts and then fails every spawn, so if your sudo's `secure_path` wins anyway, pass
-`--path "$PATH"`.
+Both halves of that prefix are load-bearing. `"$(command -v seanced)"` is the full path
+because sudo looks the command up in `secure_path` whatever `--preserve-env` says, and
+`secure_path` never holds `~/.local/bin`, so a bare `sudo seanced …` dies with
+`sudo: seanced: command not found`. `--preserve-env=PATH` then controls the PATH the command
+sees: everything the unit records is written out literally — a `User=` system unit
+inherits nothing from your shell — and under a plain `sudo` that PATH is `secure_path`,
+which holds no mise shim, no `~/.local/bin` and so neither bun (the `env bun` shebang
+needs it too) nor claude. `install --system` refuses rather than write a unit that
+starts and then fails every spawn. Where sudoers refuses `--preserve-env`, the
+`sudo env PATH="$PATH" seanced …` form gets the same result: sudo only has to find
+`env`, which `secure_path` holds, and `env` then finds seanced and bun on your PATH.
 
 What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
 rather than from root: home and uid/gid via `getent`, the state dir
@@ -67,7 +73,7 @@ What the user-unit flow still does that this doesn't:
 
 - The unit definition never self-rewrites — `selfRestart` under a system unit exits for
   `Restart=always` to relaunch it, and it cannot regenerate a root-owned file. So the
-  "definitions lag the code" catch-up below is `sudo seanced install --system` here, and
+  "definitions lag the code" catch-up below is `sudo --preserve-env=PATH "$(command -v seanced)" install --system` here, and
   `doctor` reports the drift by comparing the installed unit against what this checkout
   would write. That replaces the manual `ExecStart=` re-check this section used to ask
   for.
@@ -78,7 +84,7 @@ What the user-unit flow still does that this doesn't:
 
 `doctor` and `seanced status` both report the system unit correctly now: which scope owns
 the daemon, whether it is active, the bun path resolved against the unit's _own_ recorded
-PATH, and the key as delivered. `sudo seanced uninstall --system` removes the unit,
+PATH, and the key as delivered. `sudo --preserve-env=PATH "$(command -v seanced)" uninstall --system` removes the unit,
 leaving the sealed blob (a TPM blob can't be recreated from a backup) and the `seanced`
 name on PATH, which belongs to a user whose PATH root can't see.
 
@@ -137,7 +143,7 @@ disk is not rewritten in step: launchd caches job definitions, so the plist chan
 only when you run `seanced install`, and systemd's unit is rewritten by the update's
 own restart — one update cycle behind the code that generates it. A systemd **system**
 unit is never rewritten at all, since the daemon lacks the privilege: `doctor` reports
-the drift, and `sudo seanced install --system` clears it — rewriting the file _and_
+the drift, and `sudo --preserve-env=PATH "$(command -v seanced)" install --system` clears it — rewriting the file _and_
 restarting the unit, since `enable --now` leaves an already-running one on its old
 definition.
 
