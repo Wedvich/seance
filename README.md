@@ -351,7 +351,9 @@ On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool
 still works for every machine, with the same registration; `seanced doctor` says which
-path MCP takes from your shell. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
+path MCP takes from your shell. Only such a daemon brokers: wherever the server can
+read the key itself, the daemon runs no broker, so nothing gains fleet reach without
+the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
 
 Naming _this_ machine skips the relay entirely: the request goes straight to the
 local daemon over a unix socket in the state directory, so spawning where you are

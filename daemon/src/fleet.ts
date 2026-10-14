@@ -68,10 +68,20 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
   };
 }
 
+/**
+ * The daemon reads its key from a store this user can read too, so it does not
+ * broker — the fix is on this side, never "update seanced".
+ */
+const NOT_BROKERING =
+  "this daemon's key is not service-delivered, so it does not broker — `seanced mcp` has to read the PSK itself";
+const WHY_KEYLESS =
+  "run `seanced doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field)";
+
 /** What a broker failure needs added for the reader to act on it. */
 export function brokerFailureText(err: BrokerError): string {
   if (err.code === "daemon_unreachable") return `${err.message} — is seanced running? try \`seanced status\``;
   if (err.code === "relay_unavailable") return `the daemon could not reach the relay: ${err.message}`;
+  if (err.code === "broker_disabled") return `${NOT_BROKERING}; ${WHY_KEYLESS}`;
   return err.message;
 }
 
@@ -93,6 +103,8 @@ function unreachableAdvice(cause: unknown): string {
       );
     case "relay_unavailable":
       return `${NO_KEY}. The daemon is running but could not reach the relay (${message}). ${LOCAL_STILL_WORKS}`;
+    case "broker_disabled":
+      return `${NO_KEY}, but ${NOT_BROKERING}; ${WHY_KEYLESS}. ${LOCAL_STILL_WORKS}`;
     case "busy":
       return `${NO_KEY}. The daemon is busy (${message}) — try again in a moment. ${LOCAL_STILL_WORKS}`;
     case "daemon_timeout":
@@ -142,6 +154,14 @@ export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts 
         {
           level: "warn",
           message: `${prefix}and no daemon is listening; only this machine is reachable until seanced runs`,
+        },
+      ];
+    }
+    if (err.code === "broker_disabled") {
+      return [
+        {
+          level: "warn",
+          message: `${prefix}but ${NOT_BROKERING} (the psk check above says why it cannot); only this machine is reachable until then`,
         },
       ];
     }

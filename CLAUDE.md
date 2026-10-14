@@ -112,10 +112,11 @@ green:
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
   allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
-  tweak (DESIGN.md's "Local op socket" records why `despawn` got in). The same socket carries the
+  tweak (DESIGN.md's "Local op socket" records why `despawn` got in). On a daemon whose key is
+  service-delivered (`source: "credential"`) — and only there — the same socket carries the
   fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, two actions and
-  the same three remote ops — DESIGN.md's "Fleet broker" is the record, and any widening of it is
-  the same kind of change.
+  the same three remote ops — DESIGN.md's "Fleet broker" is the record, and any widening of it,
+  including running it on other daemons, is the same kind of change.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws

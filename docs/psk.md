@@ -173,19 +173,24 @@ runs as — the op socket lives in a 0700 directory under that user's state dir,
 a daemon new enough to broker. `seanced doctor` says which path MCP will take from your
 shell, and probes the broker when that is the one:
 
-| doctor says                                | meaning                                                          |
-| ------------------------------------------ | ---------------------------------------------------------------- |
-| reaches other machines directly            | this shell can read the PSK; the daemon is not involved          |
-| through the daemon's broker — N machine(s) | keyless here, and the broker answered with the registry          |
-| no daemon is listening                     | start it (`sudo systemctl start seanced`); local ops need it too |
-| older than the fleet broker                | update the checkout and `seanced restart`                        |
-| the daemon could not reach the relay       | the daemon's own relay URL/token — same fix as for the daemon    |
+| doctor says                                | meaning                                                              |
+| ------------------------------------------ | -------------------------------------------------------------------- |
+| reaches other machines directly            | this shell can read the PSK; the daemon is not involved              |
+| through the daemon's broker — N machine(s) | keyless here, and the broker answered with the registry              |
+| no daemon is listening                     | start it (`sudo systemctl start seanced`); local ops need it too     |
+| older than the fleet broker                | update the checkout and `seanced restart`                            |
+| this daemon's key is not service-delivered | only a credential box brokers; read the key here (see the psk check) |
+| the daemon could not reach the relay       | the daemon's own relay URL/token — same fix as for the daemon        |
 
 **What this hands out, said plainly.** Any process running as your user can now
 spawn and despawn on _every_ machine through the socket, including on this box where
 it cannot read the key. That is the point — a Claude session here is meant to drive
 the fleet — and it is behind Claude Code's per-tool approval, so do not allowlist
-`spawn_session` or `despawn_session`. It is still less than the key: no way to read
+`spawn_session` or `despawn_session`. It is confined to this kind of box: a daemon
+whose key came from anywhere but the systemd credential (keychain, DPAPI, a
+user-unsealed TPM blob, the config field) runs no broker at all, since there
+`seanced mcp` reads the key itself and a broker would only hand the same reach to
+anything that skips the key store. It is still less than the key: no way to read
 it, seal or open anything, address the `"machines"` group, or send any op but those
 three, and every brokered request is audited as `origin=local-broker` (the target
 records it as `origin=relay client="mcp"`). The TPM protects the key at rest; it never

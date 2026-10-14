@@ -227,7 +227,10 @@ describe("the fleet broker on the local op socket", () => {
     const path = join(base, "nobroker.sock");
     const bare = await listen(path, undefined);
     try {
-      expect(await rejection(brokerMachines({ path }))).toMatchObject({ code: "unsupported" });
+      const err = await rejection(brokerMachines({ path }));
+      expect(err).toMatchObject({ code: "broker_disabled" });
+      // Its own cause, never the old-daemon advice.
+      expect(String(err)).not.toContain("update");
     } finally {
       bare.stop();
     }
@@ -326,6 +329,21 @@ describe("doctor's view of the MCP fleet path", () => {
       });
     } finally {
       old.stop(true);
+    }
+  });
+
+  test("no key here and a daemon that does not broker names why, and not as an old daemon", async () => {
+    const path = join(base, "nobroker-doctor.sock");
+    const bare = await listen(path, undefined);
+    try {
+      const [check] = await mcpFleetChecks(false, { path });
+      expect(check?.level).toBe("warn");
+      const message = check?.message ?? "";
+      expect(message).toContain("not service-delivered");
+      expect(message).toContain("psk check above");
+      expect(message).not.toContain("older than the fleet broker");
+    } finally {
+      bare.stop();
     }
   });
 });

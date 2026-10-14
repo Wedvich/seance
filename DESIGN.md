@@ -454,8 +454,8 @@ over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
 The daemon builds one handler per surface over a single context, so the two differ
 only in the audit origin they are tagged with — see "Local op socket".
 
-The same three ops have a third sender on a credential-delivered box: the daemon's
-fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
+The same three ops have a third sender on a credential-delivered box, and only
+there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
 `seanced mcp` that reached it over the local op socket with a broker frame — not a
 `Plain`, and not on this wire. To the relay and the target it is one more app.
 
@@ -1792,10 +1792,21 @@ second frame kind on the same socket, through which the server asks the daemon f
 the registry or for one of three ops on one other machine, and the daemon makes that
 request itself as an app-role relay client with the key it imported at start.
 
-- **This widens the socket's authority, on purpose.** A same-uid process on a
-  credential-delivered box can now spawn and despawn on every machine, which before
-  it could not — it could not read the key. That is the product decision: a Claude
-  session on that box is meant to drive the fleet, exactly as it already does on
+- **Only on a daemon whose key is service-delivered.** `run.ts` builds the broker
+  when its own `loadPsk` answered `source: "credential"`, and nowhere else: on
+  macOS, WSL and Linux with a config-field or user-unsealed `tpm` key, `seanced mcp`
+  reads the key itself and goes direct, so a broker there would add no reach — only
+  same-uid authority that skips the key store, and an app-role relay surface in the
+  daemon. Those daemons construct no broker and no app-role client at all; a broker
+  frame gets `broker_disabled`, its own code rather than `unsupported`, so the MCP
+  side can say "read the key here" instead of "update seanced" without matching
+  message text. Decided by the source the daemon imported, never by probing: a
+  config field beside a credential wins in `loadPsk`, and then MCP reads it too.
+  Rejected: running it everywhere, as first shipped — it was never needed there.
+- **This widens the socket's authority, on purpose, and only there.** A same-uid
+  process on a credential-delivered box can now spawn and despawn on every machine,
+  which before it could not — it could not read the key. That is the product
+  decision: a Claude session on that box is meant to drive the fleet, exactly as it already does on
   macOS and WSL, where it reads the key outright. The gate is the one MCP always had,
   Claude Code's per-tool approval. What the same-uid process still cannot do is
   hold the key: read it, derive it, seal or open anything, address the `"machines"`
@@ -1857,7 +1868,10 @@ action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the sock
 - **Compatibility.** No relay, PWA, wire-protocol or MCP-registration change. An old
   daemon drops the frame and closes; the server's `machines` probe — side-effect free
   — is where that is read as "update seanced". `doctor` reports which path MCP takes
-  from the shell, probing the broker only when it is the one.
+  from the shell, probing the broker only when it is the one. A self-update restarts
+  the daemon, not a running `seanced mcp`: an MCP older than `broker_disabled` parses
+  the unknown code as an unreadable reply ("a mismatched seanced version?"), which a
+  new Claude session resolves; on a credential-delivered box nothing changes.
 
 Untested in CI: the systemd-credential arrangement itself (TPM, `LoadCredentialEncrypted=`,
 an unprivileged LXC). The e2e suite runs a keyless MCP against two real daemons, but the

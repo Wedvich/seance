@@ -224,17 +224,23 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     log.warn(`backend start failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Only where the key is service-delivered: there `seanced mcp` cannot read it,
+  // and the broker is its only way to other machines. Anywhere else it reads the
+  // key itself, so a broker would only widen what a same-uid process can do
+  // without touching the key store — and keep an app-role surface in the daemon.
   // Built over the key imported above — never a second lookup — and dials
   // nothing until a peer first asks it to reach another machine.
-  const broker = createBroker({
-    selfDeviceId: state.deviceId,
-    relay: brokerRelay(config, key),
-    auditSink: daemonSink,
-  });
+  const broker =
+    resolved.source === "credential"
+      ? createBroker({ selfDeviceId: state.deviceId, relay: brokerRelay(config, key), auditSink: daemonSink })
+      : null;
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
-  const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local"), broker: broker.handle });
+  const local = await startLocalSocket({
+    handle: createHandler(handlerCtx, "local"),
+    ...(broker === null ? {} : { broker: broker.handle }),
+  });
 
   // Cached repos registered instantly above; refresh in the background now,
   // then hourly. Explicit rescans arrive as ops.
@@ -286,7 +292,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       reapAbort.abort();
       // Its app-role socket and timers go with this handle: a reload builds a
       // fresh broker, and an orphaned one would hold a relay socket forever.
-      broker.stop();
+      broker?.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

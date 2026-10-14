@@ -155,6 +155,19 @@ describe("selectFleet", () => {
     }
   });
 
+  test("a daemon that does not broker says why and what to do here, never to update seanced", async () => {
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => countingFleet([]),
+      broker: countingFleet([], new BrokerError("broker_disabled", "detail")),
+    });
+    const message = String(await fleet.open().catch((caught: unknown) => caught));
+    expect(message).toContain("not service-delivered");
+    expect(message).toContain("seanced doctor");
+    expect(message).not.toContain("update");
+    expect(message).not.toContain("is seanced running?");
+  });
+
   test("concurrent first calls share one key lookup", async () => {
     let lookups = 0;
     const fleet = selectFleet({
