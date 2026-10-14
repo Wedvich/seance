@@ -1,28 +1,43 @@
 import { describe, expect, mock, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
-import { sessionName, windowName } from "./register.ts";
+import { attachedPanes, sessionName, windowName } from "./register.ts";
 
 type Recorded = { readonly renames: string[]; readonly tmux: string[][] };
 
+const sessionId = "4a64b25d-e344-4cb6-91ac-9c9455b37567";
+
 /**
  * `serverTag` is the tmux server's global SEANCE_MACHINE_TAG: undefined answers
- * `show-environment` the way tmux does for an unset variable. `tmux` records
- * every other tmux call — the rename-window.
+ * `show-environment` the way tmux does for an unset variable. `ps` and `panes`
+ * answer the attached-pane lookup, the session's id being `sessionId`. `tmux`
+ * records every other tmux call — the rename-window.
  */
 function record(
   on: On,
   env: Readonly<Record<string, string>>,
-  { exitCode = 0, serverTag }: { readonly exitCode?: number; readonly serverTag?: string } = {},
+  {
+    exitCode = 0,
+    serverTag,
+    ps = "",
+    panes = "",
+  }: { readonly exitCode?: number; readonly serverTag?: string; readonly ps?: string; readonly panes?: string } = {},
 ): Recorded {
   const recorded: Recorded = { renames: [], tmux: [] };
   mock.env(on, env);
+  on("session.id", () => ({ value: sessionId }));
   on("command.run", (_$, e) => {
     recorded.renames.push(e.args);
     return { text: "renamed" };
   });
   on("process.run", (_$, e) => {
     const truncated = { isStdoutTruncated: false, isStderrTruncated: false };
+    if (e.argv[0] === "ps") {
+      return { value: { exitCode: 0, stdout: ps, stderr: "", ...truncated } };
+    }
+    if (e.argv[1] === "list-panes") {
+      return { value: { exitCode: 0, stdout: panes, stderr: "", ...truncated } };
+    }
     if (e.argv[1] === "show-environment") {
       return {
         value:
@@ -75,6 +90,44 @@ describe("windowName", () => {
   });
 });
 
+describe("attachedPanes", () => {
+  const id = sessionId;
+  const panes = "%140 51112\n%141 10238\n%141 10238\n%142 14146\n";
+
+  test("walks an attach client up to its pane, once per grouped listing", () => {
+    const ps = ["10238 1 -zsh", "10601 10238 claude attach 4a64b25d", "14146 1 -zsh"].join("\n");
+    expect(attachedPanes(id, ps, panes)).toEqual(["%141"]);
+  });
+
+  test("finds a client nested under a wrapper, by full id or a flagged form", () => {
+    const ps = [
+      "10238 1 -zsh",
+      "500 10238 bash -c something",
+      "501 500 /Users/me/.local/bin/claude attach --verbose 4a64b25d-e344-4cb6-91ac-9c9455b37567",
+      "14146 1 -zsh",
+      "600 14146 claude attach 4a64",
+    ].join("\n");
+    expect(attachedPanes(id, ps, panes)).toEqual(["%141", "%142"]);
+  });
+
+  test("ignores another session's attach, other commands, and clients outside tmux", () => {
+    const ps = [
+      "10238 1 -zsh",
+      "10601 10238 claude attach 2658badc",
+      "10602 10238 claude logs 4a64b25d",
+      "10603 10238 vim claude attach 4a64b25d",
+      "10604 10238 claude attach a debugger to 4a6",
+      "700 1 claude attach 4a64b25d",
+    ].join("\n");
+    expect(attachedPanes(id, ps, panes)).toEqual([]);
+  });
+
+  test("a parent loop ends the walk", () => {
+    const ps = ["800 801 claude attach 4a64b25d", "801 800 -zsh"].join("\n");
+    expect(attachedPanes(id, ps, panes)).toEqual([]);
+  });
+});
+
 describe("/rename", () => {
   test("tags the session and leaves the window bare", async ($, on) => {
     const recorded = record(on, { TMUX_PANE: "%7", SEANCE_MACHINE_TAG: "wsl-box" });
@@ -116,6 +169,27 @@ describe("/rename", () => {
     const recorded = record(on, { TMUX_PANE: "%7" });
     await rename($, "-wip fix");
     expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "-wip fix"]]);
+  });
+
+  test("a background session renames the window it's attached from", async ($, on) => {
+    const recorded = record(
+      on,
+      { SEANCE_MACHINE_TAG: "mac" },
+      { ps: "10238 1 -zsh\n10601 10238 claude attach 4a64b25d\n", panes: "%141 10238\n%141 10238\n" },
+    );
+    await rename($, "bla-bla");
+    expect(recorded.renames).toEqual(["bla-bla (mac)"]);
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%141", "--", "bla-bla"]]);
+  });
+
+  test("its own pane wins over any attach client", async ($, on) => {
+    const recorded = record(
+      on,
+      { TMUX_PANE: "%7" },
+      { ps: "10238 1 -zsh\n10601 10238 claude attach 4a64b25d\n", panes: "%141 10238\n" },
+    );
+    await rename($, "bla-bla");
+    expect(recorded.tmux).toEqual([["tmux", "rename-window", "-t", "%7", "--", "bla-bla"]]);
   });
 
   test("outside tmux the session is still tagged", async ($, on) => {
