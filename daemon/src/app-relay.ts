@@ -1,4 +1,4 @@
-import { appRelayUrl, RelayClient, type RelayState, type RequestOp } from "@seance/shared";
+import { appRelayUrl, RelayClient, REGISTRY_SETTLE_MS, type RelayState, type RequestOp } from "@seance/shared";
 import type { Config } from "./config.ts";
 
 /**
@@ -35,6 +35,9 @@ const IDLE_MS = 5 * 60_000;
 /** Bounds `acquire` when the relay is down; past it the call fails instead of riding the backoff forever. */
 export const CONNECT_TIMEOUT_MS = 10_000;
 
+/** Over the client's own settle window, for the socket hop and scheduling. */
+const SETTLE_MARGIN_MS = 1_000;
+
 export interface LazyRelayOpts {
   /**
    * Async because `seanced mcp` resolves the PSK here rather than at startup:
@@ -44,6 +47,8 @@ export interface LazyRelayOpts {
   readonly create: () => AppRelay | Promise<AppRelay>;
   readonly idleMs?: number;
   readonly connectTimeoutMs?: number;
+  /** Bounds the registry wait after open; tests shorten it. */
+  readonly registrySettleMs?: number;
 }
 
 /**
@@ -69,14 +74,23 @@ export class LazyRelay {
     this.#idleTimer = null;
     this.#inFlight += 1;
     try {
+      // A 4401/4400 after open leaves the client rejected for good: it never
+      // redials by itself, and steady use would keep the idle timer from ever
+      // dropping it, so every call would fail until the daemon restarted.
+      if (this.#client?.getState().status === "rejected") {
+        this.#client.stop();
+        this.#client = null;
+      }
       if (this.#client !== null) return this.#client;
-      this.#connecting ??= this.#connect();
+      // Cleared by the connect itself, so a failure never leaves later callers
+      // joining a dead attempt.
+      this.#connecting ??= this.#connect().finally(() => {
+        this.#connecting = null;
+      });
       return await this.#connecting;
     } catch (err) {
       this.#inFlight -= 1;
       throw err;
-    } finally {
-      this.#connecting = null;
     }
   }
 
@@ -118,21 +132,27 @@ export class LazyRelay {
     return client;
   }
 
-  async #waitOpen(client: AppRelay): Promise<void> {
+  /**
+   * Resolves once `ready` holds. A rejection is terminal and the relay delivers
+   * it by accepting the upgrade and then closing 4401, so a wait that only
+   * watches for its success state would sit through open → rejected forever.
+   */
+  async #until(
+    client: AppRelay,
+    ready: (state: RelayState) => boolean,
+    timeoutMs: number,
+    timeoutText: string,
+  ): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         unsubscribe();
-        reject(new Error(`the relay did not answer within ${this.#opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS}ms`));
-      }, this.#opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
+        reject(new Error(timeoutText));
+      }, timeoutMs);
       // Referenced from the closures above and below, assigned before either can run:
       // the timer is async and check() is only called after subscribe returns.
       const check = (): void => {
         const state = client.getState();
-        if (state.status === "open") {
-          clearTimeout(timer);
-          unsubscribe();
-          resolve();
-        } else if (state.status === "rejected") {
+        if (state.status === "rejected") {
           clearTimeout(timer);
           unsubscribe();
           reject(
@@ -142,6 +162,10 @@ export class LazyRelay {
                 : "the relay rejected the connection as malformed",
             ),
           );
+        } else if (ready(state)) {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
         }
       };
       const unsubscribe = client.subscribe(check);
@@ -149,21 +173,19 @@ export class LazyRelay {
     });
   }
 
+  async #waitOpen(client: AppRelay): Promise<void> {
+    const ms = this.#opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+    await this.#until(client, (state) => state.status === "open", ms, `the relay did not answer within ${ms}ms`);
+  }
+
   /**
-   * Waits for the client to mark this socket's registry authoritative. Bounded
-   * by the client itself: `registrySettled` flips within REGISTRY_SETTLE_MS of
-   * `open` even if no registry frame ever arrives.
+   * Waits for the client to mark this socket's registry authoritative. The
+   * client flips `registrySettled` within REGISTRY_SETTLE_MS of `open`, but a
+   * socket that drops in between never settles, so this carries its own bound.
    */
   async #settleRegistry(client: AppRelay): Promise<void> {
-    await new Promise<void>((resolve) => {
-      const check = (): void => {
-        if (!client.getState().registrySettled) return;
-        unsubscribe();
-        resolve();
-      };
-      const unsubscribe = client.subscribe(check);
-      check();
-    });
+    const ms = this.#opts.registrySettleMs ?? REGISTRY_SETTLE_MS + SETTLE_MARGIN_MS;
+    await this.#until(client, (state) => state.registrySettled, ms, `the relay did not settle its registry within ${ms}ms`);
   }
 }
 

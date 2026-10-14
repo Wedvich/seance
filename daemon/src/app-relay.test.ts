@@ -64,4 +64,63 @@ describe("LazyRelay", () => {
     await expect(pending).rejects.toThrow("stopped");
     expect(fake?.stopped).toBe(true);
   });
+
+  test("open then rejected before the registry settles fails the call, and the next call redials", async () => {
+    const fakes: FakeRelay[] = [];
+    const lazy = new LazyRelay({
+      create: () => {
+        const fake = fakeRelay([machine()], () => ({}), "connecting");
+        fakes.push(fake);
+        return fake;
+      },
+    });
+    const first = lazy.acquire();
+    // The relay accepts the upgrade, then closes 4401: open is seen, settled never comes.
+    await pollUntil(() => fakes[0]?.started === 1, "the first dial");
+    fakes[0]?.setState({ status: "open" });
+    fakes[0]?.setState({ status: "rejected", rejection: "unauthorized" });
+    await expect(first).rejects.toThrow("bearer token");
+    expect(fakes[0]?.stopped).toBe(true);
+
+    const second = lazy.acquire();
+    await pollUntil(() => fakes.length === 2, "a fresh dial after the failure");
+    fakes[1]?.setState({ status: "open", registrySettled: true });
+    expect(await second).toBe(fakes[1]);
+    lazy.stop();
+  });
+
+  test("a registry that never settles fails the call instead of hanging every later one", async () => {
+    const fakes: FakeRelay[] = [];
+    const lazy = new LazyRelay({
+      create: () => {
+        const fake = fakeRelay([machine()], () => ({}), "open");
+        fake.setState({ registrySettled: false });
+        fakes.push(fake);
+        return fake;
+      },
+      registrySettleMs: 30,
+    });
+    await expect(lazy.acquire()).rejects.toThrow("did not settle");
+    await expect(lazy.acquire()).rejects.toThrow("did not settle");
+    expect(fakes).toHaveLength(2);
+  });
+
+  test("a cached client the relay later rejected is dropped and redialled", async () => {
+    const fakes: FakeRelay[] = [];
+    const lazy = new LazyRelay({
+      create: () => {
+        const fake = fakeRelay([machine()]);
+        fakes.push(fake);
+        return fake;
+      },
+    });
+    await lazy.acquire();
+    lazy.release();
+    fakes[0]?.setState({ status: "rejected", rejection: "unauthorized" });
+    const next = await lazy.acquire();
+    expect(fakes).toHaveLength(2);
+    expect(fakes[0]?.stopped).toBe(true);
+    expect(next).toBe(fakes[1]);
+    lazy.stop();
+  });
 });
