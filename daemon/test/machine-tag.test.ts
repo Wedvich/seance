@@ -50,6 +50,16 @@ async function tagInTmux(): Promise<string> {
   return (await tmux(["show-environment", "-g", "SEANCE_MACHINE_TAG"])).stdout.trim();
 }
 
+/**
+ * `kill-server` returns before the server has exited, and a `new-session` that
+ * reaches it meanwhile fails (exit 1, Linux CI), so it is retried until a new
+ * server takes it.
+ */
+async function restartServer(): Promise<void> {
+  await tmux(["kill-server"]);
+  await pollUntil(async () => (await tmux(["new-session", "-d", "-s", "later"])).exitCode === 0, "a new tmux server");
+}
+
 async function serverUp(): Promise<boolean> {
   return (await tmux(["list-sessions"])).exitCode === 0;
 }
@@ -57,8 +67,7 @@ async function serverUp(): Promise<boolean> {
 describe("machine tag on the tmux server", () => {
   test("a server started after the daemon gets the tag", async () => {
     await started();
-    await tmux(["kill-server"]);
-    await tmux(["new-session", "-d", "-s", "later"]);
+    await restartServer();
     await pollUntil(async () => (await tagInTmux()) === "SEANCE_MACHINE_TAG=wsl-box", "the tag republished");
   });
 
@@ -71,8 +80,7 @@ describe("machine tag on the tmux server", () => {
 
   test("a stopped daemon stops republishing", async () => {
     (await started()).stop?.();
-    await tmux(["kill-server"]);
-    expect((await tmux(["new-session", "-d", "-s", "later"])).exitCode).toBe(0);
+    await restartServer();
     // A sentinel, so a failed query (empty stdout) can't pass for "left alone".
     await tmux(["set-environment", "-g", "SEANCE_MACHINE_TAG", "sentinel"]);
     await Bun.sleep(REPUBLISH_MS * 5);
