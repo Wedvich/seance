@@ -23,6 +23,7 @@ import {
   makeClaudeStub,
   makeGitFixture,
   pollUntil,
+  untilDeathStamped,
   usePrivateTmux,
   type ClaudeStub,
   type GitFixture,
@@ -390,10 +391,7 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
     const dead = await openWindow(`tmux wait-for reap-dead; exec ${stub.failing} --remote-control`);
     await tmuxOk(["set-option", "-w", "-t", dead, "remain-on-exit", "on"]);
     await tmuxOk(["wait-for", "-S", "reap-dead"]);
-    await pollUntil(
-      async () => (await listPanes()).some((p) => p.paneId === dead && p.deadAt !== null),
-      "pane to die and tmux to stamp when",
-    );
+    await untilDeathStamped(dead);
     const live = await openWindow(`exec ${stub.ok} --remote-control`);
     await pollUntil(async () => (await listPanes()).some((p) => p.paneId === live && p.titled), "live pane to title");
 

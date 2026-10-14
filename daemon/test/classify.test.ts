@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyPane, listPanes, listStuckWindows, type PaneInfo, type PaneState } from "../src/sessions.ts";
 import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
-import { makeClaudeStub, pollUntil, usePrivateTmux, type ClaudeStub, type PrivateTmux } from "./fixtures.ts";
+import {
+  makeClaudeStub,
+  pollUntil,
+  untilDeathStamped,
+  usePrivateTmux,
+  type ClaudeStub,
+  type PrivateTmux,
+} from "./fixtures.ts";
 
 let base: string;
 let privateTmux: PrivateTmux | undefined;
@@ -55,8 +62,8 @@ describe("classifyPane (real tmux, stub claude)", () => {
     await tmuxOk(["wait-for", "-S", "classify-dead"]);
     await settlesAs(paneId, "dead");
     // tmux marks the pane dead when its pty closes but stamps the time only once
-    // it reaps the process, so the two can be a moment apart (seen on Ubuntu CI).
-    await pollUntil(async () => (await pane(paneId))?.deadAt !== null, "tmux to stamp the death time");
+    // it reaps the process, which on tmux 3.4 can take a nudge (`untilDeathStamped`).
+    await untilDeathStamped(paneId);
     expect((await pane(paneId))?.deadAt).toBeGreaterThan(Date.now() - 60_000);
   });
 
