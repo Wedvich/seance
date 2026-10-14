@@ -1979,6 +1979,21 @@ show-environment -g`), falling back to its own process env only when the
   a `claude` outside tmux); exporting the tag from shell dotfiles (a second copy
   that drifts from config); stripping any trailing parenthetical as the tag (the
   first draft — eats user text).
+- **A background session renames the window it's attached from** (added
+  2026-10-14). A `claude --bg` session runs in a pty host its Claude daemon
+  starts without `TMUX_PANE` — dropped on purpose, since the daemon inherits
+  the pane of whoever first started it — and `claude attach` is only a client,
+  whose env never reaches the session; `session.attach` carries no env or tty
+  either, and doesn't fire for a terminal attach. So with no `TMUX_PANE` the
+  mod looks from outside: `ps -wwAo pid=,ppid=,args=` for each `claude attach
+<prefix of its session id>`, walked up its parents to a pane's shell from
+  `tmux list-panes -a`. The prefix must be an id-shaped word of 4+ characters:
+  ps joins argv with spaces, so a prompt like `claude "attach a debugger"` would
+  otherwise match every id starting with `a`. Every window attached gets the name; none found (not
+  attached, or attached outside tmux) skips the window step as before. Its own
+  `TMUX_PANE`, when set, wins and the lookup never runs. Rejected: a shell
+  wrapper around `claude attach` recording the pane per session id (only
+  works when everyone attaches through it, and goes stale on re-attach).
 - **Fails open**: a tmux error (nonzero exit, or tmux failing to start) costs a
   toast, never the rename; a `.catch` on the hook covers anything else. The name
   goes after `--`, so one led by a dash isn't read as tmux flags. A bare `/rename` (Claude picks the name, which the hook can't see)
