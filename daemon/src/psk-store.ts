@@ -3,6 +3,7 @@ import { credentialPskPath, readCredentialPsk } from "./credential.ts";
 import { dpapiPskPath, dpapiRoundTrip, importDpapiPskValue, readDpapiPsk } from "./dpapi.ts";
 import { importKeychainPsk, importKeychainPskValue, PSK_SERVICE, readKeychainPsk } from "./keychain.ts";
 import { importTpmPskValue, readTpmPsk, tpmAvailable, tpmPskPath, tpmRoundTrip } from "./tpmcreds.ts";
+import { systemUnitDeliversPsk } from "./systemd.ts";
 import { isWsl } from "./wsl.ts";
 
 /**
@@ -138,7 +139,10 @@ async function dpapiChecks(): Promise<readonly Check[]> {
     : [{ level: "warn", message: `${interop} — psk-import and a DPAPI-stored PSK won't work` }];
 }
 
-export function tpmStore(path: string = tpmPskPath()): PskStore {
+export function tpmStore(
+  path: string = tpmPskPath(),
+  unitDelivers: () => Promise<boolean> = () => systemUnitDeliversPsk(),
+): PskStore {
   return {
     source: "tpm",
     nag: "a TPM-sealed blob",
@@ -148,7 +152,15 @@ export function tpmStore(path: string = tpmPskPath()): PskStore {
     available: tpmAvailable,
     read: () => readTpmPsk(path),
     importValue: (psk) => importTpmPskValue(psk, path),
-    doctor: () => tpmChecks(path),
+    doctor: () => tpmChecks(path, unitDelivers),
+  };
+}
+
+/** Not a warning: PID 1 unseals the blob for the unit, so a shell that can't is the designed state. */
+function unsealedByUnit(path: string): Check {
+  return {
+    level: "ok",
+    message: `sealed PSK blob at ${path} is unsealed by systemd for the system unit, not by this shell`,
   };
 }
 
@@ -158,7 +170,7 @@ export function tpmStore(path: string = tpmPskPath()): PskStore {
  * that box is the DPAPI store's, and `readTpmPsk` declines it for the same
  * reason — so exactly one blob store reports per machine.
  */
-async function tpmChecks(path: string): Promise<readonly Check[]> {
+async function tpmChecks(path: string, unitDelivers: () => Promise<boolean>): Promise<readonly Check[]> {
   if (process.platform !== "linux" || isWsl()) return [];
   const stored = await Bun.file(path).exists();
   if (await tpmAvailable()) {
@@ -173,19 +185,21 @@ async function tpmChecks(path: string): Promise<readonly Check[]> {
           ]
         : [{ level: "warn", message: `${probe} — psk-import and a TPM-sealed PSK won't work` }];
     }
-    return (await readTpmPsk(path)) !== null
-      ? [{ level: "ok", message: "TPM-sealed PSK blob decrypts via systemd-creds" }]
-      : [
-          {
-            level: "warn",
-            message:
-              `sealed blob at ${path} does not decrypt here — expected where a system unit delivers it via ` +
-              "LoadCredentialEncrypted= (systemd >= 256 refuses unprivileged unseal, so `psk-import` can't " +
-              "re-seal it either); otherwise the blob came from other hardware — machine-bound by design, " +
-              "re-seal on this machine (docs/psk.md)",
-          },
-        ];
+    if ((await readTpmPsk(path)) !== null)
+      return [{ level: "ok", message: "TPM-sealed PSK blob decrypts via systemd-creds" }];
+    if (await unitDelivers()) return [unsealedByUnit(path)];
+    return [
+      {
+        level: "warn",
+        message:
+          `sealed blob at ${path} does not decrypt here — expected where a system unit delivers it via ` +
+          "LoadCredentialEncrypted= (systemd >= 256 refuses unprivileged unseal, so `psk-import` can't " +
+          "re-seal it either); otherwise the blob came from other hardware — machine-bound by design, " +
+          "re-seal on this machine (docs/psk.md)",
+      },
+    ];
   }
+  if (stored && (await unitDelivers())) return [unsealedByUnit(path)];
   return stored
     ? [
         {
