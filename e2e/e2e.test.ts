@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry, SpawnResponse } from "@seance/shared";
@@ -11,7 +11,8 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
-import { relayFleet } from "../daemon/src/fleet.ts";
+import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
+import { tmux } from "../daemon/src/tmux.ts";
 import { buildMcpServer, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import {
   killWindow,
@@ -488,4 +489,143 @@ describe("mcp ↔ relay ↔ daemon", () => {
       dead.stop();
     }
   });
+});
+
+describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", () => {
+  test("a process with no PSK lists, sees, spawns and despawns on another machine through its own daemon", async () => {
+    // Machine B: a second real daemon, in its own process with its own state
+    // dir — so its own deviceId — on the same relay and tmux server.
+    const remoteState = join(base, "remote-state");
+    const remoteConfigDir = join(base, "remote-config");
+    await mkdir(remoteConfigDir, { recursive: true });
+    await writeFile(
+      join(remoteConfigDir, "config.json"),
+      JSON.stringify({
+        ...stack.config,
+        name: "RemoteBox",
+        tmuxSession: "e2e-remote",
+      }),
+    );
+    const remoteLog = join(base, "remote.log");
+    const remote = Bun.spawn([process.execPath, join(import.meta.dir, "remote-daemon.ts")], {
+      env: { ...process.env, SEANCE_STATE_DIR: remoteState, SEANCE_CONFIG_DIR: remoteConfigDir },
+      stdin: "pipe",
+      stdout: Bun.file(remoteLog),
+      stderr: Bun.file(join(base, "remote.err")),
+    });
+
+    // Machine A is this suite's daemon; the MCP server below is the keyless
+    // process beside it. `key` answering null is the credential-delivered
+    // box: nothing this process can read holds the PSK, so the only way out
+    // is A's op socket. `direct` throws, so a stray direct dial fails loudly.
+    let local: LocalMachine | null = null;
+    await pollUntil(async () => {
+      local ??= await localMachine(stack.config);
+      return local !== null;
+    }, "this machine's state.json");
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => {
+        throw new Error("a keyless process must never dial the relay itself");
+      },
+      broker: brokerFleet(),
+    });
+    const client = new Client(
+      { name: "e2e-keyless", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(fleet, local), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const call = async (
+      name: string,
+      args: Record<string, unknown> = {},
+    ): Promise<{ text: string; error: boolean }> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return { text: content.map((entry) => entry.text).join("\n"), error: result.isError === true };
+    };
+
+    // A's audit lines land on its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    let window: string | null = null;
+    try {
+      type Listed = { name: string; local: boolean; connected: boolean; repos: string[] }[];
+      let listed: Listed = [];
+      await pollUntil(
+        async () => {
+          const { text, error } = await call("list_machines");
+          if (error || !text.startsWith("[")) return false;
+          listed = JSON.parse(text) as Listed;
+          return listed.some(
+            (entry) => entry.name === "RemoteBox" && entry.connected && entry.repos.includes("myrepo"),
+          );
+        },
+        "the remote machine in the brokered registry",
+        20_000,
+      );
+      // The whole fleet, not just this box — A as `local`, B beside it.
+      expect(listed.find((entry) => entry.name === "TestMac")?.local).toBe(true);
+      expect(listed.find((entry) => entry.name === "RemoteBox")?.local).toBe(false);
+
+      const before = await call("get_sessions", { machine: "RemoteBox" });
+      expect(before.error).toBe(false);
+      expect(Array.isArray(JSON.parse(before.text))).toBe(true);
+
+      const spawned = await call("spawn_session", {
+        machine: "RemoteBox",
+        repo: "myrepo",
+        mode: "here",
+        prompt: "broker the fleet",
+      });
+      window = "broker-the-fleet";
+      expect(spawned.text).toContain("spawned window broker-the-fleet on RemoteBox");
+      await pollUntil(
+        async () => (await listRegisteredWindows()).includes("broker-the-fleet"),
+        "B's window to register",
+      );
+
+      const sessions = JSON.parse((await call("get_sessions", { machine: "RemoteBox" })).text) as SessionEntry[];
+      const id = sessions.find((entry) => entry.window === window)?.id;
+      expect(id).toMatch(/^%\d+$/u);
+
+      const despawned = await call("despawn_session", { machine: "RemoteBox", id, force: true });
+      expect(despawned.text).toBe(`killed ${window} on RemoteBox`);
+      window = null;
+
+      // A recorded what it forwarded, as its own origin, without the prompt;
+      // B recorded the spawn as an ordinary relayed one from the mcp client.
+      const aLog = audit.mock.calls.map((args) => args.join(" ")).join("\n");
+      expect(aLog).toContain('audit broker origin=local-broker action=request op="spawn"');
+      expect(aLog).toContain('client="mcp"');
+      expect(aLog).not.toContain("broker the fleet");
+      await pollUntil(
+        async () => (await Bun.file(remoteLog).text()).includes('audit despawn origin=relay client="mcp"'),
+        "B's audit trail",
+      );
+      const bLog = await Bun.file(remoteLog).text();
+      expect(bLog).toContain('audit spawn origin=relay client="mcp" repo="myrepo"');
+      expect(bLog).not.toContain("broker the fleet");
+
+      // A stops mid-session: the error says so, and once it is back the same
+      // MCP server recovers on its own — nothing here cached the broken path.
+      stack.daemon.stop();
+      const down = await call("get_sessions", { machine: "RemoteBox" });
+      expect(down.error).toBe(true);
+      expect(down.text).toContain("is seanced running?");
+      await stack.restartDaemon();
+      await pollUntil(
+        async () => !(await call("get_sessions", { machine: "RemoteBox" })).error,
+        "the brokered fleet after the daemon restarted",
+        20_000,
+      );
+    } finally {
+      audit.mockRestore();
+      if (window !== null) await tmux(["kill-window", "-t", `e2e-remote:${window}`]);
+      await client.close();
+      fleet.stop();
+      remote.kill();
+      await remote.exited;
+    }
+  }, 90_000);
 });
