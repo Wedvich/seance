@@ -82,14 +82,16 @@ Who performs the unseal depends on the systemd version:
   spawns (`exec.ts`). It cold-boots the tmux server where none is running, panes
   inherit that server's environment, and a same-uid session that knows the path can
   read the tmpfs — so without the scrub every Claude session on the box would hold the
-  PSK's plaintext path, and the MCP exclusion below would be unenforced.
+  PSK's plaintext path. MCP below reaches other machines through the daemon precisely
+  so that no session needs that path.
 
   A consequence worth expecting: **nothing outside the unit can resolve the key**, so
   `seanced doctor`, `seanced run` and `seanced mcp` in a shell all see no PSK. Doctor
   reads the system unit to tell that arrangement from a genuinely keyless box, and
-  reports the key as delivered rather than missing; the other two are simply not
-  runnable by hand there. The daemon's log carries the fingerprint, which is the only
-  place it can come from here; `seanced status` reports the unit's health.
+  reports the key as delivered rather than missing; `seanced run` is simply not
+  runnable by hand there, and `seanced mcp` asks the running daemon instead (below).
+  The daemon's log carries the fingerprint, which is the only place it can come from
+  here; `seanced status` reports the unit's health.
 
 ### Sealing the blob as root
 
@@ -147,21 +149,52 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 ### MCP on a credential-delivered box
 
-`seanced mcp` is its own relay client and resolves the PSK itself — Claude Code
-launches it outside the daemon's unit, where no credential is delivered and (on
-systemd ≥ 256) direct unseal is refused.
+Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is
+delivered and (on systemd ≥ 256) direct unseal is refused — so it cannot hold the key.
+It does not need to. All four tools work, for every machine:
 
-That limits reach, not function. The key is resolved on first _remote_ use rather
-than at startup, and ops aimed at the machine the server runs on take the daemon's
-local op socket instead of the relay — which needs no key at all. So on a box whose
-key exists only as a TPM-sealed blob behind a system unit:
+- **This machine**: ops aimed at the box the server runs on take the daemon's local op
+  socket, which needs no key — relay up or down.
+- **Other machines, and the full `list_machines`**: the server asks the running daemon
+  over that same socket, and the daemon makes the request as an app-role relay client
+  with the key it already holds — the _fleet broker_. The key never leaves the daemon
+  and is never sent over the socket; what crosses it is "list the machines" or "this
+  op on this deviceId", for `sessions`, `spawn` and `despawn` only.
 
-- `list_machines`, `get_sessions`, `spawn_session` and `despawn_session` **for that
-  machine** work.
-  `list_machines` reports only that machine, with a note saying why.
-- Anything aimed at another machine reports the missing key, naming the fact that
-  local spawns need none.
+Nothing to configure: the existing `seanced mcp install` registration is unchanged. The
+server tries its own PSK lookup first, on first remote use — on macOS, WSL, or Linux
+with a key this user can read, it dials the relay itself exactly as before — and uses
+the daemon only when that lookup finds nothing. A "nothing" is re-checked after a
+minute, so a keychain unlocked mid-session is picked up.
 
-Reaching the _other_ machines from such a box needs a keychain/DPAPI store. The box
-running semi-trusted sessions holding the least authority is the point; it holds
-enough to drive itself, and no more.
+Prerequisites: the daemon running (`seanced status`), as the same user Claude Code
+runs as — the op socket lives in a 0700 directory under that user's state dir, so
+`User=` in the system unit must be you, which `install --system` already writes — and
+a daemon new enough to broker. `seanced doctor` says which path MCP will take from your
+shell, and probes the broker when that is the one:
+
+| doctor says                                | meaning                                                          |
+| ------------------------------------------ | ---------------------------------------------------------------- |
+| reaches other machines directly            | this shell can read the PSK; the daemon is not involved          |
+| through the daemon's broker — N machine(s) | keyless here, and the broker answered with the registry          |
+| no daemon is listening                     | start it (`sudo systemctl start seanced`); local ops need it too |
+| older than the fleet broker                | update the checkout and `seanced restart`                        |
+| the daemon could not reach the relay       | the daemon's own relay URL/token — same fix as for the daemon    |
+
+**What this hands out, said plainly.** Any process running as your user can now
+spawn and despawn on _every_ machine through the socket, including on this box where
+it cannot read the key. That is the point — a Claude session here is meant to drive
+the fleet — and it is behind Claude Code's per-tool approval, so do not allowlist
+`spawn_session` or `despawn_session`. It is still less than the key: no way to read
+it, seal or open anything, address the `"machines"` group, or send any op but those
+three, and every brokered request is audited as `origin=local-broker` (the target
+records it as `origin=relay client="mcp"`). The TPM protects the key at rest; it never
+protected the running daemon from your own user, and this does not change that.
+
+A same-user process in an MCP session holding fleet authority is a decision recorded
+in DESIGN.md ("Local op socket", "Fleet broker"). Before it, such a box could drive
+only itself.
+
+Rolling back is the previous checkout plus `seanced restart`: an older daemon drops
+broker frames, and `seanced mcp` then reports the daemon as predating the broker
+while local ops keep working.

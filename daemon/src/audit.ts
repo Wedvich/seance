@@ -7,10 +7,12 @@ import {
   DEFAULT_MODEL,
   quote,
   type DespawnRequest,
+  type FailureReason,
   type SpawnRequest,
   type UpdateOutcome,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
+import type { BrokerErrorCode } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
@@ -221,6 +223,42 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
     rejected: async (reason: string): Promise<void> => {
       await emit(`rejected ${reason}`);
     },
+  };
+}
+
+/**
+ * Something on this box asked the daemon to reach *another* machine for it over
+ * the op socket — a keyless `seanced mcp`. Its own origin, never `local`: a
+ * `local` line means this box's tmux was touched, and a brokered spawn touches
+ * someone else's. The target daemon audits the spawn itself as `origin=relay`.
+ */
+export type BrokerOrigin = "local-broker";
+
+export interface BrokerAudit {
+  readonly machines: (id: string) => Promise<void>;
+  readonly request: (id: string, op: string, deviceId: string, client: string | undefined) => Promise<void>;
+  readonly ok: (id: string) => Promise<void>;
+  readonly failed: (id: string, code: BrokerErrorCode, reason?: FailureReason) => Promise<void>;
+}
+
+/**
+ * Metadata only: which action, which op, which machine, which client. Never the
+ * payload — a spawn's carries the prompt, and the target daemon's own line
+ * already fingerprints it. Every wire-supplied value is quoted.
+ */
+export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broker"): BrokerAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit broker origin=${origin} ${rest}`);
+  };
+  return {
+    machines: (id) => emit(`action=machines id=${quote(id)}`),
+    request: (id, op, deviceId, client) =>
+      emit(
+        `action=request op=${quote(op)} target=${quote(deviceId)}${client === undefined ? "" : ` client=${quote(client)}`} id=${quote(id)}`,
+      ),
+    ok: (id) => emit(`ok id=${quote(id)}`),
+    failed: (id, code, reason) =>
+      emit(`failed code=${code}${reason === undefined ? "" : ` reason=${reason}`} id=${quote(id)}`),
   };
 }
 

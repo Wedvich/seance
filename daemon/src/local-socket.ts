@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Socket } from "bun";
 import type { ErrorResponse, OpName, Plain } from "@seance/shared";
 import { quote } from "@seance/shared";
+import { brokerFail, brokerFrameId, isBrokerFrame, type BrokerReply } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
@@ -25,6 +26,14 @@ import { runDir, socketPath } from "./paths.ts";
  * can read `config.json` and take the PSK outright, run `seanced spawn`, or talk
  * to the tmux server directly. What it adds is that going through here is the
  * *recorded* way to do it.
+ *
+ * The one exception is the fleet broker (`broker.ts`), a second frame kind on
+ * the same socket: where the key is delivered to the daemon's unit alone, a
+ * same-uid peer could not otherwise reach other machines, and through the
+ * broker it can — three ops, to exact registry deviceIds, audited as
+ * `origin=local-broker`. That widening is deliberate; DESIGN.md's "Local op
+ * socket" records it. Broker frames never reach the `Plain` handler below, and
+ * `Plain` ops never reach the broker.
  */
 
 /**
@@ -59,6 +68,11 @@ interface Conn {
 export interface LocalSocketOpts {
   /** Normally `createHandler(ctx, "local")` — the same routing the relay leg uses. */
   readonly handle: (plain: Plain) => Promise<Plain | null>;
+  /**
+   * The fleet broker's entry (`createBroker(...).handle`). Absent, broker frames
+   * are answered `unsupported` rather than dropped, so a peer learns why.
+   */
+  readonly broker?: (raw: unknown) => Promise<BrokerReply>;
   readonly path?: string;
 }
 
@@ -99,16 +113,58 @@ function flush(sock: Socket<undefined>, conn: Conn): void {
   }
 }
 
-function send(sock: Socket<undefined>, conn: Conn, plain: Plain): void {
-  conn.outbound = Buffer.concat([conn.outbound, Buffer.from(`${JSON.stringify(plain)}\n`, "utf8")]);
+function sendLine(sock: Socket<undefined>, conn: Conn, line: string): void {
+  conn.outbound = Buffer.concat([conn.outbound, Buffer.from(`${line}\n`, "utf8")]);
   flush(sock, conn);
+}
+
+function send(sock: Socket<undefined>, conn: Conn, plain: Plain): void {
+  sendLine(sock, conn, JSON.stringify(plain));
+}
+
+/**
+ * Always answers once there is an id to answer to: a broker handler that throws
+ * still produces a structured reply, so the peer never waits out its deadline —
+ * which for a brokered spawn is over a minute and a half. A reply past the frame
+ * cap is replaced, not truncated; the peer would refuse it anyway.
+ */
+async function dispatchBroker(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  broker: LocalSocketOpts["broker"],
+): Promise<void> {
+  const id = brokerFrameId(raw);
+  if (id === null) {
+    log.warn("local socket: dropped a broker frame with no id");
+    sock.end();
+    return;
+  }
+  let reply: BrokerReply;
+  if (broker === undefined) {
+    reply = brokerFail(id, "unsupported", "this daemon brokers no requests to other machines");
+  } else {
+    try {
+      reply = await broker(raw);
+    } catch (err) {
+      log.error(`local socket: broker crashed: ${String(err)}`);
+      reply = brokerFail(id, "internal_error", String(err));
+    }
+  }
+  let line = JSON.stringify(reply);
+  if (Buffer.byteLength(line, "utf8") >= MAX_FRAME_BYTES) {
+    line = JSON.stringify(
+      brokerFail(id, "reply_too_large", `the answer ran past the ${MAX_FRAME_BYTES}-byte frame cap`),
+    );
+  }
+  sendLine(sock, conn, line);
 }
 
 async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  handle: LocalSocketOpts["handle"],
+  opts: Pick<LocalSocketOpts, "handle" | "broker">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -116,6 +172,12 @@ async function dispatch(
   } catch {
     log.warn("local socket: dropped a frame that is not JSON");
     sock.end();
+    return;
+  }
+  // Ahead of the `Plain` check, and exclusive with it: a broker frame is never
+  // handed to the op handler, whatever else it carries.
+  if (isBrokerFrame(raw)) {
+    await dispatchBroker(sock, conn, raw, opts.broker);
     return;
   }
   if (!isPlain(raw)) {
@@ -131,7 +193,7 @@ async function dispatch(
     send(sock, conn, errorReply(raw.op, raw.id, `op "${raw.op}" is not available on the local socket`));
     return;
   }
-  const reply = await handle(raw);
+  const reply = await opts.handle(raw);
   if (reply !== null) send(sock, conn, reply);
 }
 
@@ -209,7 +271,7 @@ export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSock
         const line = conn.inbound.subarray(0, nl).toString("utf8");
         conn.inbound = conn.inbound.subarray(nl + 1);
         if (line.trim() === "") continue;
-        void dispatch(sock, conn, line, opts.handle).catch((err: unknown) => {
+        void dispatch(sock, conn, line, opts).catch((err: unknown) => {
           log.error(`local socket: dispatch crashed: ${String(err)}`);
         });
       }

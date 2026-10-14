@@ -27,6 +27,7 @@ import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from ".
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
+import { mcpFleetChecks } from "./fleet.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, socketPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
@@ -363,10 +364,14 @@ export async function cmdDoctor(): Promise<void> {
 
   console.log("config");
   let config;
+  // Whether this shell holds a key decides how `seanced mcp` reaches the fleet,
+  // reported under "service" once the socket is known. Null when config failed.
+  let keyReadable: boolean | null = null;
   try {
     config = await loadConfig();
     ok(`loads from ${configPath()}`);
     const resolved = await loadPsk(config);
+    keyReadable = resolved !== null;
     // Doctor runs in a shell; a delivered key exists only inside the unit. Ask
     // the unit whether it delivers one before condemning the box for holding none.
     const pskDelivered = resolved === null && (await serviceDeliversPsk());
@@ -457,6 +462,7 @@ export async function cmdDoctor(): Promise<void> {
   console.log("service");
   render(await doctorServiceChecks());
   render(await localSocketChecks());
+  if (keyReadable !== null) render(await mcpFleetChecks(keyReadable));
   render(await pskStoreChecks());
 
   if (failed) process.exit(1);
