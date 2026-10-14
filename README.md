@@ -347,6 +347,12 @@ query running sessions, and spawn and end sessions on other machines through the
 `list_machines`, `get_sessions`, `spawn_session`, `despawn_session`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
+On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
+the server can't read the key — so it asks the running daemon to make those requests
+for it, over the same local socket, and the key never leaves the daemon. Every tool
+still works for every machine, with the same registration; `seanced doctor` says which
+path MCP takes from your shell. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
+
 Naming _this_ machine skips the relay entirely: the request goes straight to the
 local daemon over a unix socket in the state directory, so spawning where you are
 sitting costs no round trip and works with the relay down. It is the same daemon,

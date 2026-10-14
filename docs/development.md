@@ -71,7 +71,10 @@ a production change.
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,
   dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
-  between the doubles and the real thing.
+  between the doubles and the real thing. The fleet-broker flow needs a second
+  machine, so it boots a second real daemon as a subprocess (`e2e/remote-daemon.ts`):
+  `stateDir()` comes from the environment, and two daemons in one process would share
+  a deviceId and an op socket.
 - **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
   import the daemon's and the PWA's implementations alongside the extension's and
   assert they agree. No React harness — the relay client underneath is already

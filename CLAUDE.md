@@ -102,8 +102,9 @@ green:
 - DESIGN.md's threat-model invariants are requirements, not observations: argv-array exec (the one
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
-  through its one formatter under its own origin (`relay`, `cli`, `local`, and `schedule` for the
-  daemon's reap timer — a new surface adds an origin, never reuses one),
+  through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
+  requests the daemon forwards to other machines for a keyless `seanced mcp`, and `schedule` for
+  the daemon's reap timer — a new surface adds an origin, never reuses one),
   prompt text is never logged, and a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session). Don't let changes drift from them.
@@ -111,7 +112,10 @@ green:
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
   allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
-  tweak (DESIGN.md's "Local op socket" records why `despawn` got in).
+  tweak (DESIGN.md's "Local op socket" records why `despawn` got in). The same socket carries the
+  fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, two actions and
+  the same three remote ops — DESIGN.md's "Fleet broker" is the record, and any widening of it is
+  the same kind of change.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws

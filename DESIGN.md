@@ -454,6 +454,11 @@ over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
 The daemon builds one handler per surface over a single context, so the two differ
 only in the audit origin they are tagged with — see "Local op socket".
 
+The same three ops have a third sender on a credential-delivered box: the daemon's
+fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
+`seanced mcp` that reached it over the local op socket with a broker frame — not a
+`Plain`, and not on this wire. To the relay and the target it is one more app.
+
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
 on connect and whenever the repo set changes; `msg { envelope }` for routed
 traffic; literal `"ping"`/`"pong"` strings for heartbeats (bare strings, not
@@ -1559,10 +1564,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   keychain/DPAPI/TPM stores. No new at-rest copy of the PSK anywhere; the cost
   is that the MCP server requires a machine that carries a daemon config,
   accepted because it is colocated by design. The key is imported
-  non-extractable, same as the PWA. One machine class is excluded by this: where
-  the key exists only as a credential systemd delivers to the daemon's unit,
-  `seanced mcp` — launched by Claude Code, outside that unit — resolves nothing
-  and cannot run. Deliberate; see the open item below and docs/psk.md.
+  non-extractable, same as the PWA. Where the key exists only as a credential
+  systemd delivers to the daemon's unit, `seanced mcp` — launched by Claude
+  Code, outside that unit — resolves nothing; it then reaches other machines
+  through the daemon instead ("Fleet broker", below, 2026-10-14). Before that it
+  reached only its own box there.
 - **App-role transport is `shared/src/app-client.ts`** — the `RelayClient`
   extracted verbatim from `pwa/src/relay/` (it was already runtime-agnostic;
   e2e had been importing it from `pwa/` under Bun, a wrong-direction edge this
@@ -1658,9 +1664,9 @@ field is display-only, so validation would buy nothing.
   cold-boots the tmux server when none is running and a pane's environment is
   the server's — so inheriting it would publish the PSK's plaintext path to
   every Claude session on the box, including on the credential-delivered boxes
-  where the bullet above says MCP is unsupported. It would otherwise be
-  _silently supported there, by accident_: same-uid sessions can read that
-  tmpfs, so the exclusion is enforced by this scrub and nothing else. Note
+  where MCP deliberately goes through the daemon rather than holding the key.
+  Without the scrub any session could read that tmpfs and hold the key itself,
+  so keeping it in the daemon is enforced by this scrub and nothing else. Note
   which boxes: the leak needs the daemon to have booted the server itself,
   which is the normal case on a headless system unit and not the case when a
   login shell got there first — so the accident would also have been
@@ -1694,7 +1700,8 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   else. `despawn` joined on 2026-10-09, deliberately — widening this list is a
   threat-model change, so the reasoning is kept here: without it the
   `despawn_session` tool cannot end a session on the box it runs on whenever the
-  relay is out of reach, which on a credential-delivered machine is always; and
+  relay is out of reach, which on a credential-delivered machine was then always
+  (the fleet broker below came later, and self-targets still bypass it); and
   it is the same kind of op as `spawn`, an action on this box's own tmux,
   recorded `origin=local`, granting nothing a same-uid process lacks (it can
   `tmux kill-pane` directly). `rescan` is out of scope and `update-available` is
@@ -1719,7 +1726,8 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   less: three named ops, no way to address another machine, no way to reach the
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
-  origin on the `audit request` line too.
+  origin on the `audit request` line too. True of the three `Plain` ops; the
+  fleet broker below is the one deliberate exception, and says so.
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -1754,14 +1762,15 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   executor this design exists to avoid.
 - **`list_machines` still needs the relay**, and marks the local entry `local:
 true`. When the relay cannot be reached at all it answers with this machine
-  alone plus a note. That is not a nicety: on a credential-delivered box the
-  relay is unreachable by construction, and a model that can see no machine
-  cannot spawn on the one it is sitting on either.
-- **The PSK is resolved lazily**, on first remote use rather than at startup,
-  memoized, and cleared on failure so a locked keychain can be retried. Local ops
-  need no key, which is what makes the credential-delivered box work. It also
-  narrows the threat-model addendum above: for local work the MCP process no
-  longer holds the PSK at all.
+  alone plus a note. That is not a nicety: with the relay down, or with no key
+  and no daemon to broker for it, a model that can see no machine cannot spawn
+  on the one it is sitting on either.
+- **The PSK is resolved lazily**, on first remote use rather than at startup.
+  A key found is memoized; "no key here" is re-asked after a minute, so a locked
+  keychain can be retried without re-running a refused TPM unseal on every call.
+  Local ops need no key. It also narrows the threat-model addendum above: for
+  local work the MCP process never holds the PSK, and on a credential-delivered
+  box it never holds it at all.
 - **The listener never fails the daemon.** An unbindable socket — a run directory
   owned by someone else, a path past the ~104-byte `sun_path` limit — logs and is
   skipped, matching `ensureAuditLog`'s posture: a degraded local surface is not a
@@ -1774,6 +1783,79 @@ Non-goals: routing `seanced spawn` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
 a `rescan` op; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
+
+### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
+
+On a credential-delivered box `seanced mcp` can read no PSK, so on its own it
+reaches only the machine it runs on. The broker gives it the rest of the fleet: a
+second frame kind on the same socket, through which the server asks the daemon for
+the registry or for one of three ops on one other machine, and the daemon makes that
+request itself as an app-role relay client with the key it imported at start.
+
+- **This widens the socket's authority, on purpose.** A same-uid process on a
+  credential-delivered box can now spawn and despawn on every machine, which before
+  it could not — it could not read the key. That is the product decision: a Claude
+  session on that box is meant to drive the fleet, exactly as it already does on
+  macOS and WSL, where it reads the key outright. The gate is the one MCP always had,
+  Claude Code's per-tool approval. What the same-uid process still cannot do is
+  hold the key: read it, derive it, seal or open anything, address the `"machines"`
+  group, or send any op but `sessions`/`spawn`/`despawn`. Strictly less than the key
+  it would have on any other platform, and every request recorded.
+- **A separate app-role connection, not the daemon's own socket.** The daemon's relay
+  leg is daemon-role: it registers and answers, the relay never pushes it the
+  registry, and it cannot address another daemon. Being an app is the only way to
+  reach one, so the broker is a fourth app-role client (beside the PWA, Raycast and
+  `seanced mcp`) over the shared `RelayClient`, built with the daemon's
+  already-imported `CryptoKey` — never a second store lookup or TPM touch. Lazy and
+  idle-closing like `seanced mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
+  every MCP process on the box, stopped with the daemon handle so a reload builds a
+  fresh one and leaks none.
+- **Semantic, allowlisted, fail-closed.** Two actions: `machines` (the decrypted
+  registry) and `request` (`remoteOp` ∈ `sessions`/`spawn`/`despawn`, to an exact
+  `deviceId` this daemon's key can read — never a name, `"app"`, `"machines"`, or the
+  daemon's own id, which belongs on the local op path). The payload is validated with
+  the handler's own checks and rebuilt from the validated fields, so nothing else a
+  peer adds reaches the wire. `client: "mcp"` is kept, so the target audits the spawn
+  as `origin=relay client="mcp"`, exactly as a direct MCP spawn. Rejected: a crypto
+  oracle (seal/open on request) — same-uid peers make it unpoliceable, and it is the
+  key's whole reach; raw relay forwarding (`{to, op, plaintext}`), which is the oracle
+  by another name; a transient systemd service per MCP call to receive the credential
+  (root on every call, and the key in another process); copying the PSK into a store
+  the user can read (undoes the sealing).
+- **Never a `Plain`, never an `OpName`.** A broker frame is `{v, kind: "broker", id,
+action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
+  routes on `kind` before the `Plain` check. So no broker verb can arrive from the
+  relay, no relay op can be smuggled in as a broker action, and — the reason for
+  `remoteOp` over `op` — a daemon that predates the broker sees a malformed frame and
+  drops it, where a `Plain`-shaped one would have run a _local_ spawn for a request
+  meant for another machine.
+- **Its own audit origin.** `audit broker origin=local-broker` with action, op, target
+  and client — never the payload, so never the prompt. Not `local`: a `local` line
+  says this box's tmux was touched, and a brokered spawn touches someone else's.
+- **Structured failures, and honest ones.** Refusals, relay trouble and shutdown are
+  codes, and a `RequestFailure` crosses with its reason so the MCP side renders it
+  exactly as the direct path does — a relay timeout still reads "may have landed
+  anyway". Losing the daemon mid-request, or its deadline passing, on a spawn or
+  despawn says the same; nothing is retried, on either path. A handler that throws
+  still answers. The peer's deadline is the daemon's connect and registry-settle
+  budget plus the op's own timeout plus margin, so a slow first connect never cuts
+  off a spawn still on its way. In flight is capped at 16; past it a request is
+  refused as `busy`, not queued.
+- **Transport choice in `seanced mcp` (`daemon/src/fleet.ts`).** Direct when this
+  process resolves a key, which keeps macOS, WSL and readable-Linux exactly as
+  before; the broker only when the lookup returns none — a typed null, never an error
+  string. The choice is made before anything is sent. A direct failure (bad token,
+  dead relay) is reported as itself and never retried through the daemon, and the
+  registry is re-fetched per call, so a session that outlives a daemon restart
+  recovers on its own. Self-targeted ops never reach either transport.
+- **Compatibility.** No relay, PWA, wire-protocol or MCP-registration change. An old
+  daemon drops the frame and closes; the server's `machines` probe — side-effect free
+  — is where that is read as "update seanced". `doctor` reports which path MCP takes
+  from the shell, probing the broker only when it is the one.
+
+Untested in CI: the systemd-credential arrangement itself (TPM, `LoadCredentialEncrypted=`,
+an unprivileged LXC). The e2e suite runs a keyless MCP against two real daemons, but the
+"keyless" is a seam, not a sealed blob.
 
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 
@@ -2162,7 +2244,8 @@ CSP items landed with the app (see the PWA section).
   answer for the wrong user there and every one of those values is written
   into a unit that outlives the install. Also rejected: keeping the runbook as
   printed instructions, which is what the docs already were.
-  MCP on a credential-delivered box reaches that machine but not the others
-  (docs/psk.md): the local op socket needs no key, and the PSK is resolved only
-  when an op is aimed elsewhere. Mediating at op level is what makes that safe —
-  a crypto oracle, which same-uid peers make unpoliceable, would not have.
+  MCP on a credential-delivered box reaches that machine over the local op
+  socket, and every other one through the daemon's fleet broker (docs/psk.md,
+  "Fleet broker" above), so the key never leaves the unit. Mediating at op level
+  is what makes that safe — a crypto oracle, which same-uid peers make
+  unpoliceable, would not have.
