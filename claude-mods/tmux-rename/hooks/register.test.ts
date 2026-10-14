@@ -116,6 +116,7 @@ describe("attachedPanes", () => {
       "10601 10238 claude attach 2658badc",
       "10602 10238 claude logs 4a64b25d",
       "10603 10238 vim claude attach 4a64b25d",
+      "10604 10238 claude attach a debugger to 4a6",
       "700 1 claude attach 4a64b25d",
     ].join("\n");
     expect(attachedPanes(id, ps, panes)).toEqual([]);

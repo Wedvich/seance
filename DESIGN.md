@@ -1985,9 +1985,11 @@ show-environment -g`), falling back to its own process env only when the
   the pane of whoever first started it — and `claude attach` is only a client,
   whose env never reaches the session; `session.attach` carries no env or tty
   either, and doesn't fire for a terminal attach. So with no `TMUX_PANE` the
-  mod looks from outside: `ps -Ao pid=,ppid=,args=` for each `claude attach
+  mod looks from outside: `ps -wwAo pid=,ppid=,args=` for each `claude attach
 <prefix of its session id>`, walked up its parents to a pane's shell from
-  `tmux list-panes -a`. Every window attached gets the name; none found (not
+  `tmux list-panes -a`. The prefix must be an id-shaped word of 4+ characters:
+  ps joins argv with spaces, so a prompt like `claude "attach a debugger"` would
+  otherwise match every id starting with `a`. Every window attached gets the name; none found (not
   attached, or attached outside tmux) skips the window step as before. Its own
   `TMUX_PANE`, when set, wins and the lookup never runs. Rejected: a shell
   wrapper around `claude attach` recording the pane per session id (only

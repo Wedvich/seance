@@ -32,7 +32,7 @@ export function windowName(name: string, tag: string | undefined): string {
  * each `claude attach <id prefix>` process, walked up its parents to a tmux
  * pane's shell. Several attached windows each get the name.
  *
- * `ps` is `ps -Ao pid=,ppid=,args=`; `panes` is `tmux list-panes -a -F
+ * `ps` is `ps -wwAo pid=,ppid=,args=`; `panes` is `tmux list-panes -a -F
  * '#{pane_id} #{pane_pid}'`, which lists a pane once per session in a group.
  */
 export function attachedPanes(sessionId: string, ps: string, panes: string): readonly string[] {
@@ -67,17 +67,21 @@ export function attachedPanes(sessionId: string, ps: string, panes: string): rea
   return [...found];
 }
 
-// `claude attach 4a64b25d`: the id may be any prefix Claude resolves, flags aside
+// `claude attach 4a64b25d`: the id may be any prefix Claude resolves, flags
+// aside. ps joins argv with spaces, so `claude "attach a debugger"` reads the
+// same; only an id-shaped word of 4+ chars counts, or `a` would match ids
+// starting with it.
 function isAttachTo(argv: readonly string[], sessionId: string): boolean {
   const [bin, sub, ...rest] = argv;
   if (bin === undefined || !/(?:^|\/)claude$/u.test(bin) || sub !== "attach") return false;
-  return rest.some((arg) => !arg.startsWith("-") && sessionId.startsWith(arg));
+  return rest.some((arg) => /^[0-9a-f-]{4,}$/u.test(arg) && sessionId.startsWith(arg));
 }
 
 async function findAttachedPanes($: EngineInterface): Promise<readonly string[]> {
   try {
     const [ps, panes] = await Promise.all([
-      $.process.run(["ps", "-Ao", "pid=,ppid=,args="]),
+      // -ww: never cut args to a terminal width, or the id goes with them
+      $.process.run(["ps", "-wwAo", "pid=,ppid=,args="]),
       $.process.run(["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"]),
     ]);
     if (ps.exitCode !== 0 || panes.exitCode !== 0) return [];
@@ -117,7 +121,7 @@ export const register: Register = (on) => {
     const result = await next({ ...e, args: sessionName(e.args, tag) });
     if (!inTmux) return result;
 
-    // -t pane id: rename Claude's own window, not whichever has focus;
+    // -t pane id: rename the session's window(s), not whichever has focus;
     // `--` so a name like `-wip fix` isn't read as tmux flags
     await Promise.all(
       panes.map(async (pane) => {
