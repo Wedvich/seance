@@ -124,7 +124,9 @@ describe("install --system as a normal user", () => {
     async () => {
       // The refusal has to land before anything is written, and it has to say what
       // to run — the whole point of folding the runbook into the CLI.
-      await expect(cmdInstall(["--system"])).rejects.toThrow(/sudo --preserve-env=PATH seanced install --system/u);
+      await expect(cmdInstall(["--system"])).rejects.toThrow(
+        /sudo --preserve-env=PATH "\$\(command -v seanced\)" install --system/u,
+      );
     },
   );
 });

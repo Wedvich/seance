@@ -13,6 +13,7 @@ import {
   missingBinariesMessage,
   missingUnitBinaries,
   requireRoot,
+  SUDO_SEANCED,
   targetUserName,
   whichIn,
 } from "./target-user.ts";
@@ -350,7 +351,7 @@ export function conflictingScopeMessage(installing: UnitScope, existing: string)
     ? `a user unit already exists at ${existing} — it would run a second daemon against the same state dir, ` +
         "log and relay identity, and it is the one `selfRestart` rewrites; run `seanced uninstall` as that user first"
     : `a system unit already exists at ${existing} — installing a user unit too would run a second daemon ` +
-        "against the same state dir, log and relay identity; `sudo seanced uninstall --system` removes it";
+        `against the same state dir, log and relay identity; \`${SUDO_SEANCED} uninstall --system\` removes it`;
 }
 
 export async function installService(): Promise<InstallResult> {
@@ -555,7 +556,7 @@ async function credentialBlobFor(blob: string, configFile: string, notes: string
   if (!existsSync(blob)) {
     notes.push(
       `no sealed PSK blob at ${blob}, so the unit delivers no credential — seal it (docs/psk.md, "Sealing the ` +
-        'blob as root") and re-run `sudo seanced install --system` to add the LoadCredentialEncrypted= line',
+        `blob as root") and re-run \`${SUDO_SEANCED} install --system\` to add the LoadCredentialEncrypted= line`,
     );
     return undefined;
   }
@@ -656,7 +657,7 @@ export async function selfRestart(): Promise<void> {
   if (scope === "system") {
     console.log(
       "updated — exiting for Restart=always to relaunch on the new code; the unit definition is not rewritten " +
-        "here, so run `sudo seanced install --system` if `seanced doctor` reports it drifted",
+        `here, so run \`${SUDO_SEANCED} install --system\` if \`seanced doctor\` reports it drifted`,
     );
     process.exit(0);
   }
@@ -723,7 +724,7 @@ export async function scopeChecks(
     const drift = await recordedBunCheck(
       unitBunPath(ctx.unitText),
       "service",
-      scope === "system" ? "sudo seanced install --system" : "seanced install",
+      scope === "system" ? `${SUDO_SEANCED} install --system` : "seanced install",
       current,
     );
     if (drift !== null) checks.push(drift);
@@ -733,7 +734,7 @@ export async function scopeChecks(
       level: "warn",
       message:
         "the installed system unit differs from what this checkout would write — nothing rewrites a system unit " +
-        "on its own; `sudo seanced install --system` reinstalls it",
+        `on its own; \`${SUDO_SEANCED} install --system\` reinstalls it`,
     });
   }
   if (scope === "system" && ctx.blobPath !== null && ctx.unitText !== null && !unitDeliversPsk(ctx.unitText)) {
@@ -742,7 +743,7 @@ export async function scopeChecks(
       message:
         `a sealed blob exists at ${ctx.blobPath} but the system unit has no ` +
         `LoadCredentialEncrypted=${CRED_NAME}: line, so the daemon is never handed the key — ` +
-        "`sudo seanced install --system` adds it once the blob decrypts",
+        `\`${SUDO_SEANCED} install --system\` adds it once the blob decrypts`,
     });
   }
   return checks;

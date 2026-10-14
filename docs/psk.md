@@ -62,7 +62,7 @@ Who performs the unseal depends on the systemd version:
   express TPM-only keys, and its default key degrades to a host key file inside the
   rootfs — which travels with backups, exactly the exposure sealing exists to prevent.
   Here the key is _delivered_ instead of unsealed: run `seanced` as a systemd
-  **system** unit (`sudo --preserve-env=PATH seanced install --system` writes it) with
+  **system** unit (`sudo --preserve-env=PATH "$(command -v seanced)" install --system` writes it) with
   `User=<you>` and
 
   ```ini
@@ -117,7 +117,7 @@ a future `psk-import --system` folds this runbook into the CLI too.
 Order doesn't matter. `install --system` only writes the
 `LoadCredentialEncrypted=` line for a blob that already decrypts as root — a credential
 systemd can't load fails the unit at start — so seal first and install, or install first
-and re-run `sudo seanced install --system` after sealing. `seanced doctor` warns while a
+and re-run `sudo --preserve-env=PATH "$(command -v seanced)" install --system` after sealing. `seanced doctor` warns while a
 blob is sitting there undelivered.
 
 ### Proxmox LXC

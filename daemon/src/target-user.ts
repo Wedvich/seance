@@ -20,12 +20,22 @@ export interface TargetUser {
 /** One wording for both root refusals — the name check in `targetUserName`, the uid check in `assertUnprivileged`. */
 const NEVER_ROOT = "the daemon must never run as root";
 
+/**
+ * The sudo prefix every instruction prints. sudo looks the command up in secure_path
+ * whatever `--preserve-env` says (that only sets the PATH the command then sees), and
+ * `~/.local/bin` is never in it — so seanced is named by full path, resolved by the
+ * invoking shell. PATH is still preserved: the `env bun` shebang and the binaries the
+ * unit records resolve through it.
+ */
+export const SUDO_SEANCED = 'sudo --preserve-env=PATH "$(command -v seanced)"';
+
 /** The one privileged action per command, named in the message so the remedy is the whole answer. */
 export function requireRoot(uid: number | undefined, action: string): void {
   if (uid === 0) return;
   throw new Error(
-    `${action} writes /etc/systemd/system and must run as root — \`sudo --preserve-env=PATH seanced ${action}\` ` +
-      "(--preserve-env, because sudo's secure_path holds none of the binaries the unit has to record)",
+    `${action} writes /etc/systemd/system and must run as root — \`${SUDO_SEANCED} ${action}\` ` +
+      "(full path, because sudo searches secure_path for the command; --preserve-env, because secure_path " +
+      "also holds none of the binaries the unit has to record)",
   );
 }
 
@@ -122,8 +132,8 @@ export async function missingUnitBinaries(pathEnv: string): Promise<readonly str
 export function missingBinariesMessage(missing: readonly string[], pathEnv: string): string {
   return (
     `the PATH this would record resolves no ${missing.join(", ")} — that unit would start and then fail every spawn. ` +
-    "sudo replaces PATH with secure_path; re-run as `sudo --preserve-env=PATH seanced install --system`, " +
-    `or pass \`--path "$PATH"\` explicitly (recorded PATH was: ${pathEnv})`
+    `sudo replaces PATH with secure_path; re-run as \`${SUDO_SEANCED} install --system\`, ` +
+    `or run \`sudo "$(command -v seanced)" install --system --path "$PATH"\` explicitly (recorded PATH was: ${pathEnv})`
   );
 }
 
