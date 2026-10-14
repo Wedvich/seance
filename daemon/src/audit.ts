@@ -7,10 +7,12 @@ import {
   DEFAULT_MODEL,
   quote,
   type DespawnRequest,
+  type FailureReason,
   type SpawnRequest,
   type UpdateOutcome,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
+import type { BrokerErrorCode } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
@@ -236,7 +238,7 @@ export interface BrokerAudit {
   readonly machines: (id: string) => Promise<void>;
   readonly request: (id: string, op: string, deviceId: string, client: string | undefined) => Promise<void>;
   readonly ok: (id: string) => Promise<void>;
-  readonly failed: (id: string, code: string, reason?: string) => Promise<void>;
+  readonly failed: (id: string, code: BrokerErrorCode, reason?: FailureReason) => Promise<void>;
 }
 
 /**

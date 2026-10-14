@@ -80,7 +80,8 @@ const LOCAL_STILL_WORKS = "Spawning on this machine needs neither.";
 
 /** What the reader can do about this cause — each broker code fails for a different reason. */
 function unreachableAdvice(cause: unknown): string {
-  if (!(cause instanceof BrokerError)) return `${NO_KEY}, which could not be used (${String(cause)}). ${LOCAL_STILL_WORKS}`;
+  if (!(cause instanceof BrokerError))
+    return `${NO_KEY}, which could not be used (${String(cause)}). ${LOCAL_STILL_WORKS}`;
   const { code, message } = cause;
   switch (code) {
     case "daemon_unreachable":

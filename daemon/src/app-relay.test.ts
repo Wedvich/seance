@@ -85,7 +85,7 @@ describe("LazyRelay", () => {
     const second = lazy.acquire();
     await pollUntil(() => fakes.length === 2, "a fresh dial after the failure");
     fakes[1]?.setState({ status: "open", registrySettled: true });
-    expect(await second).toBe(fakes[1]);
+    expect((await second) === fakes[1]).toBe(true);
     lazy.stop();
   });
 
@@ -120,7 +120,7 @@ describe("LazyRelay", () => {
     const next = await lazy.acquire();
     expect(fakes).toHaveLength(2);
     expect(fakes[0]?.stopped).toBe(true);
-    expect(next).toBe(fakes[1]);
+    expect(next === fakes[1]).toBe(true);
     lazy.stop();
   });
 });

@@ -185,7 +185,12 @@ export class LazyRelay {
    */
   async #settleRegistry(client: AppRelay): Promise<void> {
     const ms = this.#opts.registrySettleMs ?? REGISTRY_SETTLE_MS + SETTLE_MARGIN_MS;
-    await this.#until(client, (state) => state.registrySettled, ms, `the relay did not settle its registry within ${ms}ms`);
+    await this.#until(
+      client,
+      (state) => state.registrySettled,
+      ms,
+      `the relay did not settle its registry within ${ms}ms`,
+    );
   }
 }
 

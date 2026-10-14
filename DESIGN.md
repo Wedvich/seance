@@ -1824,7 +1824,7 @@ request itself as an app-role relay client with the key it imported at start.
   (root on every call, and the key in another process); copying the PSK into a store
   the user can read (undoes the sealing).
 - **Never a `Plain`, never an `OpName`.** A broker frame is `{v, kind: "broker", id,
-  action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
+action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
   routes on `kind` before the `Plain` check. So no broker verb can arrive from the
   relay, no relay op can be smuggled in as a broker action, and — the reason for
   `remoteOp` over `op` — a daemon that predates the broker sees a malformed frame and

@@ -5,6 +5,7 @@ import {
   quote,
   RequestFailure,
   type DespawnRequest,
+  type FailureReason,
   type SpawnClient,
   type SpawnRequest,
 } from "@seance/shared";
@@ -166,7 +167,7 @@ export function createBroker(opts: BrokerOpts): Broker {
     id: string,
     code: BrokerErrorCode,
     message: string,
-    reason?: RequestFailure["reason"],
+    reason?: FailureReason,
   ): Promise<BrokerReply> => {
     await audit.failed(id, code, reason);
     return brokerFail(id, code, message, reason);

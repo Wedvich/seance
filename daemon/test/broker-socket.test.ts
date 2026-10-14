@@ -210,7 +210,9 @@ describe("the fleet broker on the local op socket", () => {
       ),
     );
     try {
-      const inFlight = String(await rejection(brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path })));
+      const inFlight = String(
+        await rejection(brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path })),
+      );
       expect(inFlight.match(/may have landed/gu)).toHaveLength(1);
       code = "shutting_down";
       const refused = await rejection(brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path }));

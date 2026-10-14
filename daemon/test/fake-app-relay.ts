@@ -1,4 +1,4 @@
-import type { Machine, RelayState, RequestOp } from "@seance/shared";
+import { RequestFailure, type Machine, type RelayState, type RequestOp } from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
 
 /**
@@ -44,6 +44,7 @@ export function fakeRelay(
     registrySettled: status === "open",
   };
   const listeners = new Set<() => void>();
+  const pending = new Set<(err: Error) => void>();
   const fake: FakeRelay = {
     requests: [],
     started: 0,
@@ -55,8 +56,11 @@ export function fakeRelay(
     start: () => {
       fake.started += 1;
     },
+    // The real client fails every pending request as "disconnected" on stop.
     stop: () => {
       fake.stopped = true;
+      for (const reject of pending) reject(new RequestFailure("disconnected", "client stopped"));
+      pending.clear();
     },
     getState: () => state,
     subscribe: (listener) => {
@@ -65,7 +69,10 @@ export function fakeRelay(
     },
     request: async <T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T> => {
       fake.requests.push({ deviceId, op, payload });
-      const reply: unknown = await respond(op, payload, deviceId);
+      const stopSignal = new Promise<never>((_, reject) => {
+        pending.add(reject);
+      });
+      const reply: unknown = await Promise.race([respond(op, payload, deviceId), stopSignal]);
       if (reply instanceof Error) throw reply;
       // The fake's caller names T; this is the boundary that stands in for the wire.
       return reply as T;

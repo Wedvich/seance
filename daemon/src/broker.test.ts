@@ -171,7 +171,9 @@ describe("the broker", () => {
 
   test("a peer's client name never reaches the target: the broker stamps mcp itself", async () => {
     const { broker, fakes, lines } = rig(() => ({ ok: true, window: "w", path: "/p", sessions: [] }));
-    await broker.handle(request({ id: "a", remoteOp: "spawn", payload: { repo: "seance", mode: "here", client: "pwa" } }));
+    await broker.handle(
+      request({ id: "a", remoteOp: "spawn", payload: { repo: "seance", mode: "here", client: "pwa" } }),
+    );
     await broker.handle(request({ id: "b", remoteOp: "despawn", payload: { id: "%1", client: "pwa" } }));
     await broker.handle(request({ id: "c", remoteOp: "spawn", payload: { repo: "seance", mode: "here" } }));
     expect(fakes[0]?.requests.map((sent) => sent.payload)).toEqual([
@@ -223,28 +225,26 @@ describe("the broker", () => {
 
   test("past the in-flight bound a request is refused as busy, not queued", async () => {
     const gate = Promise.withResolvers<null>();
-    const { broker } = rig(() => gate.promise.then(() => ({ sessions: [], at: 1 })), { maxInFlight: 1 });
+    const { broker, fakes } = rig(() => gate.promise.then(() => ({ sessions: [], at: 1 })), { maxInFlight: 1 });
     const first = broker.handle(request({ id: "slow" }));
-    await pollUntil(async () => {
-      const second = await broker.handle(request({ id: "second" }));
-      return !second.ok && second.code === "busy";
-    }, "the second request to be refused as busy");
+    await pollUntil(() => (fakes[0]?.requests.length ?? 0) > 0, "the first request to reach the relay");
+    const second = failed(await broker.handle(request({ id: "second" })));
+    expect(second.code).toBe("busy");
+    expect(fakes[0]?.requests).toHaveLength(1);
     gate.resolve(null);
     expect((await first).ok).toBe(true);
     broker.stop();
   });
 
-  test("stop fails an in-flight request as shutting_down and refuses new ones", async () => {
+  test("stop fails an in-flight request as stopped_in_flight and refuses new ones as shutting_down", async () => {
     const { broker, fakes } = rig(() => new Promise(() => {}));
     const pending = broker.handle(request({ remoteOp: "despawn", payload: { id: "%1" } }));
     await pollUntil(() => (fakes[0]?.requests.length ?? 0) > 0, "the request to reach the relay");
-    // The fake never answers; stopping the real client is what fails its
-    // pending requests, so mimic that order here.
     broker.stop();
     expect(fakes[0]?.stopped).toBe(true);
+    expect(failed(await pending).code).toBe("stopped_in_flight");
     const after = failed(await broker.handle(request({ id: "late" })));
     expect(after.code).toBe("shutting_down");
-    void pending;
   });
 
   test("the app-role socket hangs up when idle and the next request redials", async () => {
