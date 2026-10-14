@@ -92,6 +92,9 @@ export async function startStack(base: string): Promise<Stack> {
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
     startDaemon({
       config,
+      // Stands for a credential-delivered box, the only kind that brokers: the
+      // keyless-MCP flow needs it, and nothing else here depends on the source.
+      resolvedPsk: { psk: PSK, source: "credential" },
       backend: createBackend(config, { waitMs: spawnWaitMs }),
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,

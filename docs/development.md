@@ -74,7 +74,8 @@ a production change.
   between the doubles and the real thing. The fleet-broker flow needs a second
   machine, so it boots a second real daemon as a subprocess (`e2e/remote-daemon.ts`):
   `stateDir()` comes from the environment, and two daemons in one process would share
-  a deviceId and an op socket.
+  a deviceId and an op socket. The suite's own daemon starts with a credential-sourced
+  `resolvedPsk`, since only such a daemon brokers.
 - **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
   import the daemon's and the PWA's implementations alongside the extension's and
   assert they agree. No React harness — the relay client underneath is already

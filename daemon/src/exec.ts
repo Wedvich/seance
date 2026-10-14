@@ -25,6 +25,8 @@ export interface ExecResult {
  */
 export function childEnv(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const env = { ...process.env, ...overrides };
+  // Children only: the daemon's own process.env must keep it, or a supervisor reload
+  // re-resolves the key from another source and silently turns the fleet broker off.
   delete env["CREDENTIALS_DIRECTORY"];
   return env;
 }

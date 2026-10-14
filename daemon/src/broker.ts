@@ -41,6 +41,9 @@ import { log } from "./log.ts";
  * payload from validated fields, seals with its own key and dials its own
  * configured relay. There is no frame that returns the key, seals or opens
  * arbitrary bytes, or addresses `"machines"`.
+ *
+ * Built only by a daemon whose key is service-delivered (`run.ts`): elsewhere
+ * `seanced mcp` reads the key itself, and the broker would add authority, not reach.
  */
 
 /**

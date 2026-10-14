@@ -54,6 +54,12 @@ export type BrokerRequest =
 export const BROKER_ERROR_CODES = [
   /** A version or action this daemon does not broker. */
   "unsupported",
+  /**
+   * This daemon brokers nothing: its key is not service-delivered, so a keyless
+   * peer's fix is to read the key itself. Its own code rather than
+   * `unsupported`, so the peer can say so without matching message text.
+   */
+  "broker_disabled",
   /** A remote op off the allowlist: rescan, update-available, anything else. */
   "op_not_allowed",
   /** Missing or mistyped fields, or a payload not shaped like its op's request. */

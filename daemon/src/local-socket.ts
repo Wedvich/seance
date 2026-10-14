@@ -31,9 +31,10 @@ import { runDir, socketPath } from "./paths.ts";
  * the same socket: where the key is delivered to the daemon's unit alone, a
  * same-uid peer could not otherwise reach other machines, and through the
  * broker it can — three ops, to exact registry deviceIds, audited as
- * `origin=local-broker`. That widening is deliberate; DESIGN.md's "Local op
- * socket" records it. Broker frames never reach the `Plain` handler below, and
- * `Plain` ops never reach the broker.
+ * `origin=local-broker`. That widening is deliberate and confined to those
+ * daemons: anywhere else the peer can read the key itself, so `run.ts` passes
+ * no broker. DESIGN.md's "Fleet broker" records it. Broker frames never reach
+ * the `Plain` handler below, and `Plain` ops never reach the broker.
  */
 
 /**
@@ -69,8 +70,9 @@ export interface LocalSocketOpts {
   /** Normally `createHandler(ctx, "local")` — the same routing the relay leg uses. */
   readonly handle: (plain: Plain) => Promise<Plain | null>;
   /**
-   * The fleet broker's entry (`createBroker(...).handle`). Absent, broker frames
-   * are answered `unsupported` rather than dropped, so a peer learns why.
+   * The fleet broker's entry (`createBroker(...).handle`), present only on a
+   * daemon whose key is service-delivered. Absent, broker frames are answered
+   * `broker_disabled` rather than dropped, so a peer learns why.
    */
   readonly broker?: (raw: unknown) => Promise<BrokerReply>;
   readonly path?: string;
@@ -142,7 +144,13 @@ async function dispatchBroker(
   }
   let reply: BrokerReply;
   if (broker === undefined) {
-    reply = brokerFail(id, "unsupported", "this daemon brokers no requests to other machines");
+    // Info, not warn: a keyless MCP on a non-credential box is a normal state, and asks on every remote call.
+    log.info(`local socket: refused a broker frame id=${quote(id)} — this daemon does not broker`);
+    reply = brokerFail(
+      id,
+      "broker_disabled",
+      "this daemon's key is not service-delivered, so it brokers no requests to other machines",
+    );
   } else {
     try {
       reply = await broker(raw);
