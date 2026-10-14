@@ -5,6 +5,7 @@ import {
   quote,
   RequestFailure,
   type DespawnRequest,
+  type SpawnClient,
   type SpawnRequest,
 } from "@seance/shared";
 import { appRelayClient, LazyRelay, type AppRelay } from "./app-relay.ts";
@@ -76,9 +77,15 @@ export function brokerRelay(config: Pick<Config, "relayUrl" | "bearerToken">, ke
 type Parsed = { readonly request: BrokerRequest } | { readonly code: BrokerErrorCode; readonly message: string };
 
 /**
+ * Stamped by the broker, never copied from the peer: a same-uid process could
+ * otherwise make the target's audit line read as the PWA. What reaches the
+ * target is always `client="mcp"`, as for a direct MCP spawn.
+ */
+const BROKER_CLIENT: SpawnClient = "mcp";
+
+/**
  * Rebuilt from validated fields rather than forwarded: whatever else a peer put
- * in the payload never reaches the wire. `client` is kept — it is what makes the
- * target's audit line read `client="mcp"`.
+ * in the payload — its `client` included — never reaches the wire.
  */
 function cleanSpawn(p: SpawnRequest): SpawnRequest {
   return {
@@ -89,7 +96,7 @@ function cleanSpawn(p: SpawnRequest): SpawnRequest {
     ...(p.model === undefined ? {} : { model: p.model }),
     ...(p.effort === undefined ? {} : { effort: p.effort }),
     ...(p.plan === undefined ? {} : { plan: p.plan }),
-    ...(p.client === undefined ? {} : { client: p.client }),
+    client: BROKER_CLIENT,
   };
 }
 
@@ -97,7 +104,7 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
   return {
     id: p.id,
     ...(p.force === undefined ? {} : { force: p.force }),
-    ...(p.client === undefined ? {} : { client: p.client }),
+    client: BROKER_CLIENT,
   };
 }
 

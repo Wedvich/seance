@@ -169,6 +169,20 @@ describe("the broker", () => {
     broker.stop();
   });
 
+  test("a peer's client name never reaches the target: the broker stamps mcp itself", async () => {
+    const { broker, fakes, lines } = rig(() => ({ ok: true, window: "w", path: "/p", sessions: [] }));
+    await broker.handle(request({ id: "a", remoteOp: "spawn", payload: { repo: "seance", mode: "here", client: "pwa" } }));
+    await broker.handle(request({ id: "b", remoteOp: "despawn", payload: { id: "%1", client: "pwa" } }));
+    await broker.handle(request({ id: "c", remoteOp: "spawn", payload: { repo: "seance", mode: "here" } }));
+    expect(fakes[0]?.requests.map((sent) => sent.payload)).toEqual([
+      { repo: "seance", mode: "here", client: "mcp" },
+      { id: "%1", client: "mcp" },
+      { repo: "seance", mode: "here", client: "mcp" },
+    ]);
+    expect(lines.join("\n")).not.toContain('client="pwa"');
+    broker.stop();
+  });
+
   test("an id the registry does not hold is refused without a send", async () => {
     const { broker, fakes } = rig();
     const reply = failed(await broker.handle(request({ deviceId: "device-forged" })));

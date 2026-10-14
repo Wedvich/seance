@@ -1815,15 +1815,16 @@ request itself as an app-role relay client with the key it imported at start.
   `deviceId` this daemon's key can read — never a name, `"app"`, `"machines"`, or the
   daemon's own id, which belongs on the local op path). The payload is validated with
   the handler's own checks and rebuilt from the validated fields, so nothing else a
-  peer adds reaches the wire. `client: "mcp"` is kept, so the target audits the spawn
-  as `origin=relay client="mcp"`, exactly as a direct MCP spawn. Rejected: a crypto
+  peer adds reaches the wire. `client` is stamped `"mcp"` by the broker, never copied
+  from the peer, so the target audits the spawn as `origin=relay client="mcp"`
+  exactly as a direct MCP spawn — and a same-uid process cannot pass as the PWA. Rejected: a crypto
   oracle (seal/open on request) — same-uid peers make it unpoliceable, and it is the
   key's whole reach; raw relay forwarding (`{to, op, plaintext}`), which is the oracle
   by another name; a transient systemd service per MCP call to receive the credential
   (root on every call, and the key in another process); copying the PSK into a store
   the user can read (undoes the sealing).
 - **Never a `Plain`, never an `OpName`.** A broker frame is `{v, kind: "broker", id,
-action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
+  action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
   routes on `kind` before the `Plain` check. So no broker verb can arrive from the
   relay, no relay op can be smuggled in as a broker action, and — the reason for
   `remoteOp` over `op` — a daemon that predates the broker sees a malformed frame and
