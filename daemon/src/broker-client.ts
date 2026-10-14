@@ -41,12 +41,14 @@ export class BrokerError extends Error {
 /**
  * Codes that can arrive after the daemon may already have sent the request on.
  * For a side-effecting op they must not read as "it did not happen", or the
- * model's natural next move is a duplicate spawn.
+ * model's natural next move is a duplicate spawn. `shutting_down` is not here:
+ * it is only ever a refusal before anything was sent. The daemon's own messages
+ * for these codes never claim it, so the line is added here exactly once.
  */
 const UNCERTAIN: ReadonlySet<BrokerClientCode> = new Set<BrokerClientCode>([
   "daemon_closed",
   "daemon_timeout",
-  "shutting_down",
+  "stopped_in_flight",
   "internal_error",
   "reply_too_large",
   "bad_reply",

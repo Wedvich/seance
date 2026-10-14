@@ -72,8 +72,10 @@ export const BROKER_ERROR_CODES = [
   "request_failed",
   /** The answer would not fit in one frame. */
   "reply_too_large",
-  /** The daemon is stopping or reloading. */
+  /** Refused because the daemon is stopping or reloading — before anything was sent. */
   "shutting_down",
+  /** The daemon stopped with the request already out, so it may have landed. */
+  "stopped_in_flight",
   "internal_error",
 ] as const;
 
@@ -126,14 +128,25 @@ export function brokerFail(re: string, code: BrokerErrorCode, message: string, r
   };
 }
 
-const FAILURE_REASONS: readonly FailureReason[] = ["offline", "unknown", "refused", "timeout", "disconnected"];
+/**
+ * A `Record` over the shared union, not a list: adding a reason in shared leaves
+ * a key missing here, which fails the typecheck instead of silently dropping
+ * that reason from every brokered reply.
+ */
+const FAILURE_REASONS: Record<FailureReason, true> = {
+  offline: true,
+  unknown: true,
+  refused: true,
+  timeout: true,
+  disconnected: true,
+};
 
 function isBrokerErrorCode(value: unknown): value is BrokerErrorCode {
   return BROKER_ERROR_CODES.some((code) => code === value);
 }
 
 function isFailureReason(value: unknown): value is FailureReason {
-  return FAILURE_REASONS.some((reason) => reason === value);
+  return typeof value === "string" && Object.hasOwn(FAILURE_REASONS, value);
 }
 
 /**

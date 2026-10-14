@@ -199,9 +199,8 @@ export function createBroker(opts: BrokerOpts): Broker {
         if (!(err instanceof RequestFailure)) throw err;
         // A stop mid-request fails it as "disconnected" — but it was already on
         // the wire, so the peer must hear that it may have landed, not that it
-        // never left.
-        if (stopped)
-          return fail(id, "shutting_down", "the daemon stopped while the request was out — it may have landed anyway");
+        // never left. The peer's side words the "may have landed".
+        if (stopped) return fail(id, "stopped_in_flight", "the daemon stopped while the request was out");
         return fail(id, "request_failed", err.message, err.reason);
       }
     } finally {

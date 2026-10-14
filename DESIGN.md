@@ -1837,7 +1837,12 @@ request itself as an app-role relay client with the key it imported at start.
   codes, and a `RequestFailure` crosses with its reason so the MCP side renders it
   exactly as the direct path does — a relay timeout still reads "may have landed
   anyway". Losing the daemon mid-request, or its deadline passing, on a spawn or
-  despawn says the same; nothing is retried, on either path. A handler that throws
+  despawn says the same; nothing is retried, on either path. Two stop codes keep
+  the certainty apart: `shutting_down` is a refusal before anything was sent, so
+  the request certainly did not happen; `stopped_in_flight` means it was already
+  out and reads as possibly landed. The latter is best effort — the local socket
+  closes in the same tick the broker stops, so a peer normally sees the connection
+  drop (`daemon_closed`, also read as possibly landed) rather than the reply. A handler that throws
   still answers. The peer's deadline is the daemon's connect and registry-settle
   budget plus the op's own timeout plus margin, so a slow first connect never cuts
   off a spawn still on its way. In flight is capped at 16; past it a request is

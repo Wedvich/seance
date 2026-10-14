@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { RequestFailure, type Plain, type RequestOp, type SessionsResponse } from "@seance/shared";
 import { LazyRelay } from "../src/app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest } from "../src/broker-client.ts";
-import type { BrokerReply } from "../src/broker-protocol.ts";
+import { brokerFail, brokerFrameId, type BrokerReply } from "../src/broker-protocol.ts";
 import { createBroker, type Broker } from "../src/broker.ts";
 import { mcpFleetChecks } from "../src/fleet.ts";
 import { localRequest } from "../src/local-client.ts";
@@ -77,17 +77,30 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("expected a rejection");
 }
 
-/** Raw bytes in, raw text out — for frames the real client would never send. */
-async function raw(payload: string, waitMs = 300): Promise<string> {
+async function dial(payload: string): Promise<{ readonly received: () => string; readonly end: () => void }> {
   let received = "";
   const sock = await Bun.connect<undefined>({
     unix: sockPath,
     socket: { data: (_s, chunk: Buffer): void => void (received += chunk.toString()), error: (): void => {} },
   });
   sock.write(payload);
+  return { received: () => received, end: () => void sock.end() };
+}
+
+/** Raw bytes in, the daemon's one reply line out — for frames the real client would never send. */
+async function raw(payload: string): Promise<string> {
+  const conn = await dial(payload);
+  await pollUntil(() => conn.received().includes("\n"), "the daemon's reply line");
+  conn.end();
+  return conn.received();
+}
+
+/** For the frames the daemon must not answer: a non-event cannot be polled, so this waits a fixed while. */
+async function rawSilence(payload: string, waitMs = 300): Promise<string> {
+  const conn = await dial(payload);
   await Bun.sleep(waitMs);
-  sock.end();
-  return received;
+  conn.end();
+  return conn.received();
 }
 
 describe("the fleet broker on the local op socket", () => {
@@ -150,7 +163,7 @@ describe("the fleet broker on the local op socket", () => {
   });
 
   test("a broker frame with no id is dropped, like any malformed frame", async () => {
-    expect(await raw(`${JSON.stringify({ v: 1, kind: "broker", action: "machines" })}\n`)).toBe("");
+    expect(await rawSilence(`${JSON.stringify({ v: 1, kind: "broker", action: "machines" })}\n`)).toBe("");
   });
 
   test("an answer past the frame cap is replaced by a structured refusal, not truncated", async () => {
@@ -181,6 +194,30 @@ describe("the fleet broker on the local op socket", () => {
       expect(err).toMatchObject({ code: "internal_error" });
     } finally {
       throwing.stop();
+    }
+  });
+
+  test("a stop reply says it may have landed exactly once, and a pre-send refusal says it did not", async () => {
+    const path = join(base, "stopcodes.sock");
+    let code: "shutting_down" | "stopped_in_flight" = "stopped_in_flight";
+    const stopping = await listen(path, (frame) =>
+      Promise.resolve(
+        brokerFail(
+          brokerFrameId(frame) ?? "",
+          code,
+          code === "shutting_down" ? "the daemon is stopping" : "the daemon stopped while the request was out",
+        ),
+      ),
+    );
+    try {
+      const inFlight = String(await rejection(brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path })));
+      expect(inFlight.match(/may have landed/gu)).toHaveLength(1);
+      code = "shutting_down";
+      const refused = await rejection(brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path }));
+      expect(refused).toMatchObject({ code: "shutting_down" });
+      expect(String(refused)).not.toContain("may have landed");
+    } finally {
+      stopping.stop();
     }
   });
 
