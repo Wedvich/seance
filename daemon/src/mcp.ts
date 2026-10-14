@@ -16,10 +16,20 @@ import {
   type SpawnRequest,
   type SpawnResponse,
 } from "@seance/shared";
-import { appRelayClient, LazyRelay, type AppRelay } from "./app-relay.ts";
+import { appRelayClient, LazyRelay } from "./app-relay.ts";
+import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { exec } from "./exec.ts";
+import {
+  brokerFailureText,
+  brokerFleet,
+  FleetUnreachable,
+  relayFleet,
+  selectFleet,
+  type Fleet,
+  type FleetLease,
+} from "./fleet.ts";
 import { recordedBunCheck } from "./link.ts";
 import { localRequest, LocalUnavailable } from "./local-client.ts";
 import { readState } from "./state.ts";
@@ -138,16 +148,29 @@ function renderSessions(reply: SessionsResponse | ErrorResponse): ToolResult {
   return textResult(JSON.stringify(reply.sessions, null, 2));
 }
 
+/** One line per failure whichever transport carried it: a brokered `RequestFailure` renders as the direct one does. */
 function failureText(op: string, err: unknown): string {
   const detail =
-    err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+    err instanceof RequestFailure
+      ? failureReasonText(err)
+      : err instanceof BrokerError
+        ? brokerFailureText(err)
+        : err instanceof Error
+          ? err.message
+          : String(err);
   return `${op} failed: ${detail}`;
+}
+
+/** Why the fleet could not be opened at all. A keyless box's reason is self-explanatory; a direct failure is the relay's. */
+function openFailureText(err: unknown): string {
+  return err instanceof FleetUnreachable ? err.message : failureText("connecting to the relay", err);
 }
 
 /**
  * The MCP face of Séance: four tools mapping 1:1 onto the registry and the
  * `sessions`/`spawn`/`despawn` ops. Anything this hands to the relay rides the same
- * envelope crypto as the PWA — there is no separate MCP wire surface.
+ * envelope crypto as the PWA — there is no separate MCP wire surface, whether
+ * this process seals it or the daemon's broker does (`fleet.ts`).
  *
  * `local` is what makes a self-targeted call skip the relay: the per-machine
  * ops go straight to this box's daemon over its op socket, which is the same
@@ -155,22 +178,22 @@ function failureText(op: string, err: unknown): string {
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
  */
-export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = null): McpServer {
+export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
-  // Every tool bumps the idle clock via acquire/release, even ones that fail.
-  const withRelay = async (fn: (client: AppRelay) => Promise<ToolResult>): Promise<ToolResult> => {
-    let client: AppRelay;
+  // Every tool bumps the idle clock via open/release, even ones that fail.
+  const withFleet = async (fn: (lease: FleetLease) => Promise<ToolResult>): Promise<ToolResult> => {
+    let lease: FleetLease;
     try {
-      client = await relay.acquire();
+      lease = await fleet.open();
     } catch (err) {
-      return errorResult(failureText("connecting to the relay", err));
+      return errorResult(openFailureText(err));
     }
     try {
-      return await fn(client);
+      return await fn(lease);
     } finally {
-      relay.release();
+      lease.release();
     }
   };
 
@@ -183,21 +206,21 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
       annotations: { readOnlyHint: true },
     },
     async () => {
-      let client: AppRelay;
+      let lease: FleetLease;
       try {
-        client = await relay.acquire();
+        lease = await fleet.open();
       } catch (err) {
         // The fleet needs the relay, but this box does not. Answering with the
-        // local machine alone beats answering with nothing: on a
-        // credential-delivered box the relay is unreachable by construction, and
-        // a model that cannot see any machine cannot spawn on the one it is
-        // sitting on either.
-        if (local === null) return errorResult(failureText("connecting to the relay", err));
+        // local machine alone beats answering with nothing: a model that cannot
+        // see any machine cannot spawn on the one it is sitting on either.
+        if (local === null) return errorResult(openFailureText(err));
+        const why =
+          err instanceof FleetUnreachable ? err.message : `the relay is unreachable (${failureText("connect", err)})`;
         return textResult(
           JSON.stringify(
             {
               machines: [await describeLocal(local)],
-              note: `the relay is unreachable (${failureText("connect", err)}) — only this machine is listed, and only local spawns will work`,
+              note: `${why} — only this machine is listed, and only local spawns will work`,
             },
             null,
             2,
@@ -205,10 +228,10 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         );
       }
       try {
-        const machines = client.getState().machines.map((machine) => describeMachine(machine, local));
+        const machines = lease.machines.map((machine) => describeMachine(machine, local));
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
-        relay.release();
+        lease.release();
       }
     },
   );
@@ -230,12 +253,12 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
           return errorResult(localFailureText("get_sessions", err));
         }
       }
-      return withRelay(async (client) => {
-        const resolved = resolveMachine(client.getState().machines, machine);
+      return withFleet(async (lease) => {
+        const resolved = resolveMachine(lease.machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         try {
           return renderSessions(
-            await client.request<SessionsResponse | ErrorResponse>(resolved.machine.deviceId, "sessions", {}),
+            await lease.request<SessionsResponse | ErrorResponse>(resolved.machine.deviceId, "sessions", {}),
           );
         } catch (err) {
           return errorResult(failureText("get_sessions", err));
@@ -308,8 +331,8 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         }
       }
 
-      return withRelay(async (client) => {
-        const resolved = resolveMachine(client.getState().machines, machine);
+      return withFleet(async (lease) => {
+        const resolved = resolveMachine(lease.machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
@@ -320,7 +343,7 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
           return errorResult(`${target.name} has no repo named "${repo}" — its repos: ${known}`);
         }
         try {
-          return rendered(await client.request<SpawnResponse>(target.deviceId, "spawn", request), target.name);
+          return rendered(await lease.request<SpawnResponse>(target.deviceId, "spawn", request), target.name);
         } catch (err) {
           return errorResult(failureText("spawn_session", err));
         }
@@ -361,8 +384,8 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         }
       }
 
-      return withRelay(async (client) => {
-        const resolved = resolveMachine(client.getState().machines, machine);
+      return withFleet(async (lease) => {
+        const resolved = resolveMachine(lease.machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
@@ -370,7 +393,7 @@ export function buildMcpServer(relay: LazyRelay, local: LocalMachine | null = nu
         }
         try {
           return rendered(
-            await client.request<DespawnResponse | ErrorResponse>(target.deviceId, "despawn", request),
+            await lease.request<DespawnResponse | ErrorResponse>(target.deviceId, "despawn", request),
             target.name,
           );
         } catch (err) {
@@ -402,47 +425,34 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
 }
 
 /**
- * Resolves and imports the PSK on first remote use, memoized. Deferred rather
- * than done at startup because local ops need no key at all: on a box where the
- * key only exists as a credential systemd delivers to the daemon's unit, this
- * throws — and only for the calls that actually need the relay.
- *
- * Cleared on failure so a later call retries rather than caching a rejection: a
- * keychain that was locked at the first attempt may be open at the second.
+ * The fleet as `seanced mcp` reaches it. The PSK is resolved on first remote
+ * use, not at startup, because local ops need no key at all; when this process
+ * can read none — the key exists only as a credential systemd delivers to the
+ * daemon's unit — remote ops go through the daemon's broker instead, and the
+ * key never enters this process. `selectFleet` memoizes the direct choice and
+ * re-asks the stores after a while when there was nothing to find.
  */
-function relayKey(config: Config): () => Promise<CryptoKey> {
-  const resolve = async (): Promise<CryptoKey> => {
-    const resolved = await loadPsk(config);
-    if (resolved === null) {
-      throw new Error(
-        "no PSK — fill the psk field in config.json or run `seanced psk-import`. " +
-          "Spawning on this machine needs no key; only reaching another one does.",
-      );
-    }
-    return importPsk(resolved.psk);
-  };
-  let pending: Promise<CryptoKey> | null = null;
-  return async (): Promise<CryptoKey> => {
-    pending ??= resolve();
-    try {
-      return await pending;
-    } catch (err) {
-      pending = null;
-      throw err;
-    }
-  };
+function mcpFleet(config: Config): Fleet {
+  return selectFleet({
+    key: async (): Promise<CryptoKey | null> => {
+      const resolved = await loadPsk(config);
+      return resolved === null ? null : importPsk(resolved.psk);
+    },
+    direct: (key) =>
+      relayFleet(
+        // stdout carries the protocol frames — the wire log must land on stderr.
+        new LazyRelay({ create: () => appRelayClient(config, key, (line) => console.error(line)) }),
+      ),
+    broker: brokerFleet(),
+  });
 }
 
 /** `seanced mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
   const config = await loadConfig();
   const local = await localMachine(config);
-  const key = relayKey(config);
-  const relay = new LazyRelay({
-    // stdout carries the protocol frames — the wire log must land on stderr.
-    create: async () => appRelayClient(config, await key(), (line) => console.error(line)),
-  });
-  const handle = serveStdio(() => buildMcpServer(relay, local), {
+  const fleet = mcpFleet(config);
+  const handle = serveStdio(() => buildMcpServer(fleet, local), {
     onerror: (err) => console.error(`mcp: ${err.message}`),
   });
   await new Promise<void>((resolve) => {
@@ -453,7 +463,7 @@ export async function runMcpServer(): Promise<void> {
     process.stdin.on("close", resolve);
   });
   await handle.close();
-  relay.stop();
+  fleet.stop();
   process.exit(0);
 }
 

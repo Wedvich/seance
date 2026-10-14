@@ -11,6 +11,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
+import { relayFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import {
   killWindow,
@@ -385,7 +386,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
       { versionNegotiation: { mode: { pin: "2026-07-28" } } },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    serveStdio(() => buildMcpServer(lazy), { transport: serverTransport });
+    serveStdio(() => buildMcpServer(relayFleet(lazy)), { transport: serverTransport });
     await client.connect(clientTransport);
 
     const text = async (name: string, args: Record<string, unknown>): Promise<string> => {
@@ -452,7 +453,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
       { versionNegotiation: { mode: { pin: "2026-07-28" } } },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    serveStdio(() => buildMcpServer(dead, local), { transport: serverTransport });
+    serveStdio(() => buildMcpServer(relayFleet(dead), local), { transport: serverTransport });
     await client.connect(clientTransport);
 
     const text = async (name: string, args: Record<string, unknown>): Promise<string> => {
