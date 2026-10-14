@@ -7,6 +7,7 @@ import { LazyRelay } from "../src/app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest } from "../src/broker-client.ts";
 import type { BrokerReply } from "../src/broker-protocol.ts";
 import { createBroker, type Broker } from "../src/broker.ts";
+import { mcpFleetChecks } from "../src/fleet.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { fakeRelay, machine } from "./fake-app-relay.ts";
@@ -256,6 +257,36 @@ describe("the fleet broker on the local op socket", () => {
     } finally {
       second.stop();
       local.stop();
+    }
+  });
+});
+
+describe("doctor's view of the MCP fleet path", () => {
+  test("a readable key means direct, and the broker is not probed", async () => {
+    const checks = await mcpFleetChecks(true, { path: join(base, "absent.sock") });
+    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("directly") }]);
+  });
+
+  test("no key here and a broker answering reads as the broker, with the registry size", async () => {
+    const checks = await mcpFleetChecks(false, { path: sockPath });
+    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("daemon's broker") }]);
+    expect(checks[0]?.message).toContain("2 machine(s)");
+  });
+
+  test("no key and no daemon, or a daemon too old to broker, each say which", async () => {
+    const none = await mcpFleetChecks(false, { path: join(base, "absent.sock") });
+    expect(none[0]).toMatchObject({ level: "warn", message: expect.stringContaining("no daemon is listening") });
+
+    const path = join(base, "old-doctor.sock");
+    const old = Bun.listen<undefined>({ unix: path, socket: { data: (sock): void => void sock.end() } });
+    try {
+      const stale = await mcpFleetChecks(false, { path });
+      expect(stale[0]).toMatchObject({
+        level: "warn",
+        message: expect.stringContaining("older than the fleet broker"),
+      });
+    } finally {
+      old.stop(true);
     }
   });
 });

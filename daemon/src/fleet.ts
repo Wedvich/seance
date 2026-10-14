@@ -2,6 +2,7 @@ import type { Machine } from "@seance/shared";
 import type { LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
+import type { Check } from "./check.ts";
 
 /**
  * How `seanced mcp` reaches machines other than its own. Two transports behind
@@ -88,6 +89,39 @@ export class FleetUnreachable extends Error {
         "in config.json or run `seanced psk-import`. Spawning on this machine needs neither.",
     );
     this.name = "FleetUnreachable";
+  }
+}
+
+/**
+ * Doctor's line on how `seanced mcp` would reach other machines from this
+ * shell. Never resolves a key of its own — the caller says whether its own
+ * `loadPsk` found one — and probes the broker only where it would be used,
+ * with `machines`, which cannot change anything.
+ */
+export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts = {}): Promise<readonly Check[]> {
+  if (keyReadable) {
+    return [{ level: "ok", message: "MCP reaches other machines directly — this user can read the PSK" }];
+  }
+  try {
+    const machines = await brokerMachines(opts);
+    return [
+      {
+        level: "ok",
+        message: `MCP reaches other machines through the daemon's broker — no PSK readable here, ${machines.length} machine(s) in the registry`,
+      },
+    ];
+  } catch (err) {
+    const prefix = "no PSK readable here, so MCP reaches other machines through the daemon — ";
+    if (!(err instanceof BrokerError)) return [{ level: "warn", message: `${prefix}${String(err)}` }];
+    if (err.code === "daemon_unreachable") {
+      return [
+        {
+          level: "warn",
+          message: `${prefix}and no daemon is listening; only this machine is reachable until seanced runs`,
+        },
+      ];
+    }
+    return [{ level: "warn", message: `${prefix}but it could not: ${brokerFailureText(err)}` }];
   }
 }
 
