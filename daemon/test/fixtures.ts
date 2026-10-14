@@ -3,6 +3,7 @@ import { chmod, link, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
+import { listPanes } from "../src/sessions.ts";
 import { tmux } from "../src/tmux.ts";
 import { TEST_RUN_DIR_ENV } from "../../scripts/test-run-dir.ts";
 
@@ -305,6 +306,21 @@ export async function pollUntil(
     if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
     await Bun.sleep(10);
   }
+}
+
+/**
+ * Waits for tmux to stamp a dead pane's `pane_dead_time`. tmux 3.4 (Ubuntu
+ * 24.04, so CI) now and then misses the pane's SIGCHLD: the pty is closed, so
+ * `pane_dead` is 1, but the shell sits unreaped and unstamped until some other
+ * child of the server exits — waiting longer alone never ends it. A `run-shell`
+ * is that other child; its exit makes tmux reap every zombie it holds.
+ */
+export async function untilDeathStamped(paneId: string): Promise<void> {
+  await pollUntil(async () => {
+    if ((await listPanes()).some((pane) => pane.paneId === paneId && pane.deadAt !== null)) return true;
+    await tmux(["run-shell", "true"]);
+    return false;
+  }, `tmux to stamp ${paneId}'s death time`);
 }
 
 export interface ConfigTrigger {
