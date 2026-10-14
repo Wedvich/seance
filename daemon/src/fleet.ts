@@ -75,7 +75,7 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
 const NOT_BROKERING =
   "this daemon's key is not service-delivered, so it does not broker — `seanced mcp` has to read the PSK itself";
 const WHY_KEYLESS =
-  "run `seanced doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field)";
+  "run `seanced doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field — fill the field or run `seanced psk-import`)";
 
 /** What a broker failure needs added for the reader to act on it. */
 export function brokerFailureText(err: BrokerError): string {
@@ -161,7 +161,7 @@ export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts 
       return [
         {
           level: "warn",
-          message: `${prefix}but ${NOT_BROKERING} (the psk check above says why it cannot); only this machine is reachable until then`,
+          message: `no PSK readable here, and ${NOT_BROKERING} (the key-store lines above say why it cannot); only this machine is reachable until then`,
         },
       ];
     }

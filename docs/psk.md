@@ -170,7 +170,8 @@ minute, so a keychain unlocked mid-session is picked up.
 Prerequisites: the daemon running (`seanced status`), as the same user Claude Code
 runs as — the op socket lives in a 0700 directory under that user's state dir, so
 `User=` in the system unit must be you, which `install --system` already writes — and
-a daemon new enough to broker. `seanced doctor` says which path MCP will take from your
+a daemon new enough to broker whose own key is service-delivered (any other daemon
+refuses with `broker_disabled`). `seanced doctor` says which path MCP will take from your
 shell, and probes the broker when that is the one:
 
 | doctor says                                | meaning                                                              |

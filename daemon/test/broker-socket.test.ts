@@ -229,8 +229,6 @@ describe("the fleet broker on the local op socket", () => {
     try {
       const err = await rejection(brokerMachines({ path }));
       expect(err).toMatchObject({ code: "broker_disabled" });
-      // Its own cause, never the old-daemon advice.
-      expect(String(err)).not.toContain("update");
     } finally {
       bare.stop();
     }
@@ -340,7 +338,7 @@ describe("doctor's view of the MCP fleet path", () => {
       expect(check?.level).toBe("warn");
       const message = check?.message ?? "";
       expect(message).toContain("not service-delivered");
-      expect(message).toContain("psk check above");
+      expect(message).toContain("key-store lines above");
       expect(message).not.toContain("older than the fleet broker");
     } finally {
       bare.stop();

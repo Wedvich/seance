@@ -1727,7 +1727,8 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
   origin on the `audit request` line too. True of the three `Plain` ops; the
-  fleet broker below is the one deliberate exception, and says so.
+  fleet broker below is the one deliberate exception, served only by a daemon
+  whose key is service-delivered, and says so.
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -1802,6 +1803,9 @@ request itself as an app-role relay client with the key it imported at start.
   side can say "read the key here" instead of "update seanced" without matching
   message text. Decided by the source the daemon imported, never by probing: a
   config field beside a credential wins in `loadPsk`, and then MCP reads it too.
+  The source means only that `$CREDENTIALS_DIRECTORY/seance-psk` held the key, so a
+  hand-set variable or a plain `LoadCredential=` makes a broker where MCP could read
+  the key after all — no extra reach, since writing that file takes the PSK.
   Rejected: running it everywhere, as first shipped — it was never needed there.
 - **This widens the socket's authority, on purpose, and only there.** A same-uid
   process on a credential-delivered box can now spawn and despawn on every machine,

@@ -144,7 +144,8 @@ async function dispatchBroker(
   }
   let reply: BrokerReply;
   if (broker === undefined) {
-    log.warn(`local socket: refused a broker frame id=${quote(id)} — this daemon does not broker`);
+    // Info, not warn: a keyless MCP on a non-credential box is a normal state, and asks on every remote call.
+    log.info(`local socket: refused a broker frame id=${quote(id)} — this daemon does not broker`);
     reply = brokerFail(
       id,
       "broker_disabled",
