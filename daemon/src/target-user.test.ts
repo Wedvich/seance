@@ -98,7 +98,7 @@ describe("missing binaries", () => {
     const message = missingBinariesMessage(missing, "/usr/sbin:/usr/bin");
     expect(message).toContain("secure_path");
     expect(message).toContain(SUDO_SEANCED);
-    expect(message).toContain('"$(command -v seanced)" install --system --path "$PATH"');
+    expect(message).toContain('sudo env PATH="$PATH" seanced install --system');
   });
 });
 

@@ -21,7 +21,7 @@ a **system** unit so PID 1 can unseal and deliver the key (`LoadCredentialEncryp
 ```sh
 seanced uninstall                                   # if a user unit is installed
 sudo --preserve-env=PATH "$(command -v seanced)" install --system
-# or: sudo "$(command -v seanced)" install --system --path "$PATH"
+# or: sudo env PATH="$PATH" seanced install --system
 ```
 
 Both halves of that prefix are load-bearing. `"$(command -v seanced)"` is the full path
@@ -32,8 +32,9 @@ sees: everything the unit records is written out literally — a `User=` system 
 inherits nothing from your shell — and under a plain `sudo` that PATH is `secure_path`,
 which holds no mise shim, no `~/.local/bin` and so neither bun (the `env bun` shebang
 needs it too) nor claude. `install --system` refuses rather than write a unit that
-starts and then fails every spawn, so if your sudo's `secure_path` wins anyway, pass
-`--path "$PATH"`.
+starts and then fails every spawn. Where sudoers refuses `--preserve-env`, the
+`sudo env PATH="$PATH" seanced …` form gets the same result: sudo only has to find
+`env`, which `secure_path` holds, and `env` then finds seanced and bun on your PATH.
 
 What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
 rather than from root: home and uid/gid via `getent`, the state dir

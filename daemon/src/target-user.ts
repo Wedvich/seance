@@ -133,7 +133,7 @@ export function missingBinariesMessage(missing: readonly string[], pathEnv: stri
   return (
     `the PATH this would record resolves no ${missing.join(", ")} — that unit would start and then fail every spawn. ` +
     `sudo replaces PATH with secure_path; re-run as \`${SUDO_SEANCED} install --system\`, ` +
-    `or run \`sudo "$(command -v seanced)" install --system --path "$PATH"\` explicitly (recorded PATH was: ${pathEnv})`
+    `or, where sudoers refuses --preserve-env, \`sudo env PATH="$PATH" seanced install --system\` (recorded PATH was: ${pathEnv})`
   );
 }
 
