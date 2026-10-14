@@ -16,6 +16,7 @@ import {
   lastTouched,
   listBranches,
   listWorktrees,
+  patchIndex,
   pendingChanges,
   pruneWorktrees,
   reapGit,
@@ -348,12 +349,13 @@ async function reapRepo(
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
   const verdicts = new Map<string, BranchVerdict>();
+  const patches = patchIndex(repo.path, base);
   const verdictFor = async (sha: string, branch: string | null): Promise<BranchVerdict> => {
     const key = `${sha} ${branch ?? ""}`;
     const cached = verdicts.get(key);
     if (cached !== undefined) return cached;
     const gone = branch === null ? false : (byName.get(branch)?.upstreamGone ?? false);
-    const verdict = await classifyTip(repo.path, sha, base, baseTree, gone);
+    const verdict = await classifyTip(repo.path, sha, base, baseTree, gone, patches);
     verdicts.set(key, verdict);
     return verdict;
   };

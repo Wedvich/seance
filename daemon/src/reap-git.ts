@@ -10,14 +10,21 @@ import { exec, execFailure, type ExecResult } from "./exec.ts";
  * are off for every call. `GIT_OPTIONAL_LOCKS=0` keeps `status` from refreshing
  * the index — whose mtime is one of the age signals, and reap must not reset the
  * age it is measuring. `GIT_TERMINAL_PROMPT=0` plus exec's ignored stdin and a
- * timeout keep a fetch that wants credentials from hanging, as Claude Code does.
+ * timeout keep a fetch that wants credentials from hanging, as Claude Code does;
+ * `stdin` is for the plumbing that reads it (`patch-id`, `diff-tree --stdin`), never a fetch.
  * What still runs is what a fetch needs — credential helpers, `core.sshCommand`.
  */
-export async function reapGit(cwd: string, args: readonly string[], timeoutMs = 15_000): Promise<ExecResult> {
+export async function reapGit(
+  cwd: string,
+  args: readonly string[],
+  timeoutMs = 15_000,
+  stdin?: string,
+): Promise<ExecResult> {
   return exec(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
     cwd,
     timeoutMs,
     env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+    ...(stdin === undefined ? {} : { stdin }),
   });
 }
 
@@ -134,15 +141,84 @@ export async function listBranches(repoPath: string): Promise<readonly BranchRec
  * - `ancestor` — it is in `origin/<default>`'s history (a merge or fast-forward).
  * - `squash` — merging it changes nothing: its combined diff is already on the
  *   default branch, which is what a squash-merged PR leaves behind.
+ *   Also a squash the tree check misses because the default branch has since
+ *   edited the same lines: upstream gone, and the tip's whole diff from its
+ *   merge-base is, patch id for patch id, one commit on the default branch
+ *   since that merge-base.
  * - `gone` — its upstream was deleted and every commit's patch is upstream
  *   (`git cherry`), which catches a rebase-merge the tree check can't once the
  *   default branch has since edited the same lines.
  * - `unmerged-gone` — upstream deleted, but commits whose patch is nowhere
- *   upstream: kept, and reported, since that is unpushed work.
+ *   upstream: kept, and reported, since that is unpushed work. A branch
+ *   stacked on another PR's branch lands here too: its diff from the default
+ *   branch holds the parent's changes as well, so no one commit matches.
  * - `active` — none of the above; kept quietly.
  */
 export type Merged = "ancestor" | "squash" | "gone";
 export type BranchVerdict = Merged | "unmerged-gone" | "active";
+
+/** `git patch-id` output as commit → patch id; a diff with no commit header reports the zero sha. */
+function parsePatchIds(raw: string): ReadonlyMap<string, string> {
+  const ids = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    const [patchId, commit] = line.split(" ");
+    if (patchId !== undefined && patchId !== "" && commit !== undefined) ids.set(commit, patchId);
+  }
+  return ids;
+}
+
+async function patchIds(repoPath: string, diff: string): Promise<ReadonlyMap<string, string> | null> {
+  const result = await reapGit(repoPath, ["patch-id", "--stable"], 60_000, diff);
+  return result.exitCode === 0 ? parsePatchIds(result.stdout) : null;
+}
+
+export interface PatchIndex {
+  /** Whether a non-merge commit in `since..base` has exactly this patch id. */
+  readonly landedSince: (since: string, patchId: string) => Promise<boolean>;
+}
+
+/**
+ * Patch ids of the default branch's commits, each computed once per repo pass
+ * however many tips ask: they share most of their `merge-base..base` ranges,
+ * and that range can be hundreds of commits.
+ */
+export function patchIndex(repoPath: string, base: string): PatchIndex {
+  const byCommit = new Map<string, string | null>();
+  // A range that timed out once would time out for every later tip too, each
+  // costing two 60s waits under the reap lock: give up on the index for the pass.
+  let broken = false;
+  return {
+    landedSince: async (since, patchId) => {
+      if (broken) return false;
+      const revs = await reapGit(repoPath, ["rev-list", "--no-merges", `${since}..${base}`]);
+      if (revs.exitCode !== 0) return false;
+      const range = revs.stdout.split("\n").filter((sha) => sha !== "");
+      const missing = range.filter((sha) => !byCommit.has(sha));
+      if (missing.length > 0) {
+        const diffs = await reapGit(repoPath, ["diff-tree", "--stdin", "-p"], 60_000, `${missing.join("\n")}\n`);
+        const ids = diffs.exitCode === 0 ? await patchIds(repoPath, diffs.stdout) : null;
+        if (ids === null) {
+          broken = true;
+          return false;
+        }
+        // An empty commit has no patch id; remembered as such so it isn't asked for again.
+        for (const sha of missing) byCommit.set(sha, ids.get(sha) ?? null);
+      }
+      return range.some((sha) => byCommit.get(sha) === patchId);
+    },
+  };
+}
+
+/**
+ * The tip's net change since it forked, as one patch id — what a squash merge
+ * of it would carry. Null when the diff is empty or git failed.
+ */
+async function squashPatchId(repoPath: string, mergeBase: string, tip: string): Promise<string | null> {
+  const diff = await reapGit(repoPath, ["diff-tree", "-p", mergeBase, tip], 60_000);
+  if (diff.exitCode !== 0) return null;
+  const ids = await patchIds(repoPath, diff.stdout);
+  return ids?.values().next().value ?? null;
+}
 
 /** `baseTree` is `base^{tree}`, resolved once per repo by the caller rather than once per tip. */
 export async function classifyTip(
@@ -151,6 +227,7 @@ export async function classifyTip(
   base: string,
   baseTree: string,
   upstreamGone: boolean,
+  patches: PatchIndex,
 ): Promise<BranchVerdict> {
   const ancestor = await reapGit(repoPath, ["merge-base", "--is-ancestor", tip, base]);
   if (ancestor.exitCode === 0) return "ancestor";
@@ -161,7 +238,15 @@ export async function classifyTip(
   if (!upstreamGone) return "active";
   const cherry = await reapGit(repoPath, ["cherry", base, tip]);
   if (cherry.exitCode !== 0) return "unmerged-gone";
-  return cherry.stdout.split("\n").some((line) => line.startsWith("+")) ? "unmerged-gone" : "gone";
+  if (!cherry.stdout.split("\n").some((line) => line.startsWith("+"))) return "gone";
+  // Only commits after the fork count: a patch from before it that main since
+  // reverted is not on main, and a branch re-applying it is new work.
+  const forkedAt = await reapGit(repoPath, ["merge-base", base, tip]);
+  if (forkedAt.exitCode !== 0) return "unmerged-gone";
+  const mergeBase = forkedAt.stdout.trim();
+  const patchId = await squashPatchId(repoPath, mergeBase, tip);
+  if (patchId === null) return "unmerged-gone";
+  return (await patches.landedSince(mergeBase, patchId)) ? "squash" : "unmerged-gone";
 }
 
 /** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. */
