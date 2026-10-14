@@ -1,79 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import type { Machine, RelayState, RepoEntry, RequestOp, SpawnRequest } from "@seance/shared";
-import { pollUntil } from "../test/fixtures.ts";
+import type { RepoEntry, RequestOp, SpawnRequest } from "@seance/shared";
+import { fakeRelay, machine } from "../test/fake-app-relay.ts";
+import { LazyRelay } from "./app-relay.ts";
 import { LocalUnavailable } from "./local-client.ts";
-import {
-  buildMcpServer,
-  isLocalRef,
-  LazyRelay,
-  mcpBunPath,
-  resolveMachine,
-  type AppRelay,
-  type LocalMachine,
-} from "./mcp.ts";
-
-function machine(overrides: Partial<Machine> = {}): Machine {
-  return {
-    deviceId: "device-1",
-    name: "MacBook Pro",
-    platform: "darwin",
-    repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }],
-    scannedAt: 1_000,
-    lastSeen: 2_000,
-    connected: true,
-    ...overrides,
-  };
-}
-
-interface FakeRelay extends AppRelay {
-  requests: { deviceId: string; op: RequestOp; payload: unknown }[];
-  stopped: boolean;
-  setState: (next: Partial<RelayState>) => void;
-}
-
-function fakeRelay(
-  machines: readonly Machine[],
-  respond: (op: RequestOp, payload: unknown) => unknown = () => ({}),
-  status: RelayState["status"] = "open",
-): FakeRelay {
-  let state: RelayState = {
-    status,
-    rejection: status === "rejected" ? "unauthorized" : null,
-    machines,
-    registrySize: machines.length,
-    ignored: 0,
-    skewed: 0,
-    settling: false,
-    registrySettled: status === "open",
-  };
-  const listeners = new Set<() => void>();
-  const fake: FakeRelay = {
-    requests: [],
-    stopped: false,
-    setState: (next) => {
-      state = { ...state, ...next };
-      for (const listener of listeners) listener();
-    },
-    start: () => {},
-    stop: () => {
-      fake.stopped = true;
-    },
-    getState: () => state,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    request: <T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T> => {
-      fake.requests.push({ deviceId, op, payload });
-      const reply = respond(op, payload);
-      if (reply instanceof Error) return Promise.reject(reply);
-      return Promise.resolve(reply as T);
-    },
-  };
-  return fake;
-}
+import { buildMcpServer, isLocalRef, mcpBunPath, resolveMachine, type LocalMachine } from "./mcp.ts";
 
 interface FakeLocal extends LocalMachine {
   requests: { op: RequestOp; payload: unknown }[];
@@ -166,69 +98,6 @@ describe("resolveMachine", () => {
   test("a miss lists the known machines so the caller can self-correct", () => {
     const result = resolveMachine(machines, "nope");
     expect("error" in result && result.error).toContain("homelab");
-  });
-});
-
-describe("LazyRelay", () => {
-  test("does not dial until the first acquire, and shares one client after", async () => {
-    let created = 0;
-    const lazy = new LazyRelay({
-      create: () => {
-        created += 1;
-        return fakeRelay([machine()]);
-      },
-    });
-    expect(created).toBe(0);
-    const [a, b] = await Promise.all([lazy.acquire(), lazy.acquire()]);
-    expect(created).toBe(1);
-    expect(a).toBe(b);
-    lazy.stop();
-  });
-
-  test("hangs up after the idle window and redials on the next call", async () => {
-    const fakes: FakeRelay[] = [];
-    const lazy = new LazyRelay({
-      create: () => {
-        const fake = fakeRelay([machine()]);
-        fakes.push(fake);
-        return fake;
-      },
-      idleMs: 20,
-    });
-    await lazy.acquire();
-    lazy.release();
-    await pollUntil(() => fakes[0]?.stopped === true, "the idle timer to stop the client");
-    await lazy.acquire();
-    expect(fakes).toHaveLength(2);
-    lazy.stop();
-  });
-
-  test("a rejected token surfaces as an error instead of a silent retry loop", async () => {
-    const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
-    await expect(lazy.acquire()).rejects.toThrow("bearer token");
-  });
-
-  test("a relay that never answers fails the call instead of riding the backoff forever", async () => {
-    const lazy = new LazyRelay({
-      create: () => fakeRelay([], () => ({}), "connecting"),
-      connectTimeoutMs: 30,
-    });
-    await expect(lazy.acquire()).rejects.toThrow("did not answer");
-  });
-
-  test("stop() during a pending connect stops the dialing client instead of adopting it", async () => {
-    let fake: FakeRelay | undefined;
-    const lazy = new LazyRelay({
-      create: () => {
-        fake = fakeRelay([machine()], () => ({}), "connecting");
-        return fake;
-      },
-    });
-    const pending = lazy.acquire();
-    lazy.stop();
-    fake?.setState({ status: "open", registrySettled: true });
-    await expect(pending).rejects.toThrow("stopped");
-    expect(fake?.stopped).toBe(true);
   });
 });
 

@@ -2,16 +2,13 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
-  appRelayUrl,
   failureReasonText,
   importPsk,
-  RelayClient,
   RequestFailure,
   type DespawnRequest,
   type DespawnResponse,
   type ErrorResponse,
   type Machine,
-  type RelayState,
   type RepoEntry,
   type RequestOp,
   type SessionsResponse,
@@ -19,170 +16,13 @@ import {
   type SpawnRequest,
   type SpawnResponse,
 } from "@seance/shared";
+import { appRelayClient, LazyRelay, type AppRelay } from "./app-relay.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { exec } from "./exec.ts";
 import { recordedBunCheck } from "./link.ts";
 import { localRequest, LocalUnavailable } from "./local-client.ts";
 import { readState } from "./state.ts";
-
-/**
- * The slice of the shared app-role RelayClient the tools consume — injectable
- * so tests can drive the tools without a socket. The relay is a network
- * boundary; the client itself is exercised against the real one in e2e.
- */
-export interface AppRelay {
-  readonly start: () => void;
-  readonly stop: () => void;
-  readonly getState: () => RelayState;
-  readonly subscribe: (listener: () => void) => () => void;
-  readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T>;
-}
-
-/**
- * A Claude session can sit open for hours between tool calls, so the socket
- * dials on the first call and hangs up after this much silence rather than
- * holding an app socket per session. Comfortably past the longest op timeout
- * (spawn, 90s), so the line never drops under an in-flight call — and the
- * in-flight count below guards that anyway.
- */
-const IDLE_MS = 5 * 60_000;
-
-/** Bounds `acquire` when the relay is down; past it the call fails instead of riding the backoff forever. */
-const CONNECT_TIMEOUT_MS = 10_000;
-
-export interface LazyRelayOpts {
-  /**
-   * Async because the PSK is resolved here rather than at startup: local ops
-   * need no key, so a box whose key only exists as a systemd-delivered
-   * credential still gets a working MCP server for itself, and only a remote
-   * op pays the "no PSK" error.
-   */
-  readonly create: () => AppRelay | Promise<AppRelay>;
-  readonly idleMs?: number;
-  readonly connectTimeoutMs?: number;
-}
-
-/**
- * Lazy-connect wrapper: `acquire` before a tool call, `release` after. The
- * client connects on first use, is shared by concurrent calls, and is stopped
- * once idle — the next call redials and gets a fresh registry push.
- */
-export class LazyRelay {
-  readonly #opts: LazyRelayOpts;
-  #client: AppRelay | null = null;
-  #connecting: Promise<AppRelay> | null = null;
-  #inFlight = 0;
-  #idleTimer: ReturnType<typeof setTimeout> | null = null;
-  #stopped = false;
-
-  constructor(opts: LazyRelayOpts) {
-    this.#opts = opts;
-  }
-
-  async acquire(): Promise<AppRelay> {
-    if (this.#stopped) throw new Error("the relay client is stopped");
-    if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
-    this.#idleTimer = null;
-    this.#inFlight += 1;
-    try {
-      if (this.#client !== null) return this.#client;
-      this.#connecting ??= this.#connect();
-      return await this.#connecting;
-    } catch (err) {
-      this.#inFlight -= 1;
-      throw err;
-    } finally {
-      this.#connecting = null;
-    }
-  }
-
-  release(): void {
-    this.#inFlight = Math.max(0, this.#inFlight - 1);
-    if (this.#inFlight > 0 || this.#client === null) return;
-    this.#idleTimer = setTimeout(() => {
-      this.#idleTimer = null;
-      if (this.#inFlight > 0) return;
-      this.#client?.stop();
-      this.#client = null;
-    }, this.#opts.idleMs ?? IDLE_MS);
-  }
-
-  stop(): void {
-    this.#stopped = true;
-    if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
-    this.#idleTimer = null;
-    this.#client?.stop();
-    this.#client = null;
-  }
-
-  async #connect(): Promise<AppRelay> {
-    // Awaited before `start()`, so a create that throws — an unresolvable PSK —
-    // propagates with nothing to tear down.
-    const client = await this.#opts.create();
-    client.start();
-    try {
-      await this.#waitOpen(client);
-      await this.#settleRegistry(client);
-      // stop() may have raced this connect; adopting the client now would
-      // leak its socket and heartbeat with no owner left to stop them.
-      if (this.#stopped) throw new Error("stopped while connecting to the relay");
-    } catch (err) {
-      client.stop();
-      throw err;
-    }
-    this.#client = client;
-    return client;
-  }
-
-  async #waitOpen(client: AppRelay): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        unsubscribe();
-        reject(new Error(`the relay did not answer within ${this.#opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS}ms`));
-      }, this.#opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
-      // Referenced from the closures above and below, assigned before either can run:
-      // the timer is async and check() is only called after subscribe returns.
-      const check = (): void => {
-        const state = client.getState();
-        if (state.status === "open") {
-          clearTimeout(timer);
-          unsubscribe();
-          resolve();
-        } else if (state.status === "rejected") {
-          clearTimeout(timer);
-          unsubscribe();
-          reject(
-            new Error(
-              state.rejection === "unauthorized"
-                ? "the relay rejected the bearer token — check bearerToken in config.json"
-                : "the relay rejected the connection as malformed",
-            ),
-          );
-        }
-      };
-      const unsubscribe = client.subscribe(check);
-      check();
-    });
-  }
-
-  /**
-   * Waits for the client to mark this socket's registry authoritative. Bounded
-   * by the client itself: `registrySettled` flips within REGISTRY_SETTLE_MS of
-   * `open` even if no registry frame ever arrives.
-   */
-  async #settleRegistry(client: AppRelay): Promise<void> {
-    await new Promise<void>((resolve) => {
-      const check = (): void => {
-        if (!client.getState().registrySettled) return;
-        unsubscribe();
-        resolve();
-      };
-      const unsubscribe = client.subscribe(check);
-      check();
-    });
-  }
-}
 
 /**
  * What this box is, and how to reach its daemon without the relay.
@@ -599,16 +439,8 @@ export async function runMcpServer(): Promise<void> {
   const local = await localMachine(config);
   const key = relayKey(config);
   const relay = new LazyRelay({
-    create: async () =>
-      new RelayClient({
-        url: appRelayUrl(config.relayUrl),
-        token: config.bearerToken,
-        key: await key(),
-        // stdout carries the protocol frames — the wire log must land on stderr.
-        log: (line) => console.error(line),
-        // Bun dialing workerd needs this or frames die with close code 1002.
-        createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
-      }),
+    // stdout carries the protocol frames — the wire log must land on stderr.
+    create: async () => appRelayClient(config, await key(), (line) => console.error(line)),
   });
   const handle = serveStdio(() => buildMcpServer(relay, local), {
     onerror: (err) => console.error(`mcp: ${err.message}`),

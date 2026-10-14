@@ -10,7 +10,8 @@ import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
-import { buildMcpServer, LazyRelay, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
+import { LazyRelay } from "../daemon/src/app-relay.ts";
+import { buildMcpServer, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import {
   killWindow,
   listRegisteredWindows,
