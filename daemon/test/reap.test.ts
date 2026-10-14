@@ -109,6 +109,16 @@ async function squashMergeOnOrigin(repo: Repo, branch: string): Promise<void> {
   await git(server, "push", "-q", "origin", "main", `:${branch}`);
 }
 
+/** Another developer's later edit to `file` on origin's main, pushed from a throwaway clone. */
+async function editOnOrigin(repo: Repo, file: string): Promise<void> {
+  fixtures += 1;
+  const server = join(base, `server-${fixtures}`);
+  await git(base, "clone", "-q", repo.fixture.barePath, server);
+  await writeFile(join(server, file), "since edited\n");
+  await git(server, "commit", "-q", "-am", `edit ${file}`);
+  await git(server, "push", "-q", "origin", "main");
+}
+
 /** Every signal `lastTouched` reads, set ten days back. */
 async function age(worktree: string): Promise<void> {
   const gitDir = await git(worktree, "rev-parse", "--absolute-git-dir");
@@ -210,6 +220,59 @@ describe("reap: worktrees and branches (real git)", () => {
 
     const [result] = (await reap(repo)).repos;
     expect(result?.deletedBranches.map((b) => [b.name, b.why])).toEqual([["rebased", "gone"]]);
+  });
+
+  test("a squash-merged branch whose lines origin has since edited again: the patch id finds the squash the tree check can't", async () => {
+    const repo = await freshRepo();
+    await git(repo.path, "switch", "-q", "-c", "sq-edited");
+    await commit(repo.path, "one.txt");
+    const tip = await commit(repo.path, "two.txt");
+    await git(repo.path, "push", "-q", "-u", "origin", "sq-edited");
+    await git(repo.path, "switch", "-q", "main");
+    await squashMergeOnOrigin(repo, "sq-edited");
+    await editOnOrigin(repo, "two.txt");
+    await git(repo.path, "fetch", "-q", "--prune", "origin");
+
+    const [result] = (await reap(repo)).repos;
+    expect(result?.deletedBranches).toEqual([{ name: "sq-edited", sha: tip, why: "squash" }]);
+    expect(result?.keptBranches).toEqual([]);
+  });
+
+  test("a branch stacked on a squash-merged one carries its parent's diff too, so it is kept, not mistaken for that squash", async () => {
+    const repo = await freshRepo();
+    await git(repo.path, "switch", "-q", "-c", "parent");
+    await commit(repo.path, "parent.txt");
+    await commit(repo.path, "parent-2.txt");
+    await git(repo.path, "push", "-q", "-u", "origin", "parent");
+    await git(repo.path, "switch", "-q", "-c", "child");
+    await commit(repo.path, "child.txt");
+    await git(repo.path, "push", "-q", "-u", "origin", "child");
+    await git(repo.path, "switch", "-q", "main");
+    await squashMergeOnOrigin(repo, "parent");
+    await git(repo.path, "push", "-q", "origin", ":child");
+    await editOnOrigin(repo, "parent.txt");
+    await git(repo.path, "fetch", "-q", "--prune", "origin");
+
+    const [result] = (await reap(repo)).repos;
+    expect(result?.deletedBranches.map((b) => [b.name, b.why])).toEqual([["parent", "squash"]]);
+    expect(result?.keptBranches).toEqual([{ name: "child", ahead: 3 }]);
+  });
+
+  test("a branch re-applying a change main reverted before it forked is new work, not that change landed", async () => {
+    const repo = await freshRepo();
+    const landed = await commit(repo.path, "relanded.txt");
+    await git(repo.path, "revert", "--no-edit", landed);
+    await git(repo.path, "push", "-q", "origin", "main");
+    await git(repo.path, "switch", "-q", "-c", "reland");
+    await commit(repo.path, "relanded.txt");
+    await git(repo.path, "push", "-q", "-u", "origin", "reland");
+    await git(repo.path, "switch", "-q", "main");
+    await git(repo.path, "push", "-q", "origin", ":reland");
+    await git(repo.path, "fetch", "-q", "--prune", "origin");
+
+    const [result] = (await reap(repo)).repos;
+    expect(result?.deletedBranches).toEqual([]);
+    expect(result?.keptBranches).toEqual([{ name: "reland", ahead: 1 }]);
   });
 
   test("upstream gone but commits nowhere upstream: the branch is kept and reported, untouched", async () => {

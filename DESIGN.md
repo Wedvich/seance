@@ -1241,8 +1241,17 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   conflict or a git without `--write-tree` reads as not merged, the safe side);
   or upstream gone with every commit's patch upstream (`git cherry` shows no
   `+`), which catches a rebase-merge once the default branch has since edited
-  the same lines and the tree check conflicts. Upstream gone with commits whose
-  patch is nowhere upstream is unpushed work: kept and reported. Deletion is
+  the same lines and the tree check conflicts; or upstream gone and the tip's
+  whole diff from its merge-base has the patch id of one non-merge commit on the
+  default branch since that merge-base — the squash the tree check misses once
+  those lines were edited again. Only commits after the fork count, so a branch
+  re-applying a since-reverted change isn't taken for it. Main's patch ids are
+  computed once per commit per pass, shared by every tip. Patch ids hash context
+  lines too, so a squash is still missed when main edited lines next to the PR's
+  hunks before it landed — kept, the safe side. Upstream gone with
+  commits whose patch is nowhere upstream is unpushed work: kept and reported —
+  a branch stacked on another PR's branch included, since its diff carries the
+  parent's changes and matches no one commit. Deletion is
   `update-ref -d <ref> <sha>`, a compare-and-delete that refuses a branch that
   moved since it was judged, then its config section, as `git branch -D` would.
   Every deletion's audit line carries the full tip sha — `git branch <name>
