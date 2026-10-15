@@ -139,7 +139,6 @@ describe("selectFleet", () => {
     const cases: [BrokerError["code"], string][] = [
       ["relay_unavailable", "could not reach the relay"],
       ["busy", "busy"],
-      ["daemon_timeout", "did not answer in time"],
       ["bad_reply", "not readable"],
     ];
     for (const [code, expected] of cases) {
@@ -156,6 +155,28 @@ describe("selectFleet", () => {
       expect(message).not.toContain("is seanced running?");
       // The daemon answered, so its op socket — and with it local ops — is up.
       expect(message).toContain("needs neither");
+    }
+  });
+
+  test("a daemon that took the connection and went quiet is not vouched for as serving local ops", async () => {
+    const cases: [BrokerError["code"], string][] = [
+      ["daemon_timeout", "itself is stuck"],
+      ["daemon_closed", "dropped the connection"],
+    ];
+    for (const [code, expected] of cases) {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => countingFleet([]),
+        broker: countingFleet([], new BrokerError(code, "detail")),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one cause at a time, each asserted alone
+      const err = await fleet.open().catch((caught: unknown) => caught);
+      expect(err).toBeInstanceOf(FleetUnreachable);
+      const message = String(err);
+      expect(message).toContain(expected);
+      expect(message).toContain("seanced status");
+      // Local ops ride the same daemon, which just failed to answer on that socket.
+      expect(message).not.toContain("needs neither");
     }
   });
 

@@ -315,7 +315,10 @@ describe("doctor's view of the MCP fleet path", () => {
 
   test("no key and no daemon, or a daemon too old to broker, each say which", async () => {
     const none = await mcpFleetChecks(false, { path: join(base, "absent.sock") });
-    expect(none[0]).toMatchObject({ level: "warn", message: expect.stringContaining("no daemon is listening") });
+    expect(none[0]?.level).toBe("warn");
+    expect(none[0]?.message).toContain("no daemon is listening");
+    // Local ops ride the same socket, so doctor must not promise them either.
+    expect(none[0]?.message).toContain("this machine included");
 
     const path = join(base, "old-doctor.sock");
     const old = Bun.listen<undefined>({ unix: path, socket: { data: (sock): void => void sock.end() } });

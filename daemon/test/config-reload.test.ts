@@ -7,6 +7,7 @@ import { pskFingerprint } from "../src/config.ts";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
 import {
   awaitWatcherLive,
+  captureLog,
   makeConfigTrigger,
   makeGitFixture,
   usePrivateTmux,
@@ -155,22 +156,16 @@ describe("config hot reload", () => {
     // On a credential-delivered box nothing outside the unit can read the key,
     // so this line is the only place its fingerprint can come from — and doctor
     // points there for it.
-    relay = startTestRelay(TOKEN);
+    const live = startTestRelay(TOKEN);
+    relay = live;
     const path = await configFile();
-    await writeConfig(path, "Fingerprinted", relay.url);
-    const lines: string[] = [];
-    const realLog = console.log;
-    console.log = (...args: unknown[]): void => {
-      lines.push(args.map(String).join(" "));
-    };
-    try {
+    await writeConfig(path, "Fingerprinted", live.url);
+    const lines = await captureLog(async () => {
       await startSupervised(path);
-      await registerAs(relay, "Fingerprinted");
-      await writeConfig(path, "Refingerprinted", relay.url);
+      await registerAs(live, "Fingerprinted");
+      await writeConfig(path, "Refingerprinted", live.url);
       await reload();
-    } finally {
-      console.log = realLog;
-    }
+    });
     const expected = `psk ${await pskFingerprint(PSK)} (config)`;
     const starts = lines.filter((line) => line.includes("seanced starting"));
     expect(starts).toHaveLength(2);

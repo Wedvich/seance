@@ -431,6 +431,20 @@ describe("the local short circuit", () => {
     lazy.stop();
   });
 
+  test("relay and daemon both down on the direct path: this machine is listed, but not as spawnable", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
+    const client = await connectedClient(lazy, fakeLocal(undefined, { reachable: () => Promise.resolve(false) }));
+    const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as {
+      machines: { local: boolean; connected: boolean }[];
+      note: string;
+    };
+    expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: false })]);
+    expect(listed.note).toContain("relay is unreachable");
+    expect(listed.note).toContain("nothing will spawn until seanced is running");
+    expect(listed.note).not.toContain("only local spawns will work");
+    lazy.stop();
+  });
+
   test("no PSK and no daemon: every op fails, and nothing claims local ones still work", async () => {
     // A credential-delivered box whose daemon is down. The broker and the local
     // op path share one socket, so neither answers — and the advice must not send
@@ -481,8 +495,40 @@ describe("the local short circuit", () => {
     };
     expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: false })]);
     expect(listed.note).toContain("no daemon listening");
-    expect(listed.note).toContain("nothing will spawn until seanced is running");
+    expect(listed.note).toContain("fail too");
     expect(listed.note).not.toContain("only local spawns will work");
+    // The advice already names the fix; the note must not say it twice.
+    expect(listed.note.split("seanced status").length).toBe(2);
+  });
+
+  test("list_machines takes the broker's word on the local daemon rather than probing it again", async () => {
+    // The daemon answered the broker moments ago on the socket local ops use; a
+    // second probe racing a restart must not contradict that in the same answer.
+    let probes = 0;
+    const local = fakeLocal(undefined, {
+      reachable: () => {
+        probes += 1;
+        return Promise.resolve(false);
+      },
+    });
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => {
+        throw new Error("no key, so no direct path");
+      },
+      broker: {
+        open: () => Promise.reject(new BrokerError("relay_unavailable", "relay said no")),
+        stop: () => {},
+      },
+    });
+    const client = await connectedClient(fleet, local);
+    const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as {
+      machines: { local: boolean; connected: boolean }[];
+      note: string;
+    };
+    expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: true })]);
+    expect(listed.note).toContain("needs neither");
+    expect(probes).toBe(0);
   });
 
   test("with no local machine at all, every target is remote", async () => {
