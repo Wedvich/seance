@@ -12,7 +12,9 @@ import { stateDir } from "./paths.ts";
  * 5-min averages 30d, hourly averages forever: one row per series per hour is
  * megabytes a decade. Rollups are recomputed from the tier below for every
  * bucket a write touches, so a late sample (a quota observation stamped at its
- * fetch time) still lands in the right hour.
+ * fetch time) still lands in the right hour. A sample older than the raw tier
+ * keeps is dropped at the door: the same transaction would prune it, and a
+ * cached quota stamp days old would otherwise re-enter and re-roll every tick.
  */
 export interface Sample {
   readonly metric: string;
@@ -77,9 +79,13 @@ export function metricsPath(): string {
 export class MetricsStore {
   readonly #db: Database;
   readonly #seriesId;
+  /** metric + sorted labels → id: a series never changes id, so one lookup per process is enough. */
+  readonly #seriesIds = new Map<string, number>();
   readonly #insertRaw;
-  readonly #rollup: ReadonlyMap<MetricsStep, ReturnType<Database["query"]>>;
-  readonly #prune: ReadonlyMap<MetricsStep, ReturnType<Database["query"]>>;
+  readonly #rollupM5;
+  readonly #rollupH1;
+  readonly #pruneRaw;
+  readonly #pruneM5;
   readonly #select: ReadonlyMap<MetricsStep, ReturnType<Database["query"]>>;
 
   private constructor(db: Database) {
@@ -96,14 +102,10 @@ export class MetricsStore {
       "INSERT OR IGNORE INTO raw (series, ts, value) VALUES (?, ?, ?)",
     );
     // Each tier averages the one below over the buckets from `since` on.
-    this.#rollup = new Map([
-      [300, db.query<void, [number]>(rollupSql("raw", "m5", 300))],
-      [3600, db.query<void, [number]>(rollupSql("m5", "h1", 3600))],
-    ]);
-    this.#prune = new Map([
-      [30, db.query<void, [number]>("DELETE FROM raw WHERE ts < ?")],
-      [300, db.query<void, [number]>("DELETE FROM m5 WHERE ts < ?")],
-    ]);
+    this.#rollupM5 = db.query<void, [number]>(rollupSql("raw", "m5", 300));
+    this.#rollupH1 = db.query<void, [number]>(rollupSql("m5", "h1", 3600));
+    this.#pruneRaw = db.query<void, [number]>("DELETE FROM raw WHERE ts < ?");
+    this.#pruneM5 = db.query<void, [number]>("DELETE FROM m5 WHERE ts < ?");
     this.#select = new Map(
       METRICS_STEPS.map((step) => [
         step,
@@ -138,20 +140,37 @@ export class MetricsStore {
   /** Writes the batch, refreshes every rollup bucket it touched, and prunes by `now` (unix seconds). */
   write(samples: readonly Sample[], now: number): void {
     if (samples.length === 0) return;
+    const rawHorizon = now - RAW_KEEP_S;
+    const m5Horizon = now - M5_KEEP_S;
     let oldest = Number.POSITIVE_INFINITY;
     this.#db.transaction(() => {
       for (const sample of samples) {
-        if (!Number.isFinite(sample.value) || !Number.isInteger(sample.ts)) continue;
-        const row = this.#seriesId.get(sample.metric, labelKey(sample.labels));
-        if (row === null) continue;
-        this.#insertRaw.run(row.id, sample.ts, sample.value);
+        if (!Number.isFinite(sample.value) || !Number.isInteger(sample.ts) || sample.ts < rawHorizon) continue;
+        const id = this.#seriesIdOf(sample.metric, sample.labels);
+        if (id === null) continue;
+        // Only a row that landed widens the rollup: the same stamp re-read every tick is ignored above.
+        if (this.#insertRaw.run(id, sample.ts, sample.value).changes === 0) continue;
         oldest = Math.min(oldest, sample.ts);
       }
       if (oldest === Number.POSITIVE_INFINITY) return;
-      for (const [step, query] of this.#rollup) query.run(Math.floor(oldest / step) * step);
-      this.#prune.get(30)?.run(now - RAW_KEEP_S);
-      this.#prune.get(300)?.run(now - M5_KEEP_S);
+      // From the first whole bucket the lower tier still holds entirely: a
+      // bucket the prune horizon cuts through would otherwise be re-averaged
+      // from its surviving rows and overwrite the full average already there.
+      this.#rollupM5.run(Math.max(bucket(oldest, 300), bucketAfter(rawHorizon, 300)));
+      this.#rollupH1.run(Math.max(bucket(oldest, 3600), bucketAfter(m5Horizon, 3600)));
+      this.#pruneRaw.run(rawHorizon);
+      this.#pruneM5.run(m5Horizon);
     })();
+  }
+
+  #seriesIdOf(metric: string, labels: Readonly<Record<string, string>>): number | null {
+    const key = `${metric}\u0000${labelKey(labels)}`;
+    const cached = this.#seriesIds.get(key);
+    if (cached !== undefined) return cached;
+    const row = this.#seriesId.get(metric, labelKey(labels));
+    if (row === null) return null;
+    this.#seriesIds.set(key, row.id);
+    return row.id;
   }
 
   /** Every series with a point in the range, at the tier the step names; bounds on the range are the caller's. */
@@ -175,6 +194,15 @@ export class MetricsStore {
   close(): void {
     this.#db.close();
   }
+}
+
+function bucket(ts: number, step: number): number {
+  return Math.floor(ts / step) * step;
+}
+
+/** First bucket starting at or after `ts`. */
+function bucketAfter(ts: number, step: number): number {
+  return Math.ceil(ts / step) * step;
 }
 
 function rollupSql(from: string, to: string, step: number): string {

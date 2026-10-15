@@ -95,6 +95,33 @@ describe("MetricsStore", () => {
     store.close();
   });
 
+  test("a stamp past the raw tier is dropped at the door, and a re-read stamp widens no rollup", () => {
+    const store = MetricsStore.memory();
+    const stale = NOW - RAW_KEEP_S - 3600;
+    store.write([{ metric: "quota_5h_pct", labels: machine, ts: stale, value: 41 }], NOW);
+    expect(store.query({ from: 0, to: NOW, step: 3600 })).toEqual([]);
+    // An hourly bucket the raw prune has cut into keeps its full average when a
+    // later write re-rolls from a stamp inside the same bucket.
+    const edge = NOW - RAW_KEEP_S;
+    const samples = Array.from({ length: 10 }, (_, i) => ({
+      metric: "cpu_pct",
+      labels: machine,
+      ts: edge + i * 30,
+      value: i * 10,
+    }));
+    store.write(samples, NOW);
+    expect(store.query({ from: edge, to: edge, step: 3600 })[0]?.points).toEqual([[edge, 45]]);
+    // The prune now cuts through the first 5-min bucket; it keeps its full
+    // average (not that of its four survivors), and the hour averages it with the new bucket.
+    store.write([{ metric: "cpu_pct", labels: machine, ts: edge + 300, value: 100 }], NOW + 180);
+    expect(store.query({ from: edge, to: edge + 300, step: 300 })[0]?.points).toEqual([
+      [edge, 45],
+      [edge + 300, 100],
+    ]);
+    expect(store.query({ from: edge, to: edge, step: 3600 })[0]?.points).toEqual([[edge, 72.5]]);
+    store.close();
+  });
+
   test("a non-finite value or fractional stamp is dropped, not stored", () => {
     const store = MetricsStore.memory();
     store.write(

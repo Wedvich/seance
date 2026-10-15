@@ -1,4 +1,4 @@
-import { readFile, statfs } from "node:fs/promises";
+import { readFile, stat as statFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { join } from "node:path";
 import {
@@ -67,11 +67,13 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
   const smoothed = { cpu: null as number | null, mem: null as number | null, disk: null as number | null };
   let latest: Snapshot | null = null;
   let inFlight: Promise<Snapshot> | null = null;
+  const quotaReader = cachedQuotaReader();
 
+  // Each collector fails alone: one field absent, never the tick.
   const sample = async (nowMs: number): Promise<Snapshot> => {
     const scan = sources.exclaves();
     const [cpu, memory, disks, io, sessions, quota] = await Promise.all([
-      Promise.resolve(probe.cpu()),
+      Promise.try(probe.cpu).catch(() => null),
       probe.memory().catch(() => null),
       probe.disks(sources.diskPaths).catch(() => []),
       probe.diskIo().catch(() => null),
@@ -79,7 +81,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
         (list) => list,
         () => null,
       ),
-      Promise.all(scan.exclaves.map((exclave, x) => readCachedQuota(join(exclave.configDir, ".claude.json"), x))),
+      Promise.all(scan.exclaves.map((exclave, x) => quotaReader(join(exclave.configDir, ".claude.json"), x))),
     ]);
     const dtMs = previous === null ? 0 : nowMs - previous.atMs;
     // Time-aware weight rather than a fixed alpha: a laptop back from sleep
@@ -215,6 +217,27 @@ function countSessions(sessions: readonly SessionEntry[], scan: ExclaveScan): re
     if (i !== undefined) counts[i] = (counts[i] ?? 0) + 1;
   }
   return counts;
+}
+
+/**
+ * `readCachedQuota` memoized on the file's stat: `.claude.json` carries project
+ * history and runs to megabytes, while the block read from it changes only when
+ * Claude Code refreshes it — not worth a parse per exclave per tick.
+ */
+function cachedQuotaReader(): (file: string, x: number) => Promise<QuotaObservation | null> {
+  const memo = new Map<string, { readonly key: string; readonly quota: QuotaObservation | null }>();
+  return async (file, x) => {
+    const info = await statFile(file).catch(() => null);
+    if (info === null) {
+      memo.delete(file);
+      return null;
+    }
+    const key = `${info.mtimeMs}:${info.size}`;
+    const hit = memo.get(file);
+    const quota = hit?.key === key ? hit.quota : await readCachedQuota(file, x);
+    memo.set(file, { key, quota });
+    return quota === null ? null : { ...quota, x };
+  };
 }
 
 /**

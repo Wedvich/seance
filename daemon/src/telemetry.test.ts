@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { METRIC_NAMES, type SessionEntry } from "@seance/shared";
@@ -184,6 +184,29 @@ describe("createTelemetry", () => {
     });
     expect(await telemetry.tick(T0)).toEqual({ at: T0 / 1000 });
     expect(store.query({ from: 0, to: T0 / 1000, step: 30 })).toEqual([]);
+    store.close();
+  });
+
+  test("a rewritten config file is read on the next tick", async () => {
+    const home = await makeHome();
+    await mkdir(join(home, ".claude-work"), { recursive: true });
+    const file = join(home, ".claude-work", ".claude.json");
+    await writeFile(file, JSON.stringify({ cachedUsageUtilization: cached }));
+    const store = MetricsStore.memory();
+    const telemetry = createTelemetry(store, {
+      machine: "mac",
+      diskPaths: [],
+      exclaves: () => scanOf(home),
+      sessions: async () => [],
+      probe: fakeProbe(),
+    });
+    expect((await telemetry.tick(T0)).quota?.[0]?.at).toBe((T0 - 60_000) / 1000);
+    await writeFile(file, JSON.stringify({ cachedUsageUtilization: { ...cached, fetchedAtMs: T0 } }));
+    const later = Date.now() / 1000 + 5;
+    await utimes(file, later, later); // a same-ms rewrite of the same size would read as unchanged
+    expect((await telemetry.tick(T0 + 30_000)).quota?.[0]?.at).toBe(T0 / 1000);
+    await rm(file);
+    expect((await telemetry.tick(T0 + 60_000)).quota).toBeUndefined();
     store.close();
   });
 

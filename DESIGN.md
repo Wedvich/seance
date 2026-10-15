@@ -1152,7 +1152,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
   Rollups are recomputed from the tier below for every bucket a write touches,
   so a quota observation stamped hours back still lands in its own hour, and the
-  same observation re-read every tick is one row. The latest sample is what the
+  same observation re-read every tick is one row and widens no rollup; one
+  stamped past the raw tier's 48h is dropped (the same write would prune it,
+  and a cached stamp days old would otherwise re-enter and re-roll every tick),
+  and a rollup never re-averages a bucket the prune horizon has cut into. The
+  config file is re-parsed only when its stat changes. The latest sample is what the
   `status` frame carries (its `scan` stamp is the sender's to add); history is
   the `metrics` op's. Rejected: the 1-min load average as cpu (counts runnable
   tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
