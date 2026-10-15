@@ -21,6 +21,7 @@ import {
 } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
+import { MetricsStore, type Sample } from "../src/metrics-store.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
 import {
@@ -330,6 +331,45 @@ describe("daemon ↔ relay integration", () => {
     } finally {
       daemon.stop();
       relay.stop();
+    }
+  });
+
+  // A store seeded past what one envelope carries: the relay would drop the
+  // reply unseen, so the app has to get a code it can act on instead. Own
+  // state dir, so the junk series stay out of every other test's store.
+  test("a reply that would seal past the relay's bound arrives as too_large", async () => {
+    const shared = process.env["SEANCE_STATE_DIR"];
+    process.env["SEANCE_STATE_DIR"] = join(base, "state-oversized");
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 719 * 30;
+    const samples: Sample[] = [];
+    for (let i = 0; i < 40; i++) {
+      for (let t = from; t <= now; t += 30) samples.push({ metric: `m${i}`, labels: {}, ts: t, value: 12.3 });
+    }
+    const store = await MetricsStore.open();
+    store.write(samples, now);
+    store.close();
+
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId } = await registerWithRepo(relay, "myrepo");
+      const { id } = await appRequest(relay, deviceId, "metrics", { from, to: now, step: 30 });
+      const response = await appReceive(relay);
+      expect(response.re).toBe(id);
+      expect(response.op).toBe("metrics");
+      expect(parseMetricsReply(response.payload)).toMatchObject({ ok: false, code: "too_large" });
+
+      // The remedy the code points at: the same range, narrowed by name, fits.
+      const narrowed = await appRequest(relay, deviceId, "metrics", { from, to: now, step: 30, names: ["m0", "m1"] });
+      const fits = await appReceive(relay);
+      expect(fits.re).toBe(narrowed.id);
+      const reply = parseMetricsReply(fits.payload);
+      expect(reply !== null && "series" in reply && reply.series).toHaveLength(2);
+    } finally {
+      daemon.stop();
+      relay.stop();
+      process.env["SEANCE_STATE_DIR"] = shared;
     }
   });
 

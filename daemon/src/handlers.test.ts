@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
-  ENVELOPE_MAX_CT_LENGTH,
   METRIC_NAMES,
   parseMetricsReply,
-  sealedLength,
   type DespawnResponse,
   type MetricsReply,
   type OpName,
@@ -244,16 +242,13 @@ describe("metrics answers from the store, within one envelope", () => {
     return store;
   }
 
-  async function metricsReply(
-    store: MetricsStore | null,
-    payload: unknown,
-  ): Promise<{ plain: Plain; reply: MetricsReply }> {
+  async function metricsReply(store: MetricsStore | null, payload: unknown): Promise<MetricsReply> {
     const handler = createHandler(store === null ? ctx : { ...ctx, metrics: (r) => store.query(r) });
     const plain = await handler(request("metrics", payload));
     if (plain === null) throw new Error("metrics produced no reply");
     const reply = parseMetricsReply(plain.payload);
     if (reply === null) throw new Error("metrics reply did not parse");
-    return { plain, reply };
+    return reply;
   }
 
   test("returns the named series over the range, values to one decimal", async () => {
@@ -262,7 +257,7 @@ describe("metrics answers from the store, within one envelope", () => {
       { metric: METRIC_NAMES.cpu, labels: { machine: "mac" }, ts: NOW, value: 12 },
       { metric: METRIC_NAMES.mem, labels: { machine: "mac" }, ts: NOW, value: 50 },
     ]);
-    const { reply } = await metricsReply(store, { from: NOW - 60, to: NOW, step: 30, names: [METRIC_NAMES.cpu] });
+    const reply = await metricsReply(store, { from: NOW - 60, to: NOW, step: 30, names: [METRIC_NAMES.cpu] });
     expect(reply).toEqual({
       series: [
         {
@@ -296,26 +291,7 @@ describe("metrics answers from the store, within one envelope", () => {
   });
 
   test("a daemon without a store answers with a code instead of leaving the chart to time out", async () => {
-    const { reply } = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
+    const reply = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
     expect(reply).toMatchObject({ ok: false, code: "internal_error" });
-  });
-
-  // Enough series at a full span that the reply cannot fit: the relay would drop
-  // it unseen, so the app must get a code it can act on instead.
-  test("a reply over the relay's bound becomes too_large, and the same range narrowed by name fits", async () => {
-    const samples: Sample[] = [];
-    for (let i = 0; i < 40; i++) {
-      for (let t = NOW - 719 * 30; t <= NOW; t += 30) samples.push({ metric: `m${i}`, labels: {}, ts: t, value: 12.3 });
-    }
-    const store = storeWith(samples);
-    const range = { from: NOW - 719 * 30, to: NOW, step: 30 };
-
-    const over = await metricsReply(store, range);
-    expect(over.reply).toMatchObject({ ok: false, code: "too_large" });
-
-    const narrowed = await metricsReply(store, { ...range, names: ["m0", "m1"] });
-    expect("series" in narrowed.reply && narrowed.reply.series).toHaveLength(2);
-    expect(sealedLength(narrowed.plain)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
-    store.close();
   });
 });

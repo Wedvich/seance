@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  ENVELOPE_MAX_CT_LENGTH,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   MACHINES_ID,
@@ -11,6 +12,7 @@ import {
   signRegister,
   type DaemonFrame,
   type Envelope,
+  type ErrorResponse,
   type Identity,
   type MachineStatus,
   type OpName,
@@ -297,7 +299,7 @@ export class RelayClient {
       log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=disconnected`);
       return;
     }
-    const sealed = await seal(this.#opts.key, { to: env.from, from: this.#opts.identity.deviceId }, response);
+    const sealed = await this.#sealReply(env.from, response);
     const frame: DaemonFrame = { t: "msg", env: sealed };
     const ws = this.#ws;
     if (ws === null) {
@@ -308,5 +310,24 @@ export class RelayClient {
     // Logged after the send, so the line never claims a frame that never left.
     // A reply carries a fresh iv, so the two directions join through `re`, not the iv.
     log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(env.from)}`);
+  }
+
+  /**
+   * Checked on the sealed `ct`, so the reply is encoded once: the relay drops
+   * an envelope past its bound unseen, which the app could only report as a
+   * timeout. Any op whose reply grows with data — `metrics`, `sessions` and
+   * `rescan` on a large machine — gets `too_large` in its place instead.
+   */
+  async #sealReply(to: string, response: Plain): Promise<Envelope> {
+    const route = { to, from: this.#opts.identity.deviceId };
+    const sealed = await seal(this.#opts.key, route, response);
+    if (sealed.ct.length <= ENVELOPE_MAX_CT_LENGTH) return sealed;
+    log.warn(`wire oversized re=${quote(response.re ?? "")} op=${quote(response.op)} ct=${sealed.ct.length}`);
+    const payload: ErrorResponse = {
+      ok: false,
+      code: "too_large",
+      message: `reply would seal to ${sealed.ct.length} chars, over ${ENVELOPE_MAX_CT_LENGTH}`,
+    };
+    return seal(this.#opts.key, route, { ...response, payload });
   }
 }

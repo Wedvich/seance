@@ -38,15 +38,6 @@ function buildAad(v: number, to: string, from: string): Uint8Array<ArrayBuffer> 
 /** AES-GCM's default tag, which `seal` leaves on the ciphertext. */
 export const AEAD_TAG_BYTES = 16;
 
-/**
- * Length of the `ct` `seal` would produce for this plain, without sealing it:
- * what a sender checks a data-sized reply against before the relay's bound
- * (`ENVELOPE_MAX_CT_LENGTH`) drops it unseen.
- */
-export function sealedLength(plain: Plain): number {
-  return Math.ceil((new TextEncoder().encode(JSON.stringify(plain)).length + AEAD_TAG_BYTES) / 3) * 4;
-}
-
 export async function seal(
   key: CryptoKey,
   route: { readonly to: string; readonly from: string },

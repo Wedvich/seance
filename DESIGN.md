@@ -737,6 +737,20 @@ send error that caused it.
   command timeout plus `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
+- **An oversized reply becomes `too_large`, for every op.** The relay drops an
+  envelope whose `ct` passes `ENVELOPE_MAX_CT_LENGTH` (64 KiB, every envelope
+  but `status`) unseen, which the app could only report as a timeout. So the
+  daemon's transport (`relay-client.ts`) checks each reply's sealed `ct` and,
+  past the bound, seals `{ ok: false, code: "too_large", message }` under the
+  same `re` instead. Checked after sealing, not predicted before it, so a reply
+  is encoded once and the size rule lives in one place; and at the transport,
+  not per handler, because `metrics`, `sessions` and `rescan` all grow with
+  data. Rejected: a per-handler check against a predicted sealed length (each
+  op re-states the envelope arithmetic, and every reply is encoded twice).
+  Known edge, accepted: a `spawn` or `despawn` success embeds the session list
+  (~200 B per entry), so past ~240 live sessions on one machine a spawn that
+  happened would read as `too_large`. Machines run 10–20; trimming the list or
+  a "may have run" verdict would be a wire change for a case nothing reaches.
 
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
@@ -768,10 +782,8 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   offline. The one reply that scales with
   stored data, so it is bounded twice: a request spanning more than
   `METRICS_MAX_POINTS` per series is `invalid_request` before the store reads a
-  row, and a reply that would seal past `ENVELOPE_MAX_CT_LENGTH` (64 KiB of
-  ciphertext, the relay's bound on every envelope but `status`) becomes
-  `too_large` — the relay drops an oversized envelope unseen, which the app
-  could only report as a timeout. Values go out to one decimal: a rollup's
+  row, and a reply that would seal past `ENVELOPE_MAX_CT_LENGTH` comes back
+  `too_large` (the oversized-reply bullet above). Values go out to one decimal: a rollup's
   average otherwise serializes to seventeen digits, a third of the reply. Sized
   against measurement: one machine with two exclaves keeps ~14 series, and all
   of them at a day of 5-min points is ~77 KB, so a chart asks for its panel's
