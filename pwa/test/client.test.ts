@@ -1041,6 +1041,51 @@ describe("store", () => {
     }
   });
 
+  test("a status mid-spawn keeps the spawn pending, so a reply dropped after it is still reconciled", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Busy");
+    // No spawn handler: the request stays in flight for as long as the test needs.
+    const daemon = await startFakeDaemon(relay, key, deviceId, info, {
+      sessions: () => ({ sessions: [], at: Date.now() }),
+    });
+    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      const spawning = store.spawn();
+      // The daemon's telemetry beat: every register and every STATUS_INTERVAL_MS,
+      // so on a real machine one lands inside a spawn's wait as a matter of course.
+      daemon.client.send(await statusEnvelope(deviceId, { at: 1, scan: info.scannedAt, cpu: 5 }));
+      await waitForApp(
+        (s) => s.relay.machines.some((machine) => machine.deviceId === deviceId && machine.status !== undefined),
+        "status rendered",
+      );
+      expect(store.getState().spawning).toBe(true);
+      expect(store.pendingSpawn).not.toBeNull();
+
+      // The app dies before the daemon answers — the iOS-kill-mid-spawn shape.
+      stop();
+      await spawning;
+      const { verdict } = store.getState();
+      if (verdict?.kind !== "unknown") throw new Error(`expected unknown verdict, got ${JSON.stringify(verdict)}`);
+      expect(verdict.reason).toBe("dropped");
+      // What main.tsx persists, and the relaunch's only way to ask the machine.
+      expect(store.pendingSpawn).toMatchObject({ machineId: deviceId, repo: "seance" });
+    } finally {
+      stop();
+      daemon.close();
+      // The relay this file shares sits at its 32-entry cap; given back even on a
+      // failure, or every later test that registers fails with it.
+      const { client, waitFor } = startClient();
+      try {
+        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+        client.forget(deviceId);
+        await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+      } finally {
+        client.stop();
+      }
+    }
+  });
+
   test("a retry whose rescan never lands says so instead of spawning into the stale cache", async () => {
     const deviceId = await newDeviceId();
     const ops: string[] = [];
