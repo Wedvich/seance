@@ -202,22 +202,25 @@ describe("routing", () => {
     app.close();
   });
 
-  // Scoped to what the wire can force: the supersede close can't be held open
-  // from out here, so this gates delivery across a reconnect, not the
-  // newest-first ordering itself — that rests on the production stack trace.
-  test("delivers to the surviving socket when a machine has just reconnected", async () => {
+  // The common case the identity suite's refusal must not cost: a dropped socket
+  // is gone from the object before its daemon redials, so the redial registers
+  // unimpeded and owns the route. Scoped to what the wire can force — a
+  // supersede close can't be held open from out here, so this gates delivery
+  // across a reconnect, not the newest-first ordering itself.
+  test("delivers to the redialed socket when a machine has just reconnected", async () => {
     const deviceId = nextDeviceId();
     const app = await connectApp(relay);
-    const stale = await registeredDaemon(app, deviceId);
-    const fresh = await registeredDaemon(app, deviceId);
-    expect(await stale.waitClosed()).toBe(1000);
+    const dropped = await registeredDaemon(app, deviceId);
+    dropped.close();
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+    const redialed = await registeredDaemon(app, deviceId);
 
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
 
-    expect((await fresh.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
     await app.expectNo("undeliverable");
-    fresh.close();
+    redialed.close();
     app.close();
   });
 
@@ -338,24 +341,6 @@ describe("identity", () => {
 
     observer.close();
     incumbent.close();
-    app.close();
-  });
-
-  // The common case the refusal above must not cost: a dropped socket is gone
-  // from the object before its daemon redials, so re-registering is unimpeded.
-  test("re-registers a deviceId whose socket dropped", async () => {
-    const deviceId = nextDeviceId();
-    const app = await connectApp(relay);
-    const dropped = await registeredDaemon(app, deviceId);
-    dropped.close();
-    await waitForEntry(app, deviceId, (entry) => !entry.connected);
-
-    const redialed = await registeredDaemon(app, deviceId);
-    const env = envelope(deviceId, APP_ID);
-    app.send({ t: "msg", env });
-    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
-
-    redialed.close();
     app.close();
   });
 });
@@ -602,6 +587,9 @@ describe("silent-socket sweep", () => {
   // heartbeats every 300ms against a 2s silence limit and 250ms sweeps.
   const SWEEP_INTERVAL_MS = 250;
   const SILENCE_LIMIT_MS = 2_000;
+  // Shorter than the sweep's, as in production: a register displaces a zombie
+  // on the silence its own daemon gives up at, not the sweep's three misses.
+  const SUPERSEDE_MS = 1_000;
   const HEARTBEAT_MS = 300;
   let sweeping: TestRelay;
 
@@ -613,6 +601,7 @@ describe("silent-socket sweep", () => {
     sweeping = await startRelay(TOKEN, {
       sweepIntervalMs: SWEEP_INTERVAL_MS,
       sweepSilenceLimitMs: SILENCE_LIMIT_MS,
+      supersedeSilenceMs: SUPERSEDE_MS,
     });
   });
 
@@ -657,6 +646,35 @@ describe("silent-socket sweep", () => {
 
     expect(await daemon.waitClosed(10_000)).toBe(1000);
     await waitForEntry(app, deviceId, (entry) => !entry.connected);
+    app.close();
+  }, 20_000);
+
+  // The other half of the identity suite's refusal: a zombie that stopped
+  // heartbeating is the one incumbent a register may displace, and it is
+  // displaced ahead of the sweep — a laptop that changed networks redials as
+  // soon as it misses a pong, and that redial must not wait for three misses.
+  test("a register supersedes an incumbent that has fallen silent, before the sweep would", async () => {
+    const deviceId = nextDeviceId();
+    const app = await connectApp(sweeping);
+    const zombie = await connectDaemon(sweeping);
+    zombie.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+    // Never pings, so its last proof of life is accept time. Past the supersede
+    // silence but well short of the sweep's limit.
+    await Bun.sleep(SUPERSEDE_MS + 200);
+
+    const redialed = await connectDaemon(sweeping);
+    redialed.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    // The zombie goes now, not when the alarm fires — and it is `superseded`,
+    // which the sweep never says.
+    expect(await zombie.waitClosed(SILENCE_LIMIT_MS - SUPERSEDE_MS - 400)).toBe(1000);
+    // Delivery proves the route moved with it.
+    const env = envelope(deviceId, APP_ID);
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+    app.send({ t: "msg", env });
+    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+
+    redialed.close();
     app.close();
   }, 20_000);
 });

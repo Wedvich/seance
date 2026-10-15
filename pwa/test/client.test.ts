@@ -267,7 +267,10 @@ describe("registry", () => {
       const state = await waitFor((s) => s.registrySize >= before.registrySize + 2, "both entries in the registry");
       expect(state.machines.map((m) => m.deviceId)).toContain(real);
       expect(state.machines.map((m) => m.deviceId)).not.toContain(impostor);
-      expect(state.ignored).toBe(before.ignored + 1);
+      // Its own count: "check the pre-shared key" is the wrong advice, since no
+      // key rotation makes a re-filed blob belong to the id it sits under.
+      expect(state.unbound).toBe(before.unbound + 1);
+      expect(state.ignored).toBe(before.ignored);
     } finally {
       honest.close();
       thief.close();

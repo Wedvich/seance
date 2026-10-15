@@ -85,6 +85,13 @@ export interface RelayState {
   /** Entries whose info blob did not decrypt with this key — a stale PSK somewhere. */
   readonly ignored: number;
   /**
+   * Entries whose blob is sealed from a different deviceId than the one it is
+   * filed under — a pairing only a bearer-token holder could have made, since a
+   * daemon always seals from its own id. Counted apart from `ignored` because no
+   * key rotation clears it; the fix is rotating the relay's bearer token.
+   */
+  readonly unbound: number;
+  /**
    * Entries this build cannot read for a reason no key rotation fixes: a blob
    * that opened but was not shaped like a MachineInfo, or a registry entry that
    * did not parse at all — version skew, surfaced apart from `ignored` so the
@@ -136,6 +143,7 @@ const INITIAL_STATE: RelayState = {
   machines: [],
   registrySize: 0,
   ignored: 0,
+  unbound: 0,
   skewed: 0,
   settling: true,
   registrySettled: false,
@@ -790,6 +798,7 @@ export class RelayClient {
     const machines: Machine[] = [];
     let reused = 0;
     let skewedHere = 0;
+    let unboundHere = 0;
     for (const entry of this.#entries) {
       // Only #decryptInfo writes this cache, and it stores no MachineInfo for an
       // entry whose blob is not bound to its deviceId — so an unverified entry
@@ -799,7 +808,11 @@ export class RelayClient {
         skewedHere += 1;
         continue;
       }
-      if (info === undefined || info === "unopenable" || info === "unbound") continue;
+      if (info === "unbound") {
+        unboundHere += 1;
+        continue;
+      }
+      if (info === undefined || info === "unopenable") continue;
       const scan = this.#scans.get(entry.deviceId);
       // A register that carries the scan (or a later one) makes the override spent.
       if (scan !== undefined && scan.scannedAt <= info.scannedAt) this.#scans.delete(entry.deviceId);
@@ -832,9 +845,10 @@ export class RelayClient {
       // previous array is what lets #patch — and Preact — skip the render.
       machines: reused === machines.length && reused === previous.length ? previous : machines,
       registrySize: this.#entries.length + this.#skippedEntries,
-      // Counted off entries the registry actually holds, so skew never reads as
-      // a key mismatch.
-      ignored: this.#entries.length - machines.length - skewedHere,
+      // Counted off entries the registry actually holds, so neither skew nor a
+      // swapped pairing reads as a key mismatch.
+      ignored: this.#entries.length - machines.length - skewedHere - unboundHere,
+      unbound: unboundHere,
       skewed: skewedHere + this.#skippedEntries,
       ...extra,
     });

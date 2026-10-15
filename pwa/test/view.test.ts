@@ -37,6 +37,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     machines,
     registrySize: machines.length,
     ignored: 0,
+    unbound: 0,
     skewed: 0,
     settling: false,
     registrySettled: true,
@@ -229,6 +230,23 @@ describe("banner and button", () => {
     const view = deriveView(state({ relay: relay({ machines: [], registrySize: 2, ignored: 1 }) }), NOW);
     expect(view.banner?.title).toBe("Key mismatch");
     expect(view.banner?.body).toContain("1 machine is registered");
+  });
+
+  // A swapped pairing is not a key problem either: the PSK opened nothing
+  // wrong, the relay's bearer token was used to re-file a blob.
+  test("entries filed under the wrong machine are reported as tampering, not a key mismatch", () => {
+    const view = deriveView(state({ relay: relay({ machines: [], registrySize: 1, unbound: 1 }) }), NOW);
+    expect(view.banner?.title).toBe("Registry tampered");
+    expect(view.banner?.body).toContain("1 entry is filed under a machine it does not belong to");
+    expect(view.banner?.opensSettings).toBe(false);
+    expect(view.button.label).toBe("Registry tampered");
+  });
+
+  test("a partial swapped pairing gets its own footnote", () => {
+    const view = deriveView(state({ relay: relay({ machines: [machine()], registrySize: 2, unbound: 1 }) }), NOW);
+    expect(view.banner).toBeNull();
+    expect(view.ignoredNote).toBe("1 entry dropped (filed under the wrong machine)");
+    expect(view.button.enabled).toBe(true);
   });
 
   // Skew is not a key problem: "check the pre-shared key" over a blob this key

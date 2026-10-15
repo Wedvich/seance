@@ -2,6 +2,7 @@ import {
   APP_ID,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
+  HEARTBEAT_PONG_TIMEOUT_MS,
   MACHINES_ID,
   quote,
   type Envelope,
@@ -73,6 +74,11 @@ const MAX_REGISTERS_PER_WINDOW = 10;
  */
 const SWEEP_INTERVAL_MS = 60_000;
 const SWEEP_SILENCE_LIMIT_MS = HEARTBEAT_MISSES_TO_SWEEP * HEARTBEAT_INTERVAL_MS;
+// How long an incumbent socket may be silent before a register for its id takes
+// the route. Matched to the daemon's own verdict — it closes a socket after one
+// missed pong and redials — so a zombie left by a network change is displaced
+// by its owner's redial rather than refused until the sweep's three misses.
+const SUPERSEDE_SILENCE_MS = HEARTBEAT_INTERVAL_MS + HEARTBEAT_PONG_TIMEOUT_MS;
 
 /** Vars arrive as strings; anything unparsable falls back to the default. */
 function msOverride(value: string | undefined): number | null {
@@ -108,11 +114,13 @@ export class Hub implements DurableObject {
   readonly #ctx: DurableObjectState;
   readonly #sweepIntervalMs: number;
   readonly #silenceLimitMs: number;
+  readonly #supersedeSilenceMs: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
+    this.#supersedeSilenceMs = msOverride(env.SUPERSEDE_SILENCE_MS) ?? SUPERSEDE_SILENCE_MS;
     // Re-applied on every wake. Heartbeats are answered without waking the object;
     // only the sweep alarm reads their timestamps.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -327,12 +335,12 @@ export class Hub implements DurableObject {
     // would hand the newcomer every envelope addressed to that machine and leave
     // the registry reporting it connected while they went nowhere. Reconnect is
     // unaffected — a socket that dropped is out of `getWebSockets()` before its
-    // daemon redials, and a zombie that stopped heartbeating is superseded on
-    // the same silence limit the sweep uses.
+    // daemon redials, and a zombie that stopped heartbeating is superseded as
+    // soon as its own daemon would have given up on it.
     const incumbents = this.#ctx
       .getWebSockets("daemon")
       .filter((other) => other !== ws && this.#deviceIdOf(other) === deviceId);
-    if (incumbents.some((other) => now - this.#lastAliveOf(other, now) <= this.#silenceLimitMs)) {
+    if (incumbents.some((other) => now - this.#lastAliveOf(other, now) <= this.#supersedeSilenceMs)) {
       console.log(`refused register from ${deviceId}: id held by a live socket`);
       // Closed, not left open: a daemon re-registers on connect only, so an
       // unregistered socket would stay invisible even once the incumbent goes.
@@ -409,9 +417,9 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // Newest first: a reconnecting daemon briefly leaves two sockets on one
-    // deviceId — `superseded` closes the loser, but it stays listed until its
-    // close handler runs — and picking the first match can pick the dead one
+    // Newest first: superseding a silent incumbent briefly leaves two sockets on
+    // one deviceId — `superseded` closes the loser, but it stays listed until
+    // its close handler runs — and picking the first match can pick the dead one
     // while the live socket sits behind it.
     const targets = this.#ctx
       .getWebSockets("daemon")

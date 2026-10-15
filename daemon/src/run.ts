@@ -44,6 +44,7 @@ export interface RunOpts {
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
+  readonly maxBackoffMs?: number;
   /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
   readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
@@ -204,6 +205,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     ...(opts.pingIntervalMs !== undefined ? { pingIntervalMs: opts.pingIntervalMs } : {}),
     ...(opts.pongTimeoutMs !== undefined ? { pongTimeoutMs: opts.pongTimeoutMs } : {}),
     ...(opts.baseBackoffMs !== undefined ? { baseBackoffMs: opts.baseBackoffMs } : {}),
+    ...(opts.maxBackoffMs !== undefined ? { maxBackoffMs: opts.maxBackoffMs } : {}),
   });
 
   if (opts.selfUpdate !== undefined && source !== null) {
