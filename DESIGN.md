@@ -514,22 +514,29 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                                          | Handled in                                                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`) | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)               |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
-| `registry`                          | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts`                                                                                      |
-| `undeliverable`                     | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts`                                                                                      |
-| `forget`                            | `shared/src/app-client.ts`                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
-| `forget-refused`                    | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts` — logged, never modelled                                                             |
-| `"ping"` / `"pong"`                 | both socket legs                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                             | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                  | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                  | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
-| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
+| Frame / op                          | Sent from                                                                            | Handled in                                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                   | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)               |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                           | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                         | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                       | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
+| `registry`                          | `relay/src/hub.ts`                                                                   | `shared/src/app-client.ts`                                                                                      |
+| `undeliverable`                     | `relay/src/hub.ts`                                                                   | `shared/src/app-client.ts`                                                                                      |
+| `forget`                            | `shared/src/app-client.ts`                                                           | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
+| `forget-refused`                    | `relay/src/hub.ts`                                                                   | `shared/src/app-client.ts` — logged, never modelled                                                             |
+| `"ping"` / `"pong"`                 | both socket legs                                                                     | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                               | same file — both ends share it, or nothing decrypts                                                             |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                    | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                    | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                   | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
+| `status` (daemon→relay) — M1        | `daemon/src/run.ts` via `daemon/src/relay-client.ts`, every 30s                      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
+| `status` (relay→app) — M1           | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry` | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
+| op `metrics` — M1                   | `pwa/src/store.ts` via `shared/src/app-client.ts`                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/telemetry.ts`                                       |
+
+Rows marked _M1_ are the scheduler plan's first milestone (docs/scheduler.md): their shapes
+are in `shared/src/types.ts` already, and each handler lands in its own PR, after which the
+mark goes.
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
