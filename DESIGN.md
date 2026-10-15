@@ -1676,7 +1676,7 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   only on a visibility change, so a new build lands like a cold launch instead of
   yanking the screen mid-use.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
-  verdict and the Settings screen all push on open and are cleared by
+  verdict, the Settings screen and the Machines screen stacked over it all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with
@@ -1713,6 +1713,23 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   is folded into the screen's single bottom action, which reads "Reconnect"
   while the relay is down, saves-then-reconnects when credentials were edited,
   and otherwise just returns.
+- **Machines is a layer over Settings, not a route** (scheduler M1). Until the app's
+  redesign it is reached from a row at the top of Settings, pushed as a second layer, so back
+  returns to Settings; the stage animates between any two depths. Rejected for now: URL routes
+  (`/machines`), which would need boot-time path parsing and a rethink of entry depth for deep
+  links — a separate change if links are wanted.
+- **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
+  its exclaves (account, running sessions); quota is a property of an account, not of any
+  machine, so it sits on account cards: one per `accountId` across the fleet, newest
+  observation wins (docs/scheduler.md). Charts follow the split — HISTORY on a machine asks
+  that daemon for `cpu_pct`/`mem_pct`; on an account it asks one online host of the account
+  (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
+  copies into one line per window. One chart at a time, its window fixed when asked, a reply
+  that lands after the chart moved on is dropped. Disk is collected and stored but never
+  shown: a fill level is upkeep, not load — it feeds the scheduler's free-space floor and
+  M4's health alert instead. The chart is inline SVG geometry (`chart.ts`), no charting
+  dependency; gauges break their line at a missed tick, quota holds its level between
+  observations, since a sample carries the observation's time, not the tick's.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So

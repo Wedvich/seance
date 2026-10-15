@@ -3,6 +3,7 @@ import { useEffect, useState } from "preact/hooks";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
+import { Seg } from "./seg.tsx";
 import { CredentialFields, useCredentials } from "./setup.tsx";
 
 /** Matches the client's settle hold-back: a dial that hasn't resolved by then has failed. */
@@ -25,10 +26,13 @@ export function Settings(props: {
   relayLine: string;
   relayState: ConnectionState;
   connected: boolean;
+  /** The machines row's subtitle — the same counts the spawn screen's header shows. */
+  machinesLine: string;
   onDismiss: () => void;
   onReconnect: () => void;
+  onOpenMachines: () => void;
 }): JSX.Element {
-  const { relayLine, relayState, connected, onDismiss, onReconnect } = props;
+  const { relayLine, relayState, connected, machinesLine, onDismiss, onReconnect, onOpenMachines } = props;
   // Both secrets are known to exist: the app only mounts once they load.
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
@@ -88,6 +92,18 @@ export function Settings(props: {
           void submit();
         }}
       >
+        {/* First, above credentials: until the redesign this is the app's only
+            way to the machines screen, and it is visited far more often. */}
+        <button type="button" className="nav-card card" onClick={onOpenMachines}>
+          <span>
+            <span className="theme-title">Machines</span>
+            <span className="nav-card-meta">{machinesLine}</span>
+          </span>
+          <span className="nav-card-chevron" aria-hidden="true">
+            ›
+          </span>
+        </button>
+
         <div className="setup-card card">
           <CredentialFields creds={creds} />
         </div>
@@ -119,26 +135,19 @@ export function Settings(props: {
 }
 
 function ThemeSeg(props: { value: ThemePref; onChange: (pref: ThemePref) => void }): JSX.Element {
-  const { value, onChange } = props;
-  const index = THEME_PREFS.indexOf(value);
-
   return (
-    <div className="seg" role="radiogroup" aria-label="Theme">
-      <span className="seg-thumb" style={{ transform: `translateX(${index * 100}%)` }} aria-hidden="true" />
-      {THEME_PREFS.map((pref) => (
-        <button
-          key={pref}
-          type="button"
-          role="radio"
-          aria-checked={pref === value}
-          className="seg-btn"
-          onClick={() => onChange(pref)}
-        >
+    <Seg
+      label="Theme"
+      options={THEME_PREFS}
+      value={props.value}
+      render={(pref) => (
+        <>
           <ThemeIcon pref={pref} />
           {THEME_LABELS[pref]}
-        </button>
-      ))}
-    </div>
+        </>
+      )}
+      onChange={props.onChange}
+    />
   );
 }
 

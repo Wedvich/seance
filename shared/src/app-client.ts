@@ -9,6 +9,7 @@ import {
   TOKEN_PARAM,
   type AppFrame,
   type Envelope,
+  type ExclaveInfo,
   type MachineInfo,
   type MachineStatus,
   type MetricsReply,
@@ -94,6 +95,8 @@ export interface Machine {
   readonly status?: MachineStatus;
   /** The register blob's `capabilities`, kept by identity; absent from a daemon that predates them. */
   readonly capabilities?: readonly string[];
+  /** The register blob's `exclaves`, which `status` indexes; absent from a daemon that predates them. */
+  readonly exclaves?: readonly ExclaveInfo[];
 }
 
 export interface RelayState {
@@ -284,7 +287,8 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.lastSeen === b.lastSeen &&
     a.connected === b.connected &&
     a.status === b.status &&
-    a.capabilities === b.capabilities
+    a.capabilities === b.capabilities &&
+    a.exclaves === b.exclaves
   );
 }
 
@@ -952,6 +956,7 @@ export class RelayClient {
         connected,
         ...(status !== null && status.scan === info.scannedAt ? { status } : {}),
         ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
+        ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {

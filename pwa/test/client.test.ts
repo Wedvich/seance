@@ -426,7 +426,8 @@ function machineOf(state: RelayState, deviceId: string): RelayState["machines"][
 describe("status", () => {
   test("a status lands on its machine, reaches a late app in its first push, and leaves with the socket", async () => {
     const deviceId = await newDeviceId();
-    const info = machineInfo("Mac Studio");
+    const exclaves = [{ id: "default", accountId: "org:acct", extraUsageEnabled: null, authOk: true, skills: [] }];
+    const info = { ...machineInfo("Mac Studio"), exclaves };
     const daemon = await startFakeDaemon(relay, key, deviceId, info);
     const { client, waitFor } = startClient();
     const late = startClient();
@@ -442,6 +443,8 @@ describe("status", () => {
       daemon.client.send(await statusEnvelope(deviceId, snapshot));
       const state = await waitFor((s) => machineOf(s, deviceId)?.status !== undefined, "status rendered");
       expect(machineOf(state, deviceId)?.status).toEqual(snapshot);
+      // What `quota[].x` and `sess` index, so the machines screen can name them.
+      expect(machineOf(state, deviceId)?.exclaves).toEqual(exclaves);
 
       const lateState = await late.waitFor((s) => machineOf(s, deviceId)?.status !== undefined, "status from the push");
       expect(machineOf(lateState, deviceId)?.status).toEqual(snapshot);
