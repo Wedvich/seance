@@ -314,13 +314,46 @@ export async function pollUntil(
  * `pane_dead` is 1, but the shell sits unreaped and unstamped until some other
  * child of the server exits — waiting longer alone never ends it. A `run-shell`
  * is that other child; its exit makes tmux reap every zombie it holds.
+ *
+ * Its own budget, longer than `pollUntil`'s default: the wait also covers the
+ * pane's command chain getting as far as exiting (a nested `tmux wait-for`, the
+ * stub's own startup), which is bounded by runner load, not by anything the
+ * test controls. And a timeout names which of the two it was: the nudge not
+ * working on a pane tmux already holds dead, or a process that was still
+ * running — one failure (CI, 2026-10-15) could not be told apart from here.
  */
-export async function untilDeathStamped(paneId: string): Promise<void> {
-  await pollUntil(async () => {
-    if ((await listPanes()).some((pane) => pane.paneId === paneId && pane.deadAt !== null)) return true;
-    await tmux(["run-shell", "true"]);
-    return false;
-  }, `tmux to stamp ${paneId}'s death time`);
+export async function untilDeathStamped(paneId: string, timeoutMs = 15_000): Promise<void> {
+  try {
+    await pollUntil(
+      async () => {
+        if ((await listPanes()).some((pane) => pane.paneId === paneId && pane.deadAt !== null)) return true;
+        await tmux(["run-shell", "true"]);
+        return false;
+      },
+      `tmux to stamp ${paneId}'s death time`,
+      timeoutMs,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`${message} — ${await describePaneDeath(paneId)}`, { cause: err });
+  }
+}
+
+/** What tmux and the kernel say about the pane's process when the stamp never came. */
+async function describePaneDeath(paneId: string): Promise<string> {
+  // A missing pane is a non-zero exit on some versions and every field empty
+  // on others (3.7 prints `||`); `|` rather than a space because
+  // `pane_dead_time` is empty until set.
+  const shown = await tmux(["display-message", "-p", "-t", paneId, "#{pane_dead}|#{pane_pid}|#{pane_dead_time}"]);
+  const [dead, pid, deadTime] = shown.stdout.trim().split("|");
+  if (shown.exitCode !== 0 || !dead) return `pane ${paneId} gone${shown.stderr.trim() && `: ${shown.stderr.trim()}`}`;
+  // `ps` reports a reaped process as absent and an unreaped one as `Z`, which is
+  // the distinction that matters: `Z` with `pane_dead=1` is tmux missing the
+  // SIGCHLD; a live state is the command still running.
+  const ps = await exec(["ps", "-o", "stat=,command=", "-p", pid ?? ""], { timeoutMs: 5_000 });
+  const state = ps.stdout.trim();
+  const process = ps.exitCode === 0 && state !== "" ? `process ${pid}: ${state}` : `process ${pid} gone`;
+  return `pane_dead=${dead} pane_dead_time=${deadTime === "" ? "unset" : deadTime} ${process}`;
 }
 
 export interface ConfigTrigger {
