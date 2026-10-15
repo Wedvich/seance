@@ -73,7 +73,19 @@ its Tailscale lockdown defeats the relay's purpose).
   ML-KEM/ML-DSA solve problems this design doesn't have).
 - **The relay is blind**: it routes opaque blobs and stores encrypted
   machine info it cannot read. Relay compromise cannot spawn anything or
-  read prompts/repo names.
+  read prompts/repo names. Tests cannot prove a universal like that, so the
+  structural half is enforced instead of remembered:
+  `relay/test/layering.test.ts` fails the build if `relay/src` imports the
+  envelope crypto, decodes or decrypts anything, reads `ct` for more than its
+  length cap, or grows a second secret binding. The behavioural half is three
+  witnesses: the relay suite captures workerd's stdout and greps a sentinel
+  ciphertext out of every routing path's log line (the dashboard keeps those
+  lines; a careless debug log is the realistic leak), and the e2e suite sends a
+  re-addressed and a byte-flipped envelope through the shipped relay to the
+  real daemon and watches both die there while an honest frame is answered.
+  What stays visible to the relay is metadata — routing ids, IVs, ciphertext
+  length, timing, presence — and ciphertext length is unpadded, so it bounds
+  prompt length; "blind" means payloads and forgery, not traffic analysis.
 - **Structured payloads only**: daemons accept the `SpawnRequest` fields
   (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.

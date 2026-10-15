@@ -18,11 +18,13 @@ type UndeliverableFrame = Extract<RelayToAppFrame, { t: "undeliverable" }>;
 type ForgetRefusedFrame = Extract<RelayToAppFrame, { t: "forget-refused" }>;
 
 let relay: TestRelay;
+/** Every line workerd wrote since boot; the blindness suite greps it. */
+const relayLog: string[] = [];
 
 // One workerd instance for the file: the registry is permanent by design, so
 // every test uses its own deviceId and asserts on its own entry.
 beforeAll(async () => {
-  relay = await startRelay(TOKEN);
+  relay = await startRelay(TOKEN, { onLog: (line) => relayLog.push(line) });
 });
 
 afterAll(async () => {
@@ -385,6 +387,67 @@ async function drain(app: Client): Promise<void> {
   await app.waitFor<UndeliverableFrame>("undeliverable");
 }
 
+describe("blindness", () => {
+  /**
+   * The hub logs routing ids and the iv on every path a frame can take; the
+   * ciphertext is the one field that must never follow them, because workerd's
+   * stdout is the Cloudflare dashboard's log and that outlives the frame. The
+   * sentinel is a valid `ct` to the relay (a bounded string) and unmistakable
+   * in a grep. Each path's own log line is awaited first, so a capture that
+   * silently stopped working cannot pass this vacuously.
+   */
+  test("ciphertext never reaches a log line on any routing path", async () => {
+    const sentinel = `CT-SENTINEL-${crypto.randomUUID()}`;
+    const deviceId = nextDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await connectDaemon(relay);
+    const taken = (env: { readonly iv: string }): (() => boolean) => {
+      return () => relayLog.some((line) => line.includes(`iv="${env.iv}"`));
+    };
+    const seen = async (env: { readonly iv: string }, what: string): Promise<void> => {
+      const done = taken(env);
+      const deadline = Date.now() + 2_000;
+      while (!done()) {
+        if (Date.now() > deadline) throw new Error(`relay never logged ${what} (iv ${env.iv})`);
+        await Bun.sleep(20);
+      }
+    };
+
+    // register: the blob is stored, and the only log line names the deviceId.
+    const info = { ...envelope(APP_ID, deviceId), ct: sentinel };
+    daemon.send({ t: "register", deviceId, info });
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+
+    // deliver: app → daemon.
+    const toDaemon = { ...envelope(deviceId, APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toDaemon });
+    await daemon.waitFor<RelayToDaemonFrame>("msg");
+    await seen(toDaemon, "deliver");
+
+    // fanout: daemon → every app.
+    const toApp = { ...envelope(APP_ID, deviceId), ct: sentinel };
+    daemon.send({ t: "msg", env: toApp });
+    await app.waitFor<MsgFrame>("msg");
+    await seen(toApp, "fanout");
+
+    // undeliverable: the notice echoes the iv, never the blob.
+    const toNobody = { ...envelope("never-registered", APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toNobody });
+    await app.waitFor<UndeliverableFrame>("undeliverable");
+    await seen(toNobody, "undeliverable");
+
+    // dropped: a from-mismatch is logged with its iv and nothing else.
+    const forged = { ...envelope(APP_ID, "some-other-machine"), ct: sentinel };
+    daemon.send({ t: "msg", env: forged });
+    await seen(forged, "dropped");
+
+    expect(relayLog.length).toBeGreaterThan(0);
+    expect(relayLog.filter((line) => line.includes(sentinel))).toEqual([]);
+    daemon.close();
+    app.close();
+  });
+});
+
 describe("forget", () => {
   test("deletes an offline machine's entry and pushes the change to every app", async () => {
     const deviceId = nextDeviceId();
@@ -582,8 +645,7 @@ describe("silent-socket sweep", () => {
     // scar; "Broken pipe" from server.c++). Let it settle first.
     await Bun.sleep(500);
     sweeping = await startRelay(TOKEN, {
-      sweepIntervalMs: SWEEP_INTERVAL_MS,
-      sweepSilenceLimitMs: SILENCE_LIMIT_MS,
+      sweep: { sweepIntervalMs: SWEEP_INTERVAL_MS, sweepSilenceLimitMs: SILENCE_LIMIT_MS },
     });
   });
 

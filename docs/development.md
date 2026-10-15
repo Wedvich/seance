@@ -66,7 +66,10 @@ a production change.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
-  a double.
+  a double. The relay suite also captures workerd's stdout (`onLog` on `startRelay`)
+  to prove ciphertext never reaches a log line, and `relay/test/layering.test.ts`
+  greps `relay/src` for anything that could open an envelope — the structural half of
+  "the relay is blind" (DESIGN.md, _Security model_).
 - **e2e** — all three real components at once: the daemon from `daemon/src`, the
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,
