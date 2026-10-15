@@ -33,8 +33,10 @@ describe("listExclaves", () => {
     expect(exclaves.map((e) => e.id)).toEqual(["default", "work", "play"]);
     expect(exclaves[0]?.root).toBe(await realpath(home));
     expect(exclaves[0]?.configDir).toBe(join(home, ".claude"));
+    expect(exclaves[0]?.configFile).toBe(join(home, ".claude.json"));
     expect(exclaves[1]?.root).toBe(await realpath(join(home, "work")));
     expect(exclaves[1]?.configDir).toBe(join(home, ".claude-work"));
+    expect(exclaves[1]?.configFile).toBe(join(home, ".claude-work", ".claude.json"));
     // A tree that doesn't exist yet still names an exclave; its root stays lexical.
     expect(exclaves[2]?.root).toBe(join(home, "play"));
   });
@@ -52,6 +54,12 @@ describe("listExclaves", () => {
   });
 });
 
+/** A named exclave as `listExclaves` builds it. */
+function named(home: string, name: string): { id: string; root: string; configDir: string; configFile: string } {
+  const configDir = join(home, `.claude-${name}`);
+  return { id: name, root: join(home, name), configDir, configFile: join(configDir, ".claude.json") };
+}
+
 describe("describeExclave", () => {
   test("reads account ids and the extra-usage flag, never the rest", async () => {
     const home = await makeHome();
@@ -60,7 +68,7 @@ describe("describeExclave", () => {
     await mkdir(join(home, ".claude-work", "skills", ".hidden"), { recursive: true });
     await writeFile(join(home, ".claude-work", "skills", "README.md"), "");
     await mkdir(join(home, ".claude-work", "skills", "alpha"), { recursive: true });
-    const info = await describeExclave({ id: "work", root: join(home, "work"), configDir: join(home, ".claude-work") });
+    const info = await describeExclave(named(home, "work"));
     expect(info).toEqual({
       id: "work",
       accountId: "org-1:acct-1",
@@ -73,11 +81,7 @@ describe("describeExclave", () => {
   test("signed out: no config dir, unparsable json, or no oauthAccount", async () => {
     const home = await makeHome();
     const signedOut = { accountId: null, extraUsageEnabled: null, authOk: false, skills: [] };
-    const at = (name: string): { id: string; root: string; configDir: string } => ({
-      id: name,
-      root: join(home, name),
-      configDir: join(home, `.claude-${name}`),
-    });
+    const at = (name: string): ReturnType<typeof named> => named(home, name);
     expect(await describeExclave(at("missing"))).toEqual({ id: "missing", ...signedOut });
     await writeClaudeJson(join(home, ".claude-garbled"), "{not json");
     expect(await describeExclave(at("garbled"))).toEqual({ id: "garbled", ...signedOut });
@@ -88,20 +92,26 @@ describe("describeExclave", () => {
   test("an account with ids missing is signed in with no id, and extra usage unknown", async () => {
     const home = await makeHome();
     await writeClaudeJson(join(home, ".claude-partial"), { oauthAccount: { emailAddress: "x@y" } });
-    const info = await describeExclave({
-      id: "partial",
-      root: join(home, "partial"),
-      configDir: join(home, ".claude-partial"),
-    });
+    const info = await describeExclave(named(home, "partial"));
     expect(info).toEqual({ id: "partial", accountId: null, extraUsageEnabled: null, authOk: true, skills: [] });
   });
 });
 
 describe("exclaveOf", () => {
   const exclaves = [
-    { id: "default", root: "/home/u", configDir: "/home/u/.claude" },
-    { id: "work", root: "/home/u/work", configDir: "/home/u/.claude-work" },
-    { id: "work-2", root: "/home/u/work-2", configDir: "/home/u/.claude-work-2" },
+    { id: "default", root: "/home/u", configDir: "/home/u/.claude", configFile: "/home/u/.claude.json" },
+    {
+      id: "work",
+      root: "/home/u/work",
+      configDir: "/home/u/.claude-work",
+      configFile: "/home/u/.claude-work/.claude.json",
+    },
+    {
+      id: "work-2",
+      root: "/home/u/work-2",
+      configDir: "/home/u/.claude-work-2",
+      configFile: "/home/u/.claude-work-2/.claude.json",
+    },
   ];
 
   test("longest named root wins; the rest of home and anything outside it is default", () => {
@@ -128,7 +138,7 @@ describe("exclaveOf", () => {
 describe("scanExclaves", () => {
   test("info lines up with exclaves by position, through a symlinked home", async () => {
     const real = await makeHome("work\n");
-    await writeClaudeJson(join(real, ".claude"), { oauthAccount: account });
+    await writeFile(join(real, ".claude.json"), JSON.stringify({ oauthAccount: account }));
     await mkdir(join(real, "work"));
     const link = join(await makeHome(), "home-link");
     await symlink(real, link);
@@ -140,5 +150,16 @@ describe("scanExclaves", () => {
     expect(scan.info[1]?.authOk).toBe(false);
     // Roots are canonical, so the scan's realpath'd repo paths map.
     expect(exclaveOf(join(await realpath(real), "work", "repo"), scan.exclaves)).toBe("work");
+  });
+
+  test("default's account is ~/.claude.json, not the stub that can sit in ~/.claude", async () => {
+    const home = await makeHome();
+    await writeFile(join(home, ".claude.json"), JSON.stringify({ oauthAccount: account }));
+    await writeClaudeJson(join(home, ".claude"), { numStartups: 1 });
+    await mkdir(join(home, ".claude", "skills", "alpha"), { recursive: true });
+    const { info } = await scanExclaves(home);
+    expect(info).toEqual([
+      { id: "default", accountId: "org-1:acct-1", extraUsageEnabled: true, authOk: true, skills: ["alpha"] },
+    ]);
   });
 });

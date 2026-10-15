@@ -1,6 +1,5 @@
 import { readFile, stat as statFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import { join } from "node:path";
 import {
   isRecord,
   METRIC_NAMES,
@@ -18,7 +17,7 @@ import type { MetricsStore, Sample } from "./metrics-store.ts";
  * pressure as whole percent, each smoothed over ~SMOOTHING_MS daemon-side so no
  * reader keeps a window of its own; disk free and I/O rates; running sessions
  * per exclave; and the newest quota observation per exclave, which in M1 is
- * only what Claude Code itself cached in each config dir's `.claude.json`.
+ * only what Claude Code itself cached in each exclave's `.claude.json`.
  * Every sample also lands in the metrics store under `METRIC_NAMES`.
  *
  * A field the host can't answer is absent, never a guess: the first tick has
@@ -81,7 +80,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
         (list) => list,
         () => null,
       ),
-      Promise.all(scan.exclaves.map((exclave, x) => quotaReader(join(exclave.configDir, ".claude.json"), x))),
+      Promise.all(scan.exclaves.map((exclave, x) => quotaReader(exclave.configFile, x))),
     ]);
     const dtMs = previous === null ? 0 : nowMs - previous.atMs;
     // Time-aware weight rather than a fixed alpha: a laptop back from sleep
@@ -333,24 +332,20 @@ export function parseMeminfo(text: string): { readonly total: number; readonly a
 }
 
 /**
- * macOS has no `MemAvailable`; free + inactive + speculative is what the kernel
- * reclaims first and what Activity Monitor's "memory pressure" leaves out of
- * "used" (purgeable and compressed are not counted — both cost to free).
+ * macOS has no `MemAvailable`, and no page arithmetic over `vm_stat` stands in
+ * for it: file cache and the compressor hold most of an idle Mac's RAM, so
+ * free + inactive reads 70% used on a box the kernel calls unpressured. Use the
+ * kernel's own figure instead — `kern.memorystatus_level`, the free percentage
+ * jetsam acts on and `memory_pressure` prints — scaled to bytes so both
+ * platforms answer the same shape.
  */
-export function parseVmStat(
+export function parseMemorystatusLevel(
   text: string,
   total: number,
 ): { readonly total: number; readonly available: number } | null {
-  const pageSize = Number(/page size of (\d+) bytes/u.exec(text)?.[1] ?? Number.NaN);
-  const pages = (label: string): number | null => {
-    const match = new RegExp(`^${label}:\\s+(\\d+)\\.$`, "mu").exec(text);
-    return match?.[1] === undefined ? null : Number(match[1]);
-  };
-  const free = pages("Pages free");
-  const inactive = pages("Pages inactive");
-  const speculative = pages("Pages speculative") ?? 0;
-  if (!Number.isFinite(pageSize) || free === null || inactive === null) return null;
-  return { total, available: (free + inactive + speculative) * pageSize };
+  const level = /^\s*(\d+)\s*$/u.exec(text)?.[1];
+  if (level === undefined) return null;
+  return { total, available: (Math.min(100, Number(level)) / 100) * total };
 }
 
 /** Whole devices only — a partition's sectors are its disk's counted twice, and loop/dm/md devices re-count real ones. */
@@ -385,8 +380,8 @@ export const hostProbe: HostProbe = {
   memory: async () => {
     if (process.platform === "linux") return parseMeminfo(await readFile("/proc/meminfo", "utf8"));
     if (process.platform !== "darwin") return null;
-    const result = await exec(["vm_stat"], { timeoutMs: 5_000 });
-    return result.exitCode === 0 ? parseVmStat(result.stdout, totalmem()) : null;
+    const result = await exec(["sysctl", "-n", "kern.memorystatus_level"], { timeoutMs: 5_000 });
+    return result.exitCode === 0 ? parseMemorystatusLevel(result.stdout, totalmem()) : null;
   },
   disks: async (paths) => {
     const stats = await Promise.all(paths.map(statfsBytes));

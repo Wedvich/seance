@@ -19,6 +19,12 @@ export interface Exclave {
   /** Canonical tree root, so the scan's realpath'd repo paths prefix-match it. */
   readonly root: string;
   readonly configDir: string;
+  /**
+   * Claude Code's `.claude.json`. Inside `configDir` only when `CLAUDE_CONFIG_DIR`
+   * is set, as it is for every named exclave; `default` runs without it, so its
+   * file is `~/.claude.json` and `~/.claude/.claude.json`, when present, is a stub.
+   */
+  readonly configFile: string;
 }
 
 export interface ExclaveScan {
@@ -37,8 +43,8 @@ async function readLines(file: string): Promise<readonly string[]> {
   }
 }
 
-async function exclaveAt(id: string, root: string, configDir: string): Promise<Exclave> {
-  return { id, root: await canonical(root), configDir };
+async function exclaveAt(id: string, root: string, configDir: string, configFile: string): Promise<Exclave> {
+  return { id, root: await canonical(root), configDir, configFile };
 }
 
 /** The named exclaves, in file order, deduplicated; `default` on the file is a stray line (it is implied). */
@@ -58,21 +64,24 @@ export async function listExclaves(home: string): Promise<{
     if (!names.includes(line)) names.push(line);
   }
   const exclaves = await Promise.all([
-    exclaveAt(DEFAULT_EXCLAVE, home, join(home, ".claude")),
-    ...names.map((name) => exclaveAt(name, join(home, name), join(home, `.claude-${name}`))),
+    exclaveAt(DEFAULT_EXCLAVE, home, join(home, ".claude"), join(home, ".claude.json")),
+    ...names.map((name) => {
+      const configDir = join(home, `.claude-${name}`);
+      return exclaveAt(name, join(home, name), configDir, join(configDir, ".claude.json"));
+    }),
   ]);
   return { exclaves, rejected };
 }
 
 /**
- * Account presence as Claude Code records it in its config dir's `.claude.json`.
+ * Account presence as Claude Code records it in the exclave's `.claude.json`.
  * Only `oauthAccount`'s ids and the extra-usage flag are read — never a token,
  * which that file does not hold anyway. A missing or unreadable file is a
  * signed-out exclave, not an error: the daemon reports, it doesn't require.
  */
 export async function describeExclave(exclave: Exclave): Promise<ExclaveInfo> {
   const [account, skills] = await Promise.all([
-    readAccount(join(exclave.configDir, ".claude.json")),
+    readAccount(exclave.configFile),
     listSkills(join(exclave.configDir, "skills")),
   ]);
   return { id: exclave.id, ...account, skills };

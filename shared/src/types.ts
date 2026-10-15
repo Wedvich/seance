@@ -249,7 +249,7 @@ export interface RepoEntry {
  */
 export interface ExclaveInfo {
   readonly id: string;
-  /** `organizationUuid:accountUuid` from the config dir's `.claude.json`; null when not signed in. Never the email. */
+  /** `organizationUuid:accountUuid` from the exclave's `.claude.json` (`~/.claude.json` for `default`); null when not signed in. Never the email. */
   readonly accountId: string | null;
   /** Whether the account may spill into credits; null when the config dir doesn't say. */
   readonly extraUsageEnabled: boolean | null;

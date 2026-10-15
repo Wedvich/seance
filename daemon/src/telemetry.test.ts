@@ -9,7 +9,7 @@ import {
   createTelemetry,
   parseDiskstats,
   parseMeminfo,
-  parseVmStat,
+  parseMemorystatusLevel,
   readCachedQuota,
   type HostProbe,
 } from "./telemetry.ts";
@@ -30,8 +30,13 @@ async function makeHome(): Promise<string> {
 
 function scanOf(home: string): ExclaveScan {
   const exclaves = [
-    { id: "default", root: home, configDir: join(home, ".claude") },
-    { id: "work", root: join(home, "work"), configDir: join(home, ".claude-work") },
+    { id: "default", root: home, configDir: join(home, ".claude"), configFile: join(home, ".claude.json") },
+    {
+      id: "work",
+      root: join(home, "work"),
+      configDir: join(home, ".claude-work"),
+      configFile: join(home, ".claude-work", ".claude.json"),
+    },
   ];
   const signedOut = { accountId: null, extraUsageEnabled: null, authOk: false, skills: [] };
   return {
@@ -269,17 +274,11 @@ describe("host parsers", () => {
     expect(parseMeminfo("MemTotal:       16000 kB\n")).toBeNull();
   });
 
-  test("vm_stat: free + inactive + speculative pages at the reported page size", () => {
-    const text = [
-      "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
-      "Pages free:                               1000.",
-      "Pages active:                            50000.",
-      "Pages inactive:                           3000.",
-      "Pages speculative:                         500.",
-      "Pages purgeable:                          9999.",
-    ].join("\n");
-    expect(parseVmStat(text, 100)).toEqual({ total: 100, available: 4500 * 16384 });
-    expect(parseVmStat("garbage", 100)).toBeNull();
+  test("memorystatus_level: the kernel's free percentage, scaled to bytes", () => {
+    expect(parseMemorystatusLevel("62\n", 1000)).toEqual({ total: 1000, available: 620 });
+    expect(parseMemorystatusLevel("0", 1000)).toEqual({ total: 1000, available: 0 });
+    expect(parseMemorystatusLevel("", 1000)).toBeNull();
+    expect(parseMemorystatusLevel("sysctl: unknown oid", 1000)).toBeNull();
   });
 
   test("diskstats: whole devices only, sectors of 512 bytes", () => {
