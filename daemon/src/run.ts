@@ -1,4 +1,12 @@
-import { APP_ID, importPsk, seal, type Envelope, type MachineInfo, type UpdateAvailable } from "@seance/shared";
+import {
+  APP_ID,
+  importPsk,
+  seal,
+  STATUS_INTERVAL_MS,
+  type Envelope,
+  type MachineInfo,
+  type UpdateAvailable,
+} from "@seance/shared";
 import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -16,10 +24,12 @@ import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from ".
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
+import { MetricsStore } from "./metrics-store.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
+import { createTelemetry } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
@@ -53,6 +63,8 @@ export interface RunOpts {
   readonly home?: string;
   /** How often the reap schedule asks whether a run is due; tests shorten it. */
   readonly reapCheckIntervalMs?: number;
+  /** Telemetry sample period; defaults to the `status` cadence. Tests shorten it. */
+  readonly telemetryIntervalMs?: number;
   /**
    * A psk the caller already resolved, to skip re-reading the platform store.
    * The supervisor passes it so a reload spawns one `security`/DPAPI read
@@ -290,6 +302,26 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   void rescan();
   const rescanTimer = setInterval(() => void rescan(), opts.rescanIntervalMs ?? RESCAN_INTERVAL_MS);
 
+  // Sampling from the first start on, whether or not anything asks: the history
+  // the `metrics` op serves has to predate the chart that opens it. A state dir
+  // that refuses the file costs the history, never the daemon.
+  const metrics = await MetricsStore.open().catch((err: unknown) => {
+    log.warn(`metrics store unavailable (${String(err)}) — keeping history in memory`);
+    return MetricsStore.memory();
+  });
+  const telemetry = createTelemetry(metrics, {
+    machine: config.name,
+    diskPaths: config.repoRoots,
+    exclaves: () => exclaveScan,
+    sessions: () => handlerCtx.backend.sessions(state.repos),
+  });
+  const sampleTelemetry = (): void => {
+    if (stopped) return;
+    telemetry.tick().catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
+  };
+  sampleTelemetry();
+  const telemetryTimer = setInterval(sampleTelemetry, opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS);
+
   // Off unless configured. The report goes to the log, one line each; what it
   // destroyed is in the audit trail as origin=schedule. A run the CLI already
   // holds the lock for is skipped and tried at the next check.
@@ -330,6 +362,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     stop: (): void => {
       stopped = true;
       clearInterval(rescanTimer);
+      clearInterval(telemetryTimer);
       handlerCtx.backend.stop?.();
       if (reapTimer !== null) clearInterval(reapTimer);
       reapAbort.abort();
@@ -343,6 +376,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // stale `state` and clobber what the incoming daemon already saved.
       updater?.stop();
       client.stop();
+      // Last, after every timer that writes: a tick still in flight fails its
+      // write into the warn above rather than a closed-handle throw elsewhere.
+      metrics.close();
       updateRuntime(false);
     },
     updater,

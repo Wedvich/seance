@@ -147,7 +147,8 @@ env }]`, `queue-put { id, expect, env, term? }` → `{ version }` or `version_co
 whole percent (each already smoothed over ~2 min daemon-side, so the scheduler needs no window
 of its own) plus disk free and r/w rates; running sessions per exclave; and `quota`: this
 daemon's newest observation per account (5h/7d pct, `resets_at`, source
-`session`/`oauth`/`cache`, observed-at). Quota for one account is spread over every daemon
+`session`/`oauth`/`cache`, observed-at, and `w`: the per-model weekly caps Claude Code shows
+as "Current week (Fable)", keyed by display name). Quota for one account is spread over every daemon
 hosting one of its exclaves; readers take the newest observation per account.
 
 **Encoding (settled 2026-10-15, PR 1).** The blob must fit a DO socket attachment — 2 KiB,
@@ -238,7 +239,11 @@ the PWA can show the exclave beside each repo in the manual picker.
 - Config dir follows location via the user's shell hook (`.zshenv` → `update_exclave_env`),
   as today; the daemon doesn't set it. A machine's shell setup being correct is out of scope —
   the daemon only _reports_ which exclave a clone sits in.
-- `telemetry.ts`: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
+- `telemetry.ts` — **landed (M1 task 3, 2026-10-15)**: DESIGN.md's _Daemon_ section
+  ("Telemetry") holds what is sampled, how it is smoothed, the store's tiers and modes, and
+  what is read from each config dir's cache (including the per-model weekly caps). Not yet
+  there: PSI/cgroup views in an LXC, the Proxmox node view, macOS I/O rates. The plan as it
+  was: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
   API token, which never leaves the daemon process). argv-array exec only. Samples every 30s
   into `stateDir()/metrics.sqlite` (`bun:sqlite`, no dependency; created 0600 like the other
@@ -395,7 +400,7 @@ the newest quota observation per account, and open a history chart — without a
 3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
    observations read from each config dir's `.claude.json` (`cachedUsageUtilization`, which
    Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
-   this is M1's only producer. Daemon-only; parallel with 2.
+   this is M1's only producer. Daemon-only; parallel with 2. _Landed 2026-10-15._
 4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
    `registry` includes the latest per connected daemon.
 5. `metrics` op — daemon handler over the store; app-side request.

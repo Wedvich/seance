@@ -532,7 +532,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                   | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 | `status` (daemon→relay) — M1        | `daemon/src/run.ts` via `daemon/src/relay-client.ts`, every 30s                      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
 | `status` (relay→app) — M1           | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry` | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
-| op `metrics` — M1                   | `pwa/src/store.ts` via `shared/src/app-client.ts`                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/telemetry.ts`                                       |
+| op `metrics` — M1                   | `pwa/src/store.ts` via `shared/src/app-client.ts`                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`                                   |
 
 Rows marked _M1_ are the scheduler plan's first milestone (docs/scheduler.md): their shapes
 are in `shared/src/types.ts` already, and each handler lands in its own PR, after which the
@@ -1128,6 +1128,41 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   the cadence everything else in the blob already has, and a sign-in changes
   `.claude.json`, not the list); reporting the config dir path (derivable, and
   the app has no use for a path it can't open).
+- **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
+  2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
+  cpu, memory and disk pressure as whole percent, disk free and I/O rates,
+  running sessions per exclave (by pane path, so a session outside every
+  registered repo still counts where it sits) and the newest quota observation
+  per exclave — in M1 only what Claude Code itself cached in each config dir's
+  `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
+  per-model weekly caps from its `limits`, keyed by display name since the id
+  is not cached; source `cache`, stamped at its fetch time). The three pressure
+  numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
+  laptop back from sleep resets to its first reading instead of trusting a stale
+  average, and no reader keeps a window of its own. Collectors are exec-free
+  where the host allows: `os.cpus()` deltas, `/proc/meminfo` (`MemAvailable`)
+  or `vm_stat` (free + inactive + speculative), `statfs` over the configured
+  repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
+  A field the host can't answer is absent — the first tick has no cpu or I/O
+  delta, macOS has no exec-free I/O counter, a tmux outage drops `sess` for the
+  tick — never a guess. Every sample also lands in `stateDir()/metrics.sqlite`
+  (`bun:sqlite`; created as an empty 0600 file before SQLite opens it, so the
+  WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
+  nothing else — metric, label set, timestamp, number — in three tiers sharing
+  `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
+  Rollups are recomputed from the tier below for every bucket a write touches,
+  so a quota observation stamped hours back still lands in its own hour, and the
+  same observation re-read every tick is one row and widens no rollup; one
+  stamped past the raw tier's 48h is dropped (the same write would prune it,
+  and a cached stamp days old would otherwise re-enter and re-roll every tick),
+  and a rollup never re-averages a bucket the prune horizon has cut into. The
+  config file is re-parsed only when its stat changes. The latest sample is what the
+  `status` frame carries (its `scan` stamp is the sender's to add); history is
+  the `metrics` op's. Rejected: the 1-min load average as cpu (counts runnable
+  tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
+  macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
+  (sleep gaps); a positional store schema (a new metric must cost nothing but a
+  name).
 - **Session detection**: list all tmux panes across all sessions, dedup by
   window id (grouped sessions repeat windows), count a window as a session by
   one predicate, `isRegistered` in `sessions.ts`, which the spawn path shares.

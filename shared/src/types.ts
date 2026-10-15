@@ -341,6 +341,15 @@ export type QuotaSource = (typeof QUOTA_SOURCES)[number];
  * (2 KiB, shared with the socket's identity), and the inputs are already
  * smoothed or stepped, so a float would claim precision nobody has.
  */
+export interface ScopedWindow {
+  /** Model display name as Claude Code reports it (`"Fable"`); the id is not cached. */
+  readonly m: string;
+  /** Used, whole percent. */
+  readonly p: number;
+  /** Resets at, unix seconds. */
+  readonly r?: number;
+}
+
 export interface QuotaObservation {
   /** Index into the register blob's `exclaves`; the account id lives there, not here. */
   readonly x: number;
@@ -352,6 +361,14 @@ export interface QuotaObservation {
   readonly hr?: number;
   /** Seven-day window resets at, unix seconds. */
   readonly dr?: number;
+  /**
+   * Weekly windows scoped to one model (Claude Code's `weekly_scoped` limits —
+   * the "Current week (Fable)" bar), beside the all-models `d`. A list keyed by
+   * the model's display name rather than a field per model: the next model
+   * with its own cap must not be a schema change. Readers take the max over
+   * `d` and these.
+   */
+  readonly w?: readonly ScopedWindow[];
   readonly s: QuotaSource;
   /** Observed at, unix seconds. */
   readonly at: number;
@@ -419,6 +436,29 @@ export interface MetricsSeries {
 export interface MetricsResponse {
   readonly series: readonly MetricsSeries[];
 }
+
+/**
+ * The series the daemon's store keeps, one per `MachineStatus` field plus the
+ * two quota windows — the same whole-percent / MiB / KiB/s units, so a chart
+ * and a status tile read alike. Labels: `machine` on all; `exclave` on
+ * `sessions` and quota; `account` on quota when the exclave's config dir says, `model` on `w`.
+ * A daemon ahead may add names; a reader charts the ones it knows.
+ */
+export const METRIC_NAMES = {
+  cpu: "cpu_pct",
+  mem: "mem_pct",
+  disk: "disk_pct",
+  free: "disk_free_mib",
+  rd: "disk_read_kibs",
+  wr: "disk_write_kibs",
+  sess: "sessions",
+  h: "quota_5h_pct",
+  d: "quota_7d_pct",
+  /** Label `model` carries the display name. */
+  w: "quota_7d_model_pct",
+} as const;
+
+export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
 export type SpawnMode = "worktree" | "here";
 
