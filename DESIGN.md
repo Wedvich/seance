@@ -1187,7 +1187,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
   running sessions per exclave (by pane path, so a session outside every
   registered repo still counts where it sits) and the newest quota observation
-  per exclave — in M1 only what Claude Code itself cached in each config dir's
+  per exclave — in M1 only what Claude Code itself cached in each exclave's
   `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
   is not cached; source `cache`, stamped at its fetch time). The three pressure
@@ -1203,8 +1203,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   tick — never a guess. Rejected for macOS: free + inactive + speculative pages
   from `vm_stat` — file cache and the compressor hold most of an idle Mac's RAM,
   so it read ~70% used on a 48 GB Mac the kernel rated at normal pressure, and
-  `machine_pressure` would have steered work away from it. Every sample also lands in `stateDir()/metrics.sqlite`
-  (`bun:sqlite`; created as an empty 0600 file before SQLite opens it, so the
+  `machine_pressure` would have steered work away from it. Every sample also
+  lands in `stateDir()/metrics.sqlite` (`bun:sqlite`; created as an empty 0600 file before SQLite opens it, so the
   WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
   nothing else — metric, label set, timestamp, number — in three tiers sharing
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.

@@ -81,12 +81,11 @@ describe("describeExclave", () => {
   test("signed out: no config dir, unparsable json, or no oauthAccount", async () => {
     const home = await makeHome();
     const signedOut = { accountId: null, extraUsageEnabled: null, authOk: false, skills: [] };
-    const at = (name: string): ReturnType<typeof named> => named(home, name);
-    expect(await describeExclave(at("missing"))).toEqual({ id: "missing", ...signedOut });
+    expect(await describeExclave(named(home, "missing"))).toEqual({ id: "missing", ...signedOut });
     await writeClaudeJson(join(home, ".claude-garbled"), "{not json");
-    expect(await describeExclave(at("garbled"))).toEqual({ id: "garbled", ...signedOut });
+    expect(await describeExclave(named(home, "garbled"))).toEqual({ id: "garbled", ...signedOut });
     await writeClaudeJson(join(home, ".claude-fresh"), { numStartups: 3 });
-    expect(await describeExclave(at("fresh"))).toEqual({ id: "fresh", ...signedOut });
+    expect(await describeExclave(named(home, "fresh"))).toEqual({ id: "fresh", ...signedOut });
   });
 
   test("an account with ids missing is signed in with no id, and extra usage unknown", async () => {

@@ -334,7 +334,7 @@ export function parseMeminfo(text: string): { readonly total: number; readonly a
 /**
  * macOS has no `MemAvailable`, and no page arithmetic over `vm_stat` stands in
  * for it: file cache and the compressor hold most of an idle Mac's RAM, so
- * free + inactive reads 70% used on a box the kernel calls unpressured. Use the
+ * free + inactive + speculative reads ~70% used on a box the kernel calls unpressured. Use the
  * kernel's own figure instead — `kern.memorystatus_level`, the free percentage
  * jetsam acts on and `memory_pressure` prints — scaled to bytes so both
  * platforms answer the same shape.
@@ -380,7 +380,8 @@ export const hostProbe: HostProbe = {
   memory: async () => {
     if (process.platform === "linux") return parseMeminfo(await readFile("/proc/meminfo", "utf8"));
     if (process.platform !== "darwin") return null;
-    const result = await exec(["sysctl", "-n", "kern.memorystatus_level"], { timeoutMs: 5_000 });
+    // Absolute: sysctl is in /usr/sbin, which the PATH a plist captured at install need not carry.
+    const result = await exec(["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], { timeoutMs: 5_000 });
     return result.exitCode === 0 ? parseMemorystatusLevel(result.stdout, totalmem()) : null;
   },
   disks: async (paths) => {
