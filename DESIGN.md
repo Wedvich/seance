@@ -1762,7 +1762,11 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   mid-spawn loses the reply (a blind relay cannot queue it), so the pending
   spawn is persisted and the machine is asked what is running once there is a
   socket again. Reporting a failure there would be a lie: the session may well
-  be live. A refused delivery is reported as a known no, separately.
+  be live. Never while the request is still in flight: a `status` beat or
+  registry push mid-spawn would otherwise spend the record on a question the
+  reply is about to answer, flashing a "dropped" verdict over a healthy spawn
+  and leaving nothing to reconcile if the reply really is lost. A refused
+  delivery is reported as a known no, separately.
 - **A `repo_not_found` retry rescans first.** The verdict's "Rescan and try again"
   awaits a rescan and checks the reply for the repo before spawning again; a repo
   the fresh scan still lacks is reported as conclusively gone (back to the form)
