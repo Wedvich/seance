@@ -27,6 +27,11 @@ describe("parseRepoEntry", () => {
     expect(parseRepoEntry({ ...repo, exclave: 1 })).toBeNull();
     expect(parseRepoEntry({ ...repo, origin: null })).toBeNull();
   });
+
+  test("an empty exclave or origin is refused — both are keys, and no exclave has an empty id", () => {
+    expect(parseRepoEntry({ ...repo, exclave: "" })).toBeNull();
+    expect(parseRepoEntry({ ...repo, origin: "" })).toBeNull();
+  });
 });
 
 describe("parseExclaveList", () => {
@@ -132,6 +137,8 @@ describe("metrics", () => {
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: { a: 1 }, points: [] }] })).toBeNull();
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1]] }] })).toBeNull();
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [["1", 2]] }] })).toBeNull();
+    expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Infinity]] }] })).toBeNull();
+    expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Number.NaN]] }] })).toBeNull();
     expect(parseMetricsResponse({ rows: [] })).toBeNull();
   });
 });

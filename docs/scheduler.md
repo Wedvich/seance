@@ -156,7 +156,12 @@ shared with the socket's identity — and base64 costs a third, so: every number
 `null`, and quota entries name their account by **index into the register blob's `exclaves`**
 rather than by the 73-char account id. `status.scan` carries that blob's `scannedAt`, and a
 reader drops a status whose stamp disagrees with the blob it holds — the rule the app already
-applies between `rescan` and `machine-info`. Rejected: a positional tuple or bit-packed body —
+applies between `rescan` and `machine-info`. "That blob" means the one last _registered_: the
+daemon's `state.scannedAt` moves on every hourly rescan while a re-register happens only on a
+changed repo set, and a `rescan` reply carries a third stamp that lands on `Machine.scannedAt` —
+the sender must keep the registered stamp, and the reader must compare against the decrypted
+register blob, not the merged `Machine`, or every status is dropped until the repo set next
+changes. Rejected: a positional tuple or bit-packed body —
 it saves ~100 bytes and loses the optional-field skew tolerance every other blob relies on.
 
 **New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:

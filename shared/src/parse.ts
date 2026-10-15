@@ -62,6 +62,23 @@ function parseUintList(value: unknown): readonly number[] | null {
   return Array.isArray(value) && value.every(isUint) ? value : null;
 }
 
+/**
+ * All or nothing: one unreadable element nulls the list rather than silently
+ * shortening it. Every list below is either picked from (a repo missing is
+ * worse than a machine unavailable) or indexed into (`MachineStatus` → `exclaves`,
+ * where a gap shifts every account's quota onto its neighbour).
+ */
+function parseList<T>(value: unknown, parse: (candidate: unknown) => T | null): readonly T[] | null {
+  if (!Array.isArray(value)) return null;
+  const items: T[] = [];
+  for (const candidate of value) {
+    const item = parse(candidate);
+    if (item === null) return null;
+    items.push(item);
+  }
+  return items;
+}
+
 function parseLabels(value: unknown): Readonly<Record<string, string>> | null {
   if (!isRecord(value)) return null;
   const labels: Record<string, string> = {};
@@ -80,6 +97,9 @@ export function parseRepoEntry(value: unknown): RepoEntry | null {
   const exclave = value["exclave"];
   const origin = value["origin"];
   if (!isOptionalString(exclave) || !isOptionalString(origin)) return null;
+  // Both are keys: an empty exclave matches no `ExclaveInfo.id` (which refuses
+  // ""), and an empty origin would collide every remote-less repo across machines.
+  if (exclave === "" || origin === "") return null;
   return {
     name: value["name"],
     path: value["path"],
@@ -102,36 +122,12 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   return { id: value["id"], accountId, extraUsageEnabled, authOk: value["authOk"], skills };
 }
 
-/**
- * Same rule as `parseRepoList`: one unreadable exclave invalidates the list.
- * `MachineStatus` indexes into it, so a shortened list would shift every
- * account's quota onto its neighbour.
- */
 export function parseExclaveList(value: unknown): readonly ExclaveInfo[] | null {
-  if (!Array.isArray(value)) return null;
-  const exclaves: ExclaveInfo[] = [];
-  for (const candidate of value) {
-    const exclave = parseExclaveInfo(candidate);
-    if (exclave === null) return null;
-    exclaves.push(exclave);
-  }
-  return exclaves;
+  return parseList(value, parseExclaveInfo);
 }
 
-/**
- * One unreadable repo invalidates the whole list rather than silently
- * shortening it: a picker missing the repo you wanted is worse than a machine
- * that reads as unavailable.
- */
 export function parseRepoList(value: unknown): readonly RepoEntry[] | null {
-  if (!Array.isArray(value)) return null;
-  const repos: RepoEntry[] = [];
-  for (const candidate of value) {
-    const repo = parseRepoEntry(candidate);
-    if (repo === null) return null;
-    repos.push(repo);
-  }
-  return repos;
+  return parseList(value, parseRepoEntry);
 }
 
 /**
@@ -197,16 +193,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (!isOptionalUint(free) || !isOptionalUint(rd) || !isOptionalUint(wr)) return null;
   const sess = value["sess"] === undefined ? undefined : parseUintList(value["sess"]);
   if (sess === null) return null;
-  let quota: QuotaObservation[] | undefined;
-  if (value["quota"] !== undefined) {
-    if (!Array.isArray(value["quota"])) return null;
-    quota = [];
-    for (const candidate of value["quota"]) {
-      const observation = parseQuotaObservation(candidate);
-      if (observation === null) return null;
-      quota.push(observation);
-    }
-  }
+  const quota = value["quota"] === undefined ? undefined : parseList(value["quota"], parseQuotaObservation);
+  if (quota === null) return null;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -228,8 +216,9 @@ export function isMetricsRequest(value: unknown): value is MetricsRequest {
   return METRICS_STEPS.some((step) => step === value["step"]);
 }
 
+/** `Number.isFinite`, not `typeof`: JSON can't carry NaN/Infinity, but in-process callers can. */
 function isPoint(value: unknown): value is readonly [number, number] {
-  return Array.isArray(value) && value.length === 2 && isUint(value[0]) && typeof value[1] === "number";
+  return Array.isArray(value) && value.length === 2 && isUint(value[0]) && Number.isFinite(value[1]);
 }
 
 function parseMetricsSeries(value: unknown): MetricsSeries | null {
@@ -244,14 +233,9 @@ function parseMetricsSeries(value: unknown): MetricsSeries | null {
 
 /** A `metrics` reply lands on a chart, so a daemon a version ahead must cost the chart, not the app. */
 export function parseMetricsResponse(value: unknown): MetricsResponse | null {
-  if (!isRecord(value) || !Array.isArray(value["series"])) return null;
-  const series: MetricsSeries[] = [];
-  for (const candidate of value["series"]) {
-    const parsed = parseMetricsSeries(candidate);
-    if (parsed === null) return null;
-    series.push(parsed);
-  }
-  return { series };
+  if (!isRecord(value)) return null;
+  const series = parseList(value["series"], parseMetricsSeries);
+  return series === null ? null : { series };
 }
 
 /**

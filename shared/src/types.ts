@@ -366,6 +366,15 @@ export interface QuotaObservation {
  * and `scan` names which blob: a status whose `scan` disagrees with the
  * `MachineInfo.scannedAt` a reader holds is dropped for that tick, the same
  * rule the app applies between `rescan` and `machine-info`.
+ *
+ * "The register blob's" is load-bearing on both ends. Three scan stamps exist:
+ * the daemon's `state.scannedAt` advances on every hourly rescan but a
+ * re-register happens only when the repo set changed (`daemon/src/run.ts`), and
+ * a `rescan` reply stamps a third `Date.now()` that the app merges into
+ * `Machine.scannedAt`. The sender stamps the blob it last *registered*; the
+ * reader compares against that blob's decrypted `scannedAt`, never against
+ * `Machine.scannedAt` — either slip drops every status until the next
+ * repo-set change.
  */
 export interface MachineStatus {
   /** Sampled at, unix seconds. */

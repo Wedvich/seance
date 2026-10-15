@@ -165,7 +165,15 @@ function parseRegistryView(value: unknown): RegistryView | null {
   if (info === null) return null;
   if (typeof value["deviceId"] !== "string" || typeof value["lastSeen"] !== "number") return null;
   if (typeof value["connected"] !== "boolean") return null;
-  return { deviceId: value["deviceId"], info, lastSeen: value["lastSeen"], connected: value["connected"] };
+  // Optional and lenient: a malformed status costs the status, never the entry.
+  const status = value["status"] === undefined ? null : parseEnvelope(value["status"]);
+  return {
+    deviceId: value["deviceId"],
+    info,
+    lastSeen: value["lastSeen"],
+    connected: value["connected"],
+    ...(status === null ? {} : { status }),
+  };
 }
 
 /**
