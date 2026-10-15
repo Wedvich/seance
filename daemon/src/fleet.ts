@@ -87,6 +87,21 @@ export function brokerFailureText(err: BrokerError): string {
 
 const NO_KEY = "no PSK is readable by this process, so other machines are reached through the seanced daemon";
 const LOCAL_STILL_WORKS = "Spawning on this machine needs neither.";
+// Local ops ride the same daemon's op socket, so a daemon that is not there takes them down too.
+const LOCAL_NEEDS_IT_TOO = "Ops on this machine go through that same daemon, so they fail too until it is running.";
+
+/**
+ * `up`: the daemon answered, so its op socket serves local ops. `down`: nothing
+ * listens. `unknown`: it took the connection and then went silent or hung up.
+ */
+export type LocalOutlook = "up" | "down" | "unknown";
+
+function localOutlook(cause: unknown): LocalOutlook {
+  if (!(cause instanceof BrokerError)) return "up";
+  if (cause.code === "daemon_unreachable") return "down";
+  if (cause.code === "daemon_timeout" || cause.code === "daemon_closed") return "unknown";
+  return "up";
+}
 
 /** What the reader can do about this cause — each broker code fails for a different reason. */
 function unreachableAdvice(cause: unknown): string {
@@ -99,7 +114,7 @@ function unreachableAdvice(cause: unknown): string {
         `${NO_KEY}, and none is reachable: it is not running, or too old to have the socket (${message}). ` +
         "Check it with `seanced status` — is seanced running? Where only the seanced service can read the key it must be " +
         "running; elsewhere fill the psk field in config.json or run `seanced psk-import`. " +
-        LOCAL_STILL_WORKS
+        LOCAL_NEEDS_IT_TOO
       );
     case "relay_unavailable":
       return `${NO_KEY}. The daemon is running but could not reach the relay (${message}). ${LOCAL_STILL_WORKS}`;
@@ -108,7 +123,19 @@ function unreachableAdvice(cause: unknown): string {
     case "busy":
       return `${NO_KEY}. The daemon is busy (${message}) — try again in a moment. ${LOCAL_STILL_WORKS}`;
     case "daemon_timeout":
-      return `${NO_KEY}. The daemon did not answer in time (${message}) — try again. ${LOCAL_STILL_WORKS}`;
+      // The peer's deadline outlasts the daemon's whole relay budget, so a slow
+      // relay comes back as relay_unavailable; silence means the daemon itself.
+      return (
+        `${NO_KEY}. The daemon accepted the connection but never answered (${message}), and it answers even a ` +
+        "relay failure well inside that time, so the daemon itself is stuck. Ops on this machine go through it too " +
+        "and will likely hang the same way — check `seanced status`, and `seanced restart` if it stays stuck."
+      );
+    case "daemon_closed":
+      // A stopping daemon and a pre-broker one both close; `brokerMachines` names the second in `message`.
+      return (
+        `${NO_KEY}. The daemon dropped the connection without answering (${message}). If it was stopping or ` +
+        "restarting, ops on this machine fail too until it is back — check `seanced status`."
+      );
     case "bad_reply":
       return `${NO_KEY}. The daemon's answer was not readable (${message}) — a mismatched seanced version? ${LOCAL_STILL_WORKS}`;
     default:
@@ -122,9 +149,12 @@ function unreachableAdvice(cause: unknown): string {
  * says so in its own words.
  */
 export class FleetUnreachable extends Error {
+  /** What the failure says about local ops, which ride the same daemon — so a caller never contradicts the message. */
+  readonly localOps: LocalOutlook;
   constructor(cause: unknown) {
     super(unreachableAdvice(cause));
     this.name = "FleetUnreachable";
+    this.localOps = localOutlook(cause);
   }
 }
 
@@ -153,7 +183,7 @@ export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts 
       return [
         {
           level: "warn",
-          message: `${prefix}and no daemon is listening; only this machine is reachable until seanced runs`,
+          message: `${prefix}and no daemon is listening; nothing is reachable until seanced runs, this machine included — its ops ride the same daemon`,
         },
       ];
     }

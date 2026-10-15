@@ -51,6 +51,7 @@ const local: LocalMachine = {
     // The test names T; this stands in for the op socket's wire.
     return Promise.resolve({ ok: true, window: "here", path: "/repos/seance", sessions: [] } as T);
   },
+  reachable: () => Promise.resolve(true),
 };
 
 function relayDouble(): LazyRelay {

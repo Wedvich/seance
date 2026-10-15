@@ -1763,9 +1763,21 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   executor this design exists to avoid.
 - **`list_machines` still needs the relay**, and marks the local entry `local:
 true`. When the relay cannot be reached at all it answers with this machine
-  alone plus a note. That is not a nicety: with the relay down, or with no key
-  and no daemon to broker for it, a model that can see no machine cannot spawn
-  on the one it is sitting on either.
+  alone plus a note. That is not a nicety: with the relay down, a model that can
+  see no machine cannot spawn on the one it is sitting on either. The entry's
+  `connected` is probed, not assumed — a connect to the op socket, no op sent,
+  nothing audited — because local ops ride that socket: with no key and no
+  daemon to broker for it, the daemon being down is often _why_ the fleet is out
+  of reach, and then this box cannot spawn either. The note says so rather than
+  promising local spawns (2026-10-15, after a manual acceptance on a
+  credential-delivered box found both the note and the broker advice claiming
+  otherwise). When the broker itself failed, its error already observed the
+  daemon on that same socket, so its verdict sets `connected` and the advice
+  stands as the note: a second probe could race a restart and contradict it in
+  the same answer. Only a connection the daemon took and then never answered
+  (`daemon_timeout`) or dropped (`daemon_closed`) leaves it open and is probed —
+  and neither promises local spawns, since the peer's deadline outlasts
+  everything the daemon waits on, relay included, and silence is the daemon's.
 - **The PSK is resolved lazily**, on first remote use rather than at startup.
   A key found is memoized; "no key here" is re-asked after a minute, so a locked
   keychain can be retried without re-running a refused TPM unseal on every call.

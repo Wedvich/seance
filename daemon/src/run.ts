@@ -3,7 +3,15 @@ import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import type { SessionBackend } from "./backend.ts";
-import { loadConfig, loadPsk, REAP_DEFAULTS, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
+import {
+  loadConfig,
+  loadPsk,
+  pskFingerprint,
+  REAP_DEFAULTS,
+  runnableProblems,
+  type Config,
+  type ResolvedPsk,
+} from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -215,7 +223,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     });
   }
 
-  log.info(`seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos`);
+  // Which key we came up with, so a half-rotated PSK reads as a mismatch in the
+  // log instead of a silent stream of undecryptable frames. On a credential-
+  // delivered box nothing outside the unit can read the key, so this line is
+  // the only place its fingerprint can come from.
+  log.info(
+    `seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos, ` +
+      `psk ${await pskFingerprint(resolved.psk)} (${resolved.source})`,
+  );
   client.start();
 
   try {

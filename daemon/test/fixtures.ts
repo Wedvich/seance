@@ -356,3 +356,22 @@ export function makeConfigTrigger(): ConfigTrigger {
     watching: (): boolean => onChange !== null,
   };
 }
+
+/** Captures both streams — `log.ts` splits `error` onto console.error. */
+export async function captureLog(body: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const capture = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(" "));
+  };
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = capture;
+  console.error = capture;
+  try {
+    await body();
+  } finally {
+    console.log = realLog;
+    console.error = realError;
+  }
+  return lines;
+}
