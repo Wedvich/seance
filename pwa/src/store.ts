@@ -1,4 +1,5 @@
 import type {
+  ErrorResponse,
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
@@ -201,7 +202,10 @@ export class Store {
     await Promise.all(
       deviceIds.map(async (deviceId) => {
         try {
-          const reply = await this.#client.request<SessionsResponse>(deviceId, "sessions", {});
+          const reply = await this.#client.request<SessionsResponse | ErrorResponse>(deviceId, "sessions", {});
+          // A daemon refusal (`internal_error`, `too_large`) arrives as a reply,
+          // not a throw: unchecked, `sessions` lands in state as undefined.
+          if ("ok" in reply) throw new Error(reply.code);
           this.#patch({
             sessions: { ...this.#state.sessions, [deviceId]: { sessions: reply.sessions, at: reply.at } },
           });
@@ -228,7 +232,8 @@ export class Store {
     const machine = this.#state.relay.machines.find((entry) => entry.deviceId === pending.machineId);
     let count: number | null = null;
     try {
-      const reply = await this.#client.request<SessionsResponse>(pending.machineId, "sessions", {});
+      const reply = await this.#client.request<SessionsResponse | ErrorResponse>(pending.machineId, "sessions", {});
+      if ("ok" in reply) throw new Error(reply.code);
       count = reply.sessions.length;
       this.#patch({
         sessions: { ...this.#state.sessions, [pending.machineId]: { sessions: reply.sessions, at: reply.at } },

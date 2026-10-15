@@ -438,7 +438,7 @@ export type MetricsStep = (typeof METRICS_STEPS)[number];
 /**
  * Points per series one `metrics` request may span, `(to - from) / step + 1`:
  * a month hourly, or two days at 5 min. Bounds the store's work; what bounds
- * the reply is `ENVELOPE_MAX_CT_LENGTH`, checked on the built reply.
+ * the reply is `ENVELOPE_MAX_CT_LENGTH`, checked on the sealed reply.
  */
 export const METRICS_MAX_POINTS = 720;
 
@@ -619,9 +619,13 @@ export interface RescanResponse {
   readonly scannedAt: number;
 }
 
-/** Reply payload when an op handler crashes; `re` still correlates it to the request. */
+/**
+ * Reply payload when an op handler crashes, or (`too_large`) when its reply
+ * would seal past `ENVELOPE_MAX_CT_LENGTH` and the daemon's transport sends
+ * this instead; `re` still correlates it to the request.
+ */
 export interface ErrorResponse {
   readonly ok: false;
-  readonly code: "internal_error";
+  readonly code: "internal_error" | "too_large";
   readonly message: string;
 }

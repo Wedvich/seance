@@ -13,7 +13,7 @@ import type {
   SpawnResponse,
   UpdateAvailable,
 } from "@seance/shared";
-import { ENVELOPE_MAX_CT_LENGTH, isMetricsRequest, quote, sealedLength } from "@seance/shared";
+import { isMetricsRequest, quote } from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -210,19 +210,8 @@ export function createHandler(
           return reply(await handleSpawn(ctx, audit, plain.payload));
         case "despawn":
           return reply(await handleDespawn(ctx, despawnTrail, plain.payload));
-        case "metrics": {
-          // The one reply that scales with stored data. Checked on the built
-          // reply because the relay drops an oversized envelope unseen, which
-          // the app could only report as a timeout.
-          const answer = reply(handleMetrics(ctx, plain.payload));
-          const length = sealedLength(answer);
-          if (length <= ENVELOPE_MAX_CT_LENGTH) return answer;
-          return reply({
-            ok: false,
-            code: "too_large",
-            message: `reply would seal to ${length} chars, over ${ENVELOPE_MAX_CT_LENGTH} — ask fewer names or a coarser step`,
-          } satisfies MetricsReply);
-        }
+        case "metrics":
+          return reply(handleMetrics(ctx, plain.payload));
         case "rescan": {
           const repos = await ctx.rescan();
           const payload: RescanResponse = { repos, scannedAt: Date.now() };
