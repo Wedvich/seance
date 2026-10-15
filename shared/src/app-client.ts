@@ -9,6 +9,7 @@ import {
   type AppFrame,
   type Envelope,
   type MachineInfo,
+  type MachineStatus,
   type Plain,
   type RegistryView,
   type RepoEntry,
@@ -16,7 +17,7 @@ import {
   type RescanResponse,
   type UndeliverableCode,
 } from "./types.ts";
-import { isRecord, parseEnvelope, parseMachineInfo, parseRescanResponse } from "./parse.ts";
+import { isRecord, parseEnvelope, parseMachineInfo, parseMachineStatus, parseRescanResponse } from "./parse.ts";
 import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
 import { quote } from "./fmt.ts";
 
@@ -72,6 +73,12 @@ export interface Machine {
   readonly scannedAt: number;
   readonly lastSeen: number;
   readonly connected: boolean;
+  /**
+   * The daemon's latest snapshot, while the relay holds one for its live socket
+   * and it indexes the register blob this build decrypted (`scan` agrees with
+   * that blob's `scannedAt`). Absent otherwise — never stale.
+   */
+  readonly status?: MachineStatus;
 }
 
 export interface RelayState {
@@ -185,6 +192,7 @@ function parseRegistryView(value: unknown): RegistryView | null {
 type ParsedFrame =
   | { readonly t: "registry"; readonly entries: readonly RegistryView[]; readonly skipped: number }
   | { readonly t: "msg"; readonly env: Envelope }
+  | { readonly t: "status"; readonly deviceId: string; readonly env: Envelope }
   | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string }
   | { readonly t: "forget-refused"; readonly deviceId: string; readonly code: string };
 
@@ -227,6 +235,11 @@ function parseFrame(text: string): ParsedFrame | null {
     const env = parseEnvelope(value["env"]);
     return env === null ? null : { t: "msg", env };
   }
+  if (value["t"] === "status") {
+    if (typeof value["deviceId"] !== "string") return null;
+    const env = parseEnvelope(value["env"]);
+    return env === null ? null : { t: "status", deviceId: value["deviceId"], env };
+  }
   if (value["t"] === "undeliverable") {
     if (typeof value["to"] !== "string" || typeof value["iv"] !== "string") return null;
     // Carried raw rather than narrowed to the known set: the frame's two facts —
@@ -254,7 +267,8 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.repos === b.repos &&
     a.scannedAt === b.scannedAt &&
     a.lastSeen === b.lastSeen &&
-    a.connected === b.connected
+    a.connected === b.connected &&
+    a.status === b.status
   );
 }
 
@@ -269,6 +283,12 @@ function infoCacheKey(entry: RegistryView): string {
 }
 
 type InfoCacheHit = MachineInfo | "unopenable" | "skewed" | "unbound";
+
+/** The latest `status` envelope per machine, decrypted once per iv; null is one that did not open or parse. */
+interface StatusHit {
+  readonly iv: string;
+  readonly status: MachineStatus | null;
+}
 
 /**
  * Transport half of the app: one socket, envelope seal/open, and request
@@ -300,6 +320,13 @@ export class RelayClient {
    * screen rather than as a machine that was never installed.
    */
   #skippedEntries = 0;
+  /**
+   * deviceId -> its latest `status`. Fed by the registry push (which carries one
+   * per live socket) and by `status` frames between pushes; rebuilt from each
+   * push's own entries, so a machine whose socket went — the relay drops the
+   * snapshot with it — loses it here on the same push that reports it offline.
+   */
+  #statuses = new Map<string, StatusHit>();
   /**
    * deviceId -> the lastSeen we held when delivery failed (an `undeliverable`
    * refusal or a request timeout). `connected` is derived from live sockets and
@@ -664,6 +691,11 @@ export class RelayClient {
       await this.#onRegistry(frame.entries, frame.skipped);
       return;
     }
+    if (frame.t === "status") {
+      await this.#decryptStatus(frame.deviceId, frame.env);
+      this.#rebuildMachines();
+      return;
+    }
     if (frame.t === "undeliverable") {
       this.#onUndeliverable(frame.to, frame.iv, frame.code);
       return;
@@ -749,7 +781,18 @@ export class RelayClient {
       if (hit !== undefined) next.set(key, hit);
     }
     this.#infoCache = next;
-    await Promise.all(entries.map((entry) => this.#decryptInfo(entry)));
+    const statuses = new Map<string, StatusHit>();
+    for (const entry of entries) {
+      const hit = this.#statuses.get(entry.deviceId);
+      if (entry.status !== undefined && hit?.iv === entry.status.iv) statuses.set(entry.deviceId, hit);
+    }
+    this.#statuses = statuses;
+    await Promise.all([
+      ...entries.map((entry) => this.#decryptInfo(entry)),
+      ...entries.flatMap((entry) =>
+        entry.status === undefined ? [] : [this.#decryptStatus(entry.deviceId, entry.status)],
+      ),
+    ]);
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
@@ -797,6 +840,36 @@ export class RelayClient {
     }
   }
 
+  /**
+   * Opened like `machine-info`: data at rest rather than a live message — the
+   * registry re-sends the same envelope on every push — so the replay guard
+   * must not see it, and only `from` says which machine it describes. Cached
+   * by iv per machine, so a push re-sending the envelope costs no decrypt.
+   */
+  async #decryptStatus(deviceId: string, env: Envelope): Promise<void> {
+    if (this.#statuses.get(deviceId)?.iv === env.iv) return;
+    if (env.from !== deviceId) {
+      this.#wireLog(
+        "dropped",
+        `iv=${quote(env.iv)} from=${quote(env.from)} deviceId=${quote(deviceId)} reason=status-from-mismatch`,
+      );
+      this.#statuses.set(deviceId, { iv: env.iv, status: null });
+      return;
+    }
+    let status: MachineStatus | null = null;
+    try {
+      const plain = await openEnvelope(this.#key, env);
+      status = parseMachineStatus(plain.payload);
+      if (status === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=status-shape`);
+    } catch {
+      // Not ours to read, like an info blob sealed with another key: steady state, not news.
+    }
+    // A snapshot that opened is the machine speaking — the same proof of life a
+    // reply gives, and fresher than any mark a timeout left.
+    if (status !== null) this.#provenOffline.delete(deviceId);
+    this.#statuses.set(deviceId, { iv: env.iv, status });
+  }
+
   #rebuildMachines(extra: Partial<RelayState> = {}): void {
     const previous = this.#state.machines;
     // Keyed, not positional: the relay lists entries in lexicographic deviceId
@@ -830,6 +903,11 @@ export class RelayClient {
       const stillProvenOffline = markedAt !== undefined && entry.lastSeen <= markedAt;
       if (!stillProvenOffline) this.#provenOffline.delete(entry.deviceId);
       const connected = entry.connected && !stillProvenOffline;
+      // Against the register blob's own stamp, never `scanned.scannedAt`: a
+      // rescan reply moves that without re-registering, and the status indexes
+      // the blob's `exclaves`. A mismatch is a status from before a re-register,
+      // held back until the next beat replaces it (docs/scheduler.md, "Encoding").
+      const status = this.#statuses.get(entry.deviceId)?.status ?? null;
       const built: Machine = {
         deviceId: entry.deviceId,
         name: info.name,
@@ -838,6 +916,7 @@ export class RelayClient {
         scannedAt: scanned.scannedAt,
         lastSeen: entry.lastSeen,
         connected,
+        ...(status !== null && status.scan === info.scannedAt ? { status } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {

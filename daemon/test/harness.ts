@@ -49,6 +49,8 @@ export interface TestRelay {
   readonly port: number;
   readonly registers: AsyncQueue<RegisterFrame>;
   readonly messages: AsyncQueue<Envelope>;
+  /** `status` envelopes, apart from `messages` so a reply assertion never meets a snapshot first. */
+  readonly statuses: AsyncQueue<Envelope>;
   autoPong: boolean;
   /** Close every register the way the real DO refuses an id another live socket holds. */
   refuseRegisters: boolean;
@@ -63,6 +65,7 @@ export interface TestRelay {
 export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const registers = new AsyncQueue<RegisterFrame>();
   const messages = new AsyncQueue<Envelope>();
+  const statuses = new AsyncQueue<Envelope>();
   const daemons = new Map<string, Bun.ServerWebSocket<unknown>>();
   const socketDevices = new Map<Bun.ServerWebSocket<unknown>, string>();
   let rejected = 0;
@@ -100,6 +103,8 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
           daemons.set(frame.deviceId, ws);
           socketDevices.set(ws, frame.deviceId);
           registers.push(frame);
+        } else if (frame.t === "status") {
+          statuses.push(frame.env);
         } else {
           messages.push(frame.env);
         }
@@ -117,6 +122,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     port: Number(server.port),
     registers,
     messages,
+    statuses,
     get autoPong() {
       return relay.autoPong;
     },

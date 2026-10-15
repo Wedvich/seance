@@ -6,7 +6,9 @@ import {
   APP_ID,
   importPsk,
   open,
+  parseMachineStatus,
   seal,
+  STATUS_MAX_CT_LENGTH,
   toBase64,
   verifyRegister,
   type MachineInfo,
@@ -261,6 +263,36 @@ describe("daemon ↔ relay integration", () => {
       daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("a status follows every register, sealed to the app and stamped with the registered scan", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId, info } = await registerWithRepo(relay, "myrepo");
+      // The boot register (cached repos, stamp 0) has its own status ahead of
+      // this one; each names the blob it was sent after.
+      for (let i = 0; ; i++) {
+        const env = await relay.statuses.next();
+        expect(env.to).toBe(APP_ID);
+        expect(env.from).toBe(deviceId);
+        expect(env.ct.length).toBeLessThanOrEqual(STATUS_MAX_CT_LENGTH);
+        const plain = await open(appKey, env);
+        expect(plain.op).toBe("status");
+        const status = parseMachineStatus(plain.payload);
+        if (status === null) throw new Error("status did not parse");
+        if (status.scan !== info.scannedAt) {
+          if (i < 4) continue;
+          throw new Error(`no status for scan ${info.scannedAt}`);
+        }
+        expect(status.at * 1000).toBeGreaterThan(Date.now() - 60_000);
+        expect(status.sess).toHaveLength(info.exclaves?.length ?? 0);
+        break;
+      }
+    } finally {
+      daemon.stop();
+      relay.stop();
     }
   });
 

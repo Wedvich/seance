@@ -186,6 +186,14 @@ export const STATUS_INTERVAL_MS = 30_000;
 export const STATUS_MIN_INTERVAL_MS = 10_000;
 
 /**
+ * Ciphertext bound (base64 chars) on a `status` envelope. The relay keeps the
+ * latest on the daemon socket's attachment — 2 KiB, shared with the socket's
+ * identity — so the relay refuses a larger one and the daemon trims its blob
+ * to fit (`daemon/src/status.ts`) rather than send one that will be dropped.
+ */
+export const STATUS_MAX_CT_LENGTH = 1024;
+
+/**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
  * a bare "ping" every interval, "pong" expected within the deadline, a miss
  * closes/redials. The relay sweeps a daemon socket silent for
