@@ -29,7 +29,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   (wrangler is per-workspace, not hoisted), and how the tests are layered. Read it before running
   the suite, setting up local dev, or deploying; don't restate it here — a change to commands,
   deploys or test layout updates that file.
-- **docs/scheduler.md** — the scheduler plan (queue + filter/score routing across machines and
+- **docs/scheduler.md** — the scheduler plan (a sealed queue in the relay, run by a relay-nominated
+  daemon; filter/score routing across machines and
   subscriptions, the relay `status` frame, daemon telemetry). Not built yet: it records decisions
   ahead of code, and DESIGN.md takes over each part as it lands. Read it before scheduler work.
 
