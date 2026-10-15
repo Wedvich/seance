@@ -1,6 +1,15 @@
 // Guards shared/src/app-client.ts — the suite lives here because it boots the real
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
-import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
+import {
+  APP_ID,
+  importPsk,
+  seal,
+  toBase64,
+  type MachineInfo,
+  type MachineStatus,
+  type Plain,
+  type SessionsResponse,
+} from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connectDaemon, newDeviceId, register, startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import type { ServerWebSocket } from "bun";
@@ -399,6 +408,117 @@ describe("registry", () => {
       }
     } finally {
       one.close();
+      client.stop();
+    }
+  });
+});
+
+async function statusEnvelope(deviceId: string, status: MachineStatus, withKey = key): Promise<unknown> {
+  const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: status };
+  return { t: "status", env: await seal(withKey, { to: APP_ID, from: deviceId }, plain) };
+}
+
+function machineOf(state: RelayState, deviceId: string): RelayState["machines"][number] | undefined {
+  return state.machines.find((m) => m.deviceId === deviceId);
+}
+
+describe("status", () => {
+  test("a status lands on its machine, reaches a late app in its first push, and leaves with the socket", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Mac Studio");
+    const daemon = await startFakeDaemon(relay, key, deviceId, info);
+    const { client, waitFor } = startClient();
+    const late = startClient();
+    try {
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
+      const snapshot: MachineStatus = {
+        at: 1,
+        scan: info.scannedAt,
+        cpu: 12,
+        sess: [1],
+        quota: [{ x: 0, h: 84, s: "cache", at: 1 }],
+      };
+      daemon.client.send(await statusEnvelope(deviceId, snapshot));
+      const state = await waitFor((s) => machineOf(s, deviceId)?.status !== undefined, "status rendered");
+      expect(machineOf(state, deviceId)?.status).toEqual(snapshot);
+
+      const lateState = await late.waitFor((s) => machineOf(s, deviceId)?.status !== undefined, "status from the push");
+      expect(machineOf(lateState, deviceId)?.status).toEqual(snapshot);
+
+      daemon.close();
+      const offline = await late.waitFor((s) => machineOf(s, deviceId)?.connected === false, "machine offline");
+      expect(machineOf(offline, deviceId)?.status).toBeUndefined();
+    } finally {
+      daemon.close();
+      client.stop();
+      late.client.stop();
+    }
+  });
+
+  test("a status naming a blob this app does not hold stays hidden; the re-register and the status after it show", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Tower");
+    const daemon = await startFakeDaemon(relay, key, deviceId, info);
+    const { client, waitFor } = startClient();
+    try {
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
+      const next = info.scannedAt + 1;
+      daemon.client.send(await statusEnvelope(deviceId, { at: 2, scan: next, mem: 50 }));
+      // A non-event: nothing to poll for. The relay forwards it either way.
+      await Bun.sleep(300);
+      expect(machineOf(client.getState(), deviceId)?.status).toBeUndefined();
+
+      // The register clears the relay's snapshot and its floor, so the status
+      // that follows it is accepted inside ten seconds of the last.
+      const plain: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "machine-info",
+        payload: { ...info, scannedAt: next },
+      };
+      daemon.client.send(await register(deviceId, { info: await seal(key, { to: APP_ID, from: deviceId }, plain) }));
+      await waitFor((s) => machineOf(s, deviceId)?.scannedAt === next, "the new blob lands");
+      daemon.client.send(await statusEnvelope(deviceId, { at: 3, scan: next, mem: 60 }));
+      const state = await waitFor((s) => machineOf(s, deviceId)?.status !== undefined, "status for the new blob");
+      expect(machineOf(state, deviceId)).toMatchObject({ scannedAt: next, status: { at: 3, scan: next, mem: 60 } });
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  test("a status that opened clears a timeout's offline mark, like a reply does", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Sleeper");
+    const daemon = await startFakeDaemon(relay, key, deviceId, info);
+    const { client, waitFor } = startClient({ timeouts: { sessions: 200 } });
+    try {
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
+      daemon.stop();
+      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      await waitFor((s) => machineOf(s, deviceId)?.connected === false, "marked offline");
+      daemon.client.send(await statusEnvelope(deviceId, { at: 3, scan: info.scannedAt }));
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "a snapshot is proof of life");
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
+  test("a status sealed with another key never renders, and costs nothing else", async () => {
+    const deviceId = await newDeviceId();
+    const info = machineInfo("Mixed");
+    const daemon = await startFakeDaemon(relay, key, deviceId, info);
+    const { client, waitFor } = startClient();
+    try {
+      await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
+      daemon.client.send(await statusEnvelope(deviceId, { at: 4, scan: info.scannedAt }, otherKey));
+      await Bun.sleep(300);
+      const machine = machineOf(client.getState(), deviceId);
+      expect(machine?.status).toBeUndefined();
+      expect(machine?.connected).toBe(true);
+    } finally {
+      daemon.close();
       client.stop();
     }
   });
@@ -1256,6 +1376,46 @@ describe("malformed frames", () => {
       expect(state.registrySize).toBe(2);
       expect(state.skewed).toBe(1);
       expect(state.ignored).toBe(0);
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
+  // The relay checks a status's `from` against the socket it came in on, so
+  // only a peer that is not the relay can pair one machine's snapshot with
+  // another's id — and `from` is AAD-bound, which makes the pairing checkable.
+  test("drops a status whose envelope is sealed from another id than the frame names", async () => {
+    const peer = startHostilePeer();
+    const deviceId = await newDeviceId();
+    const other = await newDeviceId();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ url: peer.url, log: (line) => lines.push(line) });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const info = machineInfo("Victim");
+      peer.send(await registryFrame(deviceId, info));
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "the machine lands");
+      const plain: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "status",
+        payload: { at: 1, scan: info.scannedAt, cpu: 99 },
+      };
+      peer.send({ t: "status", deviceId, env: await seal(key, { to: APP_ID, from: other }, plain) });
+      await pollUntil(
+        () => lines.some((line) => line.includes("reason=status-from-mismatch")),
+        "the drop to be logged",
+      );
+      expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.status).toBeUndefined();
+      // And one with no envelope at all is a frame drop, not a wedge.
+      peer.sendText(JSON.stringify({ t: "status", deviceId }));
+      await pollUntil(() => lines.includes("wire dropped reason=frame"), "the frame drop to be logged");
+      peer.send({ t: "status", deviceId, env: await seal(key, { to: APP_ID, from: deviceId }, plain) });
+      await waitFor(
+        (s) => s.machines.find((m) => m.deviceId === deviceId)?.status?.cpu === 99,
+        "a sound status still lands",
+      );
     } finally {
       client.stop();
       await peer.stop();

@@ -3,6 +3,7 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
   MACHINES_ID,
+  STATUS_MIN_INTERVAL_MS,
   quote,
   verifyRegister,
   type DaemonFrame,
@@ -92,6 +93,19 @@ interface SocketAttachment {
   readonly connectedAt: number;
   /** Present once the socket has registered. */
   readonly identity?: SocketIdentity;
+  /**
+   * The daemon's latest `status`, kept here and never in storage: no write per
+   * sample, and it goes with the socket — a disconnected machine's snapshot is
+   * stale by definition. Bounded by `STATUS_MAX_CT_LENGTH` so it and the
+   * identity fit the attachment's 2 KiB together.
+   */
+  readonly status?: SocketStatus;
+}
+
+interface SocketStatus {
+  readonly env: Envelope;
+  /** Accept time, ms — the per-socket floor below counts from it. */
+  readonly at: number;
 }
 
 interface SocketIdentity {
@@ -237,7 +251,43 @@ export class Hub implements DurableObject {
       );
       return;
     }
+    if (frame.t === "status") {
+      this.#status(ws, deviceId, frame.env);
+      return;
+    }
     await this.#route(frame.env, ws, "daemon");
+  }
+
+  /**
+   * Latest-wins on the socket's attachment, then one small frame to every app.
+   * Floored per socket as `register` is rate-limited, and for the same reason:
+   * the attachment write and the fan-out are what a sender could otherwise make
+   * the hub pay for without bound. A frame under the floor is dropped, not
+   * closed — a daemon re-sending after a re-register is not misbehaving. The
+   * relay stays blind: it holds ciphertext and routing only, as with `info`.
+   */
+  #status(ws: WebSocket, deviceId: string, env: Envelope): void {
+    if (env.to !== APP_ID) {
+      wireLog("dropped", env, " reason=status-not-app");
+      return;
+    }
+    const now = Date.now();
+    const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
+    if (attachment.status !== undefined && now - attachment.status.at < STATUS_MIN_INTERVAL_MS) {
+      wireLog("dropped", env, " reason=status-rate");
+      return;
+    }
+    ws.serializeAttachment({ ...attachment, status: { env, at: now } } satisfies SocketAttachment);
+    const frame: RelayToAppFrame = { t: "status", deviceId, env };
+    const text = JSON.stringify(frame);
+    let fanned = 0;
+    const failures: string[] = [];
+    for (const app of this.#ctx.getWebSockets("app")) {
+      const err = trySend(app, text);
+      if (err === null) fanned += 1;
+      else failures.push(err);
+    }
+    wireLog("status", env, ` apps=${fanned}${failSuffix(failures)}`);
   }
 
   async #onAppMessage(ws: WebSocket, text: string): Promise<void> {
@@ -271,7 +321,7 @@ export class Hub implements DurableObject {
    * same id forever.
    */
   async #forget(ws: WebSocket, deviceId: string): Promise<void> {
-    if (this.#connectedIds([]).has(deviceId)) {
+    if (this.#liveSockets([]).has(deviceId)) {
       const refusal: RelayToAppFrame = { t: "forget-refused", deviceId, code: "connected" };
       ws.send(JSON.stringify(refusal));
       console.log(`refused forget ${deviceId}: connected`);
@@ -343,7 +393,13 @@ export class Hub implements DurableObject {
     // stranger cannot sign for the id. Two open sockets for one machine would
     // deliver a spawn twice, so the older one loses. Attaching first keeps the
     // loser's close handler from reporting the machine as disconnected.
-    ws.serializeAttachment({ ...attachment, identity: { deviceId, ...rate } } satisfies SocketAttachment);
+    // The snapshot goes too: it indexes the blob this register just replaced,
+    // so every reader would hide it anyway — and with it goes the floor, so
+    // the status a daemon sends right after registering is let through.
+    ws.serializeAttachment({
+      connectedAt: attachment.connectedAt,
+      identity: { deviceId, ...rate },
+    } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
     }
@@ -482,24 +538,43 @@ export class Hub implements DurableObject {
 
   async #views(exclude: readonly WebSocket[]): Promise<RegistryView[]> {
     const stored = await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX });
-    const connected = this.#connectedIds(exclude);
+    const live = this.#liveSockets(exclude);
+    const views: RegistryView[] = [];
     // Spelled out rather than spread: this is the wire projection of an entry.
-    return [...stored.values()].map((entry) => ({
-      deviceId: entry.deviceId,
-      info: entry.info,
-      lastSeen: entry.lastSeen,
-      connected: connected.has(entry.deviceId),
-    }));
+    for (const entry of stored.values()) {
+      const socket = live.get(entry.deviceId);
+      // Only a live socket's: a snapshot from a machine that is gone would
+      // render as current pressure on a machine nothing can be sent to.
+      const status = socket?.status?.env;
+      views.push({
+        deviceId: entry.deviceId,
+        info: entry.info,
+        lastSeen: entry.lastSeen,
+        connected: socket !== undefined,
+        ...(status === undefined ? {} : { status }),
+      });
+    }
+    return views;
   }
 
-  /** Derived at read time and never persisted, so an eviction cannot leave a stale `true` on disk. */
-  #connectedIds(exclude: readonly WebSocket[]): ReadonlySet<string> {
-    const ids = new Set<string>();
-    for (const ws of this.#ctx.getWebSockets("daemon")) {
-      if (exclude.includes(ws)) continue;
-      const deviceId = this.#deviceIdOf(ws);
-      if (deviceId !== null) ids.add(deviceId);
+  /**
+   * Derived at read time and never persisted, so an eviction cannot leave a
+   * stale `true` on disk. Newest socket per id, as `#route` picks: across a
+   * re-register the superseded socket stays listed until its close handler
+   * runs, and its snapshot belongs to the connection that is ending.
+   */
+  #liveSockets(exclude: readonly WebSocket[]): ReadonlyMap<string, SocketAttachment> {
+    const live = new Map<string, SocketAttachment>();
+    const sockets = this.#ctx
+      .getWebSockets("daemon")
+      .filter((ws) => !exclude.includes(ws))
+      .toSorted((a, b) => this.#connectedAtOf(b) - this.#connectedAtOf(a));
+    for (const ws of sockets) {
+      const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+      if (attachment === null || attachment.identity === undefined) continue;
+      const { deviceId } = attachment.identity;
+      if (!live.has(deviceId)) live.set(deviceId, attachment);
     }
-    return ids;
+    return live;
   }
 }

@@ -1,6 +1,6 @@
 # Séance scheduler — plan
 
-**Status: plan, nothing built.** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1 landing.** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists.
@@ -402,7 +402,9 @@ the newest quota observation per account, and open a history chart — without a
    Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
    this is M1's only producer. Daemon-only; parallel with 2. _Landed 2026-10-15._
 4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
-   `registry` includes the latest per connected daemon.
+   `registry` includes the latest per connected daemon. _Landed 2026-10-15._ The 1 KiB bound
+   holds four exclaves' quota with every field; past that the daemon trims (per-model
+   windows first, `daemon/src/status.ts`) rather than send a frame the relay drops.
 5. `metrics` op — daemon handler over the store; app-side request.
 6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts.
 

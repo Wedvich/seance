@@ -1,4 +1,5 @@
 import {
+  APP_ID,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   MACHINES_ID,
@@ -11,6 +12,7 @@ import {
   type DaemonFrame,
   type Envelope,
   type Identity,
+  type MachineStatus,
   type OpName,
   type Plain,
   type RelayToDaemonFrame,
@@ -28,6 +30,8 @@ export interface RelayClientOpts {
   /** Op dispatch; a returned Plain is sealed and sent back to the requester. */
   readonly handle: (plain: Plain) => Promise<Plain | null>;
   readonly onConnect?: () => void;
+  /** After every register frame leaves — connect and re-register alike. */
+  readonly onRegister?: () => void;
   readonly onDisconnect?: () => void;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
@@ -48,6 +52,8 @@ export class RelayClient {
     RelayClientOpts;
   readonly #guard = new ReplayGuard();
   #ws: WebSocket | null = null;
+  /** Whether a register frame has left the current socket: the relay drops any other frame before one. */
+  #registered = false;
   #attempt = 0;
   /** Whether the current socket reached `open` — a connect that failed outright must not reset backoff. */
   #opened = false;
@@ -107,6 +113,23 @@ export class RelayClient {
     return true;
   }
 
+  /**
+   * The current snapshot, sealed to the app like the register blob but sent as
+   * its own frame: the relay keeps the latest on this socket and forwards it,
+   * never storing it. Fire-and-forget like `broadcast` — nothing answers — and
+   * not logged per frame: one every 30s is the daemon's steadiest traffic, and
+   * the relay's log carries each `iv` for the rare one worth chasing.
+   */
+  async sendStatus(status: MachineStatus): Promise<boolean> {
+    if (!this.connected || !this.#registered) return false;
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: status };
+    const sealed = await seal(this.#opts.key, { to: APP_ID, from: this.#opts.identity.deviceId }, plain);
+    const ws = this.#ws;
+    if (ws === null || !this.connected) return false;
+    ws.send(JSON.stringify({ t: "status", env: sealed } satisfies DaemonFrame));
+    return true;
+  }
+
   async #register(): Promise<void> {
     const { identity } = this.#opts;
     const info = await this.#opts.buildInfo();
@@ -121,7 +144,11 @@ export class RelayClient {
       ts,
       sig: await signRegister(identity, ts),
     };
-    this.#ws?.send(JSON.stringify(frame));
+    const ws = this.#ws;
+    if (ws === null) return;
+    ws.send(JSON.stringify(frame));
+    this.#registered = true;
+    this.#opts.onRegister?.();
   }
 
   #dial(): void {
@@ -136,6 +163,7 @@ export class RelayClient {
     });
     this.#ws = ws;
     this.#opened = false;
+    this.#registered = false;
 
     ws.addEventListener("open", () => {
       this.#opened = true;

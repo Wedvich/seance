@@ -5,7 +5,9 @@ import {
   IDENTITY_SIGNATURE_BYTES,
   MACHINES_ID,
   PROTOCOL_VERSION,
+  STATUS_MAX_CT_LENGTH,
   base64Length,
+  type Envelope,
 } from "@seance/shared";
 import { parseAppFrame, parseDaemonFrame, parseEnvelope } from "../src/wire.ts";
 
@@ -97,6 +99,29 @@ describe("parseDaemonFrame", () => {
   test("malformed JSON and unknown frame types are dropped, not thrown", () => {
     expect(parseDaemonFrame("{nope")).toBeNull();
     expect(parseDaemonFrame(JSON.stringify({ t: "forget", deviceId: "device-1" }))).toBeNull();
+  });
+});
+
+describe("status frames", () => {
+  test("a status is a bounded envelope: a KiB of ciphertext, since it lands on the socket attachment", () => {
+    const fits: Envelope = {
+      v: PROTOCOL_VERSION,
+      to: APP_ID,
+      from: "device-1",
+      iv: "cmFuZG9taXZieXRl",
+      ct: "A".repeat(STATUS_MAX_CT_LENGTH),
+    };
+    expect(parseDaemonFrame(JSON.stringify({ t: "status", env: fits }))).toEqual({ t: "status", env: fits });
+    const over = env({ to: APP_ID, from: "device-1", ct: "A".repeat(STATUS_MAX_CT_LENGTH + 1) });
+    expect(parseDaemonFrame(JSON.stringify({ t: "status", env: over }))).toBeNull();
+    // The same ciphertext is an ordinary msg's size — the bound is the frame's, not the envelope's.
+    expect(parseDaemonFrame(JSON.stringify({ t: "msg", env: over }))).not.toBeNull();
+    expect(parseDaemonFrame(JSON.stringify({ t: "status" }))).toBeNull();
+    expect(parseDaemonFrame(JSON.stringify({ t: "status", env: env({ iv: "" }) }))).toBeNull();
+  });
+
+  test("an app socket cannot send one", () => {
+    expect(parseAppFrame(JSON.stringify({ t: "status", env: env({ to: APP_ID, from: "device-1" }) }))).toBeNull();
   });
 });
 
