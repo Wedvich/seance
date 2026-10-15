@@ -28,7 +28,7 @@ stay as they are; the table says which word each one means.
 | Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite |
 | Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
 | Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                       |
-| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` — never the email                                                                                                                                                                                             |
+| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                            |
 | Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                    |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                 |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                             |
@@ -241,7 +241,7 @@ the PWA can show the exclave beside each repo in the manual picker.
   the daemon only _reports_ which exclave a clone sits in.
 - `telemetry.ts` — **landed (M1 task 3, 2026-10-15)**: DESIGN.md's _Daemon_ section
   ("Telemetry") holds what is sampled, how it is smoothed, the store's tiers and modes, and
-  what is read from each config dir's cache (including the per-model weekly caps). Not yet
+  what is read from each exclave's cache (including the per-model weekly caps). Not yet
   there: PSI/cgroup views in an LXC, the Proxmox node view, macOS I/O rates. The plan as it
   was: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
@@ -400,7 +400,7 @@ the newest quota observation per account, and open a history chart — without a
    presence per config dir. Daemon-only, no wire change; runs in parallel with 3. _Landed
    2026-10-15._
 3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
-   observations read from each config dir's `.claude.json` (`cachedUsageUtilization`, which
+   observations read from each exclave's `.claude.json` (`cachedUsageUtilization`, which
    Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
    this is M1's only producer. Daemon-only; parallel with 2. _Landed 2026-10-15._
 4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;

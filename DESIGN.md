@@ -1162,7 +1162,14 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   outside it) and, per exclave, what its config dir says (`MachineInfo.exclaves`:
   `accountId` = `organizationUuid:accountUuid` and the extra-usage flag from
   `.claude.json`'s `oauthAccount`, `authOk` = that object's presence, `skills` =
-  directory names under `skills/`). Nothing else in that file is read — it holds
+  directory names under `skills/`). `.claude.json` sits in the config dir only
+  when `CLAUDE_CONFIG_DIR` is set: `default` runs without it, so its file is
+  `~/.claude.json`, and a `~/.claude/.claude.json` beside it is a stub that once
+  read every `default` as signed out. Every running session rewrites its
+  exclave's `.claude.json`, so a read can land mid-write: an unparsable file
+  keeps the previous scan's account for that exclave (signed out only on the
+  first scan), while a missing one is signed out at once — a retry would narrow
+  the window, not close it. Nothing else in that file is read — it holds
   no token — and the daemon never sets a config dir: the owner's shell hook picks
   it by cwd, so location is the whole fact. **The `~/.exclaves` contract**: one
   name per line matching `^[a-z0-9][a-z0-9-]*$`; `default` is implied and a
@@ -1184,7 +1191,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
   running sessions per exclave (by pane path, so a session outside every
   registered repo still counts where it sits) and the newest quota observation
-  per exclave — in M1 only what Claude Code itself cached in each config dir's
+  per exclave — in M1 only what Claude Code itself cached in each exclave's
   `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
   is not cached; source `cache`, stamped at its fetch time). The three pressure
@@ -1192,12 +1199,16 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   laptop back from sleep resets to its first reading instead of trusting a stale
   average, and no reader keeps a window of its own. Collectors are exec-free
   where the host allows: `os.cpus()` deltas, `/proc/meminfo` (`MemAvailable`)
-  or `vm_stat` (free + inactive + speculative), `statfs` over the configured
+  or, on macOS, `100 − kern.memorystatus_level` (the kernel's free percentage —
+  what jetsam acts on and `memory_pressure` prints), `statfs` over the configured
   repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
   A field the host can't answer is absent — the first tick has no cpu or I/O
   delta, macOS has no exec-free I/O counter, a tmux outage drops `sess` for the
-  tick — never a guess. Every sample also lands in `stateDir()/metrics.sqlite`
-  (`bun:sqlite`; created as an empty 0600 file before SQLite opens it, so the
+  tick — never a guess. Rejected for macOS: free + inactive + speculative pages
+  from `vm_stat` — file cache and the compressor hold most of an idle Mac's RAM,
+  so it read ~70% used on a 48 GB Mac the kernel rated at normal pressure, and
+  `machine_pressure` would have steered work away from it. Every sample also
+  lands in `stateDir()/metrics.sqlite` (`bun:sqlite`; created as an empty 0600 file before SQLite opens it, so the
   WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
   nothing else — metric, label set, timestamp, number — in three tiers sharing
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
