@@ -1,6 +1,7 @@
 import { PROTOCOL_VERSION, type Envelope } from "@seance/shared";
 import { Miniflare } from "miniflare";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 
 /**
  * Boots the real Worker + Durable Object under workerd via Miniflare, so these
@@ -55,7 +56,29 @@ export interface SweepOverrides {
   readonly sweepSilenceLimitMs: number;
 }
 
-export async function startRelay(token: string, sweep?: SweepOverrides): Promise<TestRelay> {
+export interface RelayOptions {
+  readonly sweep?: SweepOverrides;
+  /**
+   * Receives every line workerd writes to stdout or stderr — the Worker's
+   * `console.log` included. The blindness suite reads it to prove ciphertext
+   * never reaches a log line, which is the one leak the dashboard would keep.
+   */
+  readonly onLog?: (line: string) => void;
+}
+
+/** Splits a stream into lines for `onLog`; a trailing partial line is held until its newline lands. */
+function forwardLines(stream: Readable, onLog: (line: string) => void): void {
+  let rest = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    const parts = (rest + chunk).split("\n");
+    rest = parts.pop() ?? "";
+    for (const line of parts) onLog(line);
+  });
+}
+
+export async function startRelay(token: string, options: RelayOptions = {}): Promise<TestRelay> {
+  const { sweep, onLog } = options;
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
@@ -74,6 +97,14 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
             SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
           }),
     },
+    ...(onLog === undefined
+      ? {}
+      : {
+          handleRuntimeStdio: (stdout: Readable, stderr: Readable): void => {
+            forwardLines(stdout, onLog);
+            forwardLines(stderr, onLog);
+          },
+        }),
   });
   const url = await mf.ready;
 
