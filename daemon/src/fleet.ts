@@ -87,6 +87,8 @@ export function brokerFailureText(err: BrokerError): string {
 
 const NO_KEY = "no PSK is readable by this process, so other machines are reached through the seanced daemon";
 const LOCAL_STILL_WORKS = "Spawning on this machine needs neither.";
+// Local ops ride the same daemon's op socket, so a daemon that is not there takes them down too.
+const LOCAL_NEEDS_IT_TOO = "Ops on this machine go through that same daemon, so they fail too until it is running.";
 
 /** What the reader can do about this cause — each broker code fails for a different reason. */
 function unreachableAdvice(cause: unknown): string {
@@ -99,7 +101,7 @@ function unreachableAdvice(cause: unknown): string {
         `${NO_KEY}, and none is reachable: it is not running, or too old to have the socket (${message}). ` +
         "Check it with `seanced status` — is seanced running? Where only the seanced service can read the key it must be " +
         "running; elsewhere fill the psk field in config.json or run `seanced psk-import`. " +
-        LOCAL_STILL_WORKS
+        LOCAL_NEEDS_IT_TOO
       );
     case "relay_unavailable":
       return `${NO_KEY}. The daemon is running but could not reach the relay (${message}). ${LOCAL_STILL_WORKS}`;

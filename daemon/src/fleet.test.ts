@@ -131,6 +131,8 @@ describe("selectFleet", () => {
     expect(message).toContain("no daemon listening");
     expect(message).toContain("is seanced running?");
     expect(message).toContain("seanced psk-import");
+    // Local ops ride the same socket, so the advice must not promise them.
+    expect(message).not.toContain("needs neither");
   });
 
   test("each broker failure gets advice for its own cause, not the missing-daemon advice", async () => {
@@ -152,6 +154,8 @@ describe("selectFleet", () => {
       expect(message).toContain("detail");
       expect(message).not.toContain("psk-import");
       expect(message).not.toContain("is seanced running?");
+      // The daemon answered, so its op socket — and with it local ops — is up.
+      expect(message).toContain("needs neither");
     }
   });
 

@@ -31,7 +31,7 @@ import {
   type FleetLease,
 } from "./fleet.ts";
 import { recordedBunCheck } from "./link.ts";
-import { localRequest, LocalUnavailable } from "./local-client.ts";
+import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -56,6 +56,8 @@ export interface LocalMachine {
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
   readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T>;
+  /** Whether its daemon is listening, asked without sending an op — nothing is run or audited. */
+  readonly reachable: () => Promise<boolean>;
 }
 
 /**
@@ -117,12 +119,12 @@ function describeMachine(machine: Machine, local: LocalMachine | null): Record<s
 }
 
 /** The local machine as `list_machines` renders it when the relay cannot be reached at all. */
-async function describeLocal(local: LocalMachine): Promise<Record<string, unknown>> {
+async function describeLocal(local: LocalMachine, reachable: boolean): Promise<Record<string, unknown>> {
   return {
     name: local.name,
     deviceId: local.deviceId,
     platform: local.platform,
-    connected: true,
+    connected: reachable,
     repos: (await local.repos()).map((repo) => repo.name),
     local: true,
   };
@@ -216,11 +218,17 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         if (local === null) return errorResult(openFailureText(err));
         const why =
           err instanceof FleetUnreachable ? err.message : `the relay is unreachable (${failureText("connect", err)})`;
+        // Probed, not assumed: local ops need this box's daemon, and the reason
+        // the fleet is out of reach may be that the daemon is down too.
+        const reachable = await local.reachable();
         return textResult(
           JSON.stringify(
             {
-              machines: [await describeLocal(local)],
-              note: `${why} — only this machine is listed, and only local spawns will work`,
+              machines: [await describeLocal(local, reachable)],
+              note: reachable
+                ? `${why} — only this machine is listed, and only local spawns will work`
+                : `${why} — only this machine is listed, and its daemon is not listening either, so nothing ` +
+                  "will spawn until seanced is running (`seanced status`)",
             },
             null,
             2,
@@ -421,6 +429,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
     // Falls back to the startup read: a transient failure shouldn't read as "no repos".
     repos: async (): Promise<readonly RepoEntry[]> => (await readState())?.repos ?? state.repos,
     request: <T>(op: RequestOp, payload: unknown): Promise<T> => localRequest<T>(op, payload),
+    reachable: (): Promise<boolean> => localSocketReachable(),
   };
 }
 

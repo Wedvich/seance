@@ -1,12 +1,4 @@
-import {
-  loadConfig,
-  loadPsk,
-  pskFingerprint,
-  runnableProblems,
-  watchConfigFile,
-  type Config,
-  type ResolvedPsk,
-} from "./config.ts";
+import { loadConfig, loadPsk, runnableProblems, watchConfigFile, type Config, type ResolvedPsk } from "./config.ts";
 import { log } from "./log.ts";
 import { configPath } from "./paths.ts";
 import { startDaemon, type DaemonHandle, type RunOpts } from "./run.ts";
@@ -139,9 +131,8 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
       return;
     }
     if (result !== "swapped") return;
-    // Which key we came up with, so a half-rotated PSK reads as a mismatch in
-    // the log instead of a silent stream of undecryptable frames.
-    log.info(`reloaded as "${config.name}" — psk ${await pskFingerprint(next.resolved.psk)} (${next.resolved.source})`);
+    // The swapped-in daemon's start line carries the key's fingerprint.
+    log.info(`reloaded as "${config.name}"`);
   };
 
   // Nothing ever awaits the chain, so a rejection in it goes unhandled — which
