@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
 import {
   makeClaudeStub,
+  makeClone,
   makeGitFixture,
   pollUntil,
   usePrivateTmux,
@@ -73,10 +74,12 @@ async function startTestDaemon(
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
     readonly maxBackoffMs?: number;
+    readonly home?: string;
+    readonly extraRoots?: readonly string[];
   } = {},
 ): Promise<DaemonHandle> {
-  const config = makeConfig(relayUrl);
-  const { spawnWaitMs = 700, ...rest } = overrides;
+  const { spawnWaitMs = 700, extraRoots = [], ...rest } = overrides;
+  const config = { ...makeConfig(relayUrl), repoRoots: [fixture.root, ...extraRoots] };
   return startDaemon({
     config,
     backend: createBackend(config, { waitMs: spawnWaitMs }),
@@ -258,6 +261,46 @@ describe("daemon ↔ relay integration", () => {
       daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("the blob carries exclaves, tags each clone, and a sign-in re-registers", async () => {
+    const home = join(base, "home");
+    await mkdir(join(home, "work"), { recursive: true });
+    await writeFile(join(home, ".exclaves"), "work\nnot valid\n");
+    const clone = await makeClone(join(home, "work"), "inside");
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, { home, extraRoots: [join(home, "work")] });
+    try {
+      const { deviceId, info } = await registerWithRepo(relay, "inside");
+      expect(info.exclaves?.map((e) => [e.id, e.authOk])).toEqual([
+        ["default", false],
+        ["work", false],
+      ]);
+      const byName = new Map(info.repos.map((r) => [r.name, r]));
+      expect(byName.get("myrepo")?.exclave).toBe("default");
+      expect(byName.get("inside")).toMatchObject({ path: clone, exclave: "work", origin: "inside" });
+
+      // Same clones, one account signed in: the blob is how apps learn it.
+      await mkdir(join(home, ".claude-work"), { recursive: true });
+      await writeFile(
+        join(home, ".claude-work", ".claude.json"),
+        JSON.stringify({ oauthAccount: { organizationUuid: "o", accountUuid: "a", hasExtraUsageEnabled: false } }),
+      );
+      await appRequest(relay, deviceId, "rescan", {});
+      await appReceive(relay);
+      const again = await registerWithRepo(relay, "inside");
+      expect(again.info.exclaves?.[1]).toEqual({
+        id: "work",
+        accountId: "o:a",
+        extraUsageEnabled: false,
+        authOk: true,
+        skills: [],
+      });
+    } finally {
+      daemon.stop();
+      relay.stop();
+      await rm(home, { recursive: true, force: true });
     }
   });
 

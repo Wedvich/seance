@@ -230,14 +230,11 @@ the PWA can show the exclave beside each repo in the manual picker.
 
 ## Daemon changes
 
-- `exclaves.ts`: read `~/.exclaves` + default; map scanned repos by path prefix; read
-  account/org/extra-usage/auth presence from each config dir. Rescan on `~/.exclaves` mtime.
-- **The `~/.exclaves` contract.** One name per line, matching `^[a-z0-9][a-z0-9-]*$`; each
-  names a tree at `~/<name>` and a config dir at `~/.claude-<name>`, and `default` is implied.
-  The daemon validates every line against that regex and skips the rest, so a stray line costs
-  one exclave, not the scan. The file has two readers — the owner's shell hook and skill in
-  their dotfiles maintain it, the daemon only reads it — and this paragraph is the agreement
-  between them: a format change there is a daemon change here.
+- `exclaves.ts` — **landed (M1 task 2, 2026-10-15)**: DESIGN.md's _Daemon_ section
+  ("Exclaves") now holds the `~/.exclaves` contract, the clone→exclave mapping and what is
+  read from each config dir; "Repo discovery" there holds `origin`'s normalisation. It is
+  re-read with every repo scan rather than on the file's mtime (the hourly cadence is what the
+  rest of the blob already has).
 - Config dir follows location via the user's shell hook (`.zshenv` → `update_exclave_env`),
   as today; the daemon doesn't set it. A machine's shell setup being correct is out of scope —
   the daemon only _reports_ which exclave a clone sits in.
@@ -393,7 +390,8 @@ the newest quota observation per account, and open a history chart — without a
    frame→module table in one small PR before anything else, so no later task touches either
    file for more than the field its brief names.
 2. `exclaves.ts` — the `~/.exclaves` contract, clones mapped by path prefix, account/auth
-   presence per config dir. Daemon-only, no wire change; runs in parallel with 3.
+   presence per config dir. Daemon-only, no wire change; runs in parallel with 3. _Landed
+   2026-10-15._
 3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
    observations read from each config dir's `.claude.json` (`cachedUsageUtilization`, which
    Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so

@@ -34,6 +34,77 @@ async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
   return match?.[1]?.trim() ?? null;
 }
 
+/**
+ * The scheduler's repo key: the same across machines where a clone's name
+ * (machine-local, collision-disambiguated) is not. Scheme, userinfo and the
+ * `.git` suffix go, scp-style `host:path` becomes `host/path`, and the whole
+ * thing is lowercased — the hosts we route to compare case-insensitively, and
+ * a key that differs by case would split one repo in two. A local path (or
+ * `file://`) is some machine's mirror, not a repo identity, so it reads as no
+ * remote. Null when nothing usable remains.
+ */
+export function normalizeOrigin(url: string): string | null {
+  let rest = url.trim();
+  if (rest === "" || rest.startsWith("/") || rest.startsWith(".")) return null;
+  const scheme = rest.match(/^([a-z][a-z0-9+.-]*):\/\//iu);
+  if (scheme !== null) {
+    if (scheme[1]?.toLowerCase() === "file") return null;
+    rest = rest.slice(scheme[0].length).replace(/^[^/@]*@/u, "");
+  } else {
+    // scp-like: `[user@]host:path`
+    const scp = rest.match(/^(?:[^/@:]+@)?([^/:]+):(.*)$/u);
+    if (scp === null) return null;
+    rest = `${scp[1]}/${scp[2]?.replace(/^\/+/u, "") ?? ""}`;
+  }
+  rest = rest
+    .replace(/\/+$/u, "")
+    .replace(/\.git$/iu, "")
+    .replace(/\/+$/u, "")
+    .toLowerCase();
+  return rest.includes("/") ? rest : null;
+}
+
+/**
+ * `remote.origin.url` from the common dir's config — the same read `git
+ * remote get-url origin` does, without the process. The parser covers what a
+ * config written by git holds: sections, `key = value`, comments. `include`
+ * directives and `url.<base>.insteadOf` rewrites are not followed, so a repo
+ * that only names its remote through them reads as remote-less.
+ */
+export async function readOriginUrl(commonDir: string): Promise<string | null> {
+  let text: string;
+  try {
+    text = await Bun.file(join(commonDir, "config")).text();
+  } catch {
+    return null;
+  }
+  let inOrigin = false;
+  for (const line of text.split(/\r?\n/u)) {
+    const section = line.match(/^\s*\[([^\s"\]]+)(?:\s+"((?:[^"\\]|\\.)*)")?\]/u);
+    if (section !== null) {
+      inOrigin = section[1]?.toLowerCase() === "remote" && section[2] === "origin";
+      continue;
+    }
+    if (!inOrigin) continue;
+    const entry = line.match(/^\s*url\s*=\s*(.*?)\s*$/iu);
+    if (entry === null) continue;
+    const raw = entry[1] ?? "";
+    // Quoted values keep everything; bare ones end at a comment marker.
+    const value = raw.startsWith('"')
+      ? (raw.match(/^"((?:[^"\\]|\\.)*)"/u)?.[1] ?? "")
+      : raw.replace(/\s*[#;].*$/u, "");
+    return value === "" ? null : value; // first `url` is the fetch URL
+  }
+  return null;
+}
+
+async function readOrigin(repoPath: string): Promise<string | null> {
+  const commonDir = await resolveCommonDir(repoPath);
+  if (commonDir === null) return null;
+  const url = await readOriginUrl(commonDir);
+  return url === null ? null : normalizeOrigin(url);
+}
+
 async function listDirs(parent: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(parent, { withFileTypes: true });
@@ -131,6 +202,8 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
  * carries forward from the
  * previous scan when already resolved — default branches practically never
  * change — and is read from local refs only for new (or still-null) repos.
+ * `origin` is re-read every scan: one file, no process, and a remote does get
+ * repointed. Basename when there is none — a key, so never absent.
  */
 export async function scanRepos(
   roots: readonly string[],
@@ -142,10 +215,12 @@ export async function scanRepos(
   const entries = await Promise.all(
     paths.map(async (path): Promise<RepoEntry> => {
       const cached = prevByPath.get(path)?.defaultBranch ?? null;
+      const [defaultBranch, origin] = await Promise.all([cached ?? readDefaultBranch(path), readOrigin(path)]);
       return {
         name: names.get(path) ?? path,
         path,
-        defaultBranch: cached ?? (await readDefaultBranch(path)),
+        defaultBranch,
+        origin: origin ?? basename(path),
       };
     }),
   );

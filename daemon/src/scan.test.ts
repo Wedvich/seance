@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
-import { addWorktree, makeClone } from "../test/fixtures.ts";
-import { readDefaultBranch, repoSetsEqual, scanRepos } from "./scan.ts";
+import { addWorktree, makeClone, makeSeparateGitDirClone } from "../test/fixtures.ts";
+import { normalizeOrigin, readDefaultBranch, readOriginUrl, repoSetsEqual, scanRepos } from "./scan.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -49,7 +49,7 @@ describe("scanRepos", () => {
     await makeRepo(parent, "dotfiles/submodule", "main"); // depth 1 under the root — not descended into
 
     const repos = await scanRepos([root]);
-    expect(repos).toEqual([{ name: "dotfiles", path: root, defaultBranch: "main" }]);
+    expect(repos).toEqual([{ name: "dotfiles", path: root, defaultBranch: "main", origin: "dotfiles" }]);
   });
 
   test("skips hidden directories", async () => {
@@ -172,5 +172,69 @@ describe("repoSetsEqual", () => {
     expect(repoSetsEqual(a, [...a])).toBe(true);
     expect(repoSetsEqual(a, [])).toBe(false);
     expect(repoSetsEqual(a, [{ ...a[0]!, defaultBranch: null }])).toBe(false);
+  });
+});
+
+describe("origin", () => {
+  test("normalizes https, ssh and scp-like URLs to one lowercase host/path key", () => {
+    expect(normalizeOrigin("https://github.com/Wedvich/seance.git")).toBe("github.com/wedvich/seance");
+    expect(normalizeOrigin("git@github.com:Wedvich/seance.git")).toBe("github.com/wedvich/seance");
+    expect(normalizeOrigin("ssh://git@github.com/Wedvich/seance")).toBe("github.com/wedvich/seance");
+    expect(normalizeOrigin("https://pengefix@dev.azure.com/pengefix/pengefix/_git/web/")).toBe(
+      "dev.azure.com/pengefix/pengefix/_git/web",
+    );
+    expect(normalizeOrigin("host:~user/repo.git")).toBe("host/~user/repo");
+  });
+
+  test("a local or file remote, or nothing usable, is no remote", () => {
+    expect(normalizeOrigin("/srv/mirrors/seance.git")).toBeNull();
+    expect(normalizeOrigin("../sibling")).toBeNull();
+    expect(normalizeOrigin("file:///srv/mirrors/seance.git")).toBeNull();
+    expect(normalizeOrigin("https://github.com")).toBeNull();
+    expect(normalizeOrigin("")).toBeNull();
+  });
+
+  test("reads remote.origin.url from the common dir's config — first url, quoted or bare", async () => {
+    const root = await makeRoot();
+    const repo = await makeRepo(root, "r", "main");
+    await writeFile(
+      join(repo, ".git", "config"),
+      [
+        "[core]",
+        "\tbare = false",
+        '[remote "upstream"]',
+        "\turl = https://example.com/other/repo.git",
+        '[Remote "origin"] ; trailing',
+        '\tURL = "https://github.com/Wedvich/seance.git" # quoted',
+        "\turl = git@github.com:Wedvich/push-only.git",
+        "\tfetch = +refs/heads/*:refs/remotes/origin/*",
+        "",
+      ].join("\n"),
+    );
+    expect(await readOriginUrl(join(repo, ".git"))).toBe("https://github.com/Wedvich/seance.git");
+    expect((await scanRepos([root]))[0]?.origin).toBe("github.com/wedvich/seance");
+  });
+
+  test("a bare value ends at a comment marker; a remote-less repo keys by basename", async () => {
+    const root = await makeRoot();
+    const repo = await makeRepo(root, "keyed", "main");
+    await writeFile(join(repo, ".git", "config"), '[remote "origin"]\n\turl = git@github.com:o/r.git # mirror\n');
+    const bare = await makeRepo(root, "no-remote");
+    const repos = await scanRepos([root]);
+    expect(repos.map((r) => [r.name, r.origin])).toEqual([
+      ["keyed", "github.com/o/r"],
+      ["no-remote", "no-remote"],
+    ]);
+    expect(await readOriginUrl(join(bare, ".git"))).toBeNull();
+  });
+
+  test("a separate-git-dir clone reads its config through the pointer", async () => {
+    const root = await makeRoot();
+    const gitDir = join(root, "gitdirs", "detached");
+    const repo = await makeSeparateGitDirClone(root, "detached", gitDir);
+    await writeFile(join(gitDir, "config"), '[remote "origin"]\n\turl = https://example.org/Org/Detached.git\n', {
+      flag: "a",
+    });
+    expect((await scanRepos([root])).find((r) => r.path === repo)?.origin).toBe("example.org/org/detached");
   });
 });
