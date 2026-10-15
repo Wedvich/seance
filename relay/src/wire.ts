@@ -1,5 +1,8 @@
 import {
   APP_ID,
+  IDENTITY_PUBLIC_KEY_BYTES,
+  IDENTITY_SIGNATURE_BYTES,
+  base64Length,
   isRecord,
   MACHINES_ID,
   parseEnvelope as parseEnvelopeShape,
@@ -21,6 +24,19 @@ const MAX_IV_LENGTH = 32;
 const MAX_CT_LENGTH = 64 * 1024;
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/u;
+
+/**
+ * A register's key and signature are fixed-size for the one algorithm in use,
+ * so the bound is exact: anything else is refused here, before the digest and
+ * the verify in `#register` are paid for.
+ */
+const KEY_LENGTH = base64Length(IDENTITY_PUBLIC_KEY_BYTES);
+const SIG_LENGTH = base64Length(IDENTITY_SIGNATURE_BYTES);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/u;
+
+function exactBase64(value: unknown, length: number): value is string {
+  return typeof value === "string" && value.length === length && BASE64.test(value);
+}
 
 function boundedString(value: unknown, max: number): value is string {
   return typeof value === "string" && value !== "" && value.length <= max;
@@ -63,7 +79,9 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
     // squatting one would show up as a machine called "app" or swallow every
     // broadcast addressed to the group.
     if (value["deviceId"] === APP_ID || value["deviceId"] === MACHINES_ID) return null;
-    return { t: "register", deviceId: value["deviceId"], info };
+    if (!exactBase64(value["key"], KEY_LENGTH) || !exactBase64(value["sig"], SIG_LENGTH)) return null;
+    if (typeof value["ts"] !== "number" || !Number.isFinite(value["ts"])) return null;
+    return { t: "register", deviceId: value["deviceId"], info, key: value["key"], ts: value["ts"], sig: value["sig"] };
   }
   if (value["t"] === "msg") {
     const env = parseEnvelope(value["env"]);

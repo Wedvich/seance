@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { importPsk, toBase64 } from "@seance/shared";
+import { generateIdentitySeed, identityFromSeed, importPsk, toBase64 } from "@seance/shared";
 import { loadPsk, type Config } from "../src/config.ts";
 import { credentialPskPath } from "../src/credential.ts";
 import { exec } from "../src/exec.ts";
@@ -92,6 +92,7 @@ describe("a delivered credential survives the daemon's own spawning", () => {
     const path = join(dir, "config.json");
     await writeFile(path, JSON.stringify({ ...CONFIG, name: "Before" }));
     const key = await importPsk(PSK);
+    const identity = await identityFromSeed(generateIdentitySeed());
     const sources: (string | undefined)[] = [];
     // Records what each start was handed; never dials, so no relay is needed.
     const start = async (opts: RunOpts): Promise<DaemonHandle> => {
@@ -99,7 +100,7 @@ describe("a delivered credential survives the daemon's own spawning", () => {
       const client = new RelayClient({
         url: CONFIG.relayUrl,
         bearerToken: CONFIG.bearerToken,
-        deviceId: "dev",
+        identity,
         key,
         buildInfo: () => Promise.reject(new Error("never registers")),
         handle: () => Promise.resolve(null),

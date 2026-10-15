@@ -1,5 +1,5 @@
 import { APP_ID, open, seal, type Envelope, type MachineInfo, type OpName, type Plain } from "@seance/shared";
-import { connectDaemon, type Client, type TestRelay } from "../../relay/test/harness.ts";
+import { connectDaemon, register, type Client, type TestRelay } from "../../relay/test/harness.ts";
 
 /**
  * A daemon just far enough to answer the app: registers an encrypted MachineInfo
@@ -19,6 +19,7 @@ export type Handlers = Partial<Record<OpName, (payload: unknown) => unknown>>;
 export async function startFakeDaemon(
   relay: TestRelay,
   key: CryptoKey,
+  /** From the relay harness's `newDeviceId()`, so the register can be signed. */
   deviceId: string,
   info: MachineInfo,
   handlers: Handlers = {},
@@ -32,11 +33,7 @@ export async function startFakeDaemon(
     op: "machine-info",
     payload: info,
   };
-  client.send({
-    t: "register",
-    deviceId,
-    info: await seal(key, { to: APP_ID, from: deviceId }, infoPlain),
-  });
+  client.send(await register(deviceId, { info: await seal(key, { to: APP_ID, from: deviceId }, infoPlain) }));
 
   // A holder rather than a bare `let`: the loop condition is flipped by the
   // stop/close closures below, which static analysis cannot see through.

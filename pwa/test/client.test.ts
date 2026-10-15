@@ -2,7 +2,7 @@
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import { APP_ID, importPsk, seal, toBase64, type MachineInfo, type Plain, type SessionsResponse } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { connectDaemon, startRelay, type TestRelay } from "../../relay/test/harness.ts";
+import { connectDaemon, newDeviceId, register, startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import type { ServerWebSocket } from "bun";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
@@ -31,15 +31,9 @@ afterAll(async () => {
   await relay.dispose();
 });
 
-let deviceCounter = 0;
-
-// The registry is permanent by design, so every test owns its own deviceId and
-// asserts on its own entry rather than on the whole list.
-function nextDeviceId(): string {
-  deviceCounter += 1;
-  return `pwa-device-${deviceCounter}`;
-}
-
+// The registry is permanent by design, so every test owns its own deviceId
+// (minted with a key the relay will accept a register for) and asserts on its
+// own entry rather than on the whole list.
 function appUrl(): string {
   const url = new URL("/app", relay.url);
   url.protocol = "ws:";
@@ -192,7 +186,7 @@ describe("connection", () => {
 
 describe("registry", () => {
   test("decrypts a machine and reports it online", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mac Studio"));
     try {
@@ -213,7 +207,7 @@ describe("registry", () => {
   // arrives on every push, so running it through the replay guard would hide the
   // machine permanently.
   test("accepts an info blob far outside the replay window", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const tenDaysAgo = Date.now() - 10 * 24 * 60 * 60 * 1000;
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Old Tower"), {}, { infoTs: tenDaysAgo });
@@ -226,7 +220,7 @@ describe("registry", () => {
   });
 
   test("counts an entry sealed with another key as ignored, not as a machine", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, otherKey, deviceId, machineInfo("Stranger"));
     try {
@@ -244,8 +238,8 @@ describe("registry", () => {
   // another's id — the picker would then show A's name and repos on an entry that
   // spawns on B. `from` is AAD-bound, which makes the pairing checkable.
   test("drops an entry whose info blob is sealed from a different deviceId", async () => {
-    const real = nextDeviceId();
-    const impostor = nextDeviceId();
+    const real = await newDeviceId();
+    const impostor = await newDeviceId();
     const plain: Plain = {
       id: crypto.randomUUID(),
       ts: Date.now(),
@@ -259,10 +253,11 @@ describe("registry", () => {
     const thief = await connectDaemon(relay);
     try {
       const before = await waitFor((s) => s.registrySettled, "the first registry push");
-      honest.send({ t: "register", deviceId: real, info });
+      honest.send(await register(real, { info }));
       // Byte-identical, so a cache keyed on the envelope alone would serve the
-      // machine the honest entry decrypted.
-      thief.send({ t: "register", deviceId: impostor, info });
+      // machine the honest entry decrypted. The thief signs for an id of their
+      // own — the relay checks who sent the register, not what it says.
+      thief.send(await register(impostor, { info }));
 
       const state = await waitFor((s) => s.registrySize >= before.registrySize + 2, "both entries in the registry");
       expect(state.machines.map((m) => m.deviceId)).toContain(real);
@@ -279,7 +274,7 @@ describe("registry", () => {
   });
 
   test("forgets an offline machine at the relay, and gets it back only if it registers again", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone Fishing"));
     try {
@@ -311,7 +306,7 @@ describe("registry", () => {
   // deleting — and the app only offers removal on an offline row, which makes
   // this reachable as a race rather than as a button.
   test("leaves a connected machine's entry alone and logs the refusal", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const lines: string[] = [];
     const { client, waitFor } = startClient({ log: (line) => lines.push(line) });
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Wide Awake"));
@@ -327,12 +322,12 @@ describe("registry", () => {
   });
 
   test("forgetting an id the registry never held changes nothing", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Bystander"));
     try {
       const before = await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "registry arrived");
-      client.forget(nextDeviceId());
+      client.forget(await newDeviceId());
       await Bun.sleep(100);
       expect(client.getState().registrySize).toBe(before.registrySize);
     } finally {
@@ -347,7 +342,7 @@ describe("registry", () => {
   // override is the cheapest public way to force that rebuild — it is spent by
   // the very rebuild it triggers.
   test("a rebuild that changes nothing keeps the state object and notifies nobody", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Steady"));
     try {
@@ -376,12 +371,11 @@ describe("registry", () => {
   // lists entries by deviceId (storage.list over a "device:" prefix), so a first
   // registration lands anywhere in the list, and matching the previous entries by
   // position would re-allocate every machine behind the insertion point. Ids are
-  // minted here rather than from nextDeviceId(), whose counter puts their relative
-  // order at the mercy of how many tests run before this one ("…-10" < "…-9").
+  // sorted here so the one registered second is the one that lands ahead.
   test("a registry push leaves the entries it did not change identical", async () => {
-    const run = crypto.randomUUID();
-    const inserted = `pwa-device-a-${run}`;
-    const settled = `pwa-device-b-${run}`;
+    const minted = [await newDeviceId(), await newDeviceId()].toSorted();
+    const inserted = minted[0] ?? "";
+    const settled = minted[1] ?? "";
     expect(inserted < settled).toBe(true);
 
     const { client, waitFor } = startClient();
@@ -412,7 +406,7 @@ describe("registry", () => {
 
 describe("requests", () => {
   test("round-trips a sessions request through the real relay", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const sessions: SessionsResponse = {
       sessions: [{ window: "port-the-pane-20260727-093214", repo: "seance", path: "/Users/m/repos/seance" }],
       at: Date.now(),
@@ -434,7 +428,7 @@ describe("requests", () => {
   // The app holds the `id`; the relay can only ever name the `iv`. Logging both
   // on each side of a round trip is what makes a relay line joinable to an op.
   test("logs the iv beside the id on the way out and the re on the way back", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const secret = "port-the-pane-20260727-093214";
     const sessions: SessionsResponse = {
       sessions: [{ window: secret, repo: "seance", path: "/Users/m/repos/seance" }],
@@ -478,7 +472,7 @@ describe("requests", () => {
   // stories behind one `timed out`, and only the log can tell them apart. A reply
   // whose `re` matches nothing pending is that case (and another tab's reply).
   test("logs a reply matching no pending request, marked unmatched", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const orphanId = crypto.randomUUID();
     const lines: string[] = [];
     const realLog = console.log;
@@ -525,7 +519,7 @@ describe("requests", () => {
   // The relay derives `connected` from live sockets, so it can read true over a
   // machine that vanished. A refused delivery is better evidence than the flag.
   test("a refused delivery marks the machine offline despite a stale connected flag", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("MacBook Air"));
     try {
@@ -541,7 +535,7 @@ describe("requests", () => {
   });
 
   test("times out when the daemon never answers", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ timeouts: { sessions: 300 } });
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Silent"));
     try {
@@ -561,7 +555,7 @@ describe("requests", () => {
   // proof of life, so a slow answer must not strand it offline until it happens
   // to re-register.
   test("a decrypted message from the machine clears a timeout's offline mark", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Slow Mac"));
     try {
@@ -592,7 +586,7 @@ describe("requests", () => {
   // clock, very late answer) still proves the machine alive. Gating it on the
   // guard would turn "every request times out" into "every machine sticks asleep".
   test("a reply outside the replay window still clears the offline mark", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Skewed"));
     try {
@@ -619,7 +613,7 @@ describe("requests", () => {
   });
 
   test("fails in-flight requests when the socket drops", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Dropper"));
     try {
@@ -739,7 +733,7 @@ describe("store", () => {
   }
 
   test("a repo_not_found retry rescans before spawning again", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const ops: string[] = [];
     // The daemon knows the repo again only once it has rescanned — the exact
     // stale-cache shape the retry exists for.
@@ -780,7 +774,7 @@ describe("store", () => {
   });
 
   test("a repo the rescan still misses lands a conclusive verdict instead of looping", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const ops: string[] = [];
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
@@ -818,7 +812,7 @@ describe("store", () => {
   });
 
   test("a spawn that started but never registered reaches the verdict as pending, screen and all", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Thad"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
       spawn: () => ({
@@ -850,7 +844,7 @@ describe("store", () => {
   });
 
   test("a retry whose rescan never lands says so instead of spawning into the stale cache", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const ops: string[] = [];
     // Answers the spawn but not the rescan, which can then only time out.
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
@@ -888,7 +882,7 @@ describe("store", () => {
   });
 
   test("a rescan that changes nothing still moves the scan time the row shows", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const info = { ...machineInfo("Unchanged"), scannedAt: Date.now() - 2 * 60 * 60 * 1000 };
     const scannedAt = Date.now();
     const daemon = await startFakeDaemon(relay, key, deviceId, info, {
@@ -913,7 +907,7 @@ describe("store", () => {
   });
 
   test("a rescan failure survives another sheet and is cleared once its own closes", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     // No rescan handler: the request can only time out.
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mute"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
@@ -943,7 +937,7 @@ describe("store", () => {
   // A dismissal's back is delivered later, so a retry that went back would close
   // whichever verdict had landed by then — here the rescan's own report.
   test("a retry's verdict survives the history the failed one left", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
       spawn: () => ({ ok: false, code: "repo_not_found", message: "no repo named seance" }),
@@ -978,7 +972,7 @@ describe("store", () => {
   });
 
   test("reusePrompt restores the prompt the success verdict stashed", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Reuser"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
       spawn: () => ({ ok: true, window: "resurrect-me", path: "/tmp/w", sessions: [] }),
@@ -1006,7 +1000,7 @@ describe("store", () => {
   });
 
   test("a confirmed forget takes the machine's repo, selection and session list with it", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Retired"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
     });
@@ -1036,7 +1030,7 @@ describe("store", () => {
   // reconnected between the render and the tap. The relay refuses, and the app
   // must not have thrown the selection away on the way there.
   test("a refused forget leaves the repo and the selection where they were", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Wide Awake Too"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
     });
@@ -1181,7 +1175,7 @@ describe("malformed frames", () => {
   // on it too, and the tab was dead until reload.
   test("drops a registry frame with no entries instead of wedging every later rebuild", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
@@ -1202,7 +1196,7 @@ describe("malformed frames", () => {
   // Its own handler's catch used to throw as well: the reason line quotes `env.iv`.
   test("drops a msg frame with no envelope", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
@@ -1220,7 +1214,7 @@ describe("malformed frames", () => {
   // the way a msg with no envelope did.
   test("drops a frame whose type this build does not know, and says so without echoing it", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const lines: string[] = [];
     const realLog = console.log;
     try {
@@ -1252,7 +1246,7 @@ describe("malformed frames", () => {
   // an authoritative "no machines" out of one machine a version ahead.
   test("skips the registry entries that do not parse, keeping the ones that do and counting the skew", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
@@ -1274,7 +1268,7 @@ describe("malformed frames", () => {
   // blob this key just opened.
   test("counts a blob that opens but is not a MachineInfo as skewed, not as a machine", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
@@ -1305,7 +1299,7 @@ describe("malformed frames", () => {
   // the request now instead of riding the full timeout (90s for a spawn).
   test("fails a request fast on an undeliverable whose code this build does not know", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");
@@ -1328,7 +1322,7 @@ describe("malformed frames", () => {
   // wedge by another door.
   test("applies nothing from a rescan reply that is not shaped like one", async () => {
     const peer = startHostilePeer();
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const { client, waitFor } = startClient({ url: peer.url });
     try {
       await waitFor((s) => s.status === "open", "open");

@@ -1,4 +1,13 @@
-import { PROTOCOL_VERSION, type Envelope } from "@seance/shared";
+import {
+  APP_ID,
+  PROTOCOL_VERSION,
+  generateIdentitySeed,
+  identityFromSeed,
+  signRegister,
+  type DaemonFrame,
+  type Envelope,
+  type Identity,
+} from "@seance/shared";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { join } from "node:path";
 
@@ -54,8 +63,6 @@ function workerBundle(): Promise<string> {
 export interface SweepOverrides {
   readonly sweepIntervalMs: number;
   readonly sweepSilenceLimitMs: number;
-  /** Defaults to the sweep limit, so a suite that sets only the two above keeps one notion of silence. */
-  readonly supersedeSilenceMs?: number;
 }
 
 export async function startRelay(token: string, sweep?: SweepOverrides): Promise<TestRelay> {
@@ -80,7 +87,6 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
           : {
               SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
               SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
-              SUPERSEDE_SILENCE_MS: String(sweep.supersedeSilenceMs ?? sweep.sweepSilenceLimitMs),
             }),
       },
     }),
@@ -235,5 +241,45 @@ export function envelope(to: string, from: string): Envelope {
     from,
     iv: `iv-${ivCounter}`,
     ct: "Y2lwaGVydGV4dA==",
+  };
+}
+
+const identities = new Map<string, Identity>();
+
+/**
+ * A deviceId the relay will accept a register for: the hash of a freshly minted
+ * key, remembered here so `register()` can sign for it later. Tests pass ids
+ * around as strings, exactly as the wire does; this is the one place that knows
+ * which key stands behind each.
+ */
+export async function newDeviceId(): Promise<string> {
+  const identity = await identityFromSeed(generateIdentitySeed());
+  identities.set(identity.deviceId, identity);
+  return identity.deviceId;
+}
+
+export function identityOf(deviceId: string): Identity {
+  const identity = identities.get(deviceId);
+  if (identity === undefined) throw new Error(`no identity minted for ${deviceId} — use newDeviceId()`);
+  return identity;
+}
+
+type RegisterFrame = Extract<DaemonFrame, { t: "register" }>;
+
+/** A register the relay verifies, for an id from `newDeviceId()`. `over` forges fields on purpose. */
+export async function register(
+  deviceId: string,
+  over: Partial<RegisterFrame> & { readonly info?: Envelope } = {},
+): Promise<RegisterFrame> {
+  const identity = identityOf(deviceId);
+  const ts = over.ts ?? Date.now();
+  return {
+    t: "register",
+    deviceId,
+    info: over.info ?? envelope(APP_ID, deviceId),
+    key: identity.publicKey,
+    ts,
+    sig: await signRegister(identity, ts),
+    ...over,
   };
 }

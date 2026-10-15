@@ -94,7 +94,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
         if (frame.t === "register") {
           if (relay.refuseRegisters) {
             registers.push(frame);
-            ws.close(1000, "device id in use");
+            ws.close(1000, "register unverified");
             return;
           }
           daemons.set(frame.deviceId, ws);

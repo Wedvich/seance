@@ -8,6 +8,7 @@ import {
   open,
   seal,
   toBase64,
+  verifyRegister,
   type MachineInfo,
   type Plain,
   type RescanResponse,
@@ -90,6 +91,10 @@ async function startTestDaemon(
 async function registerWithRepo(relay: TestRelay, repoName: string): Promise<{ deviceId: string; info: MachineInfo }> {
   for (let i = 0; i < 5; i++) {
     const frame = await relay.registers.next();
+    // The fake relay accepts anything; the real one would refuse an unsigned
+    // or mis-signed register, so every one the daemon sends has to verify.
+    const claim = { deviceId: frame.deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig };
+    expect(await verifyRegister(claim, Date.now())).toBe("ok");
     const plain = await open(appKey, frame.info);
     const info = plain.payload as MachineInfo;
     if (info.repos.some((r) => r.name === repoName)) {
@@ -133,7 +138,7 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId, info } = await registerWithRepo(relay, "myrepo");
-      expect(deviceId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(deviceId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
       expect(info.name).toBe("TestMac");
       expect(info.platform).toBe(process.platform);
       expect(info.repos[0]?.defaultBranch).toBe("main");
@@ -340,9 +345,8 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
-  // The relay answers a register for an id another live socket holds by closing
-  // the new socket, so from here it looks like a connect that succeeded and then
-  // dropped. Treating that as success would reset backoff and turn the refusal
+  // The relay answers a register it cannot verify by closing the socket, so
+  // from here it looks like a connect that succeeded and then dropped. Treating that as success would reset backoff and turn the refusal
   // into a redial every base interval; the refusal is spelled out in the log
   // and the backoff keeps growing until the relay lets the daemon in.
   test("a refused register keeps backing off instead of redialing at the base rate", async () => {
@@ -360,7 +364,9 @@ describe("daemon ↔ relay integration", () => {
       // Backoff grows 20→40→…→400ms (full jitter) from the first refusal on: on
       // the order of ten attempts in a second. A reset on every `open` gives ~50.
       expect(relay.connectionCount()).toBeLessThanOrEqual(25);
-      expect(lines.some((line) => line.includes('relay socket closed code=1000 reason="device id in use"'))).toBe(true);
+      expect(lines.some((line) => line.includes('relay socket closed code=1000 reason="register unverified"'))).toBe(
+        true,
+      );
     } finally {
       console.log = realWarn;
       daemon.stop();
