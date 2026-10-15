@@ -1,4 +1,13 @@
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type SessionEntry, type SpawnErrorCode } from "@seance/shared";
+import {
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  METRIC_NAMES,
+  type MetricName,
+  type MetricsSeries,
+  type MetricsStep,
+  type SessionEntry,
+  type SpawnErrorCode,
+} from "@seance/shared";
 
 /** Offered models. The wire keeps `model` a free string so this can change without a daemon deploy. */
 export const MODELS = ["fable", "opus", "sonnet"] as const;
@@ -85,6 +94,50 @@ export interface PendingSpawn {
 export interface SessionsView {
   readonly sessions: readonly SessionEntry[];
   readonly at: number;
+}
+
+/**
+ * Pressure belongs to a machine, quota to an account: a machine's chart is its
+ * own load, an account's is read from one machine hosting it (`deviceId`) and
+ * narrowed to that account's series.
+ */
+export type HistoryTarget =
+  | { readonly kind: "machine"; readonly deviceId: string }
+  | { readonly kind: "account"; readonly accountId: string; readonly deviceId: string };
+
+/**
+ * A chart asks for its own series only: every series of a multi-exclave machine
+ * at a day's 5-min points overflows the relay's envelope (docs/scheduler.md).
+ * All of them are whole percent, so one 0–100 axis serves either.
+ */
+export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]> = {
+  machine: [METRIC_NAMES.cpu, METRIC_NAMES.mem],
+  account: [METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w],
+};
+
+export const HISTORY_RANGES = ["6h", "24h", "30d"] as const;
+export type HistoryRange = (typeof HISTORY_RANGES)[number];
+
+/** Each range on the coarsest-needed store tier, so none crosses `METRICS_MAX_POINTS`. */
+export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: MetricsStep }> = {
+  "6h": { span: 6 * 3600, step: 30 },
+  "24h": { span: 24 * 3600, step: 300 },
+  "30d": { span: 30 * 24 * 3600, step: 3600 },
+};
+
+export type HistoryResult =
+  | { readonly kind: "loading" }
+  | { readonly kind: "ok"; readonly series: readonly MetricsSeries[] }
+  | { readonly kind: "failed"; readonly message: string };
+
+/** The one chart open on the machines screen; its window is fixed when asked, in unix seconds. */
+export interface HistoryView {
+  readonly target: HistoryTarget;
+  readonly range: HistoryRange;
+  readonly from: number;
+  readonly to: number;
+  readonly step: MetricsStep;
+  readonly result: HistoryResult;
 }
 
 /**

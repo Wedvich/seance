@@ -314,11 +314,12 @@ and re-route. Only then does the loop start dispatching.
  every clone of the task's   ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
  repo, on any machine         │   offline/stale · no taskId · auth missing · repo absent   │
                               │   skill absent · pin mismatch · base unpushed             │
+                              │   free disk < 1 GiB                                       │
                               │   account over threshold ∧ credits off · cap reached      │
                               │                                                           │
                               └─► 2 SCORE  (lower wins, weights in config)                │
                                   account_pressure       max(f(5h), g(7d)), ÷ time-to-reset
-                                  machine_pressure       max(cpu, mem, disk, host)        │
+                                  machine_pressure       max(cpu, mem, host)              │
                                   dependency_distance    0 same exclave … 0.5 elsewhere   │
                                   queue_pressure                                          │
                                       │                                                   │
@@ -336,12 +337,13 @@ the latest `status` per machine; a snapshot older than ~90s counts as unknown an
 is filtered for new work:
 
 1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;
-   exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
+   free disk under 1 GiB; exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
    stacked base unpushed and not on this exclave; projected account usage over the 90% line (a window resetting within 15 min counts as empty) **and**
    extra usage disabled; per-account / global cap reached.
 2. _Score_ (lower wins, weights in config):
    `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
-   time-to-reset; `machine_pressure` = max(cpu, mem, disk, host) for LXCs;
+   time-to-reset; `machine_pressure` = max(cpu, mem, host) for LXCs — disk is the filter's
+   floor, never a score;
    `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`.
 3. _Stickiness_: lineage owner bonus; only matters for continuations.
 4. _Reserve_ (one store write) then dispatch with `taskId`; reservation TTL 120s; spawn failure
@@ -410,7 +412,9 @@ the newest quota observation per account, and open a history chart — without a
    day's 5-min points is ~77 KB against the relay's 64 KiB envelope, so a chart asks for its
    panel's series, and a reply that still wouldn't fit comes back `too_large` (DESIGN.md,
    Layer 2).
-6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts.
+6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts. _Landed
+   2026-10-15._ Quota moved to account cards (one per account across the fleet) and disk off
+   the screen; Machines is a layer over Settings until the redesign (DESIGN.md, _PWA_).
 
 **Exit.**
 
@@ -532,7 +536,9 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
 - **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
-  credits-spill and needs-input alerts, `push-subscribe`.
+  credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
+  nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the PWA shows no
+  disk numbers, since a fill level is upkeep rather than load).
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal.
 
 ## Settled defaults (interview, 2026-10-15)
@@ -557,7 +563,11 @@ same PR, with the reason.
 5. **`needs-input` escalation** after 30 min: re-alert once, keep the slot, never kill.
 6. **Retention**: raw 30s for 48h, 5-min for 30d, hourly forever; Prometheus-shaped samples
    (above) so an external metrics stack is a consumer, not a redesign.
-7. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
+7. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
+   above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
+   not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
+   it. The same series feeds M4's health alert, and the PWA shows no disk numbers.
+8. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
    machine per tick, the leader's view never older than one tick, and a fresh PWA renders
    pressure from the registry push without waiting.
 

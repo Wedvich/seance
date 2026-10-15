@@ -6,6 +6,7 @@ import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
+import { deriveMachines } from "../pwa/src/machines-view.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -112,6 +113,10 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(status.mem).toBeGreaterThanOrEqual(0);
       expect(status.mem).toBeLessThanOrEqual(100);
       expect(status.sess?.length).toBeGreaterThan(0);
+      // The machines screen renders pressure and the exclave rows from that push alone.
+      const card = deriveMachines(state.relay.machines, Date.now()).cards.find((c) => c.deviceId === stack.deviceId);
+      expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
+      expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
     }
