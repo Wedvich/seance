@@ -12,43 +12,43 @@ here — DESIGN.md is the record for anything M1 built.
 One word per thing. The wire names in `shared/src/types.ts` are older than this table and
 stay as they are; the table says which word each one means.
 
-| Term    | Meaning                                                                                                                                                                                                                                                                                                                                             | On the wire / in code                                   |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                                                                                                                                            | `deviceId` is its routing key, `MachineInfo` its blob   |
-| exclave | A tree at `~/<name>` whose Claude Code config dir is `~/.claude-<name>`, signed into one account; `default` is `~` with `~/.claude`. Séance depends on those three attributes and the `~/.exclaves` contract below, nothing else an exclave carries (git identity, browser profile) is its business. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone |
-| account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                                                                                                                                                | `accountId` = `organizationUuid:accountUuid`            |
-| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                                                                                                                                        | `tasks.repo`, `RepoEntry.origin`                        |
-| clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                                                                                                                                       | `RepoEntry`, `spawn { repo }` (historical name)         |
-| session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                                                                                                                                        | pane id, `sessions` op                                  |
-| task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                                                                                                                                         | `task:<id>` in the store, `taskId` on spawn             |
-| leader  | The daemon currently nominated to run the scheduler loop                                                                                                                                                                                                                                                                                            | `lead`/`follow`, `scheduler:term`                       |
+| Term    | Meaning                                                                                                                                                                                                                                                                                                                                             | On the wire / in code                                                                       |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                                                                                                                                            | `deviceId` is its routing key, `MachineInfo` its blob                                       |
+| exclave | A tree at `~/<name>` whose Claude Code config dir is `~/.claude-<name>`, signed into one account; `default` is `~` with `~/.claude`. Séance depends on those three attributes and the `~/.exclaves` contract below, nothing else an exclave carries (git identity, browser profile) is its business. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone                                     |
+| account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                                                                                                                                                | `accountId` = `organizationUuid:accountUuid`; `account:<hmac>` its record in the store (M4) |
+| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                                                                                                                                        | `tasks.repo`, `RepoEntry.origin`                                                            |
+| clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                                                                                                                                       | `RepoEntry`, `spawn { repo }` (historical name)                                             |
+| session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                                                                                                                                        | pane id, `sessions` op                                                                      |
+| task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                                                                                                                                         | `task:<id>` in the store, `taskId` on spawn                                                 |
+| leader  | The daemon currently nominated to run the scheduler loop                                                                                                                                                                                                                                                                                            | `lead`/`follow`, `scheduler:term`                                                           |
 
 ## Decisions (from the interview, placement revised 2026-10-15)
 
-| Topic             | Decision                                                                                                                                                                                                                                                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite        |
-| Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob, and as the blob's `MachineInfo.exclaves` list (account, auth, skills); a repo's location decides its config dir, so `spawn` is unchanged |
-| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                              |
-| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                                   |
-| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                           |
-| Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                        |
-| Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                    |
-| Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                       |
-| Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                  |
-| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                             |
-| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                       |
-| Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                     |
-| Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                |
-| Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                                 |
-| Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader. History stays on each daemon behind a `metrics` op. Neither the relay nor the scheduler stores telemetry              |
-| At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                                     |
-| Skills            | Hard filter when declared or prompt starts with `/name`; otherwise informational (+ PWA autocomplete)                                                                                                                                                                               |
-| Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                             |
-| Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                               |
-| Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                              |
-| AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                             |
-| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                                      |
+| Topic             | Decision                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite                                                                                                                |
+| Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob, and as the blob's `MachineInfo.exclaves` list (account, auth, skills); a repo's location decides its config dir, so `spawn` is unchanged                                                                                                         |
+| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                                                                                                                                      |
+| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                                                                                                                                           |
+| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                                                                                                                                   |
+| Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                                                                                                                                |
+| Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
+| Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                                                               |
+| Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
+| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                                                                                                                                     |
+| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
+| Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
+| Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
+| Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                                                                                                                                         |
+| Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader; the relay keeps the last one with the registry entry when the socket goes (M2), so quota outlives a sleeping observer. History stays on each daemon behind a `metrics` op; neither the relay nor the scheduler stores history |
+| At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                                                                                                                                             |
+| Skills            | Hard filter when declared or prompt starts with `/name`; otherwise informational (+ PWA autocomplete)                                                                                                                                                                                                                                                                                       |
+| Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                                                                                                                                     |
+| Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                                                                                                                                       |
+| Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                                                                                                                                      |
+| AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                                                                                                                                     |
+| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                                                                                                                                              |
 
 ### Why the relay holds the queue and a daemon runs it
 
@@ -86,7 +86,7 @@ PWA ──/app──┐                ┌──/daemon── seanced (mac)   �
             └── scheduler:term
 ```
 
-No new kind of PSK holder. The leader is an ordinary daemon with two extra legs: a queue-store
+No new kind of PSK holder. The leader is an ordinary daemon with two extra legs: a store
 client on its daemon socket and an app-role client (the fleet broker's precedent) to receive
 registry and `status` pushes and to address other daemons. That client is the leader's own
 and long-lived, not the broker's idle-closing `LazyRelay` (Daemon changes, `leader.ts`).
@@ -117,22 +117,45 @@ table gains rows.
   was demoted while partitioned still holds a socket and may still write, so every leader write
   carries its term and the relay refuses a stale one with `not_leader`. Nomination is the only
   election; daemons never vote.
-- **Queue store ops** on the daemon leg (leader) and app leg: `queue-list` → `[{ id, version,
-env }]`, `queue-put { id, expect, env, term? }` → `{ version }` or `version_conflict`,
-  `queue-delete { id, expect, term }`. Values live at `task:<id>` as `{ version, env }`; `version`
-  starts at 1 on create and increments per put. Apps may `queue-list` and create (`expect: 0`)
-  so enqueue works with no leader; every overwrite and delete is term-fenced, leader-only.
-  Bounds in `wire.ts`: ids as for `deviceId`, `env.ct` under the existing 64 KiB cap (a DO value
-  caps at 128 KiB), `MAX_TASKS` like `MAX_DEVICES`, and a create rate floor per socket.
+- **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
+version, env }]`, `store-put { key, expect, env, term? }` → `{ version }` or
+  `version_conflict`, `store-delete { key, expect, term? }`. Values live at their key as
+  `{ version, env }`; `version` starts at 1 on create and increments per put. Named for the
+  store, not the queue, because tasks are not its only records — who may write is a rule per
+  key prefix, applied by the relay:
+
+  | Prefix           | Create          | Overwrite / delete         | Term-fenced | Lands |
+  | ---------------- | --------------- | -------------------------- | ----------- | ----- |
+  | `task:<id>`      | any app, leader | leader only                | yes         | M3    |
+  | `account:<hmac>` | any app         | any app, by `expect` (CAS) | no          | M4    |
+
+  Tasks: apps may list and create (`expect: 0`) so enqueue works with no leader; every
+  overwrite and delete is the leader's. App-writable records exist for state a person edits from
+  any client with no leader up — an account's alias first; whether M4's `settings` is one is
+  M4's call. Bounds in `wire.ts`: keys as for `deviceId` plus their prefix, `env.ct` under the
+  existing 64 KiB cap (a DO value caps at 128 KiB), `MAX_TASKS` and `MAX_RECORDS` like
+  `MAX_DEVICES`, and a create rate floor per socket.
+
 - **Version binding closes rollback.** Anything with the bearer token can list the queue, keep a
   task's old sealed blob and put it back — authentic bytes, stale state (a cancelled task back to
   `ready`). So the sealed body carries the `version` its put will produce, and every reader
   rejects a blob whose inner version disagrees with the relay's. A replayed blob then fails like
   a forged one. `version_conflict` is the only other way a put fails.
-- **Stored blobs are an at-rest format, not live frames.** Their `op` is `task`, sealed to
-  `"scheduler"`, opened _without_ the `ReplayGuard` — exactly as `parseMachineInfo` consumers
-  already open the register blob — and never accepted on a live routing path. Keeping the op
-  distinct is what stops a stored task being replayed as a request.
+- **Stored blobs are an at-rest format, not live frames.** Their `op` is the record's kind —
+  `task` sealed to `"scheduler"`, `account` to `"app"` — opened _without_ the `ReplayGuard`
+  through `openAtRest` — exactly as the register blob and `status` already are — and never
+  accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
+  record being replayed as a request, or as a record of another kind.
+- **Last `status` kept (M2).** When a daemon socket closes or is swept, the relay already
+  writes the entry's `lastSeen`; the same put now keeps the attachment's last `status` env in
+  the entry, and the registry push carries it for an offline machine as for a live one. No
+  write the relay did not already make, no new op or signature: the env is the one the
+  verified socket sent, sealed `from` its own `deviceId`, so a token holder cannot plant one.
+  A `register` clears it — the kept status indexes the blob that register replaces (#102's
+  rule), and the daemon sends a fresh one right after. Readers take quota from it, never
+  pressure (Routing, _quota freshness_). This amends M1's "never in storage"
+  (`hub.ts`'s `SocketAttachment.status`): the relay now holds the last snapshot of a machine
+  that is gone, which is what an account's quota needs and what pressure must not use.
 - Envelopes `to: "scheduler"` route to the leader's socket; no leader → `undeliverable { code:
 "offline" }` to apps, dropped for daemon-origin events. `SCHEDULER_ID = "scheduler"` is
   reserved, refused by `register` like `"app"`/`"machines"`.
@@ -189,7 +212,7 @@ client=scheduler`; task ↔ session correlation is `taskId`.
 **App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
 `queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
 "reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `enqueue` is _not_ a
-leader op: the app seals the task and `queue-put`s it at `expect: 0`, so queuing works with
+leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling.
 
@@ -249,7 +272,7 @@ the placement decision reversible: moving the scheduler to a fixed box later is 
 adapter implementations (SQLite store, own app-role client) and no change here.
 
 - `QueueStore`: `list()`, `put(id, expect, body)`, `delete(id, expect)` over sealed task
-  bodies, with `version_conflict` surfaced as a value. Daemon adapter: the relay's `queue-*`
+  bodies, with `version_conflict` surfaced as a value. Daemon adapter: the relay's `store-*`
   ops, sealing/opening with the daemon's already-imported `CryptoKey`, carrying its term.
 - `Fleet`: a registry + `status` feed, and `spawn`/`sessions`/`despawn` to a `deviceId`.
   Daemon adapter: the leader's own long-lived app-role `RelayClient` (`leader.ts`, above).
@@ -294,7 +317,7 @@ and re-route. Only then does the loop start dispatching.
                                   3 STICKY  lineage owner bonus (continuations only)      │
                                       │                                                   │
                                       ▼                                                   ▼
-                                  4 RESERVE ──► queue-put ──► spawn { taskId } ──► 5 RECORD decision
+                                  4 RESERVE ──► store-put ──► spawn { taskId } ──► 5 RECORD decision
                                   TTL 120s      (one write)   task_running /       chose X because …
                                                               failure → release    rejected Y because …
 ```
@@ -324,12 +347,28 @@ cards read it — the newest observation per account across the fleet, a window 
 counting as 0% — from the one copy of both rules, `newestQuotaByAccount` and `effectivePct` in
 `shared/src/quota.ts`.
 
+**Quota freshness is the observation's, not the status's.** A machine's status answers two
+questions that age differently. Its pressure describes that machine now, so a status
+`isStatusStale` calls stale — and every kept status (Wire changes, _Last `status` kept_), whose
+machine is gone — says nothing about pressure, and the machine is filtered. Its quota
+observations describe an account, which other machines share, each stamped with its own `at`:
+they join the fold from live and kept statuses alike, the newest `at` per account wins, and a
+window past its reset counts as 0% however old the reading. So an account last used on a
+laptop that has since slept keeps that laptop's reading instead of falling back to an older
+one, or to nothing.
+
+An old reading is a _lower bound_: use since — on another machine the fleet would see, or on
+claude.ai, which it would not — only raises it. v1 routes on it as observed and the decision
+record shows its age. **Open, owner to confirm before M2's library lands:** no age cap beyond
+the reset rule. If use outside the fleet makes that bite, the fix is a cap (an observation
+older than N is `quota unknown`), not a guess at the drift.
+
 **Missing quota is unknown, never 0%.** An account is scored only on a reading it actually has.
-It is filtered `quota unknown` when no fresh status carries an observation for it (statuses
-`isStatusStale` reports as stale are left out of the fold), or when a status from a machine
-hosting it is trimmed (`isQuotaTrimmed`) and does not carry it — trimming may have dropped
-exactly the reading that said the account was full. Reading either case as 0% would route the
-most work to the account the scheduler knows least about.
+It is filtered `quota unknown` when no status, live or kept, carries an observation for it, or
+when a status from a machine hosting it is trimmed (`isQuotaTrimmed`), does not carry it, and
+nothing newer than that status does — trimming may have dropped exactly the reading that said
+the account was full. Reading either case as 0% would route the most work to the account the
+scheduler knows least about.
 
 **Credits spill:** dispatching to an account past the hard threshold with extra usage on
 fires a Web Push ("Spending credits on <account> for <task>" + Pause actions). Re-alerts once per
@@ -403,6 +442,10 @@ term } | null` in the registry push.
    event to a pane and takes session and task from its own pane map, keeps only `https:` PR
    URLs, and forwards to the leader sealed to `"scheduler"`.
 6. PWA — `auto` in the picker (greyed with no leader), `route-preview` and the decision view.
+7. Kept `status` — the relay keeps the last one in the entry on close and sweep and clears it
+   on `register`; `newestQuotaByAccount` folds kept statuses' quota, pressure readers skip
+   them, and the PWA's account cards get an asleep machine's reading with its age. Independent
+   of 2–6, and lands before the library's quota filter is trusted on real fleets.
 
 **Exit.**
 
@@ -425,8 +468,12 @@ term } | null` in the registry push.
   map attributes to the sender; a non-`https:` PR URL never reaches the PWA or a push (daemon).
 - The leader's app-role leg stays up through more than `LazyRelay`'s idle window with no
   calls, and nothing of it survives `follow` (daemon).
-- An account with no fresh observation, or trimmed out of a status that hosts it, is filtered
-  `quota unknown` and never scored as 0% (scheduler).
+- An account with no observation in any live or kept status, or trimmed out of a status that
+  hosts it with nothing newer elsewhere, is filtered `quota unknown` and never scored as 0%
+  (scheduler).
+- A daemon disconnects: its accounts' quota stays in the fold from the kept status, its
+  pressure reads unknown and the machine is filtered; it re-registers with a new blob and the
+  kept status is gone until its next `status` (relay + e2e).
 - Library suite: every filter reason, every score component and stickiness reproduce the
   fixture decisions; the layering test fails on either forbidden import (scheduler).
 
@@ -440,7 +487,8 @@ spawn or a session report gives it a reading; M4's OAuth poll closes this.
 `leadership.ts`, library and adapters, `taskId` idempotency, quota unknown), _Local op socket_
 (the `session-event` frame kind), _Threat model_ (plaintext but signed `roles`, the
 leader-capture guard, term fencing, the mod as an ingest-only path whose every field is
-untrusted), _Wire protocol_ rows.
+untrusted), _Wire protocol_ rows, _Presence & identity_ (the kept `status`, replacing "never in
+storage").
 
 ### M3 — durable queue
 
@@ -449,7 +497,8 @@ and finishes without anyone watching.
 
 **Lands, in order.**
 
-1. Relay store — `queue-list` / `queue-put` / `queue-delete`, `task:<id>` as `{ version, env }`,
+1. Relay store — `store-list` / `store-put` / `store-delete` with the per-prefix rules (only
+   `task:` populated yet), `task:<id>` as `{ version, env }`,
    term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS`, create rate floor.
 2. The at-rest `task` op and version binding — sealed body carries the version its put
    produces; readers open without the `ReplayGuard` and reject a mismatch.
@@ -499,6 +548,49 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the PWA shows no
   disk numbers, since a fill level is upkeep rather than load).
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal.
+- **Account records** — `account:<hmac>` in the store, app-writable (Wire changes, _Store
+  ops_), holding `{ accountId, alias }` sealed to `"app"` under op `account`. The key is
+  HMAC-SHA-256 over the account's id under a key HKDF derives from the PSK with its own label —
+  never the PSK's AES-GCM bytes reused, and never a plain hash, which anyone who knows the
+  UUIDs (Anthropic, another relay the account appears on) could match. Every PSK holder lands
+  on the same key, so two apps naming one account race on its version, not into two records;
+  the relay sees how many accounts are named and when one is renamed, nothing else. Readers
+  check the sealed `accountId` hashes to the key. The HMAC input carries the account's kind
+  (`oauth|<org>:<acct>`), so a later kind — an API key, a Foundry deployment — gets ids
+  disjoint from these; what identifies such an account (the provider's org or workspace, or a
+  fingerprint of the key, which changes on rotation) is decided with that kind. PWA: rename on
+  the account card. Exit: an alias set in one client shows in another; a record whose
+  `accountId` does not hash to its key is ignored (shared + e2e). Record: DESIGN.md _Threat
+  model_ (the HKDF label, what the key reveals, a token holder can delete an alias).
+- **Fleet quota record** (follow-up, after account records) — a single `quota` key,
+  `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) whether
+  or not anything changed, by read-open-compare-`expect`: a daemon writes only an observation
+  newer than the one stored, so the record keeps the newest observation, not the last write.
+  One key, not one per account — per-account writes would tell the relay when each account is
+  in use. Its payoff is `status` shrinking to pressure, which frees most of the 2 KiB socket
+  attachment; its cost is a daemon write path into the store and a 5-min floor on freshness,
+  where `status` is faster. Taken up only if the attachment budget or the kept-status fold
+  (M2) proves too tight.
+- **Auth health** — `authOk` says only that `.claude.json` names an `oauthAccount`: a revoked
+  or lapsed login still reads as signed in, and the `auth missing` filter routes to an exclave
+  that cannot start a session. Per exclave `auth: ok | expired | unknown` with its observed-at,
+  carried in `status`, not the register blob (a change there re-registers and drops the status,
+  #102). Filter widens to "missing **or expired**"; `unknown` routes, since it is every exclave
+  before its first poll. Signals:
+  - _The OAuth poll's 401, read against the access token's `expiresAt`._ A 401 with
+    `expiresAt` still ahead is `expired` (revoked or lapsed); a 401 after it is `unknown` —
+    Claude Code refreshes on next use. **The daemon never refreshes**: refresh tokens rotate,
+    so a daemon refresh would sign the exclave out of Claude Code. (`invalid_grant` comes only
+    from the refresh endpoint, so it is never a signal here.)
+  - _A session that died on auth_ — only if a hook surfaces it, which is unverified; check
+    before relying on it.
+  - _A `claude setup-token` token_ (`CLAUDE_CODE_OAUTH_TOKEN`) has the one predictable expiry;
+    handled only if an exclave runs on one.
+
+  `expired` clears to `unknown` when a rescan sees the exclave's `.claude.json` or credentials
+  change (a `/login`); the next poll decides. PWA: "needs `/login`" on the exclave row; a Web
+  Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
+  clears after `/login`; an expired access token alone never reads as `expired` (daemon).
 
 ## Settled defaults (interview, 2026-10-15)
 
@@ -535,8 +627,10 @@ same PR, with the reason.
   read a prompt, forge a task, or roll one back (version binding). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
   exists (rotate). DESIGN.md's "destroys nothing that exists" paragraph gets this caveat.
-  Holding the leader's term would be a second, larger act, and as planned it is not an edge
-  case — next item.
+  M4's account records add a smaller one: being app-writable, a token holder can delete an
+  alias or overwrite it with junk that readers skip — but not read, forge or roll one back, and
+  an alias is a label, retyped in a second. Holding the leader's term would be a larger act,
+  and as planned it is not an edge case — next item.
 - **Leader capture is routine. Open: the owner decides before M2's relay leadership lands.**
   Earliest `connectedAt` wins, and `roles` is the only other gate. Device ids are
   self-certifying, so anyone with the bearer token can mint one, sign a valid register with
@@ -556,7 +650,7 @@ same PR, with the reason.
     registry entry does not open — `info` sealed `from` its own device id, the rule that
     already decides which entries become a `Machine` — as no leader. No config, nothing to
     deploy. But it changes only what readers believe: the relay still holds the term for the
-    squatter, so its `queue-put` and `queue-delete` still succeed, and no honest daemon can
+    squatter, so its `store-put` and `store-delete` still succeed, and no honest daemon can
     lead until the squatter's socket goes. It turns a silent stall into a visible one and
     stops apps sending it requests; it does not protect the queue.
 
