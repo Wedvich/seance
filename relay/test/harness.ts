@@ -1,5 +1,5 @@
 import { PROTOCOL_VERSION, type Envelope } from "@seance/shared";
-import { Miniflare } from "miniflare";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { join } from "node:path";
 
 /**
@@ -17,6 +17,7 @@ export interface TestRelay {
 
 interface WranglerConfig {
   readonly compatibility_date: string;
+  readonly compatibility_flags?: readonly string[];
   readonly durable_objects: { readonly bindings: readonly { readonly name: string; readonly class_name: string }[] };
 }
 
@@ -60,21 +61,27 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
 
-  const mf = new Miniflare({
-    modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
-    compatibilityDate: config.compatibility_date,
-    // Free-tier Durable Objects are SQLite-backed; match that here.
-    durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
-    bindings: {
-      BEARER_TOKEN: token,
-      ...(sweep === undefined
-        ? {}
-        : {
-            SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
-            SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
-          }),
-    },
-  });
+  // Miniflare 5 moved worker options under a `config` object with a different
+  // schema; the v4 shape still describes this worker exactly, so it is fed
+  // through the adapter the package ships rather than ported by hand.
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
+      compatibilityDate: config.compatibility_date,
+      compatibilityFlags: [...(config.compatibility_flags ?? [])],
+      // Free-tier Durable Objects are SQLite-backed; match that here.
+      durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
+      bindings: {
+        BEARER_TOKEN: token,
+        ...(sweep === undefined
+          ? {}
+          : {
+              SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
+              SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
+            }),
+      },
+    }),
+  );
   const url = await mf.ready;
 
   return {
