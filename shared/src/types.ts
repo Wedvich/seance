@@ -62,7 +62,15 @@ export type DaemonFrame =
       /** base64 signature over `deviceId` and `ts`, made with `key`. */
       readonly sig: string;
     }
-  | { readonly t: "msg"; readonly env: Envelope };
+  | { readonly t: "msg"; readonly env: Envelope }
+  /**
+   * The daemon's current telemetry snapshot (`op: "status"`, sealed to APP_ID
+   * like the register blob), every STATUS_INTERVAL_MS. The relay keeps only the
+   * latest, on the socket's attachment — never in storage — so it vanishes with
+   * the socket, which is right: a disconnected machine's snapshot is stale by
+   * definition. docs/scheduler.md, "Wire changes".
+   */
+  | { readonly t: "status"; readonly env: Envelope };
 
 /** Layer 1: relay→daemon frames. */
 export type RelayToDaemonFrame = { readonly t: "msg"; readonly env: Envelope };
@@ -101,6 +109,8 @@ export type ForgetRefusalCode = (typeof FORGET_REFUSAL_CODES)[number];
 export type RelayToAppFrame =
   | { readonly t: "registry"; readonly entries: readonly RegistryView[] }
   | { readonly t: "msg"; readonly env: Envelope }
+  /** A daemon's latest `status`, forwarded as it arrives — a small frame, not a registry re-push. */
+  | { readonly t: "status"; readonly deviceId: string; readonly env: Envelope }
   | {
       readonly t: "undeliverable";
       readonly to: string;
@@ -132,15 +142,27 @@ export interface RegistryEntry {
  * and never wake the object, so a stored flag would survive as a stale `true`
  * past an eviction.
  */
-export type RegistryView = RegistryEntry & { readonly connected: boolean };
+export type RegistryView = RegistryEntry & {
+  readonly connected: boolean;
+  /** The daemon's latest `status` envelope, present only while its socket is open. */
+  readonly status?: Envelope;
+};
 
-export type OpName = "sessions" | "spawn" | "despawn" | "rescan" | "machine-info" | "update-available";
+export type OpName =
+  | "sessions"
+  | "spawn"
+  | "despawn"
+  | "rescan"
+  | "machine-info"
+  | "update-available"
+  | "status"
+  | "metrics";
 
 /**
- * Ops that expect a response; `machine-info` is a stored blob and
- * `update-available` a fire-and-forget broadcast — neither correlates a reply.
+ * Ops that expect a response; `machine-info` and `status` are stored blobs and
+ * `update-available` a fire-and-forget broadcast — none correlates a reply.
  */
-export type RequestOp = Exclude<OpName, "machine-info" | "update-available">;
+export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "status">;
 
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
@@ -153,7 +175,15 @@ export const OP_TIMEOUT_MS = {
   rescan: 15_000,
   spawn: 90_000,
   despawn: 20_000,
+  metrics: 15_000,
 } as const satisfies Record<RequestOp, number>;
+
+/**
+ * Status cadence. The relay floors it per socket at STATUS_MIN_INTERVAL_MS, as
+ * it rate-limits `register`; a sender below the floor is dropped, not closed.
+ */
+export const STATUS_INTERVAL_MS = 30_000;
+export const STATUS_MIN_INTERVAL_MS = 10_000;
 
 /**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
@@ -168,8 +198,9 @@ export const HEARTBEAT_MISSES_TO_SWEEP = 3;
 
 /**
  * Decrypted message body. `ts` feeds the ±60s replay window; `re` correlates
- * a response to its request `id`. `machine-info` blobs are data at rest in
- * the registry — receivers skip the replay check for them.
+ * a response to its request `id`. `machine-info` and `status` blobs are data
+ * at rest (the registry, a socket attachment) — receivers skip the replay
+ * check for them.
  */
 export interface Plain {
   readonly id: string;
@@ -184,6 +215,32 @@ export interface RepoEntry {
   readonly path: string;
   /** From local refs only (origin/HEAD on disk); null when unset. */
   readonly defaultBranch: string | null;
+  /** Which exclave's tree this clone sits in (`ExclaveInfo.id`). Absent from older daemons. */
+  readonly exclave?: string;
+  /**
+   * The cross-machine repo key: the origin URL normalised to `host/path` (no
+   * scheme, user or `.git`), or the basename when there is no remote. `name` is
+   * machine-local and collision-disambiguated, so it cannot say "the same repo"
+   * across machines. Absent from older daemons.
+   */
+  readonly origin?: string;
+}
+
+/**
+ * One exclave as the daemon reports it: a tree at `~/<id>` whose Claude Code
+ * config dir is `~/.claude-<id>` (`default` is `~` with `~/.claude`). The
+ * `~/.exclaves` contract is in docs/scheduler.md, "Daemon changes".
+ */
+export interface ExclaveInfo {
+  readonly id: string;
+  /** `organizationUuid:accountUuid` from the config dir's `.claude.json`; null when not signed in. Never the email. */
+  readonly accountId: string | null;
+  /** Whether the account may spill into credits; null when the config dir doesn't say. */
+  readonly extraUsageEnabled: boolean | null;
+  /** The config dir holds a signed-in account. */
+  readonly authOk: boolean;
+  /** User-level skill names under the config dir — informational until M4's skill filter. */
+  readonly skills: readonly string[];
 }
 
 export interface SessionEntry {
@@ -254,6 +311,113 @@ export interface MachineInfo {
   readonly scannedAt: number;
   readonly source?: SourceInfo | null;
   readonly lastUpdate?: UpdateReport | null;
+  /**
+   * In the order `MachineStatus` indexes them. Absent from older daemons, which
+   * the scheduler then treats as ineligible for `auto` — it can't know which
+   * account a spawn would bill.
+   */
+  readonly exclaves?: readonly ExclaveInfo[];
+  /**
+   * What this daemon's handlers support beyond the base ops (`"metrics"`,
+   * later `"taskId"`, `"baseBranch"`), so no reader relies on a field an old
+   * daemon would drop. Sealed, unlike the relay-read `roles` of M2.
+   */
+  readonly capabilities?: readonly string[];
+}
+
+export const QUOTA_SOURCES = ["session", "oauth", "cache"] as const;
+
+/**
+ * Where a quota number came from, newest wins per account: `session` is a
+ * running session's statusline report, `oauth` the usage endpoint poll (M4),
+ * `cache` the `cachedUsageUtilization` Claude Code itself leaves in the config
+ * dir's `.claude.json` — M1's only source, and the floor for an idle exclave.
+ */
+export type QuotaSource = (typeof QUOTA_SOURCES)[number];
+
+/**
+ * One account's newest quota observation on this daemon. Keys are short and
+ * every number an integer: the whole `status` must fit a DO socket attachment
+ * (2 KiB, shared with the socket's identity), and the inputs are already
+ * smoothed or stepped, so a float would claim precision nobody has.
+ */
+export interface QuotaObservation {
+  /** Index into the register blob's `exclaves`; the account id lives there, not here. */
+  readonly x: number;
+  /** Five-hour window used, whole percent. */
+  readonly h?: number;
+  /** Seven-day window used, whole percent. */
+  readonly d?: number;
+  /** Five-hour window resets at, unix seconds. */
+  readonly hr?: number;
+  /** Seven-day window resets at, unix seconds. */
+  readonly dr?: number;
+  readonly s: QuotaSource;
+  /** Observed at, unix seconds. */
+  readonly at: number;
+}
+
+/**
+ * Payload of the sealed `status` blob (`op: "status"`). Pressure fractions are
+ * whole percent, smoothed over ~2 min daemon-side so no reader needs a window
+ * of its own. Absent fields are unknown — never null — so the blob stays small.
+ *
+ * Indexed fields (`sess`, `quota[].x`) refer to the register blob's `exclaves`,
+ * and `scan` names which blob: a status whose `scan` disagrees with the
+ * `MachineInfo.scannedAt` a reader holds is dropped for that tick, the same
+ * rule the app applies between `rescan` and `machine-info`.
+ *
+ * "The register blob's" is load-bearing on both ends. Three scan stamps exist:
+ * the daemon's `state.scannedAt` advances on every hourly rescan but a
+ * re-register happens only when the repo set changed (`daemon/src/run.ts`), and
+ * a `rescan` reply stamps a third `Date.now()` that the app merges into
+ * `Machine.scannedAt`. The sender stamps the blob it last *registered*; the
+ * reader compares against that blob's decrypted `scannedAt`, never against
+ * `Machine.scannedAt` — either slip drops every status until the next
+ * repo-set change.
+ */
+export interface MachineStatus {
+  /** Sampled at, unix seconds. */
+  readonly at: number;
+  /** `MachineInfo.scannedAt` of the register blob whose `exclaves` this indexes — ms, as that field is. */
+  readonly scan: number;
+  readonly cpu?: number;
+  readonly mem?: number;
+  readonly disk?: number;
+  /** Disk free, MiB. */
+  readonly free?: number;
+  /** Disk read / write rate, KiB/s. */
+  readonly rd?: number;
+  readonly wr?: number;
+  /** Running sessions per exclave, by index. */
+  readonly sess?: readonly number[];
+  readonly quota?: readonly QuotaObservation[];
+}
+
+/** Resolutions the daemon's metrics store keeps, seconds — raw, 5-min and hourly tiers. */
+export const METRICS_STEPS = [30, 300, 3600] as const;
+
+export type MetricsStep = (typeof METRICS_STEPS)[number];
+
+/** `op: "metrics"` — history from the daemon's local store; the PWA asks when a chart opens. */
+export interface MetricsRequest {
+  /** Unix seconds, inclusive. */
+  readonly from: number;
+  readonly to: number;
+  readonly step: MetricsStep;
+}
+
+/** Prometheus's data model and nothing else, so an external metrics stack is a consumer, not a redesign. */
+export interface MetricsSeries {
+  readonly metric: string;
+  /** `machine`, `exclave`, `account` as applicable. */
+  readonly labels: Readonly<Record<string, string>>;
+  /** `[unix seconds, value]`, ascending. */
+  readonly points: readonly (readonly [number, number])[];
+}
+
+export interface MetricsResponse {
+  readonly series: readonly MetricsSeries[];
 }
 
 export type SpawnMode = "worktree" | "here";

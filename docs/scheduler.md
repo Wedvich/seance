@@ -29,7 +29,7 @@ stay as they are; the table says which word each one means.
 | Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
 | Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                       |
 | Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` — never the email                                                                                                                                                                                             |
-| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → last value + `resets_at` floor                                                                                                                                                                   |
+| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                    |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                 |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                             |
 | Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                |
@@ -144,14 +144,29 @@ env }]`, `queue-put { id, expect, env, term? }` → `{ version }` or `version_co
   tick. Well inside free-tier limits for a handful of machines and tens of tasks.
 
 **`status` payload** (`MachineStatus` in `types.ts`): `at`; cpu, mem, disk pressure as
-0–1 fractions (each already smoothed over ~2 min daemon-side, so the scheduler needs no window
+whole percent (each already smoothed over ~2 min daemon-side, so the scheduler needs no window
 of its own) plus disk free and r/w rates; running sessions per exclave; and `quota`: this
 daemon's newest observation per account (5h/7d pct, `resets_at`, source
-`session`/`oauth`, observed-at). Quota for one account is spread over every daemon
+`session`/`oauth`/`cache`, observed-at). Quota for one account is spread over every daemon
 hosting one of its exclaves; readers take the newest observation per account.
 
+**Encoding (settled 2026-10-15, PR 1).** The blob must fit a DO socket attachment — 2 KiB,
+shared with the socket's identity — and base64 costs a third, so: every number is an integer
+(whole percent, unix seconds, MiB), keys are short, an unknown field is absent rather than
+`null`, and quota entries name their account by **index into the register blob's `exclaves`**
+rather than by the 73-char account id. `status.scan` carries that blob's `scannedAt`, and a
+reader drops a status whose stamp disagrees with the blob it holds — the rule the app already
+applies between `rescan` and `machine-info`. "That blob" means the one last _registered_: the
+daemon's `state.scannedAt` moves on every hourly rescan while a re-register happens only on a
+changed repo set, and a `rescan` reply carries a third stamp that lands on `Machine.scannedAt` —
+the sender must keep the registered stamp, and the reader must compare against the decrypted
+register blob, not the merged `Machine`, or every status is dropped until the repo set next
+changes. Rejected: a positional tuple or bit-packed body —
+it saves ~100 bytes and loses the optional-field skew tolerance every other blob relies on.
+
 **New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:
-`metrics { range, resolution }` → `{ series }` from the daemon's local store. The PWA calls it
+`metrics { from, to, step }` → `{ series }` from the daemon's local store, `step` one of the
+store's three tiers (30s, 5 min, 1 h). The PWA calls it
 when a chart is opened; nothing else needs it. History of an asleep machine is unavailable
 until it wakes — accepted.
 
@@ -380,7 +395,9 @@ the newest quota observation per account, and open a history chart — without a
 2. `exclaves.ts` — the `~/.exclaves` contract, clones mapped by path prefix, account/auth
    presence per config dir. Daemon-only, no wire change; runs in parallel with 3.
 3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
-   observations from session reports. Daemon-only; parallel with 2.
+   observations read from each config dir's `.claude.json` (`cachedUsageUtilization`, which
+   Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
+   this is M1's only producer. Daemon-only; parallel with 2.
 4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
    `registry` includes the latest per connected daemon.
 5. `metrics` op — daemon handler over the store; app-side request.
@@ -400,8 +417,10 @@ the newest quota observation per account, and open a history chart — without a
 - `status` round-trips through the real DO to a real app client (e2e).
 
 **Gaps.** No scheduler: you pick the exclave by hand and read the pressure yourself. Quota
-is session-reported only (OAuth poll is M4), so an idle exclave shows a stale number with its
-observed-at. Proxmox node view absent (M4); LXCs report their cgroup view.
+comes only from Claude Code's own cached utilization per config dir (session reports are M2,
+the OAuth poll M4), so an exclave shows whatever its last Claude session left, with its
+observed-at — and nothing at all until one has run there. Proxmox node view absent (M4); LXCs
+report their cgroup view.
 
 **Record.** DESIGN.md _Presence & identity_ (status on the attachment), _Wire protocol_ (frame
 table rows), _Daemon_ (exclaves, telemetry, the contract paragraph), _PWA_.
