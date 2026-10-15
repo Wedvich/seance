@@ -12,6 +12,7 @@ import {
   type Config,
   type ResolvedPsk,
 } from "./config.ts";
+import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -48,6 +49,8 @@ export interface RunOpts {
   /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
   readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
+  /** Where `.exclaves` and the config dirs live; defaults to `homedir()`. Tests point it at a fixture. */
+  readonly home?: string;
   /** How often the reap schedule asks whether a run is due; tests shorten it. */
   readonly reapCheckIntervalMs?: number;
   /**
@@ -71,6 +74,12 @@ export interface SelfUpdateOpts {
   readonly root?: string;
   readonly debounceMs?: number;
   readonly effects?: UpdateEffects;
+}
+
+/** Every scan, not once: the line nags until the file is fixed, which is the point. */
+function warnRejected(scan: ExclaveScan): void {
+  if (scan.rejected.length === 0) return;
+  log.warn(`~/.exclaves: skipped ${scan.rejected.map((line) => JSON.stringify(line)).join(", ")}`);
 }
 
 /** Wires config/state/scan/handlers into a running relay client. */
@@ -106,12 +115,21 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     await saveState(state);
   }
 
+  // Read with the repos, so the blob's `exclaves` and each repo's `exclave`
+  // come from one reading of `.exclaves`: a status quota entry indexes into
+  // this list, and the cached repos get re-tagged here so the instant register
+  // below can't pair a stale tag with a fresh list.
+  let exclaveScan = await scanExclaves(opts.home);
+  warnRejected(exclaveScan);
+  state = { ...state, repos: tagExclaves(state.repos, exclaveScan.exclaves) };
+
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
       platform: process.platform,
       repos: state.repos,
       scannedAt: state.scannedAt ?? 0,
+      exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
     };
@@ -130,13 +148,20 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let stopped = false;
 
   const rescan = async (): Promise<State["repos"]> => {
-    const scanned = await scanRepos(config.repoRoots, state.repos);
+    const [repos, exclaves] = await Promise.all([scanRepos(config.repoRoots, state.repos), scanExclaves(opts.home)]);
+    const scanned = tagExclaves(repos, exclaves.exclaves);
     if (stopped) return scanned;
-    const changed = !repoSetsEqual(scanned, state.repos);
+    warnRejected(exclaves);
+    // A sign-in or a new line in `.exclaves` re-registers like a new clone does:
+    // the blob is the only place apps learn either from.
+    const changed = !repoSetsEqual(scanned, state.repos) || !exclaveInfoEqual(exclaves.info, exclaveScan.info);
+    exclaveScan = exclaves;
     state = { ...state, repos: scanned, scannedAt: Date.now() };
     await saveState(state);
     if (changed) {
-      log.info(`repo set changed (${scanned.length} repos) — re-registering`);
+      log.info(
+        `repo set or exclaves changed (${scanned.length} repos, ${exclaves.info.length} exclaves) — re-registering`,
+      );
       await client.reRegister();
     }
     return scanned;

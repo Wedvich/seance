@@ -1,9 +1,9 @@
-import { readdir, realpath } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
 import { git } from "./exec.ts";
-import { inspectCheckout, resolveCommonDir } from "./gitdir.ts";
+import { canonical, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
 const SCAN_CONCURRENCY = 16;
 
@@ -34,6 +34,70 @@ async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
   return match?.[1]?.trim() ?? null;
 }
 
+/**
+ * The scheduler's repo key: the same across machines where a clone's name
+ * (machine-local, collision-disambiguated) is not. Scheme, userinfo and the
+ * `.git` suffix go, scp-style `host:path` becomes `host/path`, and the whole
+ * thing is lowercased — the hosts we route to compare case-insensitively, and
+ * a key that differs by case would split one repo in two. A local path (or
+ * `file://`) is some machine's mirror, not a repo identity, so it reads as no
+ * remote. Null when nothing usable remains.
+ */
+export function normalizeOrigin(url: string): string | null {
+  let rest = url.trim();
+  if (rest === "" || rest.startsWith("/") || rest.startsWith(".")) return null;
+  const scheme = rest.match(/^([a-z][a-z0-9+.-]*):\/\//iu);
+  if (scheme !== null) {
+    if (scheme[1]?.toLowerCase() === "file") return null;
+    rest = rest.slice(scheme[0].length).replace(/^[^/@]*@/u, "");
+  } else {
+    // scp-like: `[user@]host:path`
+    const scp = rest.match(/^(?:[^/@:]+@)?([^/:]+):(.*)$/u);
+    if (scp === null) return null;
+    rest = `${scp[1]}/${scp[2]?.replace(/^\/+/u, "") ?? ""}`;
+  }
+  rest = rest
+    .replace(/\/+$/u, "")
+    .replace(/\.git$/iu, "")
+    .replace(/\/+$/u, "")
+    .toLowerCase();
+  return rest.includes("/") ? rest : null;
+}
+
+/**
+ * `remote.origin.url` from the common dir's config — the same read `git
+ * remote get-url origin` does, without the process. The parser covers what a
+ * config written by git holds: sections, `key = value`, comments. `include`
+ * directives and `url.<base>.insteadOf` rewrites are not followed, so a repo
+ * that only names its remote through them reads as remote-less.
+ */
+export async function readOriginUrl(commonDir: string): Promise<string | null> {
+  let text: string;
+  try {
+    text = await Bun.file(join(commonDir, "config")).text();
+  } catch {
+    return null;
+  }
+  let inOrigin = false;
+  for (const line of text.split(/\r?\n/u)) {
+    const section = line.match(/^\s*\[([^\s"\]]+)(?:\s+"((?:[^"\\]|\\.)*)")?\]/u);
+    if (section !== null) {
+      inOrigin = section[1]?.toLowerCase() === "remote" && section[2] === "origin";
+      continue;
+    }
+    if (!inOrigin) continue;
+    const entry = line.match(/^\s*url\s*=\s*(.*?)\s*$/iu);
+    if (entry === null) continue;
+    const raw = entry[1] ?? "";
+    // Quoted values keep everything; bare ones end at a comment marker.
+    const value = raw.startsWith('"')
+      ? (raw.match(/^"((?:[^"\\]|\\.)*)"/u)?.[1] ?? "")
+      : raw.replace(/\s*[#;].*$/u, "");
+    return value === "" ? null : value; // first `url` is the fetch URL
+  }
+  return null;
+}
+
 async function listDirs(parent: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(parent, { withFileTypes: true });
@@ -42,15 +106,6 @@ async function listDirs(parent: string): Promise<readonly string[]> {
       .map((e) => join(parent, e.name));
   } catch {
     return []; // missing/unreadable root — doctor flags it, scan stays quiet
-  }
-}
-
-/** tmux reports kernel-canonical pane paths (macOS: /var → /private/var) — store canonical paths so prefix mapping works. */
-async function canonical(p: string): Promise<string> {
-  try {
-    return await realpath(p);
-  } catch {
-    return p;
   }
 }
 
@@ -72,6 +127,7 @@ async function discoverRepoPaths(roots: readonly string[]): Promise<readonly str
   const collect = async (dir: string): Promise<boolean> => {
     const { kind } = await inspectCheckout(dir);
     if (kind === "none") return false;
+    // tmux reports kernel-canonical pane paths (macOS: /var → /private/var) — store canonical paths so prefix mapping works.
     if (kind === "main") found.add(await canonical(dir));
     return true;
   };
@@ -131,6 +187,8 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
  * carries forward from the
  * previous scan when already resolved — default branches practically never
  * change — and is read from local refs only for new (or still-null) repos.
+ * `origin` is re-read every scan: one file, no process, and a remote does get
+ * repointed. Basename when there is none — a key, so never absent.
  */
 export async function scanRepos(
   roots: readonly string[],
@@ -139,16 +197,22 @@ export async function scanRepos(
   const prevByPath = new Map(previous.map((r) => [r.path, r]));
   const paths = await discoverRepoPaths(roots);
   const names = assignNames(paths);
-  const entries = await Promise.all(
-    paths.map(async (path): Promise<RepoEntry> => {
-      const cached = prevByPath.get(path)?.defaultBranch ?? null;
-      return {
-        name: names.get(path) ?? path,
-        path,
-        defaultBranch: cached ?? (await readDefaultBranch(path)),
-      };
-    }),
-  );
+  // Bounded like the walk: this is per-repo I/O on every scan now, not only for new clones.
+  const entries = await scanLimit(paths, async (path): Promise<RepoEntry> => {
+    const cached = prevByPath.get(path)?.defaultBranch ?? null;
+    const commonDir = await resolveCommonDir(path);
+    const [defaultBranch, url] = await Promise.all([
+      cached ?? readDefaultBranch(path),
+      commonDir === null ? null : readOriginUrl(commonDir),
+    ]);
+    const origin = url === null ? null : normalizeOrigin(url);
+    return {
+      name: names.get(path) ?? path,
+      path,
+      defaultBranch,
+      origin: origin ?? basename(path),
+    };
+  });
   return entries.toSorted((a, b) => a.name.localeCompare(b.name));
 }
 

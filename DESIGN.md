@@ -1090,6 +1090,44 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   (slow, noisy), authoritative default-branch resolution at scan time
   (turns a 19ms local walk into a multi-second networked operation that
   fails offline).
+  Each entry also carries `origin`, the repo's identity _across_ machines
+  (docs/scheduler.md keys tasks by it): `remote.origin.url` read from the common
+  dir's config — the same file `git remote get-url` reads, no process — with
+  scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
+  `host/path`, and the whole lowercased (the hosts we route to compare
+  case-insensitively; a key that differed by case would split one repo in two).
+  Basename when there is no remote, or only a local/`file://` one — some
+  machine's mirror is not an identity. Re-read every scan, not carried
+  forward: a remote does get repointed, and the read is one file. Not followed:
+  `include` directives and `url.<base>.insteadOf`, so a repo that only names its
+  remote through those keys by basename. Known split: the same repo over https
+  and ssh on different machines keys differently (`dev.azure.com/…` vs
+  `ssh.dev.azure.com/v3/…`); fold hosts when it bites.
+- **Exclaves** (`daemon/src/exclaves.ts`, added 2026-10-15 for the scheduler):
+  an exclave is a tree at `~/<name>` whose Claude Code config dir is
+  `~/.claude-<name>`, signed into one account; `default` is `~` with `~/.claude`.
+  The daemon reports which exclave each clone sits in (`RepoEntry.exclave`,
+  longest named root by path prefix, `default` for the rest of `~` and anything
+  outside it) and, per exclave, what its config dir says (`MachineInfo.exclaves`:
+  `accountId` = `organizationUuid:accountUuid` and the extra-usage flag from
+  `.claude.json`'s `oauthAccount`, `authOk` = that object's presence, `skills` =
+  directory names under `skills/`). Nothing else in that file is read — it holds
+  no token — and the daemon never sets a config dir: the owner's shell hook picks
+  it by cwd, so location is the whole fact. **The `~/.exclaves` contract**: one
+  name per line matching `^[a-z0-9][a-z0-9-]*$`; `default` is implied and a
+  line saying it is stray. The daemon validates every line and skips the rest
+  with one log line, so a stray line costs one exclave, never the scan; a listed
+  tree that doesn't exist yet is still an exclave (signed out, no clones). The
+  file has two readers — the owner's dotfiles maintain it, the daemon only reads
+  it — and this paragraph is the agreement between them: a format change there
+  is a daemon change here. Read with every repo scan (startup, hourly, `rescan`)
+  from one reading, so the blob's `exclaves` and each repo's tag never come
+  from two versions of the file — `status` quota entries index into that list
+  (docs/scheduler.md, "Encoding") — and a change in either re-registers, as a
+  new clone does. Rejected: an mtime watch on `~/.exclaves` (the hourly scan is
+  the cadence everything else in the blob already has, and a sign-in changes
+  `.claude.json`, not the list); reporting the config dir path (derivable, and
+  the app has no use for a path it can't open).
 - **Session detection**: list all tmux panes across all sessions, dedup by
   window id (grouped sessions repeat windows), count a window as a session by
   one predicate, `isRegistered` in `sessions.ts`, which the spawn path shares.
