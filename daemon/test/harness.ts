@@ -50,6 +50,8 @@ export interface TestRelay {
   readonly registers: AsyncQueue<RegisterFrame>;
   readonly messages: AsyncQueue<Envelope>;
   autoPong: boolean;
+  /** Close every register the way the real DO refuses an id another live socket holds. */
+  refuseRegisters: boolean;
   rejectedCount: () => number;
   connectionCount: () => number;
   sendToDaemon: (env: Envelope) => void;
@@ -66,7 +68,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   let rejected = 0;
   let connections = 0;
 
-  const relay: { autoPong: boolean } = { autoPong: true };
+  const relay: { autoPong: boolean; refuseRegisters: boolean } = { autoPong: true, refuseRegisters: false };
 
   const server = Bun.serve({
     port,
@@ -90,6 +92,11 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
         }
         const frame = JSON.parse(text) as DaemonFrame;
         if (frame.t === "register") {
+          if (relay.refuseRegisters) {
+            registers.push(frame);
+            ws.close(1000, "device id in use");
+            return;
+          }
           daemons.set(frame.deviceId, ws);
           socketDevices.set(ws, frame.deviceId);
           registers.push(frame);
@@ -115,6 +122,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set autoPong(value: boolean) {
       relay.autoPong = value;
+    },
+    get refuseRegisters() {
+      return relay.refuseRegisters;
+    },
+    set refuseRegisters(value: boolean) {
+      relay.refuseRegisters = value;
     },
     rejectedCount: () => rejected,
     connectionCount: () => connections,

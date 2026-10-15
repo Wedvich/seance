@@ -11,4 +11,5 @@ export interface Env {
    */
   readonly SWEEP_INTERVAL_MS?: string;
   readonly SWEEP_SILENCE_LIMIT_MS?: string;
+  readonly SUPERSEDE_SILENCE_MS?: string;
 }

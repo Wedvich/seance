@@ -54,6 +54,8 @@ function workerBundle(): Promise<string> {
 export interface SweepOverrides {
   readonly sweepIntervalMs: number;
   readonly sweepSilenceLimitMs: number;
+  /** Defaults to the sweep limit, so a suite that sets only the two above keeps one notion of silence. */
+  readonly supersedeSilenceMs?: number;
 }
 
 export async function startRelay(token: string, sweep?: SweepOverrides): Promise<TestRelay> {
@@ -78,6 +80,7 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
           : {
               SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
               SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
+              SUPERSEDE_SILENCE_MS: String(sweep.supersedeSilenceMs ?? sweep.sweepSilenceLimitMs),
             }),
       },
     }),

@@ -46,6 +46,8 @@ export class RelayClient {
   readonly #guard = new ReplayGuard();
   #ws: WebSocket | null = null;
   #attempt = 0;
+  /** Whether the current socket reached `open` — a connect that failed outright must not reset backoff. */
+  #opened = false;
   #stopped = false;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -119,9 +121,10 @@ export class RelayClient {
       perMessageDeflate: false,
     });
     this.#ws = ws;
+    this.#opened = false;
 
     ws.addEventListener("open", () => {
-      this.#attempt = 0;
+      this.#opened = true;
       log.info(`connected to ${this.#opts.url}`);
       void this.#register();
       this.#startHeartbeat();
@@ -132,20 +135,29 @@ export class RelayClient {
       void this.#onMessage(typeof event.data === "string" ? event.data : "");
     });
 
-    ws.addEventListener("close", () => this.#onDrop("closed"));
+    ws.addEventListener("close", (event) => this.#onDrop("closed", event.code, event.reason));
     ws.addEventListener("error", () => this.#onDrop("errored"));
   }
 
-  #onDrop(why: string): void {
+  #onDrop(why: string, code?: number, reason?: string): void {
     if (this.#ws === null) return; // already handled (close after error)
     this.#ws = null;
     this.#teardownHeartbeat();
     this.#opts.onDisconnect?.();
     if (this.#stopped) return;
+    // The relay refuses a register for an id another live socket holds by
+    // closing the new one — so a socket that opened is not proof the register
+    // was accepted. Backoff resets only on the drop of a socket that was not
+    // refused: a refusal keeps it growing, so a daemon whose id is held redials
+    // at the capped rate rather than once per base interval, and the reason is
+    // logged because the close is the only word the relay sends about it.
+    const refused = reason === "device id in use";
+    if (this.#opened && !refused) this.#attempt = 0;
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);
     const delay = Math.random() * capped; // full jitter
     this.#attempt += 1;
-    log.warn(`relay socket ${why} — reconnecting in ${Math.round(delay)}ms`);
+    const detail = code === undefined ? "" : ` code=${code}${reason ? ` reason=${quote(reason)}` : ""}`;
+    log.warn(`relay socket ${why}${detail} — reconnecting in ${Math.round(delay)}ms`);
     this.#reconnectTimer = setTimeout(() => this.#dial(), delay);
   }
 

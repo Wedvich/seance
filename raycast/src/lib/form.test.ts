@@ -338,6 +338,7 @@ function relayOf(machines: readonly Machine[]): RelayState {
     machines,
     registrySize: machines.length,
     ignored: 0,
+    unbound: 0,
     skewed: 0,
     settling: false,
     registrySettled: true,

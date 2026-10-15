@@ -67,7 +67,12 @@ function makeConfig(relayUrl: string): Config {
 
 async function startTestDaemon(
   relayUrl: string,
-  overrides: { readonly spawnWaitMs?: number; readonly pingIntervalMs?: number; readonly pongTimeoutMs?: number } = {},
+  overrides: {
+    readonly spawnWaitMs?: number;
+    readonly pingIntervalMs?: number;
+    readonly pongTimeoutMs?: number;
+    readonly maxBackoffMs?: number;
+  } = {},
 ): Promise<DaemonHandle> {
   const config = makeConfig(relayUrl);
   const { spawnWaitMs = 700, ...rest } = overrides;
@@ -332,6 +337,34 @@ describe("daemon ↔ relay integration", () => {
       }
     } finally {
       daemon.stop();
+    }
+  });
+
+  // The relay answers a register for an id another live socket holds by closing
+  // the new socket, so from here it looks like a connect that succeeded and then
+  // dropped. Treating that as success would reset backoff and turn the refusal
+  // into a redial every base interval; the refusal is spelled out in the log
+  // and the backoff keeps growing until the relay lets the daemon in.
+  test("a refused register keeps backing off instead of redialing at the base rate", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.refuseRegisters = true;
+    const lines: string[] = [];
+    const realWarn = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    const daemon = await startTestDaemon(relay.url, { maxBackoffMs: 400 });
+    try {
+      await relay.registers.next();
+      await Bun.sleep(1_000);
+      // Backoff grows 20→40→…→400ms (full jitter) from the first refusal on: on
+      // the order of ten attempts in a second. A reset on every `open` gives ~50.
+      expect(relay.connectionCount()).toBeLessThanOrEqual(25);
+      expect(lines.some((line) => line.includes('relay socket closed code=1000 reason="device id in use"'))).toBe(true);
+    } finally {
+      console.log = realWarn;
+      daemon.stop();
+      relay.stop();
     }
   });
 
