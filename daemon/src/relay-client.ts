@@ -52,6 +52,8 @@ export class RelayClient {
     RelayClientOpts;
   readonly #guard = new ReplayGuard();
   #ws: WebSocket | null = null;
+  /** Whether a register frame has left the current socket: the relay drops any other frame before one. */
+  #registered = false;
   #attempt = 0;
   /** Whether the current socket reached `open` — a connect that failed outright must not reset backoff. */
   #opened = false;
@@ -119,7 +121,7 @@ export class RelayClient {
    * the relay's log carries each `iv` for the rare one worth chasing.
    */
   async sendStatus(status: MachineStatus): Promise<boolean> {
-    if (!this.connected) return false;
+    if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: status };
     const sealed = await seal(this.#opts.key, { to: APP_ID, from: this.#opts.identity.deviceId }, plain);
     const ws = this.#ws;
@@ -145,6 +147,7 @@ export class RelayClient {
     const ws = this.#ws;
     if (ws === null) return;
     ws.send(JSON.stringify(frame));
+    this.#registered = true;
     this.#opts.onRegister?.();
   }
 
@@ -160,6 +163,7 @@ export class RelayClient {
     });
     this.#ws = ws;
     this.#opened = false;
+    this.#registered = false;
 
     ws.addEventListener("open", () => {
       this.#opened = true;

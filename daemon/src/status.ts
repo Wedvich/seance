@@ -37,22 +37,29 @@ function withoutResets(quota: readonly QuotaObservation[]): readonly QuotaObserv
  */
 export function fitStatus(status: MachineStatus, budget = STATUS_PAYLOAD_BUDGET): MachineStatus {
   if (statusBytes(status) <= budget) return status;
-  const quota = status.quota ?? [];
-  const steps: (() => readonly QuotaObservation[])[] = [
-    () => withoutModelWindows(quota),
-    () => withoutResets(withoutModelWindows(quota)),
-  ];
-  for (const step of steps) {
-    const trimmed = { ...status, quota: step() };
-    if (statusBytes(trimmed) <= budget) return trimmed;
+  if (status.quota !== undefined) {
+    const { quota } = status;
+    const steps: (() => readonly QuotaObservation[])[] = [
+      () => withoutModelWindows(quota),
+      () => withoutResets(withoutModelWindows(quota)),
+    ];
+    for (const step of steps) {
+      const trimmed = { ...status, quota: step() };
+      if (statusBytes(trimmed) <= budget) return trimmed;
+    }
+    let kept = withoutResets(withoutModelWindows(quota));
+    while (kept.length > 1) {
+      kept = kept.slice(0, -1);
+      const trimmed = { ...status, quota: kept };
+      if (statusBytes(trimmed) <= budget) return trimmed;
+    }
   }
-  let kept = withoutResets(withoutModelWindows(quota));
-  while (kept.length > 0) {
-    kept = kept.slice(0, -1);
-    const trimmed = kept.length === 0 ? withoutQuota(status) : { ...status, quota: kept };
-    if (statusBytes(trimmed) <= budget) return trimmed;
-  }
-  return withoutQuota(status);
+  const pressureOnly = withoutQuota(status);
+  if (statusBytes(pressureOnly) <= budget) return pressureOnly;
+  // Only an exclave list far past anything real gets here; a frame over the
+  // bound is refused whole, so even `sess` goes before the pressure does.
+  const { sess: _sess, ...pressure } = pressureOnly;
+  return pressure;
 }
 
 function withoutQuota({ quota: _quota, ...rest }: MachineStatus): MachineStatus {

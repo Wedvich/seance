@@ -96,7 +96,7 @@ interface SocketAttachment {
   /**
    * The daemon's latest `status`, kept here and never in storage: no write per
    * sample, and it goes with the socket — a disconnected machine's snapshot is
-   * stale by definition. Bounded by `MAX_STATUS_CT_LENGTH` so it and the
+   * stale by definition. Bounded by `STATUS_MAX_CT_LENGTH` so it and the
    * identity fit the attachment's 2 KiB together.
    */
   readonly status?: SocketStatus;
@@ -321,7 +321,7 @@ export class Hub implements DurableObject {
    * same id forever.
    */
   async #forget(ws: WebSocket, deviceId: string): Promise<void> {
-    if (this.#connectedIds([]).has(deviceId)) {
+    if (this.#liveSockets([]).has(deviceId)) {
       const refusal: RelayToAppFrame = { t: "forget-refused", deviceId, code: "connected" };
       ws.send(JSON.stringify(refusal));
       console.log(`refused forget ${deviceId}: connected`);
@@ -555,10 +555,6 @@ export class Hub implements DurableObject {
       });
     }
     return views;
-  }
-
-  #connectedIds(exclude: readonly WebSocket[]): ReadonlySet<string> {
-    return new Set(this.#liveSockets(exclude).keys());
   }
 
   /**
