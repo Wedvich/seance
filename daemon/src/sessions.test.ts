@@ -231,6 +231,10 @@ describe("stuckWindows", () => {
     expect(stuckWindows(parsePaneInfo(literal))).toEqual([]);
   });
 
+  test("a window with no name is reported by its id — what an automatic name can be on macOS", () => {
+    expect(stuckWindows(parsePaneInfo(infoLine({ pane: "%8", window: "@8", titled: "0", name: "" })))).toEqual(["@8"]);
+  });
+
   test("dedups split panes by window id", () => {
     const raw = [
       infoLine({ pane: "%6", window: "@6", titled: "0", name: "one" }),

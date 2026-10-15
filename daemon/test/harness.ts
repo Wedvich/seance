@@ -19,6 +19,9 @@ export class AsyncQueue<T> {
   readonly #items: T[] = [];
   readonly #waiters: ((value: T) => void)[] = [];
 
+  /** Named in the timeout error: a stack that stops in this file can't say which queue starved. */
+  constructor(readonly name: string) {}
+
   push(item: T): void {
     const waiter = this.#waiters.shift();
     if (waiter !== undefined) waiter(item);
@@ -29,7 +32,10 @@ export class AsyncQueue<T> {
     const item = this.#items.shift();
     if (item !== undefined) return item;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`AsyncQueue: nothing arrived in ${timeoutMs}ms`)), timeoutMs);
+      const timer = setTimeout(
+        () => reject(new Error(`AsyncQueue(${this.name}): nothing arrived in ${timeoutMs}ms`)),
+        timeoutMs,
+      );
       this.#waiters.push((value) => {
         clearTimeout(timer);
         resolve(value);
@@ -63,9 +69,9 @@ export interface TestRelay {
 }
 
 export function startTestRelay(bearerToken: string, port = 0): TestRelay {
-  const registers = new AsyncQueue<RegisterFrame>();
-  const messages = new AsyncQueue<Envelope>();
-  const statuses = new AsyncQueue<Envelope>();
+  const registers = new AsyncQueue<RegisterFrame>("registers");
+  const messages = new AsyncQueue<Envelope>("messages");
+  const statuses = new AsyncQueue<Envelope>("statuses");
   const daemons = new Map<string, Bun.ServerWebSocket<unknown>>();
   const socketDevices = new Map<Bun.ServerWebSocket<unknown>, string>();
   let rejected = 0;

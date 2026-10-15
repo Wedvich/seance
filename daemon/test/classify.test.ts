@@ -31,13 +31,32 @@ afterAll(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
+/**
+ * Named at creation, as `spawn.ts` names every window: an automatic name is
+ * whatever tmux caught mid-exec — on macOS `kernel_task`, `tmux` or `""` (most
+ * often under an `automatic-rename-format` of `#{b:pane_current_path}`).
+ */
+const OURS_WINDOW = "seance-stub";
+
 /** A window séance would recognise as its own: the start command carries `--remote-control`. */
 async function ours(wrapper: string): Promise<string> {
-  return open(`exec ${wrapper} --remote-control`);
+  return open(`exec ${wrapper} --remote-control`, ["-n", OURS_WINDOW]);
 }
 
-async function open(command: string): Promise<string> {
-  const paneId = await tmuxOk(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${session}:`, "-c", base, command]);
+async function open(command: string, extra: readonly string[] = []): Promise<string> {
+  const paneId = await tmuxOk([
+    "new-window",
+    "-d",
+    "-P",
+    "-F",
+    "#{pane_id}",
+    "-t",
+    `${session}:`,
+    "-c",
+    base,
+    ...extra,
+    command,
+  ]);
   return paneId.trim();
 }
 
@@ -75,8 +94,7 @@ describe("classifyPane (real tmux, stub claude)", () => {
   test("a séance claude that never titled its pane is starting, and is what doctor calls stuck", async () => {
     const paneId = await ours(stub.stuck);
     expect(await stateOf(paneId)).toBe("starting");
-    const windowName = (await pane(paneId))?.windowName;
-    expect(await listStuckWindows()).toContain(windowName ?? "");
+    expect(await listStuckWindows()).toContain(OURS_WINDOW);
   });
 
   test("a titled séance claude on its ordinary screen is live", async () => {
