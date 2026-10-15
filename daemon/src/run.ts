@@ -20,7 +20,7 @@ import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
-import { loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
+import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
 /**
@@ -92,6 +92,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   if (logProblem !== null) log.warn(logProblem);
 
   let state: State = await loadOrInitState();
+  const identity = await identityOfState(state);
   const key = await importPsk(resolved.psk);
   const startedAt = Date.now();
 
@@ -182,7 +183,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
-    deviceId: state.deviceId,
+    identity,
     key,
     buildInfo,
     handle: createHandler(handlerCtx),

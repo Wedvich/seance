@@ -51,7 +51,17 @@ export interface Envelope {
  * "ping"/"pong" (not JSON) so DO auto-response can answer without waking.
  */
 export type DaemonFrame =
-  | { readonly t: "register"; readonly deviceId: string; readonly info: Envelope }
+  | {
+      readonly t: "register";
+      readonly deviceId: string;
+      readonly info: Envelope;
+      /** base64 raw ML-DSA-65 public key; `deviceId` is its SHA-256 (`shared/src/identity.ts`). */
+      readonly key: string;
+      /** Signing time, ms — the relay refuses one outside `REGISTER_FRESHNESS_MS`. */
+      readonly ts: number;
+      /** base64 signature over `deviceId` and `ts`, made with `key`. */
+      readonly sig: string;
+    }
   | { readonly t: "msg"; readonly env: Envelope };
 
 /** Layer 1: relay→daemon frames. */

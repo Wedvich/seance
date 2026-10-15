@@ -2,9 +2,10 @@ import {
   APP_ID,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
-  HEARTBEAT_PONG_TIMEOUT_MS,
   MACHINES_ID,
   quote,
+  verifyRegister,
+  type DaemonFrame,
   type Envelope,
   type RegistryEntry,
   type RegistryView,
@@ -74,11 +75,6 @@ const MAX_REGISTERS_PER_WINDOW = 10;
  */
 const SWEEP_INTERVAL_MS = 60_000;
 const SWEEP_SILENCE_LIMIT_MS = HEARTBEAT_MISSES_TO_SWEEP * HEARTBEAT_INTERVAL_MS;
-// How long an incumbent socket may be silent before a register for its id takes
-// the route. Matched to the daemon's own verdict — it closes a socket after one
-// missed pong and redials — so a zombie left by a network change is displaced
-// by its owner's redial rather than refused until the sweep's three misses.
-const SUPERSEDE_SILENCE_MS = HEARTBEAT_INTERVAL_MS + HEARTBEAT_PONG_TIMEOUT_MS;
 
 /** Vars arrive as strings; anything unparsable falls back to the default. */
 function msOverride(value: string | undefined): number | null {
@@ -114,13 +110,11 @@ export class Hub implements DurableObject {
   readonly #ctx: DurableObjectState;
   readonly #sweepIntervalMs: number;
   readonly #silenceLimitMs: number;
-  readonly #supersedeSilenceMs: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
-    this.#supersedeSilenceMs = msOverride(env.SUPERSEDE_SILENCE_MS) ?? SUPERSEDE_SILENCE_MS;
     // Re-applied on every wake. Heartbeats are answered without waking the object;
     // only the sweep alarm reads their timestamps.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -228,7 +222,7 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.t === "register") {
-      await this.#register(ws, frame.deviceId, frame.info);
+      await this.#register(ws, frame);
       return;
     }
     const deviceId = this.#deviceIdOf(ws);
@@ -305,7 +299,8 @@ export class Hub implements DurableObject {
    * defends *against* a token holder — rotating the token does — they only keep
    * what a holder can cost from being unbounded.
    */
-  async #register(ws: WebSocket, deviceId: string, info: Envelope): Promise<void> {
+  async #register(ws: WebSocket, frame: Extract<DaemonFrame, { t: "register" }>): Promise<void> {
+    const { deviceId, info } = frame;
     const now = Date.now();
     const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
     const prior = attachment.identity;
@@ -320,6 +315,19 @@ export class Hub implements DurableObject {
       return;
     }
 
+    // Behind the rate limit, so a token holder pays for at most ten verifies a
+    // minute per socket. The id is the hash of the key and the signature proves
+    // the key, so passing this is proof the sender is the machine the id names —
+    // the one thing a blind relay can know about a register.
+    const verdict = await verifyRegister({ deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig }, now);
+    if (verdict !== "ok") {
+      console.log(`refused register from ${deviceId}: ${verdict}`);
+      // Closed, not left open: a daemon re-registers on connect only, and the
+      // reason is the one word it gets about why its identity was not accepted.
+      ws.close(1000, "register unverified");
+      return;
+    }
+
     const key = ENTRY_PREFIX + deviceId;
     const known = (await this.#ctx.storage.get<RegistryEntry>(key)) !== undefined;
     if (!known && (await this.#entryCount()) >= MAX_DEVICES) {
@@ -329,30 +337,16 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // A register proves possession of the bearer token and nothing else — the
-    // relay is blind, so it cannot tell a machine's own daemon from a holder
-    // claiming its id. A live incumbent therefore keeps the route: taking it
-    // would hand the newcomer every envelope addressed to that machine and leave
-    // the registry reporting it connected while they went nowhere. Reconnect is
-    // unaffected — a socket that dropped is out of `getWebSockets()` before its
-    // daemon redials, and a zombie that stopped heartbeating is superseded as
-    // soon as its own daemon would have given up on it.
-    const incumbents = this.#ctx
-      .getWebSockets("daemon")
-      .filter((other) => other !== ws && this.#deviceIdOf(other) === deviceId);
-    if (incumbents.some((other) => now - this.#lastAliveOf(other, now) <= this.#supersedeSilenceMs)) {
-      console.log(`refused register from ${deviceId}: id held by a live socket`);
-      // Closed, not left open: a daemon re-registers on connect only, so an
-      // unregistered socket would stay invisible even once the incumbent goes.
-      ws.close(1000, "device id in use");
-      return;
-    }
-
+    // A verified register is the machine itself, so it always takes the route:
+    // whatever else holds the id is a zombie this daemon left behind (a network
+    // change, a sleep the relay has not swept yet), never a stranger, since a
+    // stranger cannot sign for the id. Two open sockets for one machine would
+    // deliver a spawn twice, so the older one loses. Attaching first keeps the
+    // loser's close handler from reporting the machine as disconnected.
     ws.serializeAttachment({ ...attachment, identity: { deviceId, ...rate } } satisfies SocketAttachment);
-    // Two open sockets for one machine would deliver a spawn twice, so the silent
-    // one loses. Attaching first keeps the loser's close handler from reporting
-    // the machine as disconnected.
-    for (const other of incumbents) other.close(1000, "superseded");
+    for (const other of this.#ctx.getWebSockets("daemon")) {
+      if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
+    }
     if (!(await this.#put(key, { deviceId, info, lastSeen: now }))) return;
     console.log(`registered ${deviceId}`);
     await this.#pushRegistry();
@@ -417,9 +411,9 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // Newest first: superseding a silent incumbent briefly leaves two sockets on
-    // one deviceId — `superseded` closes the loser, but it stays listed until
-    // its close handler runs — and picking the first match can pick the dead one
+    // Newest first: a re-registering daemon briefly leaves two sockets on one
+    // deviceId — `superseded` closes the loser, but it stays listed until its
+    // close handler runs — and picking the first match can pick the dead one
     // while the live socket sits behind it.
     const targets = this.#ctx
       .getWebSockets("daemon")

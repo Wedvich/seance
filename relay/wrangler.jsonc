@@ -3,6 +3,9 @@
   "name": "seance-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-27",
+  // ML-DSA in Web Crypto — a register's signature is verified with it
+  // (shared/src/identity.ts). Opt-in while the Modern Algorithms draft settles.
+  "compatibility_flags": ["webcrypto_modern_algorithms"],
   // Daemons dial wss://seance-relay.<subdomain>.workers.dev/daemon, the app /app.
   "workers_dev": true,
   // Off: a preview URL per uploaded version would keep superseded relays reachable
