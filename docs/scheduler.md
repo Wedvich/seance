@@ -10,16 +10,16 @@ DESIGN.md describes what exists.
 One word per thing. The wire names in `shared/src/types.ts` are older than this table and
 stay as they are; the table says which word each one means.
 
-| Term    | Meaning                                                                                                                                                                                                                        | On the wire / in code                                   |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                       | `deviceId` is its routing key, `MachineInfo` its blob   |
-| exclave | One Claude Code config dir and the tree it owns: `default` (`~/.claude`, `~`) or a line of `~/.exclaves` (`~/.claude-<name>`, `~/<name>`). Decides which account a spawn bills. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone |
-| account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                           | `accountId` = `organizationUuid:accountUuid`            |
-| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                   | `tasks.repo`, `RepoEntry.origin`                        |
-| clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                  | `RepoEntry`, `spawn { repo }` (historical name)         |
-| session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                   | pane id, `sessions` op                                  |
-| task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                    | `task:<id>` in the store, `taskId` on spawn             |
-| leader  | The daemon currently nominated to run the scheduler loop                                                                                                                                                                       | `lead`/`follow`, `scheduler:term`                       |
+| Term    | Meaning                                                                                                                                                                                                                                                                                                                                             | On the wire / in code                                   |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                                                                                                                                            | `deviceId` is its routing key, `MachineInfo` its blob   |
+| exclave | A tree at `~/<name>` whose Claude Code config dir is `~/.claude-<name>`, signed into one account; `default` is `~` with `~/.claude`. Séance depends on those three attributes and the `~/.exclaves` contract below, nothing else an exclave carries (git identity, browser profile) is its business. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone |
+| account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                                                                                                                                                | `accountId` = `organizationUuid:accountUuid`            |
+| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                                                                                                                                        | `tasks.repo`, `RepoEntry.origin`                        |
+| clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                                                                                                                                       | `RepoEntry`, `spawn { repo }` (historical name)         |
+| session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                                                                                                                                        | pane id, `sessions` op                                  |
+| task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                                                                                                                                         | `task:<id>` in the store, `taskId` on spawn             |
+| leader  | The daemon currently nominated to run the scheduler loop                                                                                                                                                                                                                                                                                            | `lead`/`follow`, `scheduler:term`                       |
 
 ## Decisions (from the interview, placement revised 2026-10-15)
 
@@ -217,9 +217,15 @@ the PWA can show the exclave beside each repo in the manual picker.
 
 - `exclaves.ts`: read `~/.exclaves` + default; map scanned repos by path prefix; read
   account/org/extra-usage/auth presence from each config dir. Rescan on `~/.exclaves` mtime.
+- **The `~/.exclaves` contract.** One name per line, matching `^[a-z0-9][a-z0-9-]*$`; each
+  names a tree at `~/<name>` and a config dir at `~/.claude-<name>`, and `default` is implied.
+  The daemon validates every line against that regex and skips the rest, so a stray line costs
+  one exclave, not the scan. The file has two readers — the owner's shell hook and skill in
+  their dotfiles maintain it, the daemon only reads it — and this paragraph is the agreement
+  between them: a format change there is a daemon change here.
 - Config dir follows location via the user's shell hook (`.zshenv` → `update_exclave_env`),
   as today; the daemon doesn't set it. A machine's shell setup being correct is out of scope —
-  the daemon only _reports_ which exclave a repo sits in.
+  the daemon only _reports_ which exclave a clone sits in.
 - `telemetry.ts`: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
   API token, which never leaves the daemon process). argv-array exec only. Samples every 30s
