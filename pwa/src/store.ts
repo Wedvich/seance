@@ -63,7 +63,7 @@ function layerEntry(state: unknown): LayerEntry | null {
 const HISTORY_UNREADABLE = "Couldn't read the machine's answer. Update seanced and the app to matching versions.";
 
 const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
-  too_large: "Too much history for one answer. Pick a shorter range.",
+  too_large: "Too much history for one answer. 24h asks for the fewest points.",
   invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
   internal_error: "The machine couldn't read its history store.",
 };

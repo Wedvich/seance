@@ -80,9 +80,10 @@ const DAY = 24 * HOUR;
 export function formatUntil(at: number, now: number): string {
   const left = at - now;
   if (left <= 0) return "resets now";
-  if (left < HOUR) return `resets in ${Math.max(1, Math.round(left / MINUTE))}m`;
-  if (left < DAY) return `resets in ${Math.round(left / HOUR)}h`;
-  return `resets in ${Math.round(left / DAY)}d`;
+  // Floored like `formatSeen`: rounding would print "60m" or "24h" just under each boundary.
+  if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
+  if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
+  return `resets in ${Math.floor(left / DAY)}d`;
 }
 
 /** The account half of `organizationUuid:accountUuid`, shortened: enough to tell two apart. */

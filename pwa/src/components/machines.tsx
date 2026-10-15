@@ -26,12 +26,14 @@ export function MachinesScreen(props: {
   view: MachinesView;
   relayLine: string;
   relayState: ConnectionState;
+  /** The registry is authoritative (`RelayState.registrySettled`). */
+  settled: boolean;
   history: HistoryView | null;
   onDismiss: () => void;
   onShowHistory: (target: HistoryTarget, range: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { view, relayLine, relayState, history, onDismiss, onShowHistory, onHideHistory } = props;
+  const { view, relayLine, relayState, settled, history, onDismiss, onShowHistory, onHideHistory } = props;
 
   return (
     <>
@@ -51,7 +53,10 @@ export function MachinesScreen(props: {
       </header>
 
       <div className="fleet">
-        {view.cards.length === 0 && <p className="fleet-empty">No machines to show.</p>}
+        {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
+        {view.cards.length === 0 && (
+          <p className="fleet-empty">{settled ? "No machines to show." : "Waiting for the relay…"}</p>
+        )}
         {view.cards.map((card) => (
           <MachineCardView
             key={card.deviceId}

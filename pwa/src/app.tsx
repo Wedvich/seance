@@ -81,8 +81,10 @@ export function App(props: { store: Store }): JSX.Element {
           )}
         </main>
       )}
-      {shown(1) && (
-        <main key="settings" className={panelClass(anim, 1)}>
+      {/* Kept mounted, hidden, under machines: its credential fields hold
+          unsaved drafts that a remount would drop on the way back. */}
+      {(shown(1) || depth === 2) && (
+        <main key="settings" className={panelClass(anim, 1)} hidden={!shown(1)}>
           <Settings
             relayUrl={readRelayUrl()}
             relayLine={view.relayLine}
@@ -101,6 +103,7 @@ export function App(props: { store: Store }): JSX.Element {
             view={deriveMachines(state.relay.machines, now)}
             relayLine={view.relayLine}
             relayState={view.relayState}
+            settled={state.relay.registrySettled}
             history={state.history}
             onDismiss={actions.dismissLayer}
             onShowHistory={(target, range) => void store.showHistory(target, range)}

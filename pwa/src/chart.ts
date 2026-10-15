@@ -1,4 +1,5 @@
 import { METRIC_NAMES, type MetricsSeries } from "@seance/shared";
+import { TARGET_METRICS } from "./state.ts";
 
 /**
  * Geometry for the machines screen's history chart, kept apart from the
@@ -25,7 +26,7 @@ const LABELS: Readonly<Record<string, string>> = {
  * moves only when the account was seen anew: a level that holds until the next
  * point, never a slope between them.
  */
-const HELD = new Set<string>([METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w]);
+const HELD = new Set<string>(TARGET_METRICS.account);
 
 function seriesLabel(series: MetricsSeries): string {
   const model = series.labels["model"];
