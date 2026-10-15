@@ -1,11 +1,13 @@
 import {
   APP_ID,
+  ENVELOPE_MAX_CT_LENGTH,
   IDENTITY_PUBLIC_KEY_BYTES,
   IDENTITY_SIGNATURE_BYTES,
   base64Length,
   isRecord,
   MACHINES_ID,
   parseEnvelope as parseEnvelopeShape,
+  STATUS_MAX_CT_LENGTH,
   type AppFrame,
   type DaemonFrame,
   type Envelope,
@@ -19,9 +21,6 @@ import {
  */
 const MAX_ID_LENGTH = 64;
 const MAX_IV_LENGTH = 32;
-
-/** A DO value caps at 128 KiB; a register blob for ~60 repos is nearer 12 KiB. */
-const MAX_CT_LENGTH = 64 * 1024;
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/u;
 
@@ -60,12 +59,12 @@ function parseJson(text: string): unknown {
  * envelope — `iv`/`ct` stay opaque strings to it — but they reach DO storage
  * keys and logs, which is what the caps and charset protect.
  */
-export function parseEnvelope(value: unknown): Envelope | null {
+export function parseEnvelope(value: unknown, maxCtLength = ENVELOPE_MAX_CT_LENGTH): Envelope | null {
   const env = parseEnvelopeShape(value);
   if (env === null) return null;
   if (!routableId(env.to) || !routableId(env.from)) return null;
   if (!boundedString(env.iv, MAX_IV_LENGTH)) return null;
-  if (!boundedString(env.ct, MAX_CT_LENGTH)) return null;
+  if (!boundedString(env.ct, maxCtLength)) return null;
   return env;
 }
 
@@ -86,6 +85,12 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
   if (value["t"] === "msg") {
     const env = parseEnvelope(value["env"]);
     return env === null ? null : { t: "msg", env };
+  }
+  if (value["t"] === "status") {
+    // Tighter than a msg: it lands on the socket attachment (2 KiB, shared with
+    // the socket's identity), not in a storage value.
+    const env = parseEnvelope(value["env"], STATUS_MAX_CT_LENGTH);
+    return env === null ? null : { t: "status", env };
   }
   return null;
 }

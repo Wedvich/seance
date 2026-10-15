@@ -193,6 +193,37 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
+  test("machines stacks over settings: back returns to settings and drops its chart", async () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    store.openSettings();
+    store.openMachines();
+    // An idle client has no socket, so the chart settles on its failure line.
+    await store.showHistory({ kind: "machine", deviceId: "dev-1" }, "24h");
+    expect(store.getState().history?.result.kind).toBe("failed");
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }, { depth: 2 }]);
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: false, settings: true, history: null });
+  });
+
+  test("a chart closed before its answer stays closed", async () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    const answered = store.showHistory({ kind: "machine", deviceId: "dev-1" }, "6h");
+    expect(store.getState().history).toMatchObject({ range: "6h", result: { kind: "loading" } });
+    // 6h on the raw tier is exactly the per-request point cap.
+    const asked = store.getState().history;
+    expect(asked === null ? null : (asked.to - asked.from) / asked.step + 1).toBe(720);
+    store.hideHistory();
+    await answered;
+
+    expect(store.getState().history).toBeNull();
+  });
+
   test("a sheet already open is replaced without a second entry", () => {
     fake = fakeHistory();
     const store = new Store(idleClient());

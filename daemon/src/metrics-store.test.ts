@@ -37,6 +37,24 @@ describe("MetricsStore", () => {
     store.close();
   });
 
+  test("names limits the reply to those metrics, and a name never written matches nothing", () => {
+    const store = MetricsStore.memory();
+    store.write(
+      [
+        { metric: "cpu_pct", labels: machine, ts: NOW, value: 10 },
+        { metric: "mem_pct", labels: machine, ts: NOW, value: 20 },
+        { metric: "disk_pct", labels: machine, ts: NOW, value: 30 },
+      ],
+      NOW,
+    );
+    const names = (wanted: readonly string[]): readonly string[] =>
+      store.query({ from: NOW, to: NOW, step: 30, names: wanted }).map((s) => s.metric);
+    expect(names(["mem_pct", "cpu_pct"])).toEqual(["cpu_pct", "mem_pct"]);
+    expect(names(["not_yet_a_metric"])).toEqual([]);
+    expect(store.query({ from: NOW, to: NOW, step: 30 })).toHaveLength(3);
+    store.close();
+  });
+
   test("the same stamp on a series is one sample — a cached quota re-read every tick is not a new observation", () => {
     const store = MetricsStore.memory();
     store.write([{ metric: "quota_5h_pct", labels: machine, ts: NOW, value: 41 }], NOW);

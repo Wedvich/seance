@@ -4,10 +4,11 @@ import {
   parseExclaveList,
   parseMachineInfo,
   parseMachineStatus,
+  parseMetricsReply,
   parseMetricsResponse,
   parseRepoEntry,
 } from "./parse.ts";
-import type { MachineStatus, MetricsSeries, QuotaObservation } from "./types.ts";
+import { METRICS_MAX_POINTS, type MachineStatus, type MetricsSeries, type QuotaObservation } from "./types.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
 const info = { name: "mac", platform: "darwin", repos: [repo], scannedAt: 1_700_000_000_000 };
@@ -126,6 +127,32 @@ describe("metrics", () => {
     expect(isMetricsRequest({ from: 20, to: 10, step: 30 })).toBe(false);
     expect(isMetricsRequest({ from: 10, to: 20, step: 60 })).toBe(false);
     expect(isMetricsRequest({ from: 10.5, to: 20, step: 30 })).toBe(false);
+  });
+
+  test("a range spanning more than the point cap is refused before the store reads it", () => {
+    const span = (METRICS_MAX_POINTS - 1) * 3600;
+    expect(isMetricsRequest({ from: 0, to: span, step: 3600 })).toBe(true);
+    expect(isMetricsRequest({ from: 0, to: span + 3600, step: 3600 })).toBe(false);
+    expect(isMetricsRequest({ from: 0, to: 2 ** 40, step: 30 })).toBe(false);
+  });
+
+  test("names filters by metric, and an empty list is malformed rather than a filter for nothing", () => {
+    expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: ["cpu_pct", "not_yet_a_metric"] })).toBe(true);
+    expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: [] })).toBe(false);
+    expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: "cpu_pct" })).toBe(false);
+    expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: [1] })).toBe(false);
+  });
+
+  test("a reply is the history or a known refusal, and an unknown code is unreadable", () => {
+    expect(parseMetricsReply({ series: [] })).toEqual({ series: [] });
+    expect(parseMetricsReply({ ok: false, code: "too_large", message: "m" })).toEqual({
+      ok: false,
+      code: "too_large",
+      message: "m",
+    });
+    expect(parseMetricsReply({ ok: false, code: "nope", message: "m" })).toBeNull();
+    expect(parseMetricsReply({ ok: false, code: "too_large" })).toBeNull();
+    expect(parseMetricsReply(null)).toBeNull();
   });
 
   test("a response is a list of labelled series with ascending points", () => {

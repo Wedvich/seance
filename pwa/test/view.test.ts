@@ -52,6 +52,8 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     promptUndo: null,
     sheet: null,
     settings: false,
+    machines: false,
+    history: null,
     spawning: false,
     rescanning: false,
     rescan: "idle",

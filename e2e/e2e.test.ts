@@ -6,6 +6,7 @@ import type { SessionEntry, SpawnResponse } from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
+import { deriveMachines } from "../pwa/src/machines-view.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -92,6 +93,30 @@ describe("daemon ↔ relay ↔ app", () => {
       if (typeof view !== "object") throw new Error("unreachable");
       expect(view.sessions).toEqual([]);
       expect(view.at).toBeGreaterThan(0);
+    } finally {
+      app.stop();
+    }
+  });
+
+  test("status: the real daemon's snapshot reaches a fresh app in its first push, through the DO", async () => {
+    const app = startApp(stack);
+    try {
+      // Sent after every register, so it is on the relay before this app
+      // dials: no beat to wait for. Numbers are the host's, so only their
+      // shape is asserted.
+      const state = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.status !== undefined, "status rendered");
+      const machine = ownMachine(state, stack.deviceId);
+      const status = machine?.status;
+      if (machine === null || status === undefined) throw new Error("unreachable");
+      expect(status.at * 1000).toBeGreaterThan(Date.now() - 120_000);
+      expect(status.scan).toBe(machine.scannedAt);
+      expect(status.mem).toBeGreaterThanOrEqual(0);
+      expect(status.mem).toBeLessThanOrEqual(100);
+      expect(status.sess?.length).toBeGreaterThan(0);
+      // The machines screen renders pressure and the exclave rows from that push alone.
+      const card = deriveMachines(state.relay.machines, Date.now()).cards.find((c) => c.deviceId === stack.deviceId);
+      expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
+      expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
     }

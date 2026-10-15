@@ -5,8 +5,12 @@ import { join } from "node:path";
 import {
   APP_ID,
   importPsk,
+  METRIC_NAMES,
   open,
+  parseMachineStatus,
+  parseMetricsReply,
   seal,
+  STATUS_MAX_CT_LENGTH,
   toBase64,
   verifyRegister,
   type MachineInfo,
@@ -261,6 +265,71 @@ describe("daemon ↔ relay integration", () => {
       daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("a status follows every register, sealed to the app and stamped with the registered scan", async () => {
+    // A state dir of its own. The shared one caches what earlier tests scanned,
+    // so the boot register would already carry myrepo, and when the boot rescan
+    // finds the set changed (`newrepo` is gone) its re-register restamps every
+    // status still in flight: the boot stamp this test matched never goes out,
+    // and the next beat is 30s off.
+    process.env["SEANCE_STATE_DIR"] = await mkdtemp(join(base, "state-"));
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId, info } = await registerWithRepo(relay, "myrepo");
+      // The boot register (no repos, stamp 0) has its own status ahead of
+      // this one; each names the blob it was sent after.
+      for (let i = 0; ; i++) {
+        const env = await relay.statuses.next();
+        expect(env.to).toBe(APP_ID);
+        expect(env.from).toBe(deviceId);
+        expect(env.ct.length).toBeLessThanOrEqual(STATUS_MAX_CT_LENGTH);
+        const plain = await open(appKey, env);
+        expect(plain.op).toBe("status");
+        const status = parseMachineStatus(plain.payload);
+        if (status === null) throw new Error("status did not parse");
+        if (status.scan !== info.scannedAt) {
+          if (i < 4) continue;
+          throw new Error(`no status for scan ${info.scannedAt}`);
+        }
+        expect(status.at * 1000).toBeGreaterThan(Date.now() - 60_000);
+        expect(status.sess).toHaveLength(info.exclaves?.length ?? 0);
+        break;
+      }
+    } finally {
+      daemon.stop();
+      relay.stop();
+      process.env["SEANCE_STATE_DIR"] = join(base, "state");
+    }
+  });
+
+  test("the blob advertises metrics, and the op answers from what the telemetry tick stored", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId, info } = await registerWithRepo(relay, "myrepo");
+      expect(info.capabilities).toEqual(["metrics"]);
+      // A status leaves only after its tick wrote the store, so one in hand
+      // means there is history to ask for.
+      await relay.statuses.next();
+      const now = Math.floor(Date.now() / 1000);
+      const { id } = await appRequest(relay, deviceId, "metrics", {
+        from: now - 300,
+        to: now + 30,
+        step: 30,
+        names: [METRIC_NAMES.sess],
+      });
+      const response = await appReceive(relay);
+      expect(response.re).toBe(id);
+      const reply = parseMetricsReply(response.payload);
+      if (reply === null || !("series" in reply)) throw new Error(`no history: ${JSON.stringify(response.payload)}`);
+      expect(reply.series.length).toBeGreaterThan(0);
+      for (const series of reply.series) expect(series.metric).toBe(METRIC_NAMES.sess);
+    } finally {
+      daemon.stop();
+      relay.stop();
     }
   });
 

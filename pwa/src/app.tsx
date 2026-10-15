@@ -1,20 +1,30 @@
 import type { JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { MachinesScreen } from "./components/machines.tsx";
 import { Settings } from "./components/settings.tsx";
 import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
+import { deriveMachines } from "./machines-view.ts";
 import "./screen.css";
 import type { Verdict } from "./state.ts";
 import type { Store } from "./store.ts";
 import { deriveView, type AppState } from "./view.ts";
 
-type ScreenAnim = "push" | "pop";
+/** Pushed screens in stack order; the spawn form is depth 0. */
+type Depth = 0 | 1 | 2;
+
+interface ScreenAnim {
+  readonly from: Depth;
+  readonly to: Depth;
+}
 
 export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
-  const [anim, clearAnim] = useScreenTransition(state.settings);
+  const depth: Depth = state.machines ? 2 : state.settings ? 1 : 0;
+  const [anim, clearAnim] = useScreenTransition(depth);
+  const shown = (screen: Depth): boolean => screen === depth || screen === anim?.from;
   const exit = useVerdictExit(state.verdict);
   const actions = useSpawnActions(store);
 
@@ -34,7 +44,7 @@ export function App(props: { store: Store }): JSX.Element {
   const rendered = exit.rendered;
   const view = deriveView(state, now);
 
-  // Both screens stay mounted while a transition plays; push and pop are
+  // Both ends of a transition stay mounted while it plays; push and pop are
   // mirrored full-width slides.
   return (
     <div
@@ -43,8 +53,8 @@ export function App(props: { store: Store }): JSX.Element {
         if (event.animationName.startsWith("screen-")) clearAnim();
       }}
     >
-      {(anim !== null || !state.settings) && (
-        <main key="form" className={`${panelClass(anim, "push-out", "pop-in")}${exit.entering ? " form-enter" : ""}`}>
+      {shown(0) && (
+        <main key="form" className={`${panelClass(anim, 0)}${exit.entering ? " form-enter" : ""}`}>
           {rendered !== null ? (
             <VerdictView
               key={rendered}
@@ -71,15 +81,33 @@ export function App(props: { store: Store }): JSX.Element {
           )}
         </main>
       )}
-      {(anim !== null || state.settings) && (
-        <main key="settings" className={panelClass(anim, "push-in", "pop-out")}>
+      {/* Kept mounted, hidden, under machines: its credential fields hold
+          unsaved drafts that a remount would drop on the way back. */}
+      {(shown(1) || depth === 2) && (
+        <main key="settings" className={panelClass(anim, 1)} hidden={!shown(1)}>
           <Settings
             relayUrl={readRelayUrl()}
             relayLine={view.relayLine}
             relayState={view.relayState}
             connected={state.relay.status === "open"}
+            machinesLine={view.meta}
             onDismiss={actions.dismissLayer}
             onReconnect={() => store.reconnect()}
+            onOpenMachines={() => store.openMachines()}
+          />
+        </main>
+      )}
+      {shown(2) && (
+        <main key="machines" className={panelClass(anim, 2)}>
+          <MachinesScreen
+            view={deriveMachines(state.relay.machines, now)}
+            relayLine={view.relayLine}
+            relayState={view.relayState}
+            settled={state.relay.registrySettled}
+            history={state.history}
+            onDismiss={actions.dismissLayer}
+            onShowHistory={(target, range) => void store.showHistory(target, range)}
+            onHideHistory={() => store.hideHistory()}
           />
         </main>
       )}
@@ -87,28 +115,30 @@ export function App(props: { store: Store }): JSX.Element {
   );
 }
 
-function panelClass(anim: ScreenAnim | null, pushing: string, popping: string): string {
+/** The deeper of the two screens is the one sliding; the shallower gives way under it. */
+function panelClass(anim: ScreenAnim | null, screen: Depth): string {
   if (anim === null) return "screen stage-panel";
-  return `screen stage-panel panel-${anim === "push" ? pushing : popping}`;
+  const pushing = anim.to > anim.from;
+  const role = screen === anim.to ? (pushing ? "push-in" : "pop-in") : pushing ? "push-out" : "pop-out";
+  return `screen stage-panel panel-${role}`;
 }
 
 /**
- * Direction to animate when the settings screen opens ("push") or closes
- * ("pop"), null once the transition has played. useLayoutEffect so the
- * animation classes land before the swapped screen paints — an effect after
- * paint would flash the final state for a frame. The timeout backstops a lost
- * animationend, which would otherwise wedge the stage under
- * pointer-events: none.
+ * The screens to animate between when the stack moves, null once the
+ * transition has played. useLayoutEffect so the animation classes land before
+ * the swapped screen paints — an effect after paint would flash the final state
+ * for a frame. The timeout backstops a lost animationend, which would otherwise
+ * wedge the stage under pointer-events: none.
  */
-function useScreenTransition(settings: boolean): [ScreenAnim | null, () => void] {
+function useScreenTransition(depth: Depth): [ScreenAnim | null, () => void] {
   const [anim, setAnim] = useState<ScreenAnim | null>(null);
-  const previous = useRef(settings);
+  const previous = useRef(depth);
 
   useLayoutEffect(() => {
-    if (settings === previous.current) return;
-    previous.current = settings;
-    setAnim(settings ? "push" : "pop");
-  }, [settings]);
+    if (depth === previous.current) return;
+    setAnim({ from: previous.current, to: depth });
+    previous.current = depth;
+  }, [depth]);
 
   useEffect(() => {
     if (anim === null) return;

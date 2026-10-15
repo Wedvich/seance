@@ -3,6 +3,7 @@ import {
   MACHINES_ID,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
+  STATUS_MAX_CT_LENGTH,
   type RegistryView,
   type RelayToAppFrame,
   type RelayToDaemonFrame,
@@ -26,6 +27,7 @@ type RegistryFrame = Extract<RelayToAppFrame, { t: "registry" }>;
 type MsgFrame = Extract<RelayToAppFrame, { t: "msg" }>;
 type UndeliverableFrame = Extract<RelayToAppFrame, { t: "undeliverable" }>;
 type ForgetRefusedFrame = Extract<RelayToAppFrame, { t: "forget-refused" }>;
+type StatusFrame = Extract<RelayToAppFrame, { t: "status" }>;
 
 let relay: TestRelay;
 
@@ -409,6 +411,100 @@ describe("identity", () => {
   });
 });
 
+describe("status", () => {
+  test("the latest rides the socket: forwarded to open apps, carried in the push a late app gets, gone with the socket", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    const status = envelope(APP_ID, deviceId);
+
+    daemon.send({ t: "status", env: status });
+    expect(await app.waitFor<StatusFrame>("status")).toEqual({ t: "status", deviceId, env: status });
+
+    // Not a registry re-push for the app that was open; the one that connects
+    // later gets it in its first push, so it renders pressure without a wait.
+    const late = await connectApp(relay);
+    const entry = await waitForEntry(late, deviceId, (candidate) => candidate.status !== undefined);
+    expect(entry.status).toEqual(status);
+    expect(entry.connected).toBe(true);
+
+    daemon.close();
+    const gone = await waitForEntry(late, deviceId, (candidate) => !candidate.connected);
+    expect(gone.status).toBeUndefined();
+    app.close();
+    late.close();
+  });
+
+  test("a second status inside the floor is dropped, and the first stays the latest", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    const first = envelope(APP_ID, deviceId);
+    daemon.send({ t: "status", env: first });
+    await app.waitFor<StatusFrame>("status");
+
+    daemon.send({ t: "status", env: envelope(APP_ID, deviceId) });
+    await app.expectNo("status");
+    const late = await connectApp(relay);
+    const entry = await waitForEntry(late, deviceId, (candidate) => candidate.status !== undefined);
+    expect(entry.status).toEqual(first);
+    daemon.close();
+    app.close();
+    late.close();
+  });
+
+  test("dropped from an unregistered socket, under another machine's id, or addressed anywhere but the app", async () => {
+    const deviceId = await newDeviceId();
+    const other = await newDeviceId();
+    const app = await connectApp(relay);
+    const stranger = await connectDaemon(relay);
+    stranger.send({ t: "status", env: envelope(APP_ID, deviceId) });
+    await app.expectNo("status");
+
+    const daemon = await registeredDaemon(app, deviceId);
+    daemon.send({ t: "status", env: envelope(APP_ID, other) });
+    daemon.send({ t: "status", env: envelope(other, deviceId) });
+    await app.expectNo("status");
+
+    const late = await connectApp(relay);
+    const entry = await waitForEntry(late, deviceId, (candidate) => candidate.connected);
+    expect(entry.status).toBeUndefined();
+    stranger.close();
+    daemon.close();
+    app.close();
+    late.close();
+  });
+
+  test("the largest status the bound allows fits the attachment beside the identity; a re-register clears it", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+
+    // Over the bound first: refused by the parser, so it never reaches the floor.
+    daemon.send({ t: "status", env: { ...envelope(APP_ID, deviceId), ct: "A".repeat(STATUS_MAX_CT_LENGTH + 1) } });
+    await app.expectNo("status");
+
+    const largest = { ...envelope(APP_ID, deviceId), ct: "A".repeat(STATUS_MAX_CT_LENGTH) };
+    daemon.send({ t: "status", env: largest });
+    expect((await app.waitFor<StatusFrame>("status")).env).toEqual(largest);
+
+    // The register replaces the blob the snapshot indexes, so the snapshot
+    // goes with it — and the floor with the snapshot: the status that follows
+    // a register inside ten seconds is accepted, not dropped.
+    daemon.send(await register(deviceId));
+    await waitForEntry(app, deviceId, (candidate) => candidate.connected);
+    const late = await connectApp(relay);
+    const cleared = await waitForEntry(late, deviceId, (candidate) => candidate.connected);
+    expect(cleared.status).toBeUndefined();
+    const fresh = envelope(APP_ID, deviceId);
+    daemon.send({ t: "status", env: fresh });
+    expect((await late.waitFor<StatusFrame>("status")).env).toEqual(fresh);
+    daemon.close();
+    app.close();
+    late.close();
+  });
+});
+
 describe("robustness", () => {
   test("ignores malformed frames without dropping the socket", async () => {
     const deviceId = await newDeviceId();
@@ -689,11 +785,15 @@ describe("silent-socket sweep", () => {
     daemon.send(await register(deviceId));
     await waitForEntry(app, deviceId, (entry) => entry.connected);
     const registeredAt = Date.now();
+    daemon.send({ t: "status", env: envelope(APP_ID, deviceId) });
+    await app.waitFor<StatusFrame>("status");
 
     // The point of the sweep: a slept machine sends no close frame, so the
     // relay must close the socket and push the offline registry on its own.
     expect(await daemon.waitClosed(10_000)).toBe(1000);
     const entry = await waitForEntry(app, deviceId, (candidate) => !candidate.connected);
+    // A swept socket leaves no snapshot behind: it went with the socket.
+    expect(entry.status).toBeUndefined();
 
     // lastSeen is the last proof of life (accept time — it never pinged), not
     // the moment the sweep happened to run. Bounded by registration rather

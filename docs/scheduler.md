@@ -1,6 +1,6 @@
 # Séance scheduler — plan
 
-**Status: plan, nothing built.** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1 landing.** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists.
@@ -28,7 +28,7 @@ stay as they are; the table says which word each one means.
 | Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite |
 | Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
 | Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                       |
-| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` — never the email                                                                                                                                                                                             |
+| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                            |
 | Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                    |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                 |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                             |
@@ -166,8 +166,8 @@ changes. Rejected: a positional tuple or bit-packed body —
 it saves ~100 bytes and loses the optional-field skew tolerance every other blob relies on.
 
 **New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:
-`metrics { from, to, step }` → `{ series }` from the daemon's local store, `step` one of the
-store's three tiers (30s, 5 min, 1 h). The PWA calls it
+`metrics { from, to, step, names? }` → `{ series }` from the daemon's local store, `step` one
+of the store's three tiers (30s, 5 min, 1 h), `names` the metrics a chart panel draws. The PWA calls it
 when a chart is opened; nothing else needs it. History of an asleep machine is unavailable
 until it wakes — accepted.
 
@@ -241,7 +241,7 @@ the PWA can show the exclave beside each repo in the manual picker.
   the daemon only _reports_ which exclave a clone sits in.
 - `telemetry.ts` — **landed (M1 task 3, 2026-10-15)**: DESIGN.md's _Daemon_ section
   ("Telemetry") holds what is sampled, how it is smoothed, the store's tiers and modes, and
-  what is read from each config dir's cache (including the per-model weekly caps). Not yet
+  what is read from each exclave's cache (including the per-model weekly caps). Not yet
   there: PSI/cgroup views in an LXC, the Proxmox node view, macOS I/O rates. The plan as it
   was: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
@@ -314,11 +314,12 @@ and re-route. Only then does the loop start dispatching.
  every clone of the task's   ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
  repo, on any machine         │   offline/stale · no taskId · auth missing · repo absent   │
                               │   skill absent · pin mismatch · base unpushed             │
+                              │   free disk < 1 GiB                                       │
                               │   account over threshold ∧ credits off · cap reached      │
                               │                                                           │
                               └─► 2 SCORE  (lower wins, weights in config)                │
                                   account_pressure       max(f(5h), g(7d)), ÷ time-to-reset
-                                  machine_pressure       max(cpu, mem, disk, host)        │
+                                  machine_pressure       max(cpu, mem, host)              │
                                   dependency_distance    0 same exclave … 0.5 elsewhere   │
                                   queue_pressure                                          │
                                       │                                                   │
@@ -336,12 +337,13 @@ the latest `status` per machine; a snapshot older than ~90s counts as unknown an
 is filtered for new work:
 
 1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;
-   exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
+   free disk under 1 GiB; exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
    stacked base unpushed and not on this exclave; projected account usage over the 90% line (a window resetting within 15 min counts as empty) **and**
    extra usage disabled; per-account / global cap reached.
 2. _Score_ (lower wins, weights in config):
    `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
-   time-to-reset; `machine_pressure` = max(cpu, mem, disk, host) for LXCs;
+   time-to-reset; `machine_pressure` = max(cpu, mem, host) for LXCs — disk is the filter's
+   floor, never a score;
    `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`.
 3. _Stickiness_: lineage owner bonus; only matters for continuations.
 4. _Reserve_ (one store write) then dispatch with `taskId`; reservation TTL 120s; spawn failure
@@ -398,13 +400,21 @@ the newest quota observation per account, and open a history chart — without a
    presence per config dir. Daemon-only, no wire change; runs in parallel with 3. _Landed
    2026-10-15._
 3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
-   observations read from each config dir's `.claude.json` (`cachedUsageUtilization`, which
+   observations read from each exclave's `.claude.json` (`cachedUsageUtilization`, which
    Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
    this is M1's only producer. Daemon-only; parallel with 2. _Landed 2026-10-15._
 4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
-   `registry` includes the latest per connected daemon.
-5. `metrics` op — daemon handler over the store; app-side request.
-6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts.
+   `registry` includes the latest per connected daemon. _Landed 2026-10-15._ The 1 KiB bound
+   holds four exclaves' quota with every field; past that the daemon trims (per-model
+   windows first, `daemon/src/status.ts`) rather than send a frame the relay drops.
+5. `metrics` op — daemon handler over the store; app-side request. _Landed 2026-10-15._
+   The request gained an optional `names` filter: every series of a two-exclave machine at a
+   day's 5-min points is ~77 KB against the relay's 64 KiB envelope, so a chart asks for its
+   panel's series, and a reply that still wouldn't fit comes back `too_large` (DESIGN.md,
+   Layer 2).
+6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts. _Landed
+   2026-10-15._ Quota moved to account cards (one per account across the fleet) and disk off
+   the screen; Machines is a layer over Settings until the redesign (DESIGN.md, _PWA_).
 
 **Exit.**
 
@@ -526,7 +536,9 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
 - **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
-  credits-spill and needs-input alerts, `push-subscribe`.
+  credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
+  nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the PWA shows no
+  disk numbers, since a fill level is upkeep rather than load).
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal.
 
 ## Settled defaults (interview, 2026-10-15)
@@ -551,7 +563,11 @@ same PR, with the reason.
 5. **`needs-input` escalation** after 30 min: re-alert once, keep the slot, never kill.
 6. **Retention**: raw 30s for 48h, 5-min for 30d, hourly forever; Prometheus-shaped samples
    (above) so an external metrics stack is a consumer, not a redesign.
-7. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
+7. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
+   above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
+   not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
+   it. The same series feeds M4's health alert, and the PWA shows no disk numbers.
+8. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
    machine per tick, the leader's view never older than one tick, and a fresh PWA renders
    pressure from the registry push without waiting.
 

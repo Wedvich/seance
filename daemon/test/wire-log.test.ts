@@ -83,7 +83,7 @@ function makeConfig(relayUrl: string): Config {
   };
 }
 
-async function startTestDaemon(relayUrl: string): Promise<DaemonHandle> {
+async function startTestDaemon(relayUrl: string, home?: string): Promise<DaemonHandle> {
   const config = makeConfig(relayUrl);
   return startDaemon({
     config,
@@ -91,6 +91,7 @@ async function startTestDaemon(relayUrl: string): Promise<DaemonHandle> {
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
+    ...(home === undefined ? {} : { home }),
   });
 }
 
@@ -172,6 +173,25 @@ describe("wire correlation logging", () => {
 
       expect(logged()).toContain(`id=${JSON.stringify(id)} op="spawn"`);
       expect(logged()).not.toContain(SECRET_PROMPT);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+});
+
+describe("status logging", () => {
+  test("a status that fits the relay's bound goes out without the trimmed warning", async () => {
+    // An empty home: no exclaves, no quota files — whatever this host has
+    // could legitimately need a trim.
+    const home = await mkdtemp(join(base, "home-"));
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, home);
+    try {
+      await relay.statuses.next();
+      // The warning is logged before its status is sealed, so one in hand
+      // means it would already be on the record.
+      expect(logged()).not.toContain("status trimmed");
     } finally {
       daemon.stop();
       relay.stop();

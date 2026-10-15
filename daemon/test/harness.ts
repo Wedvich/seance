@@ -19,6 +19,9 @@ export class AsyncQueue<T> {
   readonly #items: T[] = [];
   readonly #waiters: ((value: T) => void)[] = [];
 
+  /** Named in the timeout error: a stack that stops in this file can't say which queue starved. */
+  constructor(readonly name: string) {}
+
   push(item: T): void {
     const waiter = this.#waiters.shift();
     if (waiter !== undefined) waiter(item);
@@ -29,7 +32,10 @@ export class AsyncQueue<T> {
     const item = this.#items.shift();
     if (item !== undefined) return item;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`AsyncQueue: nothing arrived in ${timeoutMs}ms`)), timeoutMs);
+      const timer = setTimeout(
+        () => reject(new Error(`AsyncQueue(${this.name}): nothing arrived in ${timeoutMs}ms`)),
+        timeoutMs,
+      );
       this.#waiters.push((value) => {
         clearTimeout(timer);
         resolve(value);
@@ -49,6 +55,8 @@ export interface TestRelay {
   readonly port: number;
   readonly registers: AsyncQueue<RegisterFrame>;
   readonly messages: AsyncQueue<Envelope>;
+  /** `status` envelopes, apart from `messages` so a reply assertion never meets a snapshot first. */
+  readonly statuses: AsyncQueue<Envelope>;
   autoPong: boolean;
   /** Close every register the way the real DO refuses an id another live socket holds. */
   refuseRegisters: boolean;
@@ -61,8 +69,9 @@ export interface TestRelay {
 }
 
 export function startTestRelay(bearerToken: string, port = 0): TestRelay {
-  const registers = new AsyncQueue<RegisterFrame>();
-  const messages = new AsyncQueue<Envelope>();
+  const registers = new AsyncQueue<RegisterFrame>("registers");
+  const messages = new AsyncQueue<Envelope>("messages");
+  const statuses = new AsyncQueue<Envelope>("statuses");
   const daemons = new Map<string, Bun.ServerWebSocket<unknown>>();
   const socketDevices = new Map<Bun.ServerWebSocket<unknown>, string>();
   let rejected = 0;
@@ -100,6 +109,8 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
           daemons.set(frame.deviceId, ws);
           socketDevices.set(ws, frame.deviceId);
           registers.push(frame);
+        } else if (frame.t === "status") {
+          statuses.push(frame.env);
         } else {
           messages.push(frame.env);
         }
@@ -117,6 +128,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     port: Number(server.port),
     registers,
     messages,
+    statuses,
     get autoPong() {
       return relay.autoPong;
     },

@@ -1,10 +1,23 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { DespawnResponse, OpName, Plain, RepoEntry, SessionEntry, SpawnResponse } from "@seance/shared";
+import {
+  ENVELOPE_MAX_CT_LENGTH,
+  METRIC_NAMES,
+  parseMetricsReply,
+  sealedLength,
+  type DespawnResponse,
+  type MetricsReply,
+  type OpName,
+  type Plain,
+  type RepoEntry,
+  type SessionEntry,
+  type SpawnResponse,
+} from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
+import { MetricsStore, type Sample } from "./metrics-store.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -218,5 +231,91 @@ describe("despawn is audited and answers with the list it left", () => {
     };
     expect(await despawnReply(startOnly, "%7")).toMatchObject({ ok: false, code: "internal_error" });
     expect(logged()).toContain("audit despawn origin=relay failed code=internal_error");
+  });
+});
+
+describe("metrics answers from the store, within one envelope", () => {
+  const NOW = 1_700_000_000 - (1_700_000_000 % 3600);
+
+  /** The real store, in memory: it is this package's, so nothing here is mocked past it. */
+  function storeWith(samples: readonly Sample[]): MetricsStore {
+    const store = MetricsStore.memory();
+    store.write(samples, NOW);
+    return store;
+  }
+
+  async function metricsReply(
+    store: MetricsStore | null,
+    payload: unknown,
+  ): Promise<{ plain: Plain; reply: MetricsReply }> {
+    const handler = createHandler(store === null ? ctx : { ...ctx, metrics: (r) => store.query(r) });
+    const plain = await handler(request("metrics", payload));
+    if (plain === null) throw new Error("metrics produced no reply");
+    const reply = parseMetricsReply(plain.payload);
+    if (reply === null) throw new Error("metrics reply did not parse");
+    return { plain, reply };
+  }
+
+  test("returns the named series over the range, values to one decimal", async () => {
+    const store = storeWith([
+      { metric: METRIC_NAMES.cpu, labels: { machine: "mac" }, ts: NOW - 30, value: 100 / 3 },
+      { metric: METRIC_NAMES.cpu, labels: { machine: "mac" }, ts: NOW, value: 12 },
+      { metric: METRIC_NAMES.mem, labels: { machine: "mac" }, ts: NOW, value: 50 },
+    ]);
+    const { reply } = await metricsReply(store, { from: NOW - 60, to: NOW, step: 30, names: [METRIC_NAMES.cpu] });
+    expect(reply).toEqual({
+      series: [
+        {
+          metric: METRIC_NAMES.cpu,
+          labels: { machine: "mac" },
+          points: [
+            [NOW - 30, 33.3],
+            [NOW, 12],
+          ],
+        },
+      ],
+    });
+    expect(logged()).toContain('audit request origin=relay op="metrics" id="req-1"');
+    store.close();
+  });
+
+  test("a malformed or over-long range is refused with a code, before the store is read", async () => {
+    let reads = 0;
+    const handler = createHandler({
+      ...ctx,
+      metrics: () => {
+        reads += 1;
+        return [];
+      },
+    });
+    for (const payload of [{ from: NOW, to: NOW - 1, step: 30 }, { from: 0, to: NOW, step: 30 }, { step: 30 }]) {
+      const plain = await handler(request("metrics", payload));
+      expect(parseMetricsReply(plain?.payload)).toMatchObject({ ok: false, code: "invalid_request" });
+    }
+    expect(reads).toBe(0);
+  });
+
+  test("a daemon without a store answers with a code instead of leaving the chart to time out", async () => {
+    const { reply } = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
+    expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+  });
+
+  // Enough series at a full span that the reply cannot fit: the relay would drop
+  // it unseen, so the app must get a code it can act on instead.
+  test("a reply over the relay's bound becomes too_large, and the same range narrowed by name fits", async () => {
+    const samples: Sample[] = [];
+    for (let i = 0; i < 40; i++) {
+      for (let t = NOW - 719 * 30; t <= NOW; t += 30) samples.push({ metric: `m${i}`, labels: {}, ts: t, value: 12.3 });
+    }
+    const store = storeWith(samples);
+    const range = { from: NOW - 719 * 30, to: NOW, step: 30 };
+
+    const over = await metricsReply(store, range);
+    expect(over.reply).toMatchObject({ ok: false, code: "too_large" });
+
+    const narrowed = await metricsReply(store, { ...range, names: ["m0", "m1"] });
+    expect("series" in narrowed.reply && narrowed.reply.series).toHaveLength(2);
+    expect(sealedLength(narrowed.plain)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    store.close();
   });
 });

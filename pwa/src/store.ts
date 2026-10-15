@@ -1,14 +1,30 @@
-import type { RepoEntry, SessionsResponse, SpawnClient, SpawnRequest, SpawnResponse } from "@seance/shared";
-import { RequestFailure, type RelayClient } from "@seance/shared";
+import type {
+  MetricsErrorCode,
+  MetricsReply,
+  MetricsRequest,
+  RepoEntry,
+  SessionsResponse,
+  SpawnClient,
+  SpawnRequest,
+  SpawnResponse,
+} from "@seance/shared";
+import { failureReasonText, RequestFailure, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
+  RANGE_SPANS,
+  TARGET_METRICS,
   type Effort,
+  type HistoryRange,
+  type HistoryResult,
+  type HistoryTarget,
+  type HistoryView,
   type Model,
   type PendingSpawn,
   type PersistedForm,
   type SheetKind,
   type Verdict,
 } from "./state.ts";
+import { accountSeries } from "./chart.ts";
 import type { AppState } from "./view.ts";
 import { resolveMachine, resolveRepo } from "./view.ts";
 
@@ -43,6 +59,14 @@ function layerEntry(state: unknown): LayerEntry | null {
     depth: typeof depth === "number" && Number.isInteger(depth) && depth > 0 ? depth : 1,
   };
 }
+
+const HISTORY_UNREADABLE = "Couldn't read the machine's answer. Update seanced and the app to matching versions.";
+
+const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
+  too_large: "Too much history for one answer. 24h asks for the fewest points.",
+  invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
+  internal_error: "The machine couldn't read its history store.",
+};
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -80,6 +104,8 @@ export class Store {
       promptUndo: null,
       sheet: null,
       settings: false,
+      machines: false,
+      history: null,
       spawning: false,
       rescanning: false,
       rescan: "idle",
@@ -143,7 +169,11 @@ export class Store {
     const woken = connected.filter((machine) => this.#wokenAt.get(machine.deviceId) !== machine.lastSeen);
     for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
     if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
-    if (this.#pending !== null) void this.#reconcile();
+    // Never while the spawn is still in flight: any relay change (a status beat, a
+    // registry push) lands here, and reconciling then spends the pending record on
+    // a question the reply is about to answer — leaving nothing to reconcile if the
+    // reply is the thing that gets dropped.
+    if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
   }
 
   /**
@@ -314,6 +344,51 @@ export class Store {
     this.#patch({ settings: true });
   }
 
+  /** Stacked over settings, its own entry: back returns to settings, not the form. */
+  openMachines(): void {
+    if (!this.#state.machines) this.#pushLayer();
+    this.#patch({ machines: true });
+  }
+
+  /**
+   * One chart at a time: a new pick replaces whatever is open or still loading.
+   * The window ends on the tier's newest bucket, so it never ends mid-bucket.
+   */
+  async showHistory(target: HistoryTarget, range: HistoryRange): Promise<void> {
+    const { span, step } = RANGE_SPANS[range];
+    const to = Math.floor(Date.now() / 1000 / step) * step;
+    const from = to - span + step;
+    const asked: HistoryView = { target, range, from, to, step, result: { kind: "loading" } };
+    this.#patch({ history: asked });
+    const result = await this.#fetchHistory(target, { from, to, step, names: TARGET_METRICS[target.kind] });
+    // A later pick or a closed screen has replaced the chart this answers.
+    if (this.#state.history !== asked) return;
+    this.#patch({ history: { ...asked, result } });
+  }
+
+  hideHistory(): void {
+    this.#patch({ history: null });
+  }
+
+  async #fetchHistory(target: HistoryTarget, request: MetricsRequest): Promise<HistoryResult> {
+    let reply: MetricsReply | null;
+    try {
+      reply = await this.#client.metrics(target.deviceId, request);
+    } catch (err) {
+      // Caught whole: the caller is fire-and-forget, so a rethrow would strand the chart on "Loading…".
+      if (!(err instanceof RequestFailure)) return { kind: "failed", message: "Couldn't load the history." };
+      // A read has nothing to land, so the timeout line's "may have landed" would mislead.
+      if (err.reason === "timeout") return { kind: "failed", message: "No answer — the machine may be asleep." };
+      // The shared line is a clause meant to follow a prefix; the chart shows it alone.
+      const text = failureReasonText(err);
+      return { kind: "failed", message: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
+    }
+    if (reply === null) return { kind: "failed", message: HISTORY_UNREADABLE };
+    if ("ok" in reply) return { kind: "failed", message: HISTORY_ERRORS[reply.code] };
+    const series = target.kind === "account" ? accountSeries(reply.series, target.accountId) : reply.series;
+    return { kind: "ok", series };
+  }
+
   /** Always via history, so the entry pushed when the layer opened is consumed. */
   dismissLayer(): void {
     if (this.#openLayers() === 0) return;
@@ -335,8 +410,8 @@ export class Store {
   }
 
   #openLayers(): number {
-    const { sheet, settings, verdict } = this.#state;
-    return (sheet === null ? 0 : 1) + (settings ? 1 : 0) + (verdict === null ? 0 : 1);
+    const { sheet, settings, machines, verdict } = this.#state;
+    return (sheet === null ? 0 : 1) + (settings ? 1 : 0) + (machines ? 1 : 0) + (verdict === null ? 0 : 1);
   }
 
   /** Before the patch that opens the layer, so the depth counts it. */
@@ -373,6 +448,11 @@ export class Store {
       // another layer was up would otherwise be reset before it was ever shown.
       const rescan = sheet === "repo" && this.#state.rescan === "failed" ? "idle" : this.#state.rescan;
       this.#patch({ sheet: null, rescan });
+      return;
+    }
+    // Above settings, so it closes first.
+    if (this.#state.machines) {
+      this.#patch({ machines: false, history: null });
       return;
     }
     if (this.#state.settings) {

@@ -1,6 +1,7 @@
 import {
   APP_ID,
   importPsk,
+  METRICS_CAPABILITY,
   seal,
   STATUS_INTERVAL_MS,
   type Envelope,
@@ -29,6 +30,7 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
+import { fitStatus } from "./status.ts";
 import { createTelemetry } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
@@ -135,6 +137,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   warnRejected(exclaveScan);
   state = { ...state, repos: tagExclaves(state.repos, exclaveScan.exclaves) };
 
+  // The stamp of the blob last handed to a register, which every `status` names
+  // as its `scan`: `state.scannedAt` moves on every hourly rescan while a
+  // re-register happens only on a changed repo set, and a reader drops a status
+  // whose stamp disagrees with the blob it holds (docs/scheduler.md, "Encoding").
+  let registeredScan = 0;
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
@@ -144,7 +151,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
+      capabilities: [METRICS_CAPABILITY],
     };
+    registeredScan = info.scannedAt;
     return seal(
       key,
       { to: APP_ID, from: state.deviceId },
@@ -160,7 +169,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let stopped = false;
 
   const rescan = async (): Promise<State["repos"]> => {
-    const [repos, exclaves] = await Promise.all([scanRepos(config.repoRoots, state.repos), scanExclaves(opts.home)]);
+    const [repos, exclaves] = await Promise.all([
+      scanRepos(config.repoRoots, state.repos),
+      scanExclaves(opts.home, exclaveScan.info),
+    ]);
     const scanned = tagExclaves(repos, exclaves.exclaves);
     if (stopped) return scanned;
     warnRejected(exclaves);
@@ -198,6 +210,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let announcePending =
     opts.selfUpdate !== undefined && source !== null && previousSha !== undefined && previousSha !== source.sha;
 
+  // Sampling from the first start on, whether or not anything asks: the history
+  // the `metrics` op serves has to predate the chart that opens it. A state dir
+  // that refuses the file costs the history, never the daemon.
+  const metrics = await MetricsStore.open().catch((err: unknown) => {
+    log.warn(`metrics store unavailable (${String(err)}) — keeping history in memory`);
+    return MetricsStore.memory();
+  });
+
   // One context, a handler per inbound surface. The relay leg and the local op
   // socket share the backend, the repo set and the audit sink, and differ only
   // in the origin they are tagged with — which is what keeps "every spawn path
@@ -207,6 +227,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     getRepos: () => state.repos,
     rescan,
     auditSink: daemonSink,
+    metrics: (request) => metrics.query(request),
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {
@@ -217,6 +238,45 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : {}),
   };
 
+  const telemetry = createTelemetry(metrics, {
+    machine: config.name,
+    diskPaths: config.repoRoots,
+    exclaves: () => exclaveScan,
+    sessions: () => handlerCtx.backend.sessions(state.repos),
+  });
+  const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
+  let telemetryTimer: ReturnType<typeof setInterval> | null = null;
+  let trimWarned = false;
+  // Each sample also goes out as `status` while the socket is up — whether or
+  // not anyone is watching, so a freshly opened app finds the latest on the
+  // relay instead of waiting a beat.
+  const sampleTelemetry = (): void => {
+    if (stopped) return;
+    telemetry
+      .tick()
+      .then((snapshot) => {
+        if (stopped || !client.connected) return false;
+        const stamped = { ...snapshot, scan: registeredScan };
+        const status = fitStatus(stamped);
+        if (status !== stamped && !trimWarned) {
+          // Once: the condition is structural (too many exclaves for the bound),
+          // not transient, and the fix is a schema change rather than a retry.
+          log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");
+          trimWarned = true;
+        }
+        return client.sendStatus(status);
+      })
+      .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
+  };
+  // Also right after every register, re-arming the beat so the next lands past
+  // the relay's floor: the register just changed the blob a status indexes, and
+  // the registry push an app got carries no snapshot until this one.
+  const sampleNow = (): void => {
+    if (telemetryTimer !== null) clearInterval(telemetryTimer);
+    telemetryTimer = setInterval(sampleTelemetry, statusIntervalMs);
+    sampleTelemetry();
+  };
+
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
@@ -224,6 +284,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     key,
     buildInfo,
     handle: createHandler(handlerCtx),
+    onRegister: sampleNow,
     onConnect: (): void => {
       updateRuntime(true);
       if (announcePending && source !== null) {
@@ -272,6 +333,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       `psk ${await pskFingerprint(resolved.psk)} (${resolved.source})`,
   );
   client.start();
+  // The first sample waits for no socket: history starts with the process.
+  sampleNow();
 
   try {
     await handlerCtx.backend.start?.();
@@ -301,26 +364,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // then hourly. Explicit rescans arrive as ops.
   void rescan();
   const rescanTimer = setInterval(() => void rescan(), opts.rescanIntervalMs ?? RESCAN_INTERVAL_MS);
-
-  // Sampling from the first start on, whether or not anything asks: the history
-  // the `metrics` op serves has to predate the chart that opens it. A state dir
-  // that refuses the file costs the history, never the daemon.
-  const metrics = await MetricsStore.open().catch((err: unknown) => {
-    log.warn(`metrics store unavailable (${String(err)}) — keeping history in memory`);
-    return MetricsStore.memory();
-  });
-  const telemetry = createTelemetry(metrics, {
-    machine: config.name,
-    diskPaths: config.repoRoots,
-    exclaves: () => exclaveScan,
-    sessions: () => handlerCtx.backend.sessions(state.repos),
-  });
-  const sampleTelemetry = (): void => {
-    if (stopped) return;
-    telemetry.tick().catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
-  };
-  sampleTelemetry();
-  const telemetryTimer = setInterval(sampleTelemetry, opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS);
 
   // Off unless configured. The report goes to the log, one line each; what it
   // destroyed is in the audit trail as origin=schedule. A run the CLI already
@@ -362,7 +405,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     stop: (): void => {
       stopped = true;
       clearInterval(rescanTimer);
-      clearInterval(telemetryTimer);
+      if (telemetryTimer !== null) clearInterval(telemetryTimer);
       handlerCtx.backend.stop?.();
       if (reapTimer !== null) clearInterval(reapTimer);
       reapAbort.abort();

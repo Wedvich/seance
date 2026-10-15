@@ -109,9 +109,12 @@ export class MetricsStore {
     this.#select = new Map(
       METRICS_STEPS.map((step) => [
         step,
-        db.query<PointRow, [number, number]>(
+        // `names` arrives as one JSON array bound as text, so the filter is a
+        // fixed statement however many names a request carries.
+        db.query<PointRow, [number, number, string | null]>(
           `SELECT s.metric, s.labels, t.ts, t.value FROM ${TIERS[step]} t JOIN series s ON s.id = t.series
-           WHERE t.ts >= ? AND t.ts <= ? ORDER BY s.id, t.ts`,
+           WHERE t.ts >= ?1 AND t.ts <= ?2 AND (?3 IS NULL OR s.metric IN (SELECT value FROM json_each(?3)))
+           ORDER BY s.id, t.ts`,
         ),
       ]),
     );
@@ -173,14 +176,18 @@ export class MetricsStore {
     return row.id;
   }
 
-  /** Every series with a point in the range, at the tier the step names; bounds on the range are the caller's. */
+  /**
+   * Every series with a point in the range, at the tier the step names, limited
+   * to `names` when given; bounds on the range are the caller's.
+   */
   query(request: MetricsRequest): readonly MetricsSeries[] {
     const select = this.#select.get(request.step);
     if (select === undefined) return [];
     const out: MetricsSeries[] = [];
     let current: { readonly metric: string; readonly labels: string; readonly points: [number, number][] } | null =
       null;
-    for (const row of select.all(request.from, request.to)) {
+    const names = request.names === undefined ? null : JSON.stringify(request.names);
+    for (const row of select.all(request.from, request.to, names)) {
       if (!isPointRow(row)) continue;
       if (current === null || current.metric !== row.metric || current.labels !== row.labels) {
         current = { metric: row.metric, labels: row.labels, points: [] };

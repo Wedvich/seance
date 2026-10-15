@@ -3,6 +3,7 @@ import type { Machine, RelayState, RepoEntry } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
+  type HistoryView,
   type PersistedForm,
   type RescanState,
   type SessionsView,
@@ -72,6 +73,10 @@ export interface AppState {
   readonly sheet: SheetKind | null;
   /** The settings screen, a layer like the sheets so back leaves it instead of the app. */
   readonly settings: boolean;
+  /** The machines screen, opened from settings and stacked over it. */
+  readonly machines: boolean;
+  /** The machines screen's open chart; cleared with the screen. */
+  readonly history: HistoryView | null;
   readonly spawning: boolean;
   /** A repo_not_found retry rescans before it spawns; the button names which of the two is running. */
   readonly rescanning: boolean;
