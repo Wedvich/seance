@@ -169,7 +169,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let stopped = false;
 
   const rescan = async (): Promise<State["repos"]> => {
-    const [repos, exclaves] = await Promise.all([scanRepos(config.repoRoots, state.repos), scanExclaves(opts.home)]);
+    const [repos, exclaves] = await Promise.all([
+      scanRepos(config.repoRoots, state.repos),
+      scanExclaves(opts.home, exclaveScan.info),
+    ]);
     const scanned = tagExclaves(repos, exclaves.exclaves);
     if (stopped) return scanned;
     warnRejected(exclaves);
@@ -253,8 +256,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       .tick()
       .then((snapshot) => {
         if (stopped || !client.connected) return false;
-        const status = fitStatus({ ...snapshot, scan: registeredScan });
-        if (status !== snapshot && !trimWarned) {
+        const stamped = { ...snapshot, scan: registeredScan };
+        const status = fitStatus(stamped);
+        if (status !== stamped && !trimWarned) {
           // Once: the condition is structural (too many exclaves for the bound),
           // not transient, and the fix is a schema change rather than a retry.
           log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");

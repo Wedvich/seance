@@ -170,7 +170,11 @@ export class Store {
     const woken = connected.filter((machine) => this.#wokenAt.get(machine.deviceId) !== machine.lastSeen);
     for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
     if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
-    if (this.#pending !== null) void this.#reconcile();
+    // Never while the spawn is still in flight: any relay change (a status beat, a
+    // registry push) lands here, and reconciling then spends the pending record on
+    // a question the reply is about to answer — leaving nothing to reconcile if the
+    // reply is the thing that gets dropped.
+    if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
   }
 
   /**

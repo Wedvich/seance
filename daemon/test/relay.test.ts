@@ -270,11 +270,17 @@ describe("daemon ↔ relay integration", () => {
   });
 
   test("a status follows every register, sealed to the app and stamped with the registered scan", async () => {
+    // A state dir of its own. The shared one caches what earlier tests scanned,
+    // so the boot register would already carry myrepo, and when the boot rescan
+    // finds the set changed (`newrepo` is gone) its re-register restamps every
+    // status still in flight: the boot stamp this test matched never goes out,
+    // and the next beat is 30s off.
+    process.env["SEANCE_STATE_DIR"] = await mkdtemp(join(base, "state-"));
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId, info } = await registerWithRepo(relay, "myrepo");
-      // The boot register (cached repos, stamp 0) has its own status ahead of
+      // The boot register (no repos, stamp 0) has its own status ahead of
       // this one; each names the blob it was sent after.
       for (let i = 0; ; i++) {
         const env = await relay.statuses.next();
@@ -296,6 +302,7 @@ describe("daemon ↔ relay integration", () => {
     } finally {
       daemon.stop();
       relay.stop();
+      process.env["SEANCE_STATE_DIR"] = join(base, "state");
     }
   });
 
@@ -530,6 +537,27 @@ describe("daemon ↔ relay integration", () => {
       console.log = realWarn;
       daemon.stop();
       relay.stop();
+    }
+  });
+
+  // A socket that never opens drops through `error`, not `close`, and the error
+  // event is the only one whose reason survives — so the log has to carry it.
+  test("a connection that fails says why", async () => {
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    // Port 1 on loopback: nothing listens, so the dial is refused outright.
+    const daemon = await startTestDaemon("ws://127.0.0.1:1", { maxBackoffMs: 50 });
+    try {
+      await pollUntil(() => lines.some((line) => line.includes("relay socket errored")), "an errored drop");
+      const line = lines.find((l) => l.includes("relay socket errored"));
+      expect(line).toContain("reason=");
+      expect(line).toContain("Failed to connect");
+    } finally {
+      console.log = realLog;
+      daemon.stop();
     }
   });
 

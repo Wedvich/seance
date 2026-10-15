@@ -12,7 +12,7 @@
  * sweep daemon/test/relay.test.ts. Counts must add up to a plain run's, which the
  * coverage check below enforces — every tracked test file has to fall in a shard.
  */
-import { mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TEST_RUN_DIR_ENV } from "./test-run-dir.ts";
@@ -38,6 +38,9 @@ const SHARDS: readonly Shard[] = [
   // exit 1, the output cut mid-line, no summary, no test named. It never
   // reproduced locally or in an ubuntu:24.04 container; the whole daemon suite
   // crossed that size with the reap tests. Each half stays well under it.
+  // Probably the bug `flush` below works around, not --parallel: a non-blocking
+  // stdout keeps 64 KiB and drops the rest, and neither a local run nor a
+  // container hands one out. Worth retrying one shard once CI has run with it.
   { name: "daemon/test", paths: ["daemon/test/"], parallel: true },
   { name: "daemon/src+shared", paths: ["daemon/src/", "shared/"], parallel: true },
   { name: "e2e", paths: ["e2e/"] },
@@ -326,11 +329,47 @@ try {
 if (signalExitCode !== null) process.exit(signalExitCode);
 const elapsedMs = Math.round((Bun.nanoseconds() - started) / 1e6);
 
+/**
+ * The report is collected and written once, never through `console.log`. On a
+ * non-blocking stdout — what GitHub's runner hands the step — Bun's console.log
+ * keeps one pipe buffer (64 KiB) of a burst and silently drops the rest: a
+ * failing shard's section vanished from the log, header and all, while the
+ * total still named it. `Bun.write` to stdout duplicates chunks instead. A write
+ * awaited through its callback is the one form that delivers every byte once.
+ */
+const report: string[] = [];
+const out = (text: string): void => {
+  report.push(text);
+};
+
+function flush(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${report.join("\n")}\n`, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+/** Room for a failing shard's tail in the step summary, which GitHub caps at 1 MiB per step. */
+const STEP_SUMMARY_TAIL = 64 * 1024;
+
+/**
+ * A second copy of each failed shard where it can't scroll away: the job's
+ * summary page. The tail, because bun recaps every failure at the end.
+ */
+async function summarizeFailures(failed: readonly Result[]): Promise<void> {
+  const file = process.env["GITHUB_STEP_SUMMARY"];
+  if (file === undefined || failed.length === 0) return;
+  const sections = failed.map(
+    (r) =>
+      `### ${r.name} — exit ${r.exitCode}\n\n\`\`\`\n${r.output.replaceAll(SGR, "").slice(-STEP_SUMMARY_TAIL)}\n\`\`\`\n`,
+  );
+  await appendFile(file, sections.join("\n"));
+}
+
 for (const result of results) {
   const status =
     result.skipped === true ? "skipped" : result.exitCode === 0 ? "pass" : `FAIL (exit ${result.exitCode})`;
-  console.log(`\n${"═".repeat(72)}\n${result.name} — ${status}\n${"═".repeat(72)}`);
-  console.log(result.output.trimEnd());
+  out(`\n${"═".repeat(72)}\n${result.name} — ${status}\n${"═".repeat(72)}`);
+  out(result.output.trimEnd());
 }
 
 const failed = results.filter((r) => r.exitCode !== 0);
@@ -344,21 +383,22 @@ const unparsed = results.filter((r, i) => r.skipped !== true && summary[i]?.test
 const skipped = results.filter((r) => r.skipped === true);
 const totals = tally(summary);
 
-console.log(`\n${"═".repeat(72)}\ntotal — ${verdict}\n${"═".repeat(72)}`);
+out(`\n${"═".repeat(72)}\ntotal — ${verdict}\n${"═".repeat(72)}`);
 for (const label of ["pass", "fail", "skip", "todo"] as const) {
   const count = totals.counts[label] ?? 0;
   // bun prints skip/todo only when they happened; match that.
   if (count === 0 && label !== "pass" && label !== "fail") continue;
   // Green for passes, red only for failures that happened — a clean 0 fail is dim.
   const color = label === "pass" ? "green" : label === "fail" && count > 0 ? "red" : "dim";
-  console.log(paint(color, ` ${count} ${label}`));
+  out(paint(color, ` ${count} ${label}`));
 }
-console.log(` ${totals.expectCalls} expect() calls`);
-console.log(`Ran ${plural(totals.tests, "test")} across ${plural(totals.files, "file")}. ${duration(elapsedMs)}`);
+out(` ${totals.expectCalls} expect() calls`);
+out(`Ran ${plural(totals.tests, "test")} across ${plural(totals.files, "file")}. ${duration(elapsedMs)}`);
 // A shard that dies before printing its summary contributes nothing above, so the
 // total would quietly under-report the suite.
-if (unparsed.length > 0)
-  console.log(paint("red", `warning: no summary from ${unparsed.map((r) => r.name).join(", ")}`));
-if (skipped.length > 0) console.log(`skipped shards: ${skipped.map((r) => r.name).join(", ")}`);
+if (unparsed.length > 0) out(paint("red", `warning: no summary from ${unparsed.map((r) => r.name).join(", ")}`));
+if (skipped.length > 0) out(`skipped shards: ${skipped.map((r) => r.name).join(", ")}`);
+await flush();
+await summarizeFailures(failed);
 
 process.exit(failed.length === 0 ? 0 : 1);

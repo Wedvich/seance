@@ -16,7 +16,7 @@ import {
 } from "../src/reap.ts";
 import { transcriptDir } from "../src/reap-git.ts";
 import { scanRepos } from "../src/scan.ts";
-import { listPanes } from "../src/sessions.ts";
+import { classifyPane, listPanes } from "../src/sessions.ts";
 import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
@@ -161,6 +161,11 @@ async function openWindow(command: string, cwd: string = base): Promise<string> 
 
 async function paneExists(paneId: string): Promise<boolean> {
   return (await listPanes()).some((pane) => pane.paneId === paneId);
+}
+
+async function onExitPrompt(paneId: string): Promise<boolean> {
+  const pane = (await listPanes()).find((p) => p.paneId === paneId);
+  return pane !== undefined && (await classifyPane(pane)) === "exit-prompt";
 }
 
 describe("reap: worktrees and branches (real git)", () => {
@@ -436,10 +441,10 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
     const handStarted = await openWindow("bash --noprofile --norc -i");
     await tmuxOk(["send-keys", "-t", handStarted, "-l", stub.exitPrompt]);
     await tmuxOk(["send-keys", "-t", handStarted, "Enter"]);
-    await pollUntil(
-      async () => (await listPanes()).some((p) => p.paneId === handStarted && p.titled),
-      "hand-started prompt",
-    );
+    // Each pane on its own dialog before the reap: the two stubs boot
+    // independently, so one being ready says nothing about the other.
+    await pollUntil(() => onExitPrompt(ours), "séance claude on its exit prompt");
+    await pollUntil(() => onExitPrompt(handStarted), "hand-started claude on its exit prompt");
 
     const report = await reap(repo);
     expect(report.closedPanes.map((pane) => [pane.paneId, pane.why])).toContainEqual([ours, "exit-prompt"]);
