@@ -5,20 +5,36 @@ heuristics note, and an interview; placement revised 2026-10-15 (below). Folds i
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists.
 
+## Glossary
+
+One word per thing. The wire names in `shared/src/types.ts` are older than this table and
+stay as they are; the table says which word each one means.
+
+| Term    | Meaning                                                                                                                                                                                                                        | On the wire / in code                                   |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                       | `deviceId` is its routing key, `MachineInfo` its blob   |
+| exclave | One Claude Code config dir and the tree it owns: `default` (`~/.claude`, `~`) or a line of `~/.exclaves` (`~/.claude-<name>`, `~/<name>`). Decides which account a spawn bills. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone |
+| account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                           | `accountId` = `organizationUuid:accountUuid`            |
+| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                   | `tasks.repo`, `RepoEntry.origin`                        |
+| clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                  | `RepoEntry`, `spawn { repo }` (historical name)         |
+| session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                   | pane id, `sessions` op                                  |
+| task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                    | `task:<id>` in the store, `taskId` on spawn             |
+| leader  | The daemon currently nominated to run the scheduler loop                                                                                                                                                                       | `lead`/`follow`, `scheduler:term`                       |
+
 ## Decisions (from the interview, placement revised 2026-10-15)
 
 | Topic             | Decision                                                                                                                                                                                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite |
-| Workspace         | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
-| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, repo entry) and calls the existing `spawn`                                                                                                                                  |
-| Subscription id   | `organizationUuid:accountUuid` from `<configDir>/.claude.json` — never the email                                                                                                                                                                                             |
+| Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
+| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                       |
+| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` — never the email                                                                                                                                                                                             |
 | Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → last value + `resets_at` floor                                                                                                                                                                   |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                 |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                             |
 | Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                           |
-| Concurrency       | Global max, per-subscription max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                 |
+| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                      |
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                              |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                         |
@@ -44,7 +60,7 @@ removes all of that:
   machine (the register `info`) that the PWA opens hours after it was sealed. A task is the same
   shape. The relay learns how many tasks exist and when they change — the metadata class
   DESIGN.md already concedes — and nothing else.
-- **Running the queue** needs the PSK (every input is sealed: `status`, workspaces, task bodies,
+- **Running the queue** needs the PSK (every input is sealed: `status`, exclaves, task bodies,
   `branch-state`), so a PSK holder must do it. Daemons already hold it, already dial out, and
   one of them is up whenever any work could run. So the scheduler is a _role_ a daemon takes:
   the relay nominates one, and the queue's liveness equals the fleet's. If the leading machine
@@ -129,10 +145,10 @@ env }]`, `queue-put { id, expect, env, term? }` → `{ version }` or `version_co
 
 **`status` payload** (`MachineStatus` in `types.ts`): `at`; cpu, mem, disk pressure as
 0–1 fractions (each already smoothed over ~2 min daemon-side, so the scheduler needs no window
-of its own) plus disk free and r/w rates; running sessions per workspace; and `quota`: this
-daemon's newest observation per subscription (5h/7d pct, `resets_at`, source
-`session`/`oauth`, observed-at). Quota for one subscription is spread over every daemon
-hosting one of its workspaces; readers take the newest observation per subscription.
+of its own) plus disk free and r/w rates; running sessions per exclave; and `quota`: this
+daemon's newest observation per account (5h/7d pct, `resets_at`, source
+`session`/`oauth`, observed-at). Quota for one account is spread over every daemon
+hosting one of its exclaves; readers take the newest observation per account.
 
 **New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:
 `metrics { range, resolution }` → `{ series }` from the daemon's local store. The PWA calls it
@@ -142,10 +158,10 @@ until it wakes — accepted.
 **Daemon → scheduler (fire-and-forget, sealed to `"scheduler"`)** — events only, the things
 that must arrive when they happen rather than when someone asks:
 
-| Op              | Cadence                      | Payload (sketch)                                                                                |
-| --------------- | ---------------------------- | ----------------------------------------------------------------------------------------------- |
-| `session-event` | on event, coalesced ≤1/5s    | session id, task id, workspace, state (`busy`/`idle`/`needs-input`/`ended`), PR URL seen, skill |
-| `branch-state`  | on change, for task branches | repo, branch, `pushed`, `merged` (reap-git's rules)                                             |
+| Op              | Cadence                      | Payload (sketch)                                                                              |
+| --------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
+| `session-event` | on event, coalesced ≤1/5s    | session id, task id, exclave, state (`busy`/`idle`/`needs-input`/`ended`), PR URL seen, skill |
+| `branch-state`  | on change, for task branches | repo, branch, `pushed`, `merged` (reap-git's rules)                                           |
 
 A leader change loses nothing here: every event is also reflected in the daemon's `sessions`
 reply, which the new leader reconciles against on takeover (below).
@@ -184,9 +200,9 @@ no leader and the next one picks it up. Scheduler → app: `queue-changed` push 
 
 **`MachineInfo` additions** (register blob, optional on the wire like `source`):
 
-- `workspaces: [{ id, subscriptionId, extraUsageEnabled, authOk, skills: string[] }]`.
-- `RepoEntry` gains `workspace` (which workspace's tree it sits in) and `origin` (normalized
-  remote URL). `origin` is the scheduler's _logical_ repo key: entry names are machine-local
+- `exclaves: [{ id, accountId, extraUsageEnabled, authOk, skills: string[] }]`.
+- `RepoEntry` gains `exclave` (which exclave's tree it sits in) and `origin` (normalized
+  remote URL). `origin` is the scheduler's repo key: clone names are machine-local
   and collision-disambiguated (`seance` becomes `pengefix/seance` the day a second clone
   appears), so they can't identify "the same repo" across machines or over time. Fallback
   when there's no remote: basename.
@@ -195,15 +211,15 @@ no leader and the next one picks it up. Scheduler → app: `queue-changed` push 
   read; `capabilities` is sealed, what only the leader reads.)
 
 This is what the scheduler's filter stage reads; it reaches apps the same way repos do, and
-the PWA can show the workspace beside each repo in the manual picker.
+the PWA can show the exclave beside each repo in the manual picker.
 
 ## Daemon changes
 
-- `workspaces.ts`: read `~/.exclaves` + default; map scanned repos by path prefix; read
+- `exclaves.ts`: read `~/.exclaves` + default; map scanned repos by path prefix; read
   account/org/extra-usage/auth presence from each config dir. Rescan on `~/.exclaves` mtime.
 - Config dir follows location via the user's shell hook (`.zshenv` → `update_exclave_env`),
   as today; the daemon doesn't set it. A machine's shell setup being correct is out of scope —
-  the daemon only _reports_ which workspace a repo sits in.
+  the daemon only _reports_ which exclave a repo sits in.
 - `telemetry.ts`: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
   API token, which never leaves the daemon process). argv-array exec only. Samples every 30s
@@ -211,7 +227,7 @@ the PWA can show the workspace beside each repo in the manual picker.
   state files): raw 30s for 48h, 5-min rollups 30d, 1h rollups 1y. Quota observations (from
   session events and the OAuth poll) land in the same store. The latest goes out as `status`;
   history is served by the `metrics` op.
-- `quota.ts` (M4): OAuth usage poll per workspace when the newest session report is older than
+- `quota.ts` (M4): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
 - Local socket: `session-event` as its own frame kind, never a `Plain` or an `OpName` — the
@@ -246,9 +262,9 @@ adapter implementations (SQLite store, own app-role client) and no change here.
 Tests run the library against in-memory fakes of both; the daemon suite proves the adapters
 against `daemon/test/harness.ts`; the e2e suite proves the store against the real DO.
 
-**State (in the store, one sealed body per task):** prompt, title, repo (logical `origin`),
+**State (in the store, one sealed body per task):** prompt, title, repo (`origin`),
 spawn opts, batch, deps, state, assignment (`deviceId`, pane, `taskId`), reservation
-(`deviceId`, `expiresAt`), decision (every scoring component), lineage. Machines, workspaces,
+(`deviceId`, `expiresAt`), decision (every scoring component), lineage. Machines, exclaves,
 resources and quota come from the fleet feed and are persisted nowhere. `settings` and
 `push_subs` are two more sealed keys. A leader change loses only the in-memory view.
 
@@ -264,18 +280,18 @@ and re-route. Only then does the loop start dispatching.
 
 ```
                  registry + status (per machine)        task (sealed body)
-                 workspaces · repos · skills · caps      repo · deps · pin · skill · lineage
+                 exclaves · clones · skills · caps       repo · deps · pin · skill · lineage
                               │                                   │
                               ▼                                   ▼
- every (machine, repo entry) ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
- carrying the task's repo     │   offline/stale · no taskId · auth missing · repo absent   │
+ every clone of the task's   ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
+ repo, on any machine         │   offline/stale · no taskId · auth missing · repo absent   │
                               │   skill absent · pin mismatch · base unpushed             │
-                              │   sub over threshold ∧ credits off · cap reached          │
+                              │   account over threshold ∧ credits off · cap reached      │
                               │                                                           │
                               └─► 2 SCORE  (lower wins, weights in config)                │
-                                  subscription_pressure  max(f(5h), g(7d)), ÷ time-to-reset
+                                  account_pressure       max(f(5h), g(7d)), ÷ time-to-reset
                                   machine_pressure       max(cpu, mem, disk, host)        │
-                                  dependency_distance    0 same workspace … 0.5 elsewhere │
+                                  dependency_distance    0 same exclave … 0.5 elsewhere   │
                                   queue_pressure                                          │
                                       │                                                   │
                                       ▼                                                   │
@@ -292,13 +308,13 @@ the latest `status` per machine; a snapshot older than ~90s counts as unknown an
 is filtered for new work:
 
 1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;
-   workspace auth missing; repo absent in workspace; required skill absent; pin mismatch;
-   stacked base unpushed and not on this workspace; subscription over hard threshold **and**
-   extra usage disabled; per-subscription / global cap reached.
+   exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
+   stacked base unpushed and not on this exclave; account over hard threshold **and**
+   extra usage disabled; per-account / global cap reached.
 2. _Score_ (lower wins, weights in config):
-   `subscription_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
+   `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
    time-to-reset; `machine_pressure` = max(cpu, mem, disk, host) for LXCs;
-   `dependency_distance` (0 same workspace … 0.5 pushed elsewhere); `queue_pressure`.
+   `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`.
 3. _Stickiness_: lineage owner bonus; only matters for continuations.
 4. _Reserve_ (one store write) then dispatch with `taskId`; reservation TTL 120s; spawn failure
    or `task_running` from a stale read both resolve the reservation without a second spawn.
@@ -308,9 +324,9 @@ is filtered for new work:
 Projected usage counts reservations + running scheduler tasks (fixed per-task estimate in v1,
 tuned later from observed deltas per task).
 
-**Credits spill:** dispatching to a subscription past the hard threshold with extra usage on
-fires a Web Push ("Spending credits on <sub> for <task>" + Pause actions). Re-alerts once per
-subscription per window, not per task.
+**Credits spill:** dispatching to an account past the hard threshold with extra usage on
+fires a Web Push ("Spending credits on <account> for <task>" + Pause actions). Re-alerts once per
+account per window, not per task.
 
 **Done detection:** Linear Done (if linked, poll) or daemon `branch-state merged` → `done`;
 session `ended` without merge → `awaiting-merge` (PR open) or `failed` (no PR, nonzero) —
@@ -325,12 +341,12 @@ daemon-local merge detection is the primary done signal.
 
 ## Milestones
 
-| M   | Scope                                                                                                                                                                                                                     | Ships something usable?                           |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| M1  | Workspaces + `workspace`/`origin` on repo entries; `status` frame through the relay; daemon telemetry store + `metrics` op; session-reported quota; PWA machines/workspaces/subscriptions view + charts. No scheduler yet | Yes: visibility across machines and subscriptions |
-| M2  | `scheduler/` library + fakes; `roles`/`lead`/`follow`/term in the relay; `leader.ts` with the two adapters; `session-event` op + mod; `taskId` on spawn; filter/score/explain; `auto` spawn + `route-preview` in PWA      | Yes: "spawn this in repo X" without picking       |
-| M3  | `queue-*` store ops + version binding; durable queue, batches, deps (hand + Linear), takeover reconciliation, done detection, caps, pause, needs-input                                                                    | Yes: queue a work block and walk away             |
-| M4  | Stacking (`baseBranch`, lineage, handoff preamble), OAuth quota poll, skills filter + autocomplete, Proxmox host metrics, Web Push + Linear via sealed `settings`                                                         | Refinement                                        |
+| M   | Scope                                                                                                                                                                                                                | Ships something usable?                      |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| M1  | Exclaves + `exclave`/`origin` on clones; `status` frame through the relay; daemon telemetry store + `metrics` op; session-reported quota; PWA machines/exclaves/accounts view + charts. No scheduler yet             | Yes: visibility across machines and accounts |
+| M2  | `scheduler/` library + fakes; `roles`/`lead`/`follow`/term in the relay; `leader.ts` with the two adapters; `session-event` op + mod; `taskId` on spawn; filter/score/explain; `auto` spawn + `route-preview` in PWA | Yes: "spawn this in repo X" without picking  |
+| M3  | `queue-*` store ops + version binding; durable queue, batches, deps (hand + Linear), takeover reconciliation, done detection, caps, pause, needs-input                                                               | Yes: queue a work block and walk away        |
+| M4  | Stacking (`baseBranch`, lineage, handoff preamble), OAuth quota poll, skills filter + autocomplete, Proxmox host metrics, Web Push + Linear via sealed `settings`                                                    | Refinement                                   |
 
 ## Defaults I picked without asking — confirm or override
 
@@ -364,8 +380,8 @@ daemon-local merge detection is the primary done signal.
   session reports nothing new.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
-- **Daemons on old versions** report no `workspaces`/`origin`/`taskId`. The scheduler treats
-  such a machine as ineligible for `auto` (it can't know which subscription a spawn would bill,
+- **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
+  such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
   and can't dedupe a re-dispatch), while direct spawns to it keep working. Self-update makes
   this a short window.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
