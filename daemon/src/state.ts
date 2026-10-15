@@ -1,4 +1,4 @@
-import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RepoEntry, UpdateReport } from "@seance/shared";
 import { log } from "./log.ts";
@@ -36,14 +36,27 @@ function isState(raw: unknown): raw is State {
   return typeof obj["deviceId"] === "string" && Array.isArray(obj["repos"]);
 }
 
-/** Null when the file is absent; the problem string when it is there but unusable. */
+/**
+ * Null when the file is absent; the problem string when it is there but unusable.
+ *
+ * `readFile` rather than `Bun.file(path).json()`: the writer is temp-plus-rename,
+ * so the file on disk is always whole, but `Bun.file` is lazy by path and a read
+ * that sizes itself before it opens can land on the far side of a rename and
+ * come back short — read as corruption, which re-mints the deviceId. `readFile`
+ * sizes from the descriptor it opened, so one open sees one whole file. Seen
+ * once on a GitHub macOS runner, never reproduced locally.
+ */
 async function parseState(path: string): Promise<{ readonly state: State } | { readonly problem: string } | null> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) return null;
+  let text: string;
   try {
-    const raw: unknown = await file.json();
-    if (isState(raw)) return { state: raw };
-    return { problem: "has unexpected shape" };
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return { problem: `could not be read (${String(err)})` };
+  }
+  try {
+    const raw: unknown = JSON.parse(text);
+    return isState(raw) ? { state: raw } : { problem: "has unexpected shape" };
   } catch {
     return { problem: "is not valid JSON" };
   }
