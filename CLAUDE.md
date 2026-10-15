@@ -65,6 +65,11 @@ green:
   queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
   this stays green in CI while failing every local run. Link rather than copy, and exec it once in
   setup — `makeClaudeStub` shows both and carries the measurements.
+- A private tmux server still loads the developer's own `~/.tmux.conf` — product code boots it, and
+  only `-f` skips the file — so local runs get its default-shell, hooks and `automatic-rename-format`
+  while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
+  as `spawn.ts` does) rather than reading its automatic name, which on macOS is whatever tmux caught
+  mid-exec (`kernel_task`, `tmux`, `""`).
 - `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.
