@@ -36,6 +36,12 @@ import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(3));
 const TOKEN = "test-bearer";
+/**
+ * A status leaves only after a full telemetry pass — a CPU sample window, disk,
+ * tmux sessions, every exclave's quota file — so the queue's 2s frame default
+ * is shorter than a loaded CI runner takes (it failed there at 2s).
+ */
+const STATUS_WAIT_MS = 10_000;
 let base: string;
 let privateTmux: PrivateTmux | undefined;
 let fixture: GitFixture;
@@ -276,7 +282,7 @@ describe("daemon ↔ relay integration", () => {
       // The boot register (cached repos, stamp 0) has its own status ahead of
       // this one; each names the blob it was sent after.
       for (let i = 0; ; i++) {
-        const env = await relay.statuses.next();
+        const env = await relay.statuses.next(STATUS_WAIT_MS);
         expect(env.to).toBe(APP_ID);
         expect(env.from).toBe(deviceId);
         expect(env.ct.length).toBeLessThanOrEqual(STATUS_MAX_CT_LENGTH);
@@ -306,7 +312,7 @@ describe("daemon ↔ relay integration", () => {
       expect(info.capabilities).toEqual(["metrics"]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.
-      await relay.statuses.next();
+      await relay.statuses.next(STATUS_WAIT_MS);
       const now = Math.floor(Date.now() / 1000);
       const { id } = await appRequest(relay, deviceId, "metrics", {
         from: now - 300,
