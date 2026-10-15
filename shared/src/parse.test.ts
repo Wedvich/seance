@@ -73,6 +73,7 @@ describe("parseMachineStatus", () => {
     d: 12,
     hr: 1_700_010_000,
     dr: 1_700_500_000,
+    w: [{ m: "Fable", p: 25, r: 1_700_500_000 }],
     s: "cache",
     at: 1_699_999_000,
   };
@@ -97,6 +98,14 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, free: -1 })).toBeNull();
     expect(parseMachineStatus({ ...status, sess: [1, 0.5] })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, h: 41.2 }] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25.5 }] }] })).toBeNull();
+  });
+
+  test("a model-scoped window names its model; one bad window costs the tick", () => {
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25 }] }] })).not.toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "", p: 25 }] }] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ p: 25 }] }] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25, r: -1 }] }] })).toBeNull();
   });
 
   test("absent is the only unknown: null fields and unknown quota sources are refused", () => {

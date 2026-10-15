@@ -12,6 +12,7 @@ import {
   type QuotaObservation,
   type RepoEntry,
   type RescanResponse,
+  type ScopedWindow,
   type SpawnErrorCode,
 } from "./types.ts";
 
@@ -164,11 +165,21 @@ function isQuotaSource(value: unknown): value is QuotaObservation["s"] {
   return QUOTA_SOURCES.some((source) => source === value);
 }
 
+function parseScopedWindow(value: unknown): ScopedWindow | null {
+  if (!isRecord(value)) return null;
+  if (typeof value["m"] !== "string" || value["m"] === "" || !isUint(value["p"])) return null;
+  const r = value["r"];
+  if (!isOptionalUint(r)) return null;
+  return { m: value["m"], p: value["p"], ...(r === undefined ? {} : { r }) };
+}
+
 function parseQuotaObservation(value: unknown): QuotaObservation | null {
   if (!isRecord(value)) return null;
   if (!isUint(value["x"]) || !isUint(value["at"]) || !isQuotaSource(value["s"])) return null;
   const { h, d, hr, dr } = value;
   if (!isOptionalUint(h) || !isOptionalUint(d) || !isOptionalUint(hr) || !isOptionalUint(dr)) return null;
+  const w = value["w"] === undefined ? undefined : parseList(value["w"], parseScopedWindow);
+  if (w === null) return null;
   return {
     x: value["x"],
     s: value["s"],
@@ -177,6 +188,7 @@ function parseQuotaObservation(value: unknown): QuotaObservation | null {
     ...(d === undefined ? {} : { d }),
     ...(hr === undefined ? {} : { hr }),
     ...(dr === undefined ? {} : { dr }),
+    ...(w === undefined ? {} : { w }),
   };
 }
 

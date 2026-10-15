@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -261,6 +261,20 @@ describe("daemon ↔ relay integration", () => {
       daemon.stop();
       relay.stop();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("the daemon opens its metrics store owner-only in the state dir", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      await relay.registers.next();
+      const file = join(base, "state", "metrics.sqlite");
+      await pollUntil(async () => (await stat(file).catch(() => null)) !== null, "metrics.sqlite to exist");
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    } finally {
+      daemon.stop();
+      relay.stop();
     }
   });
 
