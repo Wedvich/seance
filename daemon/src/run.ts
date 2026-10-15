@@ -1,6 +1,7 @@
 import {
   APP_ID,
   importPsk,
+  METRICS_CAPABILITY,
   seal,
   STATUS_INTERVAL_MS,
   type Envelope,
@@ -150,7 +151,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
-      capabilities: ["metrics"],
+      capabilities: [METRICS_CAPABILITY],
     };
     registeredScan = info.scannedAt;
     return seal(

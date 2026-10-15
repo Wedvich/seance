@@ -341,6 +341,9 @@ export interface MachineInfo {
   readonly capabilities?: readonly string[];
 }
 
+/** The `capabilities` entry for the `metrics` op: a daemon without it ignores the op, which an app sees only as a timeout. */
+export const METRICS_CAPABILITY = "metrics";
+
 export const QUOTA_SOURCES = ["session", "oauth", "cache"] as const;
 
 /**

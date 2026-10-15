@@ -562,7 +562,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 | `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
 | `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
-| op `metrics`                        | `shared/src/app-client.ts` `metrics()`, which parses the reply; the PWA chart calls it   | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
+| op `metrics`                        | `shared/src/app-client.ts` `metrics()`, gated and parsed; the PWA chart is M1 step 6     | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -762,8 +762,10 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 - `metrics { from, to, step, names? }` → `{ series }` or `{ ok: false, code, message }`
   — history from the daemon's local store (Telemetry, under Daemon), Prometheus
   series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
-  Advertised as `"metrics"` in the register blob's `capabilities`, so an app
-  hides the chart for a daemon that predates it. The one reply that scales with
+  Advertised as `"metrics"` in the register blob's `capabilities`, and
+  `RelayClient.metrics` refuses a machine without it: a daemon that predates
+  the op drops it unanswered, and the timeout would mark a live machine
+  offline. The one reply that scales with
   stored data, so it is bounded twice: a request spanning more than
   `METRICS_MAX_POINTS` per series is `invalid_request` before the store reads a
   row, and a reply that would seal past `ENVELOPE_MAX_CT_LENGTH` (64 KiB of

@@ -527,13 +527,15 @@ describe("status", () => {
 
 describe("requests", () => {
   // The request is the daemon's to bound; what the client owns is that a reply
-  // reaches the chart only once parsed — a refusal as its code, junk as null.
+  // reaches the chart only once parsed — a refusal as its code, junk as null —
+  // and that it never asks a daemon that doesn't advertise the op.
   test("metrics carries the request through and hands back only a parsed reply", async () => {
     const deviceId = await newDeviceId();
     const lines: string[] = [];
     const { client, waitFor } = startClient({ log: (line) => lines.push(line) });
     const seen: unknown[] = [];
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("MacBook Pro"), {
+    const info = { ...machineInfo("MacBook Pro"), capabilities: ["metrics"] };
+    const daemon = await startFakeDaemon(relay, key, deviceId, info, {
       metrics: (payload) => {
         seen.push(payload);
         const names = isRecord(payload) ? payload["names"] : undefined;
@@ -561,6 +563,30 @@ describe("requests", () => {
 
       expect(await client.metrics(deviceId, { ...range, names: ["junk"] })).toBeNull();
       expect(lines).toContain(`wire dropped from=${JSON.stringify(deviceId)} reason=metrics-shape`);
+
+      // A daemon that predates the op drops it unanswered, so the client refuses
+      // up front rather than let the timeout mark a live machine offline.
+      daemon.close();
+      const older = await startFakeDaemon(relay, key, deviceId, machineInfo("MacBook Pro"), {
+        metrics: (payload) => {
+          seen.push(payload);
+          return { series: [] };
+        },
+      });
+      try {
+        await waitFor(
+          (s) => s.machines.some((m) => m.deviceId === deviceId && m.connected && m.capabilities === undefined),
+          "re-registered without the capability",
+        );
+        const refused: unknown = await client.metrics(deviceId, range).then(
+          () => null,
+          (err: unknown) => err,
+        );
+        expect(refused instanceof RequestFailure && refused.reason).toBe("unsupported");
+        expect(seen).toHaveLength(3);
+      } finally {
+        older.close();
+      }
 
       // The relay this file shares holds 32 entries and the suite sits at that
       // cap, so a test that adds a machine nothing later needs gives it back.
