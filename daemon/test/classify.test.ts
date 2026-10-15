@@ -7,6 +7,7 @@ import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
 import {
   makeClaudeStub,
   pollUntil,
+  DEATH_STAMP_TEST_TIMEOUT_MS,
   untilDeathStamped,
   usePrivateTmux,
   type ClaudeStub,
@@ -54,18 +55,22 @@ async function settlesAs(paneId: string, expected: PaneState | "gone"): Promise<
 }
 
 describe("classifyPane (real tmux, stub claude)", () => {
-  test("a séance claude whose process exited is dead, with the time it died", async () => {
-    // Gated until remain-on-exit is on, as spawn.ts has it before claude can die —
-    // racing the stub's exit instead would let tmux close the window first.
-    const paneId = await open(`tmux wait-for classify-dead; exec ${stub.failing} --remote-control`);
-    await tmuxOk(["set-option", "-w", "-t", paneId, "remain-on-exit", "on"]);
-    await tmuxOk(["wait-for", "-S", "classify-dead"]);
-    await settlesAs(paneId, "dead");
-    // tmux marks the pane dead when its pty closes but stamps the time only once
-    // it reaps the process, which on tmux 3.4 can take a nudge (`untilDeathStamped`).
-    await untilDeathStamped(paneId);
-    expect((await pane(paneId))?.deadAt).toBeGreaterThan(Date.now() - 60_000);
-  });
+  test(
+    "a séance claude whose process exited is dead, with the time it died",
+    async () => {
+      // Gated until remain-on-exit is on, as spawn.ts has it before claude can die —
+      // racing the stub's exit instead would let tmux close the window first.
+      const paneId = await open(`tmux wait-for classify-dead; exec ${stub.failing} --remote-control`);
+      await tmuxOk(["set-option", "-w", "-t", paneId, "remain-on-exit", "on"]);
+      await tmuxOk(["wait-for", "-S", "classify-dead"]);
+      await settlesAs(paneId, "dead");
+      // tmux marks the pane dead when its pty closes but stamps the time only once
+      // it reaps the process, which on tmux 3.4 can take a nudge (`untilDeathStamped`).
+      await untilDeathStamped(paneId);
+      expect((await pane(paneId))?.deadAt).toBeGreaterThan(Date.now() - 60_000);
+    },
+    DEATH_STAMP_TEST_TIMEOUT_MS,
+  );
 
   test("a séance claude that never titled its pane is starting, and is what doctor calls stuck", async () => {
     const paneId = await ours(stub.stuck);
