@@ -1,9 +1,11 @@
 # Séance scheduler — plan
 
-**Status: plan, M1 landing.** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1 done, M2 next.** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
-DESIGN.md describes what exists.
+DESIGN.md describes what exists. M1 (visibility: exclaves, telemetry, the `status` frame, the
+`metrics` op, the PWA's Machines screen) folded in on 2026-10-15, and its plan text is gone from
+here — DESIGN.md is the record for anything M1 built.
 
 ## Glossary
 
@@ -125,51 +127,15 @@ env }]`, `queue-put { id, expect, env, term? }` → `{ version }` or `version_co
   reserved, refused by `register` like `"app"`/`"machines"`.
 - Registry push to apps gains `scheduler: { deviceId, term } | null` so the PWA can grey out
   `auto` without a round trip.
-- **New daemon→relay frame `status { env }`** every 30s, `env` sealed to `"app"` like the
-  register blob (apps and the leader's app-role leg both open it). The relay:
-  - keeps the latest on the daemon socket's attachment (`serializeAttachment`, already used for
-    `connectedAt`/`identity`) — never DO storage, so no write per sample, and it disappears
-    with the socket, which is right: a disconnected machine's snapshot is stale by definition;
-  - forwards `status { deviceId, env }` to every app socket as it arrives — a small frame, not a
-    full registry re-push;
-  - includes each connected daemon's latest `status` in the `registry` push on connect, so a
-    freshly opened PWA (or a freshly nominated leader) renders pressure immediately;
-  - bounds it in `wire.ts` (ciphertext ≤ 1 KiB, leaving the 2 KiB attachment room for the
-    rest) and rate-floors it per socket (≥ 10s), as `register` already is.
-    The relay stays blind: it holds ciphertext and routing only, as with `info`. Plaintext
-    numbers were considered and rejected — they would be the first payload the relay can read,
-    and pressure over time is an activity timeline (when you work, on which machine).
-- Cost: one DO wake per machine per 30s for `status` (the sweep alarm already wakes it every
-  60s while daemons are connected), plus one storage write per task _transition_ — never per
-  tick. Well inside free-tier limits for a handful of machines and tens of tasks.
+- **`status { env }`** (daemon→relay, landed in M1; DESIGN.md _Presence & identity_): the
+  leader's app-role leg receives it like any app, from the registry push and as it arrives, so
+  the routing loop reads the same snapshot the PWA renders.
+- Cost: one storage write per task _transition_ — never per tick. Well inside free-tier limits for a handful of machines and tens of tasks.
 
-**`status` payload** (`MachineStatus` in `types.ts`): `at`; cpu, mem, disk pressure as
-whole percent (each already smoothed over ~2 min daemon-side, so the scheduler needs no window
-of its own) plus disk free and r/w rates; running sessions per exclave; and `quota`: this
-daemon's newest observation per account (5h/7d pct, `resets_at`, source
-`session`/`oauth`/`cache`, observed-at, and `w`: the per-model weekly caps Claude Code shows
-as "Current week (Fable)", keyed by display name). Quota for one account is spread over every daemon
-hosting one of its exclaves; readers take the newest observation per account.
-
-**Encoding (settled 2026-10-15, PR 1).** The blob must fit a DO socket attachment — 2 KiB,
-shared with the socket's identity — and base64 costs a third, so: every number is an integer
-(whole percent, unix seconds, MiB), keys are short, an unknown field is absent rather than
-`null`, and quota entries name their account by **index into the register blob's `exclaves`**
-rather than by the 73-char account id. `status.scan` carries that blob's `scannedAt`, and a
-reader drops a status whose stamp disagrees with the blob it holds — the rule the app already
-applies between `rescan` and `machine-info`. "That blob" means the one last _registered_: the
-daemon's `state.scannedAt` moves on every hourly rescan while a re-register happens only on a
-changed repo set, and a `rescan` reply carries a third stamp that lands on `Machine.scannedAt` —
-the sender must keep the registered stamp, and the reader must compare against the decrypted
-register blob, not the merged `Machine`, or every status is dropped until the repo set next
-changes. Rejected: a positional tuple or bit-packed body —
-it saves ~100 bytes and loses the optional-field skew tolerance every other blob relies on.
-
-**New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:
-`metrics { from, to, step, names? }` → `{ series }` from the daemon's local store, `step` one
-of the store's three tiers (30s, 5 min, 1 h), `names` the metrics a chart panel draws. The PWA calls it
-when a chart is opened; nothing else needs it. History of an asleep machine is unavailable
-until it wakes — accepted.
+The `status` payload, its encoding and the `metrics` history op landed in M1 (DESIGN.md
+_Presence & identity_, _Wire protocol_ Layer 2, _Daemon_ "Telemetry"). What the scheduler adds
+to the payload is new quota sources (session reports in M2, the OAuth poll in M4): readers
+already take the newest observation per account, whichever daemon reported it.
 
 **Daemon → scheduler (fire-and-forget, sealed to `"scheduler"`)** — events only, the things
 that must arrive when they happen rather than when someone asks:
@@ -214,47 +180,18 @@ leader op: the app seals the task and `queue-put`s it at `expect: 0`, so queuing
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling.
 
-**`MachineInfo` additions** (register blob, optional on the wire like `source`):
-
-- `exclaves: [{ id, accountId, extraUsageEnabled, authOk, skills: string[] }]`.
-- `RepoEntry` gains `exclave` (which exclave's tree it sits in) and `origin` (normalized
-  remote URL). `origin` is the scheduler's repo key: clone names are machine-local
-  and collision-disambiguated (`seance` becomes `pengefix/seance` the day a second clone
-  appears), so they can't identify "the same repo" across machines or over time. Fallback
-  when there's no remote: basename.
-- `capabilities: string[]` (e.g. `"taskId"`, `"baseBranch"`), so the scheduler never relies on
-  a field an old daemon would drop. (`roles` is the plaintext sibling: what the _relay_ must
-  read; `capabilities` is sealed, what only the leader reads.)
-
-This is what the scheduler's filter stage reads; it reaches apps the same way repos do, and
-the PWA can show the exclave beside each repo in the manual picker.
+**`MachineInfo`.** `exclaves`, `RepoEntry.exclave`/`origin` and `capabilities` landed in M1
+(DESIGN.md _Daemon_, "Exclaves" and "Repo discovery"). `origin` is the scheduler's repo key.
+What remains is new `capabilities` values — `"taskId"` (M2), `"baseBranch"` (M4) — so the
+scheduler never relies on a field an old daemon would drop. (`roles` is the plaintext sibling:
+what the _relay_ must read; `capabilities` is sealed, what only the leader reads.)
 
 ## Daemon changes
 
-- `exclaves.ts` — **landed (M1 task 2, 2026-10-15)**: DESIGN.md's _Daemon_ section
-  ("Exclaves") now holds the `~/.exclaves` contract, the clone→exclave mapping and what is
-  read from each config dir; "Repo discovery" there holds `origin`'s normalisation. It is
-  re-read with every repo scan rather than on the file's mtime (the hourly cadence is what the
-  rest of the blob already has).
-- Config dir follows location via the user's shell hook (`.zshenv` → `update_exclave_env`),
-  as today; the daemon doesn't set it. A machine's shell setup being correct is out of scope —
-  the daemon only _reports_ which exclave a clone sits in.
-- `telemetry.ts` — **landed (M1 task 3, 2026-10-15)**: DESIGN.md's _Daemon_ section
-  ("Telemetry") holds what is sampled, how it is smoothed, the store's tiers and modes, and
-  what is read from each exclave's cache (including the per-model weekly caps). Not yet
-  there: PSI/cgroup views in an LXC, the Proxmox node view, macOS I/O rates. The plan as it
-  was: per-platform collectors (macOS `vm_stat`/`sysctl`/`iostat`; Linux
-  `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
-  API token, which never leaves the daemon process). argv-array exec only. Samples every 30s
-  into `stateDir()/metrics.sqlite` (`bun:sqlite`, no dependency; created 0600 like the other
-  state files): raw 30s for 48h, 5-min rollups for 30d, hourly rollups kept forever (one row
-  per series per hour is megabytes a decade). Quota observations (from session events and the
-  OAuth poll) land in the same store. The latest goes out as `status`; history is served by the
-  `metrics` op. **Sample shape is Prometheus's data model and nothing else**: metric name, a
-  label set of machine / exclave / account, timestamp, number. The routing loop reads only the
-  latest `status`, never this store, so a later Prometheus + Grafana stack on the Proxmox host
-  is a new consumer (an exposition endpoint on the daemon, or remote write — daemons dial out
-  and laptops roam) and could replace the store for charts without touching the scheduler.
+- `exclaves.ts` and `telemetry.ts` landed in M1 (DESIGN.md _Daemon_). Session events (M2) and
+  the OAuth poll (M4) add quota observations to the same store under the same metric names.
+  Collectors not yet built — LXC PSI/cgroup views, the Proxmox node view, macOS I/O rates — are
+  listed there too.
 - `quota.ts` (M4): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
@@ -384,59 +321,19 @@ replaces is deleted here in the same PR.
 | M3  | Durable queue                                          | Queue a block of work with deps and walk away       |
 | M4  | Stacking, OAuth quota, skills, Proxmox, alerts, Linear | Refinement; items are independent                   |
 
-### M1 — visibility
+### M1 — visibility (done 2026-10-15)
 
-**Goal.** From the PWA, see every machine with its exclaves and accounts, current pressure and
-the newest quota observation per account, and open a history chart — without a scheduler.
+From the PWA, every machine with its exclaves and accounts, current pressure, the newest quota
+observation per account, and history charts — without a scheduler. Landed as #71 (schema), #72
+(exclaves), #73 (telemetry), #74 (`status`), #75 (`metrics`) and #77 (PWA), with fixes after.
+Recorded in DESIGN.md _Presence & identity_, _Wire protocol_, _Daemon_ and _PWA_. Every exit
+criterion has a test, though "pressure for every connected machine" is only exercised with one.
 
-**Lands, in order.**
-
-1. _Schema, alone._ `MachineInfo.exclaves`, `RepoEntry.exclave`/`origin`, `capabilities`,
-   `MachineStatus`, the `status` frame, the `metrics` op, and `registry` carrying each
-   connected daemon's latest `status` — all of them in `shared/src/types.ts` and DESIGN.md's
-   frame→module table in one small PR before anything else, so no later task touches either
-   file for more than the field its brief names.
-2. `exclaves.ts` — the `~/.exclaves` contract, clones mapped by path prefix, account/auth
-   presence per config dir. Daemon-only, no wire change; runs in parallel with 3. _Landed
-   2026-10-15._
-3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
-   observations read from each exclave's `.claude.json` (`cachedUsageUtilization`, which
-   Claude Code refreshes itself; source `cache`). Session reports need M2's ingest path, so
-   this is M1's only producer. Daemon-only; parallel with 2. _Landed 2026-10-15._
-4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
-   `registry` includes the latest per connected daemon. _Landed 2026-10-15._ The 1 KiB bound
-   holds four exclaves' quota with every field; past that the daemon trims (per-model
-   windows first, `daemon/src/status.ts`) rather than send a frame the relay drops.
-5. `metrics` op — daemon handler over the store; app-side request. _Landed 2026-10-15._
-   The request gained an optional `names` filter: every series of a two-exclave machine at a
-   day's 5-min points is ~77 KB against the relay's 64 KiB envelope, so a chart asks for its
-   panel's series, and a reply that still wouldn't fit comes back `too_large` (DESIGN.md,
-   Layer 2).
-6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts. _Landed
-   2026-10-15._ Quota moved to account cards (one per account across the fleet) and disk off
-   the screen; Machines is a layer over Settings until the redesign (DESIGN.md, _PWA_).
-
-**Exit.**
-
-- A freshly opened PWA renders pressure for every connected machine from the registry push,
-  with no wait for the next tick (pwa + e2e).
-- A daemon's `status` disappears with its socket; a swept socket leaves none behind (relay).
-- A `status` over 1 KiB or under 10s since the last is refused, and `relay/test/layering.test.ts`
-  still passes — the relay gained no readable payload (relay).
-- A stray line in `~/.exclaves` costs one exclave, not the scan; `default` is always present
-  (daemon).
-- An old daemon reporting no `exclaves` still renders as a machine, marked ineligible for
-  `auto` later (pwa).
-- `status` round-trips through the real DO to a real app client (e2e).
-
-**Gaps.** No scheduler: you pick the exclave by hand and read the pressure yourself. Quota
-comes only from Claude Code's own cached utilization per config dir (session reports are M2,
-the OAuth poll M4), so an exclave shows whatever its last Claude session left, with its
-observed-at — and nothing at all until one has run there. Proxmox node view absent (M4); LXCs
-report their cgroup view.
-
-**Record.** DESIGN.md _Presence & identity_ (status on the attachment), _Wire protocol_ (frame
-table rows), _Daemon_ (exclaves, telemetry, the contract paragraph), _PWA_.
+**Gaps, until later milestones close them.** No scheduler: you pick the exclave by hand and read
+the pressure yourself. Quota comes only from Claude Code's own cached utilization per config dir
+(session reports are M2, the OAuth poll M4), so an exclave shows whatever its last Claude
+session left, with its observed-at — and nothing at all until one has run there. Proxmox node
+view absent (M4); LXCs report their cgroup view.
 
 ### M2 — routing and leadership
 
@@ -561,15 +458,10 @@ same PR, with the reason.
    is refused from ~85% current; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
 5. **`needs-input` escalation** after 30 min: re-alert once, keep the slot, never kill.
-6. **Retention**: raw 30s for 48h, 5-min for 30d, hourly forever; Prometheus-shaped samples
-   (above) so an external metrics stack is a consumer, not a redesign.
-7. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
+6. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
    it. The same series feeds M4's health alert, and the PWA shows no disk numbers.
-8. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
-   machine per tick, the leader's view never older than one tick, and a fresh PWA renders
-   pressure from the registry push without waiting.
 
 ## Risks / unknowns
 

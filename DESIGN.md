@@ -458,7 +458,7 @@ The Durable Object persists a machine registry:
   registering the key beside it (two things to keep consistent, and the
   relay would need a first-come enrolment that is the squat all over again).
 - **The latest `status` lives on the daemon socket's attachment** (added
-  2026-10-15 for the scheduler, docs/scheduler.md): the daemon seals its
+  2026-10-15, scheduler M1): the daemon seals its
   telemetry snapshot to the app like the register blob and sends it as its own
   frame every 30s and right after each register; the hub keeps it beside the
   socket's identity (`serializeAttachment`, 2 KiB for both), forwards it to
@@ -484,9 +484,21 @@ The Durable Object persists a machine registry:
   every push), bound to its `deviceId` through the AAD `from`, and shown only
   while its `scan` names the register blob this app decrypted — the relay
   already drops a socket's snapshot at each register, so this is the app's own
-  guard against a sender stamping the wrong blob (docs/scheduler.md,
-  "Encoding"). A status that opened is proof of life and clears a timeout's
-  offline mark, as a reply does.
+  guard against a sender stamping the wrong blob. "The register blob" means the
+  one last _registered_, not the merged `Machine`: a `rescan` reply moves
+  `Machine.scannedAt` without a register, and comparing against it would drop
+  every status until the repo set next changed. A status that opened is proof
+  of life and clears a timeout's offline mark, as a reply does.
+  **Encoding** (`MachineStatus` in `shared/src/types.ts`): the blob shares a
+  2 KiB attachment and base64 costs a third, so every number is an integer
+  (whole percent, unix seconds, MiB), keys are short, an unknown field is
+  absent rather than `null`, and quota entries name their account by index
+  into the register blob's `exclaves` rather than by the 73-char account id —
+  which is why `scan` must match. Rejected: a positional tuple or bit-packed
+  body (saves ~100 bytes and loses the optional-field skew tolerance every
+  other blob relies on). Sent every 30s whether or not an app is watching:
+  one DO wake per machine per beat (the sweep alarm already wakes it every
+  60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
@@ -562,7 +574,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 | `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
 | `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
-| op `metrics`                        | `shared/src/app-client.ts` `metrics()`, gated and parsed; the PWA chart is M1 step 6     | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
+| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed          | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -791,7 +803,8 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   series count grows with exclaves, accounts and models, so no cap fits every
   machine); trimming the oldest points to fit (the chart silently shows less
   range than it asked for); positional value arrays with implied timestamps
-  (~3.5× smaller, and no longer Prometheus's shape).
+  (~3.5× smaller, and no longer Prometheus's shape). History lives only on its
+  daemon, so an asleep machine's is unavailable until it wakes — accepted.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -1193,7 +1206,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   is a daemon change here. Read with every repo scan (startup, hourly, `rescan`)
   from one reading, so the blob's `exclaves` and each repo's tag never come
   from two versions of the file — `status` quota entries index into that list
-  (docs/scheduler.md, "Encoding") — and a change in either re-registers, as a
+  (Presence & identity, "Encoding") — and a change in either re-registers, as a
   new clone does. Rejected: an mtime watch on `~/.exclaves` (the hourly scan is
   the cadence everything else in the blob already has, and a sign-in changes
   `.claude.json`, not the list); reporting the config dir path (derivable, and
@@ -1241,7 +1254,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   each register too, re-arming the beat so the next lands past the relay's
   floor: the register just changed the blob a status indexes, and the registry
   push an app got carries no snapshot until this one. History is the
-  `metrics` op's. Rejected: the 1-min load average as cpu (counts runnable
+  `metrics` op's. Nothing routes from this store — the scheduler reads only the
+  latest `status` — so a Prometheus + Grafana stack later is one more consumer
+  (an exposition endpoint, or remote write, since daemons dial out and laptops
+  roam), not a redesign. Not built: PSI and cgroup v2 views in an LXC, the
+  Proxmox node view (docs/scheduler.md, M4), macOS I/O rates. Rejected: the 1-min load average as cpu (counts runnable
   tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
   macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
   (sleep gaps); a positional store schema (a new metric must cost nothing but a
@@ -1744,7 +1761,7 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions); quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, newest
-  observation wins (docs/scheduler.md). A window whose `resets_at` has passed shows 0% and
+  observation wins, since every daemon hosting one of its exclaves reports it. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Charts follow the split — HISTORY on a machine asks
   that daemon for `cpu_pct`/`mem_pct`; on an account it asks one online host of the account

@@ -107,7 +107,7 @@ export type HistoryTarget =
 
 /**
  * A chart asks for its own series only: every series of a multi-exclave machine
- * at a day's 5-min points overflows the relay's envelope (docs/scheduler.md).
+ * at a day's 5-min points overflows the relay's envelope (DESIGN.md, `metrics`).
  * All of them are whole percent, so one 0–100 axis serves either.
  */
 export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]> = {

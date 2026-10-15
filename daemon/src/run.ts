@@ -140,7 +140,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // The stamp of the blob last handed to a register, which every `status` names
   // as its `scan`: `state.scannedAt` moves on every hourly rescan while a
   // re-register happens only on a changed repo set, and a reader drops a status
-  // whose stamp disagrees with the blob it holds (docs/scheduler.md, "Encoding").
+  // whose stamp disagrees with the blob it holds (DESIGN.md, Presence & identity).
   let registeredScan = 0;
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {

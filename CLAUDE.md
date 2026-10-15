@@ -30,9 +30,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   the suite, setting up local dev, or deploying; don't restate it here — a change to commands,
   deploys or test layout updates that file.
 - **docs/scheduler.md** — the scheduler plan (a sealed queue in the relay, run by a relay-nominated
-  daemon; filter/score routing across machines and
-  subscriptions, the relay `status` frame, daemon telemetry). Not built yet: it records decisions
-  ahead of code, and DESIGN.md takes over each part as it lands. Read it before scheduler work.
+  daemon; filter/score routing across machines and accounts). M1 (visibility: the `status`
+  frame, daemon telemetry, the Machines screen) is built and recorded in DESIGN.md; the rest
+  records decisions ahead of code, and DESIGN.md takes over each part as it lands. Read it before
+  scheduler work.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
