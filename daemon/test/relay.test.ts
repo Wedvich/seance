@@ -431,6 +431,27 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  // A socket that never opens drops through `error`, not `close`, and the error
+  // event is the only one whose reason survives — so the log has to carry it.
+  test("a connection that fails says why", async () => {
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    // Port 1 on loopback: nothing listens, so the dial is refused outright.
+    const daemon = await startTestDaemon("ws://127.0.0.1:1", { maxBackoffMs: 50 });
+    try {
+      await pollUntil(() => lines.some((line) => line.includes("relay socket errored")), "an errored drop");
+      const line = lines.find((l) => l.includes("relay socket errored"));
+      expect(line).toContain("reason=");
+      expect(line).toContain("Failed to connect");
+    } finally {
+      console.log = realLog;
+      daemon.stop();
+    }
+  });
+
   test("missed pong closes the socket and the daemon redials", async () => {
     const relay = startTestRelay(TOKEN);
     relay.autoPong = false;

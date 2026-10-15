@@ -150,7 +150,13 @@ export class RelayClient {
     });
 
     ws.addEventListener("close", (event) => this.#onDrop("closed", event.code, event.reason));
-    ws.addEventListener("error", () => this.#onDrop("errored"));
+    // The error fires first and claims the drop, so the close that follows — the
+    // only other place Bun puts the reason — is swallowed by #onDrop's guard.
+    // Bun's ErrorEvent says what failed ("Failed to connect", "Expected 101
+    // status code", "TLS handshake failed"); without it every failure reads the same.
+    ws.addEventListener("error", (event) =>
+      this.#onDrop("errored", undefined, event instanceof ErrorEvent ? event.message : undefined),
+    );
   }
 
   #onDrop(why: string, code?: number, reason?: string): void {
@@ -171,7 +177,7 @@ export class RelayClient {
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);
     const delay = Math.random() * capped; // full jitter
     this.#attempt += 1;
-    const detail = code === undefined ? "" : ` code=${code}${reason ? ` reason=${quote(reason)}` : ""}`;
+    const detail = `${code === undefined ? "" : ` code=${code}`}${reason ? ` reason=${quote(reason)}` : ""}`;
     log.warn(`relay socket ${why}${detail} — reconnecting in ${Math.round(delay)}ms`);
     this.#reconnectTimer = setTimeout(() => this.#dial(), delay);
   }
