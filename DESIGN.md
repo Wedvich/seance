@@ -1721,7 +1721,9 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions); quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, newest
-  observation wins (docs/scheduler.md). Charts follow the split — HISTORY on a machine asks
+  observation wins (docs/scheduler.md). A window whose `resets_at` has passed shows 0% and
+  "reset", however full the reading was — a cache reading can be hours old, and its
+  percentage describes a window that no longer exists. Charts follow the split — HISTORY on a machine asks
   that daemon for `cpu_pct`/`mem_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply

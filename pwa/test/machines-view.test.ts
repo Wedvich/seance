@@ -68,6 +68,27 @@ describe("deriveMachines", () => {
     expect(accounts[0]?.historyFrom).toBe("b");
   });
 
+  test("a window past its reset reads empty, however full the reading was", () => {
+    const quota = [
+      {
+        x: 0,
+        s: "cache" as const,
+        at: S - 5 * 3600,
+        h: 92,
+        hr: S - 60,
+        d: 43,
+        dr: S + 5 * 86_400,
+        w: [{ m: "Fable", p: 27, r: S - 1 }],
+      },
+    ];
+    const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW).accounts;
+    expect(account?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.resets])).toEqual([
+      ["5h", 0, "ok", "reset"],
+      ["7d", 43, "ok", "resets in 5d"],
+      ["7d Fable", 0, "ok", "reset"],
+    ]);
+  });
+
   // The newest observer is asleep, or predates `metrics`: any online host still
   // has some history, and with none the card offers no chart at all.
   test("an account's history comes from another online host when the newest can't serve it", () => {
