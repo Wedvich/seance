@@ -169,7 +169,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let stopped = false;
 
   const rescan = async (): Promise<State["repos"]> => {
-    const [repos, exclaves] = await Promise.all([scanRepos(config.repoRoots, state.repos), scanExclaves(opts.home)]);
+    const [repos, exclaves] = await Promise.all([
+      scanRepos(config.repoRoots, state.repos),
+      scanExclaves(opts.home, exclaveScan.info),
+    ]);
     const scanned = tagExclaves(repos, exclaves.exclaves);
     if (stopped) return scanned;
     warnRejected(exclaves);

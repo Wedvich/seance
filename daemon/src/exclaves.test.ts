@@ -88,6 +88,31 @@ describe("describeExclave", () => {
     expect(await describeExclave(named(home, "fresh"))).toEqual({ id: "fresh", ...signedOut });
   });
 
+  test("a torn read keeps the previous account, skills read fresh; a missing file does not", async () => {
+    const home = await makeHome("busy\n");
+    await writeClaudeJson(join(home, ".claude-busy"), { oauthAccount: account });
+    const first = await scanExclaves(home);
+    await writeClaudeJson(join(home, ".claude-busy"), '{"oauthAccount": {"organizationUuid": "or');
+    await mkdir(join(home, ".claude-busy", "skills", "alpha"), { recursive: true });
+    const torn = await scanExclaves(home, first.info);
+    expect(torn.info[1]).toEqual({
+      id: "busy",
+      accountId: "org-1:acct-1",
+      extraUsageEnabled: true,
+      authOk: true,
+      skills: ["alpha"],
+    });
+    await rm(join(home, ".claude-busy", ".claude.json"));
+    const gone = await scanExclaves(home, torn.info);
+    expect(gone.info[1]).toEqual({
+      id: "busy",
+      accountId: null,
+      extraUsageEnabled: null,
+      authOk: false,
+      skills: ["alpha"],
+    });
+  });
+
   test("an account with ids missing is signed in with no id, and extra usage unknown", async () => {
     const home = await makeHome();
     await writeClaudeJson(join(home, ".claude-partial"), { oauthAccount: { emailAddress: "x@y" } });

@@ -76,28 +76,45 @@ export async function listExclaves(home: string): Promise<{
 /**
  * Account presence as Claude Code records it in the exclave's `.claude.json`.
  * Only `oauthAccount`'s ids and the extra-usage flag are read — never a token,
- * which that file does not hold anyway. A missing or unreadable file is a
- * signed-out exclave, not an error: the daemon reports, it doesn't require.
+ * which that file does not hold anyway. A missing file is a signed-out
+ * exclave, not an error: the daemon reports, it doesn't require.
+ *
+ * An unparsable file keeps `previous`'s account: every running session
+ * rewrites its exclave's `.claude.json`, so a read can land mid-write, and a
+ * torn read reported as signed out would re-register and stick until the next
+ * scan. With no previous reading (the first scan) it is signed out.
  */
-export async function describeExclave(exclave: Exclave): Promise<ExclaveInfo> {
+export async function describeExclave(exclave: Exclave, previous?: ExclaveInfo): Promise<ExclaveInfo> {
   const [account, skills] = await Promise.all([
     readAccount(exclave.configFile),
     listSkills(join(exclave.configDir, "skills")),
   ]);
-  return { id: exclave.id, ...account, skills };
+  if (account !== UNPARSABLE) return { id: exclave.id, ...account, skills };
+  const { accountId, extraUsageEnabled, authOk } = previous ?? SIGNED_OUT;
+  return { id: exclave.id, accountId, extraUsageEnabled, authOk, skills };
 }
 
-async function readAccount(file: string): Promise<Pick<ExclaveInfo, "accountId" | "extraUsageEnabled" | "authOk">> {
-  const signedOut = { accountId: null, extraUsageEnabled: null, authOk: false };
+type Account = Pick<ExclaveInfo, "accountId" | "extraUsageEnabled" | "authOk">;
+
+const SIGNED_OUT: Account = { accountId: null, extraUsageEnabled: null, authOk: false };
+const UNPARSABLE = Symbol("unparsable");
+
+async function readAccount(file: string): Promise<Account | typeof UNPARSABLE> {
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    return SIGNED_OUT;
+  }
   let config: unknown;
   try {
-    config = JSON.parse(await readFile(file, "utf8"));
+    config = JSON.parse(text);
   } catch {
-    return signedOut;
+    return UNPARSABLE;
   }
-  if (!isRecord(config)) return signedOut;
+  if (!isRecord(config)) return SIGNED_OUT;
   const account = config["oauthAccount"];
-  if (!isRecord(account)) return signedOut;
+  if (!isRecord(account)) return SIGNED_OUT;
   const org = account["organizationUuid"];
   const acct = account["accountUuid"];
   const extra = account["hasExtraUsageEnabled"];
@@ -121,9 +138,20 @@ async function listSkills(dir: string): Promise<readonly string[]> {
   }
 }
 
-export async function scanExclaves(home: string = homedir()): Promise<ExclaveScan> {
+/** `previous` is the last scan's `info`, matched by id, so a torn read keeps that exclave's account. */
+export async function scanExclaves(
+  home: string = homedir(),
+  previous: readonly ExclaveInfo[] = [],
+): Promise<ExclaveScan> {
   const { exclaves, rejected } = await listExclaves(home);
-  const info = await Promise.all(exclaves.map(describeExclave));
+  const info = await Promise.all(
+    exclaves.map((exclave) =>
+      describeExclave(
+        exclave,
+        previous.find((p) => p.id === exclave.id),
+      ),
+    ),
+  );
   return { exclaves, info, rejected };
 }
 

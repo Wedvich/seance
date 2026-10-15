@@ -1165,7 +1165,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   directory names under `skills/`). `.claude.json` sits in the config dir only
   when `CLAUDE_CONFIG_DIR` is set: `default` runs without it, so its file is
   `~/.claude.json`, and a `~/.claude/.claude.json` beside it is a stub that once
-  read every `default` as signed out. Nothing else in that file is read — it holds
+  read every `default` as signed out. Every running session rewrites its
+  exclave's `.claude.json`, so a read can land mid-write: an unparsable file
+  keeps the previous scan's account for that exclave (signed out only on the
+  first scan), while a missing one is signed out at once — a retry would narrow
+  the window, not close it. Nothing else in that file is read — it holds
   no token — and the daemon never sets a config dir: the owner's shell hook picks
   it by cwd, so location is the whole fact. **The `~/.exclaves` contract**: one
   name per line matching `^[a-z0-9][a-z0-9-]*$`; `default` is implied and a
