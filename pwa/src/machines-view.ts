@@ -79,7 +79,6 @@ const DAY = 24 * HOUR;
 /** The forward twin of `formatSeen`, as coarse: a reset is planned around, not timed. */
 export function formatUntil(at: number, now: number): string {
   const left = at - now;
-  if (left <= 0) return "resets now";
   // Floored like `formatSeen`: rounding would print "60m" or "24h" just under each boundary.
   if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
   if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
@@ -149,14 +148,23 @@ function servesMetrics(machine: Machine): boolean {
   return machine.connected && machine.capabilities?.includes(METRICS_CAPABILITY) === true;
 }
 
+/**
+ * A window whose reset has passed is empty however old the reading — its
+ * percentage describes a window that no longer exists (docs/scheduler.md,
+ * "Quota telemetry": the `resets_at` floor). A cache reading can be hours old,
+ * so without this a spent 5h window stays red long after it refilled.
+ */
+function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
+  if (resetsAt === undefined) return { ...gauge(label, pct), resets: null };
+  if (resetsAt * 1000 <= now) return { ...gauge(label, 0), resets: "reset" };
+  return { ...gauge(label, pct), resets: formatUntil(resetsAt * 1000, now) };
+}
+
 function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
-  const resets = (at: number | undefined): string | null => (at === undefined ? null : formatUntil(at * 1000, now));
   const bars: QuotaBar[] = [];
-  if (observation.h !== undefined) bars.push({ ...gauge("5h", observation.h), resets: resets(observation.hr) });
-  if (observation.d !== undefined) bars.push({ ...gauge("7d", observation.d), resets: resets(observation.dr) });
-  for (const window of observation.w ?? []) {
-    bars.push({ ...gauge(`7d ${window.m}`, window.p), resets: resets(window.r) });
-  }
+  if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
+  if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
+  for (const window of observation.w ?? []) bars.push(quotaBar(`7d ${window.m}`, window.p, window.r, now));
   return bars;
 }
 
