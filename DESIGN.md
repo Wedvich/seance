@@ -562,11 +562,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 | `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
 | `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
-| op `metrics` — M1                   | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`                                   |
-
-Rows marked _M1_ are the scheduler plan's first milestone (docs/scheduler.md): their shapes
-are in `shared/src/types.ts` already, and each handler lands in its own PR, after which the
-mark goes.
+| op `metrics`                        | `shared/src/app-client.ts` `metrics()`, which parses the reply; the PWA chart calls it   | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -763,6 +759,25 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
+- `metrics { from, to, step, names? }` → `{ series }` or `{ ok: false, code, message }`
+  — history from the daemon's local store (Telemetry, under Daemon), Prometheus
+  series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
+  Advertised as `"metrics"` in the register blob's `capabilities`, so an app
+  hides the chart for a daemon that predates it. The one reply that scales with
+  stored data, so it is bounded twice: a request spanning more than
+  `METRICS_MAX_POINTS` per series is `invalid_request` before the store reads a
+  row, and a reply that would seal past `ENVELOPE_MAX_CT_LENGTH` (64 KiB of
+  ciphertext, the relay's bound on every envelope but `status`) becomes
+  `too_large` — the relay drops an oversized envelope unseen, which the app
+  could only report as a timeout. Values go out to one decimal: a rollup's
+  average otherwise serializes to seventeen digits, a third of the reply. Sized
+  against measurement: one machine with two exclaves keeps ~14 series, and all
+  of them at a day of 5-min points is ~77 KB, so a chart asks for its panel's
+  `names` (pressure is three series, ~16 KB). Rejected: a points cap alone (the
+  series count grows with exclaves, accounts and models, so no cap fits every
+  machine); trimming the oldest points to fit (the chart silently shows less
+  range than it asked for); positional value arrays with implied timestamps
+  (~3.5× smaller, and no longer Prometheus's shape).
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for

@@ -3,6 +3,7 @@
 import {
   APP_ID,
   importPsk,
+  isRecord,
   seal,
   toBase64,
   type MachineInfo,
@@ -525,6 +526,54 @@ describe("status", () => {
 });
 
 describe("requests", () => {
+  // The request is the daemon's to bound; what the client owns is that a reply
+  // reaches the chart only once parsed — a refusal as its code, junk as null.
+  test("metrics carries the request through and hands back only a parsed reply", async () => {
+    const deviceId = await newDeviceId();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ log: (line) => lines.push(line) });
+    const seen: unknown[] = [];
+    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("MacBook Pro"), {
+      metrics: (payload) => {
+        seen.push(payload);
+        const names = isRecord(payload) ? payload["names"] : undefined;
+        if (Array.isArray(names) && names.includes("junk")) return { series: [{ metric: "cpu_pct", points: "no" }] };
+        if (Array.isArray(names) && names.includes("huge")) {
+          return { ok: false, code: "too_large", message: "ask fewer names" };
+        }
+        return { series: [{ metric: "cpu_pct", labels: { machine: "mac" }, points: [[1, 12.5]] }] };
+      },
+    });
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const range = { from: 0, to: 30, step: 30 } as const;
+
+      expect(await client.metrics(deviceId, { ...range, names: ["cpu_pct"] })).toEqual({
+        series: [{ metric: "cpu_pct", labels: { machine: "mac" }, points: [[1, 12.5]] }],
+      });
+      expect(seen[0]).toEqual({ ...range, names: ["cpu_pct"] });
+
+      expect(await client.metrics(deviceId, { ...range, names: ["huge"] })).toEqual({
+        ok: false,
+        code: "too_large",
+        message: "ask fewer names",
+      });
+
+      expect(await client.metrics(deviceId, { ...range, names: ["junk"] })).toBeNull();
+      expect(lines).toContain(`wire dropped from=${JSON.stringify(deviceId)} reason=metrics-shape`);
+
+      // The relay this file shares holds 32 entries and the suite sits at that
+      // cap, so a test that adds a machine nothing later needs gives it back.
+      daemon.close();
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+      client.forget(deviceId);
+      await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+    } finally {
+      daemon.close();
+      client.stop();
+    }
+  });
+
   test("round-trips a sessions request through the real relay", async () => {
     const deviceId = await newDeviceId();
     const sessions: SessionsResponse = {

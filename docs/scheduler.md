@@ -166,8 +166,8 @@ changes. Rejected: a positional tuple or bit-packed body —
 it saves ~100 bytes and loses the optional-field skew tolerance every other blob relies on.
 
 **New daemon request op `metrics`** (app→daemon, like `sessions`) — history only:
-`metrics { from, to, step }` → `{ series }` from the daemon's local store, `step` one of the
-store's three tiers (30s, 5 min, 1 h). The PWA calls it
+`metrics { from, to, step, names? }` → `{ series }` from the daemon's local store, `step` one
+of the store's three tiers (30s, 5 min, 1 h), `names` the metrics a chart panel draws. The PWA calls it
 when a chart is opened; nothing else needs it. History of an asleep machine is unavailable
 until it wakes — accepted.
 
@@ -405,7 +405,11 @@ the newest quota observation per account, and open a history chart — without a
    `registry` includes the latest per connected daemon. _Landed 2026-10-15._ The 1 KiB bound
    holds four exclaves' quota with every field; past that the daemon trims (per-model
    windows first, `daemon/src/status.ts`) rather than send a frame the relay drops.
-5. `metrics` op — daemon handler over the store; app-side request.
+5. `metrics` op — daemon handler over the store; app-side request. _Landed 2026-10-15._
+   The request gained an optional `names` filter: every series of a two-exclave machine at a
+   day's 5-min points is ~77 KB against the relay's 64 KiB envelope, so a chart asks for its
+   panel's series, and a reply that still wouldn't fit comes back `too_large` (DESIGN.md,
+   Layer 2).
 6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts.
 
 **Exit.**

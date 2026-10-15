@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fromBase64, importPsk, open, ReplayError, ReplayGuard, seal, toBase64 } from "./crypto.ts";
+import { fromBase64, importPsk, open, ReplayError, ReplayGuard, seal, sealedLength, toBase64 } from "./crypto.ts";
 import { PROTOCOL_VERSION, type Envelope, type Plain } from "./types.ts";
 
 const PSK_A = toBase64(new Uint8Array(32).fill(7));
@@ -35,6 +35,17 @@ describe("seal/open", () => {
     expect(env.to).toBe("device-a");
     expect(fromBase64(env.iv).byteLength).toBe(12);
     expect(await open(key, env)).toEqual(plain);
+  });
+
+  // Multi-byte text and lengths either side of a base64 group, so neither the
+  // UTF-8 count nor the padding is assumed.
+  test("sealedLength is the ct seal produces, without sealing", async () => {
+    const key = await importPsk(PSK_A);
+    for (const payload of [{}, { s: "ø".repeat(31) }, { s: "x".repeat(32) }, { s: "x".repeat(33) }]) {
+      const each: Plain = { ...plain, payload };
+      const env = await seal(key, { to: "device-1", from: "app" }, each);
+      expect(sealedLength(each)).toBe(env.ct.length);
+    }
   });
 
   test("unique IV per message", async () => {

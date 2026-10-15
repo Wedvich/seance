@@ -10,6 +10,8 @@ import {
   type Envelope,
   type MachineInfo,
   type MachineStatus,
+  type MetricsReply,
+  type MetricsRequest,
   type Plain,
   type RegistryView,
   type RepoEntry,
@@ -17,7 +19,14 @@ import {
   type RescanResponse,
   type UndeliverableCode,
 } from "./types.ts";
-import { isRecord, parseEnvelope, parseMachineInfo, parseMachineStatus, parseRescanResponse } from "./parse.ts";
+import {
+  isRecord,
+  parseEnvelope,
+  parseMachineInfo,
+  parseMachineStatus,
+  parseMetricsReply,
+  parseRescanResponse,
+} from "./parse.ts";
 import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
 import { quote } from "./fmt.ts";
 
@@ -446,6 +455,18 @@ export class RelayClient {
     }
     this.#scans.set(deviceId, parsed);
     this.#rebuildMachines();
+    return parsed;
+  }
+
+  /**
+   * History from one machine's metrics store. Validated here rather than
+   * trusted from a type parameter, as `applyScan` is: the reply lands on a
+   * chart, and a daemon a version ahead must cost the chart, not the app. Null
+   * means the reply was unreadable; transport failures throw as any request's do.
+   */
+  async metrics(deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
+    const parsed = parseMetricsReply(await this.request<unknown>(deviceId, "metrics", request));
+    if (parsed === null) this.#wireLog("dropped", `from=${quote(deviceId)} reason=metrics-shape`);
     return parsed;
   }
 
