@@ -46,7 +46,7 @@ stay as they are; the table says which word each one means.
 | Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                        |
 | Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                       |
 | AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                      |
-| Slicing           | M1 inventory → M2 route → M3 queue → M4 stacking/OAuth/skills/Proxmox/alerts                                                                                                                                                                                                 |
+| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                               |
 
 ### Why the relay holds the queue and a daemon runs it
 
@@ -352,12 +352,160 @@ daemon-local merge detection is the primary done signal.
 
 ## Milestones
 
-| M   | Scope                                                                                                                                                                                                                | Ships something usable?                      |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| M1  | Exclaves + `exclave`/`origin` on clones; `status` frame through the relay; daemon telemetry store + `metrics` op; session-reported quota; PWA machines/exclaves/accounts view + charts. No scheduler yet             | Yes: visibility across machines and accounts |
-| M2  | `scheduler/` library + fakes; `roles`/`lead`/`follow`/term in the relay; `leader.ts` with the two adapters; `session-event` op + mod; `taskId` on spawn; filter/score/explain; `auto` spawn + `route-preview` in PWA | Yes: "spawn this in repo X" without picking  |
-| M3  | `queue-*` store ops + version binding; durable queue, batches, deps (hand + Linear), takeover reconciliation, done detection, caps, pause, needs-input                                                               | Yes: queue a work block and walk away        |
-| M4  | Stacking (`baseBranch`, lineage, handoff preamble), OAuth quota poll, skills filter + autocomplete, Proxmox host metrics, Web Push + Linear via sealed `settings`                                                    | Refinement                                   |
+Each milestone ships something usable on its own and is cut into PR-sized tasks in the order
+listed — the order is the dependency graph. _Exit_ is what proves it done, phrased as tests
+where a test can say it. _Gaps_ are what the milestone deliberately leaves manual or broken, so
+nobody files them as bugs. _Record_ names the DESIGN.md sections it folds into; the plan text it
+replaces is deleted here in the same PR.
+
+| M   | Ships                                                  | One line                                            |
+| --- | ------------------------------------------------------ | --------------------------------------------------- |
+| M1  | Visibility across machines, exclaves and accounts      | See pressure and quota everywhere; no scheduler yet |
+| M2  | Routing + leadership                                   | "spawn this in repo X" without picking a machine    |
+| M3  | Durable queue                                          | Queue a block of work with deps and walk away       |
+| M4  | Stacking, OAuth quota, skills, Proxmox, alerts, Linear | Refinement; items are independent                   |
+
+### M1 — visibility
+
+**Goal.** From the PWA, see every machine with its exclaves and accounts, current pressure and
+the newest quota observation per account, and open a history chart — without a scheduler.
+
+**Lands, in order.**
+
+1. _Schema, alone._ `MachineInfo.exclaves`, `RepoEntry.exclave`/`origin`, `capabilities`,
+   `MachineStatus`, the `status` frame, the `metrics` op, and `registry` carrying each
+   connected daemon's latest `status` — all of them in `shared/src/types.ts` and DESIGN.md's
+   frame→module table in one small PR before anything else, so no later task touches either
+   file for more than the field its brief names.
+2. `exclaves.ts` — the `~/.exclaves` contract, clones mapped by path prefix, account/auth
+   presence per config dir. Daemon-only, no wire change; runs in parallel with 3.
+3. `telemetry.ts` — collectors, the SQLite store with the three retention tiers, quota
+   observations from session reports. Daemon-only; parallel with 2.
+4. `status` — daemon sender; relay attachment, forwarding, ≤ 1 KiB bound and ≥ 10s floor;
+   `registry` includes the latest per connected daemon.
+5. `metrics` op — daemon handler over the store; app-side request.
+6. PWA — machines / exclaves / accounts view, pressure and quota per machine, charts.
+
+**Exit.**
+
+- A freshly opened PWA renders pressure for every connected machine from the registry push,
+  with no wait for the next tick (pwa + e2e).
+- A daemon's `status` disappears with its socket; a swept socket leaves none behind (relay).
+- A `status` over 1 KiB or under 10s since the last is refused, and `relay/test/layering.test.ts`
+  still passes — the relay gained no readable payload (relay).
+- A stray line in `~/.exclaves` costs one exclave, not the scan; `default` is always present
+  (daemon).
+- An old daemon reporting no `exclaves` still renders as a machine, marked ineligible for
+  `auto` later (pwa).
+- `status` round-trips through the real DO to a real app client (e2e).
+
+**Gaps.** No scheduler: you pick the exclave by hand and read the pressure yourself. Quota
+is session-reported only (OAuth poll is M4), so an idle exclave shows a stale number with its
+observed-at. Proxmox node view absent (M4); LXCs report their cgroup view.
+
+**Record.** DESIGN.md _Presence & identity_ (status on the attachment), _Wire protocol_ (frame
+table rows), _Daemon_ (exclaves, telemetry, the contract paragraph), _PWA_.
+
+### M2 — routing and leadership
+
+**Goal.** A PWA spawn with `auto` lands on the machine and exclave the scheduler chose, with
+the decision explained, and the role survives the leading machine going away. No durable
+queue yet.
+
+**Lands, in order.**
+
+1. `scheduler/` library + in-memory fakes of `QueueStore` and `Fleet`; filter / score /
+   sticky / reserve / record over fixtures. No wire change — depends only on M1's schema, so
+   it can start before M1 finishes. Includes the layering test: nothing in `scheduler/`
+   imports `daemon/`, and nothing in `daemon/` imports `scheduler/` except `leader.ts`.
+2. Relay leadership — `roles` on `register`, `scheduler:term`, `lead`/`follow`,
+   re-nomination on close and sweep, `not_leader` on a stale term, `scheduler: { deviceId,
+term } | null` in the registry push.
+3. `leader.ts` — the `Fleet` adapter over the app-role leg (`app-relay.ts`), lifecycle on
+   `lead` / `follow` / socket loss. `QueueStore` is the in-memory fake for this milestone.
+4. `taskId` on `spawn`, `task_running`, `taskId` in `sessions`; advertised in `capabilities`.
+5. `session-event` on the local socket + `claude-mods/session-events`; forwarded to the
+   leader sealed to `"scheduler"`.
+6. PWA — `auto` in the picker (greyed with no leader), `route-preview` and the decision view.
+
+**Exit.**
+
+- Two daemons up: an `auto` spawn lands on the one whose decision record says so, and the
+  record names why the other was rejected or scored lower (e2e).
+- Kill the leader's daemon: a new leader is nominated within one sweep, `auto` greys and
+  returns, the term increased (relay + e2e).
+- A demoted leader's write or dispatch is refused `not_leader` (relay).
+- A second `spawn` with a `taskId` the daemon already runs is refused `task_running` with the
+  existing pane (daemon).
+- A `session-event` from the mod reaches the leader's state (daemon + e2e).
+- A daemon without `roles` is never nominated; one without `taskId` in `capabilities` is never
+  reserved against (relay, scheduler).
+- Library suite: every filter reason, every score component and stickiness reproduce the
+  fixture decisions; the layering test fails on either forbidden import (scheduler).
+
+**Gaps.** The queue is in-memory on the leader: a leader change forgets `auto` spawns not yet
+dispatched (sessions already running are ordinary sessions and survive). No deps, no batches,
+no caps beyond the global max, no pause, no alerts.
+
+**Record.** DESIGN.md gains a _Scheduler_ section (leadership and term, library and adapters,
+`taskId` idempotency), _Local op socket_ (the `session-event` frame kind), _Threat model_
+(plaintext `roles`, term fencing, the mod as an ingest-only path), _Wire protocol_ rows.
+
+### M3 — durable queue
+
+**Goal.** Queue a block of work with dependencies and leave; it runs, survives leader changes,
+and finishes without anyone watching.
+
+**Lands, in order.**
+
+1. Relay store — `queue-list` / `queue-put` / `queue-delete`, `task:<id>` as `{ version, env }`,
+   term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS`, create rate floor.
+2. The at-rest `task` op and version binding — sealed body carries the version its put
+   produces; readers open without the `ReplayGuard` and reject a mismatch.
+3. `QueueStore` adapter on those ops; takeover reconciliation against `sessions`.
+4. Task states, batches, hand-declared deps (`after: opened` / `merged`), done detection via
+   `branch-state`, `awaiting-merge`.
+5. Caps (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
+   credits-spill detection (logged and shown in the PWA; the push alert is M4).
+6. PWA queue — enqueue, cancel, mark-done, pause; `queue-changed` push.
+
+**Exit.**
+
+- Enqueue with no leader, then start a daemon: it leads, reconciles, and runs the task (e2e).
+- Kill the leader between `spawn` and its verdict: the next leader finds the session by
+  `taskId` and does not spawn again (e2e).
+- Put an old sealed blob back at the current version: the reader rejects it on the inner
+  version (scheduler + relay).
+- A put with a stale term is refused `not_leader`; a bearer-token-only client can list and
+  create but not overwrite or delete (relay).
+- `after: opened` releases on the first `branch-state pushed` with a PR, `after: merged` only
+  on `merged`; `pause` stops dispatch and keeps running sessions; `resume` continues (scheduler).
+- A task that does not decrypt, or whose version mismatches, is skipped and reported, never
+  fatal (scheduler).
+- `relay/test/layering.test.ts` still passes with the store in place (relay).
+
+**Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until
+M4's Web Push. Linear is not consulted; done comes from local merge detection, the session
+ending, or manual marking. Quota is still session-reported.
+
+**Record.** DESIGN.md _Scheduler_ (store, states, takeover), _Security model_ and _Threat
+model_ (the bearer token's one new act, prompts at rest, rollback closed by version binding),
+_Wire protocol_ rows, _Presence & identity_ if the registry push changes shape.
+
+### M4 — refinement
+
+Independent items, any order, each its own PR with its own DESIGN.md update:
+
+- **Stacking** — `baseBranch` + `base_not_found`, lineage, the handoff preamble. Exit: a
+  dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
+  with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
+- **OAuth quota poll** — `quota.ts`, token never leaves the daemon. Exit: an idle exclave's
+  quota refreshes within `staleAfter`; a failing endpoint is quiet.
+- **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete.
+- **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
+- **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
+  credits-spill and needs-input alerts, `push-subscribe`.
+- **Linear** — key in `settings`; relation-derived deps and Done as a done signal.
 
 ## Settled defaults (interview, 2026-10-15)
 
