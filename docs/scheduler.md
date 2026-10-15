@@ -230,9 +230,14 @@ the PWA can show the exclave beside each repo in the manual picker.
   `/proc` + PSI + cgroup v2 files in LXC; in an LXC also the Proxmox node view via a read-only
   API token, which never leaves the daemon process). argv-array exec only. Samples every 30s
   into `stateDir()/metrics.sqlite` (`bun:sqlite`, no dependency; created 0600 like the other
-  state files): raw 30s for 48h, 5-min rollups 30d, 1h rollups 1y. Quota observations (from
-  session events and the OAuth poll) land in the same store. The latest goes out as `status`;
-  history is served by the `metrics` op.
+  state files): raw 30s for 48h, 5-min rollups for 30d, hourly rollups kept forever (one row
+  per series per hour is megabytes a decade). Quota observations (from session events and the
+  OAuth poll) land in the same store. The latest goes out as `status`; history is served by the
+  `metrics` op. **Sample shape is Prometheus's data model and nothing else**: metric name, a
+  label set of machine / exclave / account, timestamp, number. The routing loop reads only the
+  latest `status`, never this store, so a later Prometheus + Grafana stack on the Proxmox host
+  is a new consumer (an exposition endpoint on the daemon, or remote write — daemons dial out
+  and laptops roam) and could replace the store for charts without touching the scheduler.
 - `quota.ts` (M4): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
@@ -315,7 +320,7 @@ is filtered for new work:
 
 1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;
    exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
-   stacked base unpushed and not on this exclave; account over hard threshold **and**
+   stacked base unpushed and not on this exclave; projected account usage over the 90% line (a window resetting within 15 min counts as empty) **and**
    extra usage disabled; per-account / global cap reached.
 2. _Score_ (lower wins, weights in config):
    `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
@@ -354,18 +359,31 @@ daemon-local merge detection is the primary done signal.
 | M3  | `queue-*` store ops + version binding; durable queue, batches, deps (hand + Linear), takeover reconciliation, done detection, caps, pause, needs-input                                                               | Yes: queue a work block and walk away        |
 | M4  | Stacking (`baseBranch`, lineage, handoff preamble), OAuth quota poll, skills filter + autocomplete, Proxmox host metrics, Web Push + Linear via sealed `settings`                                                    | Refinement                                   |
 
-## Defaults I picked without asking — confirm or override
+## Settled defaults (interview, 2026-10-15)
 
-1. Leader = earliest-connected capable daemon, ties by `deviceId`; nomination only, no voting.
-2. Apps may create tasks in the store with no leader; everything else waits for one.
-3. Scheduler spawns audit as `origin=relay client=scheduler` rather than a new origin
-   — the daemon-side surface is still the relay. (Counter-argument: CLAUDE.md's "a new surface
-   adds an origin"; the scheduler is autonomous like `schedule`.)
-4. Hard quota threshold 90% (either window); reserve 10% for continuations.
-5. `needs-input` escalation after 30 min.
-6. Retention numbers above (daemon-side).
-7. `status` every 30s per machine whether or not anyone is watching (cheap; keeps the
-   leader's view fresh without pulls).
+Nothing below is open. An implementer who wants a different value changes this section in the
+same PR, with the reason.
+
+1. **Leader** = earliest-connected capable daemon, ties by `deviceId`; nomination only, no
+   voting.
+2. **Enqueue needs no leader.** Apps create tasks in the store at `expect: 0`; everything else
+   waits for one. Matters only for old daemons and the ≤ ~90s re-nomination gap, and costs
+   nothing (a token holder could already fill the registry with junk).
+3. **Audit** as `origin=relay client=scheduler`, not a new origin — the daemon-side surface is
+   still the relay, and `client` is what already tells the PWA, MCP and Raycast apart.
+4. **Quota line: 90% hard, 10% reserved**, either window. Matches the router note's
+   `reserve_pct: 10` and the knee of its convex cost, `(u/(1-u))²`: 16 at 80%, 81 at 90%,
+   361 at 95% — the score already pushes work away before the line, the filter only adds the
+   guarantee. Two sub-rules, so nobody reads them as bugs: the line applies to _projected_
+   usage (current + this task's estimate + reservations), so with a 5% v1 estimate a new task
+   is refused from ~85% current; and a window that resets within 15 min counts as empty for the
+   filter, since a task started then runs almost entirely after the reset.
+5. **`needs-input` escalation** after 30 min: re-alert once, keep the slot, never kill.
+6. **Retention**: raw 30s for 48h, 5-min for 30d, hourly forever; Prometheus-shaped samples
+   (above) so an external metrics stack is a consumer, not a redesign.
+7. **`status` every 30s** per machine whether or not anyone is watching: one DO wake per
+   machine per tick, the leader's view never older than one tick, and a fresh PWA renders
+   pressure from the registry push without waiting.
 
 ## Risks / unknowns
 
