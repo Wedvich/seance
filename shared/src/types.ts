@@ -229,7 +229,7 @@ export interface RepoEntry {
 /**
  * One exclave as the daemon reports it: a tree at `~/<id>` whose Claude Code
  * config dir is `~/.claude-<id>` (`default` is `~` with `~/.claude`). The
- * `~/.exclaves` contract is in docs/scheduler.md, "Daemon changes".
+ * `~/.exclaves` contract is in DESIGN.md, "Exclaves" (under _Daemon_).
  */
 export interface ExclaveInfo {
   readonly id: string;

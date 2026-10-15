@@ -1,9 +1,9 @@
-import { readdir, realpath } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
 import { git } from "./exec.ts";
-import { inspectCheckout, resolveCommonDir } from "./gitdir.ts";
+import { canonical, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
 const SCAN_CONCURRENCY = 16;
 
@@ -98,13 +98,6 @@ export async function readOriginUrl(commonDir: string): Promise<string | null> {
   return null;
 }
 
-async function readOrigin(repoPath: string): Promise<string | null> {
-  const commonDir = await resolveCommonDir(repoPath);
-  if (commonDir === null) return null;
-  const url = await readOriginUrl(commonDir);
-  return url === null ? null : normalizeOrigin(url);
-}
-
 async function listDirs(parent: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(parent, { withFileTypes: true });
@@ -113,15 +106,6 @@ async function listDirs(parent: string): Promise<readonly string[]> {
       .map((e) => join(parent, e.name));
   } catch {
     return []; // missing/unreadable root — doctor flags it, scan stays quiet
-  }
-}
-
-/** tmux reports kernel-canonical pane paths (macOS: /var → /private/var) — store canonical paths so prefix mapping works. */
-async function canonical(p: string): Promise<string> {
-  try {
-    return await realpath(p);
-  } catch {
-    return p;
   }
 }
 
@@ -143,6 +127,7 @@ async function discoverRepoPaths(roots: readonly string[]): Promise<readonly str
   const collect = async (dir: string): Promise<boolean> => {
     const { kind } = await inspectCheckout(dir);
     if (kind === "none") return false;
+    // tmux reports kernel-canonical pane paths (macOS: /var → /private/var) — store canonical paths so prefix mapping works.
     if (kind === "main") found.add(await canonical(dir));
     return true;
   };
@@ -212,18 +197,22 @@ export async function scanRepos(
   const prevByPath = new Map(previous.map((r) => [r.path, r]));
   const paths = await discoverRepoPaths(roots);
   const names = assignNames(paths);
-  const entries = await Promise.all(
-    paths.map(async (path): Promise<RepoEntry> => {
-      const cached = prevByPath.get(path)?.defaultBranch ?? null;
-      const [defaultBranch, origin] = await Promise.all([cached ?? readDefaultBranch(path), readOrigin(path)]);
-      return {
-        name: names.get(path) ?? path,
-        path,
-        defaultBranch,
-        origin: origin ?? basename(path),
-      };
-    }),
-  );
+  // Bounded like the walk: this is per-repo I/O on every scan now, not only for new clones.
+  const entries = await scanLimit(paths, async (path): Promise<RepoEntry> => {
+    const cached = prevByPath.get(path)?.defaultBranch ?? null;
+    const commonDir = await resolveCommonDir(path);
+    const [defaultBranch, url] = await Promise.all([
+      cached ?? readDefaultBranch(path),
+      commonDir === null ? null : readOriginUrl(commonDir),
+    ]);
+    const origin = url === null ? null : normalizeOrigin(url);
+    return {
+      name: names.get(path) ?? path,
+      path,
+      defaultBranch,
+      origin: origin ?? basename(path),
+    };
+  });
   return entries.toSorted((a, b) => a.name.localeCompare(b.name));
 }
 

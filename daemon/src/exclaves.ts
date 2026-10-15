@@ -1,7 +1,8 @@
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isRecord, type ExclaveInfo, type RepoEntry } from "@seance/shared";
+import { canonical } from "./gitdir.ts";
 
 /**
  * The `~/.exclaves` contract (DESIGN.md, "Exclaves"): one name per line, each
@@ -26,10 +27,6 @@ export interface ExclaveScan {
   readonly info: readonly ExclaveInfo[];
   /** Lines that failed the contract, for one log line; a stray line costs one exclave, never the scan. */
   readonly rejected: readonly string[];
-}
-
-async function canonical(p: string): Promise<string> {
-  return realpath(p).catch(() => p);
 }
 
 async function readLines(file: string): Promise<readonly string[]> {
