@@ -262,6 +262,31 @@ version-mismatched ones, as the PWA skips registry entries), then for each `rese
 that pane; none and the reservation is unexpired → keep waiting; none and expired → release
 and re-route. Only then does the loop start dispatching.
 
+```
+                 registry + status (per machine)        task (sealed body)
+                 workspaces · repos · skills · caps      repo · deps · pin · skill · lineage
+                              │                                   │
+                              ▼                                   ▼
+ every (machine, repo entry) ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
+ carrying the task's repo     │   offline/stale · no taskId · auth missing · repo absent   │
+                              │   skill absent · pin mismatch · base unpushed             │
+                              │   sub over threshold ∧ credits off · cap reached          │
+                              │                                                           │
+                              └─► 2 SCORE  (lower wins, weights in config)                │
+                                  subscription_pressure  max(f(5h), g(7d)), ÷ time-to-reset
+                                  machine_pressure       max(cpu, mem, disk, host)        │
+                                  dependency_distance    0 same workspace … 0.5 elsewhere │
+                                  queue_pressure                                          │
+                                      │                                                   │
+                                      ▼                                                   │
+                                  3 STICKY  lineage owner bonus (continuations only)      │
+                                      │                                                   │
+                                      ▼                                                   ▼
+                                  4 RESERVE ──► queue-put ──► spawn { taskId } ──► 5 RECORD decision
+                                  TTL 120s      (one write)   task_running /       chose X because …
+                                                              failure → release    rejected Y because …
+```
+
 **Routing (per ready task, on any state change + a 30s tick while ready tasks exist)**, from
 the latest `status` per machine; a snapshot older than ~90s counts as unknown and the machine
 is filtered for new work:
