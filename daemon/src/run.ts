@@ -1,6 +1,7 @@
 import {
   APP_ID,
   importPsk,
+  METRICS_CAPABILITY,
   seal,
   STATUS_INTERVAL_MS,
   type Envelope,
@@ -150,6 +151,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
+      capabilities: [METRICS_CAPABILITY],
     };
     registeredScan = info.scannedAt;
     return seal(
@@ -205,6 +207,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let announcePending =
     opts.selfUpdate !== undefined && source !== null && previousSha !== undefined && previousSha !== source.sha;
 
+  // Sampling from the first start on, whether or not anything asks: the history
+  // the `metrics` op serves has to predate the chart that opens it. A state dir
+  // that refuses the file costs the history, never the daemon.
+  const metrics = await MetricsStore.open().catch((err: unknown) => {
+    log.warn(`metrics store unavailable (${String(err)}) — keeping history in memory`);
+    return MetricsStore.memory();
+  });
+
   // One context, a handler per inbound surface. The relay leg and the local op
   // socket share the backend, the repo set and the audit sink, and differ only
   // in the origin they are tagged with — which is what keeps "every spawn path
@@ -214,6 +224,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     getRepos: () => state.repos,
     rescan,
     auditSink: daemonSink,
+    metrics: (request) => metrics.query(request),
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {
@@ -224,13 +235,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : {}),
   };
 
-  // Sampling from the first start on, whether or not anything asks: the history
-  // the `metrics` op serves has to predate the chart that opens it. A state dir
-  // that refuses the file costs the history, never the daemon.
-  const metrics = await MetricsStore.open().catch((err: unknown) => {
-    log.warn(`metrics store unavailable (${String(err)}) — keeping history in memory`);
-    return MetricsStore.memory();
-  });
   const telemetry = createTelemetry(metrics, {
     machine: config.name,
     diskPaths: config.repoRoots,

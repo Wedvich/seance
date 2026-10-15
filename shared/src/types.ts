@@ -194,6 +194,14 @@ export const STATUS_MIN_INTERVAL_MS = 10_000;
 export const STATUS_MAX_CT_LENGTH = 1024;
 
 /**
+ * Ciphertext bound (base64 chars) on every other envelope the relay forwards.
+ * A DO value caps at 128 KiB; a register blob for ~60 repos is nearer 12 KiB.
+ * Shared because a sender whose reply scales with data (`metrics`) must refuse
+ * to build one the relay would drop, which the app sees only as a timeout.
+ */
+export const ENVELOPE_MAX_CT_LENGTH = 64 * 1024;
+
+/**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
  * a bare "ping" every interval, "pong" expected within the deadline, a miss
  * closes/redials. The relay sweeps a daemon socket silent for
@@ -333,6 +341,9 @@ export interface MachineInfo {
   readonly capabilities?: readonly string[];
 }
 
+/** The `capabilities` entry for the `metrics` op: a daemon without it ignores the op, which an app sees only as a timeout. */
+export const METRICS_CAPABILITY = "metrics";
+
 export const QUOTA_SOURCES = ["session", "oauth", "cache"] as const;
 
 /**
@@ -424,12 +435,26 @@ export const METRICS_STEPS = [30, 300, 3600] as const;
 
 export type MetricsStep = (typeof METRICS_STEPS)[number];
 
+/**
+ * Points per series one `metrics` request may span, `(to - from) / step + 1`:
+ * a month hourly, or two days at 5 min. Bounds the store's work; what bounds
+ * the reply is `ENVELOPE_MAX_CT_LENGTH`, checked on the built reply.
+ */
+export const METRICS_MAX_POINTS = 720;
+
 /** `op: "metrics"` — history from the daemon's local store; the PWA asks when a chart opens. */
 export interface MetricsRequest {
   /** Unix seconds, inclusive. */
   readonly from: number;
   readonly to: number;
   readonly step: MetricsStep;
+  /**
+   * `METRIC_NAMES` values to return; absent means every series. A chart asks
+   * for its panel's names so the reply fits one envelope — every series of a
+   * multi-exclave machine at a day's 5-min points does not. A name this daemon
+   * doesn't keep matches nothing, so a newer app gets fewer series, not an error.
+   */
+  readonly names?: readonly string[];
 }
 
 /** Prometheus's data model and nothing else, so an external metrics stack is a consumer, not a redesign. */
@@ -444,6 +469,19 @@ export interface MetricsSeries {
 export interface MetricsResponse {
   readonly series: readonly MetricsSeries[];
 }
+
+/** `too_large`: the reply would not fit one envelope — ask fewer `names` or a coarser step. */
+export const METRICS_ERROR_CODES = ["invalid_request", "too_large", "internal_error"] as const;
+
+export type MetricsErrorCode = (typeof METRICS_ERROR_CODES)[number];
+
+export interface MetricsError {
+  readonly ok: false;
+  readonly code: MetricsErrorCode;
+  readonly message: string;
+}
+
+export type MetricsReply = MetricsResponse | MetricsError;
 
 /**
  * The series the daemon's store keeps, one per `MachineStatus` field plus the

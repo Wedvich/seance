@@ -1,4 +1,6 @@
 import {
+  METRICS_ERROR_CODES,
+  METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
   SPAWN_ERROR_CODES,
@@ -6,6 +8,7 @@ import {
   type ExclaveInfo,
   type MachineInfo,
   type MachineStatus,
+  type MetricsReply,
   type MetricsRequest,
   type MetricsResponse,
   type MetricsSeries,
@@ -221,11 +224,18 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   };
 }
 
-/** Request shape for the daemon's `metrics` handler; bounds on the range are the handler's. */
+/**
+ * Request shape for the daemon's `metrics` handler, span included: a range of
+ * more than `METRICS_MAX_POINTS` per series is refused before the store reads
+ * a row. An empty `names` asks for nothing, so it is malformed, not a filter.
+ */
 export function isMetricsRequest(value: unknown): value is MetricsRequest {
   if (!isRecord(value)) return false;
-  if (!isUint(value["from"]) || !isUint(value["to"]) || value["from"] > value["to"]) return false;
-  return METRICS_STEPS.some((step) => step === value["step"]);
+  const { from, to, step, names } = value;
+  if (!isUint(from) || !isUint(to) || from > to) return false;
+  const known = METRICS_STEPS.find((s) => s === step);
+  if (known === undefined || (to - from) / known + 1 > METRICS_MAX_POINTS) return false;
+  return names === undefined || (isStringArray(names) && names.length > 0);
 }
 
 /** `Number.isFinite`, not `typeof`: JSON can't carry NaN/Infinity, but in-process callers can. */
@@ -248,6 +258,14 @@ export function parseMetricsResponse(value: unknown): MetricsResponse | null {
   if (!isRecord(value)) return null;
   const series = parseList(value["series"], parseMetricsSeries);
   return series === null ? null : { series };
+}
+
+/** Either the history or the daemon's structured refusal; `too_large` is the one a chart acts on. */
+export function parseMetricsReply(value: unknown): MetricsReply | null {
+  if (!isRecord(value) || value["ok"] !== false) return parseMetricsResponse(value);
+  const code = METRICS_ERROR_CODES.find((c) => c === value["code"]);
+  if (code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
 }
 
 /**

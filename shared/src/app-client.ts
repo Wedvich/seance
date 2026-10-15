@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  METRICS_CAPABILITY,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
@@ -10,6 +11,8 @@ import {
   type Envelope,
   type MachineInfo,
   type MachineStatus,
+  type MetricsReply,
+  type MetricsRequest,
   type Plain,
   type RegistryView,
   type RepoEntry,
@@ -17,7 +20,14 @@ import {
   type RescanResponse,
   type UndeliverableCode,
 } from "./types.ts";
-import { isRecord, parseEnvelope, parseMachineInfo, parseMachineStatus, parseRescanResponse } from "./parse.ts";
+import {
+  isRecord,
+  parseEnvelope,
+  parseMachineInfo,
+  parseMachineStatus,
+  parseMetricsReply,
+  parseRescanResponse,
+} from "./parse.ts";
 import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
 import { quote } from "./fmt.ts";
 
@@ -26,9 +36,10 @@ export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 /**
  * Why a request will never get an answer. "refused" is an `undeliverable` whose
  * code this build does not know: what it means is unknown, but that the relay
- * declined delivery is not — the request certainly did not land.
+ * declined delivery is not — the request certainly did not land. "unsupported"
+ * never left the app: the machine's register blob doesn't advertise the op.
  */
-export type FailureReason = UndeliverableCode | "refused" | "timeout" | "disconnected";
+export type FailureReason = UndeliverableCode | "refused" | "unsupported" | "timeout" | "disconnected";
 
 export class RequestFailure extends Error {
   constructor(
@@ -53,8 +64,10 @@ export function failureReasonText(failure: RequestFailure): string {
       return "the relay has never seen that machine";
     case "disconnected":
       return "lost the relay connection before the request went out";
-    // The message already names the code the relay sent; no fixed line could.
+    // The message already names the code the relay sent, or the op the daemon
+    // predates; no fixed line could.
     case "refused":
+    case "unsupported":
       return failure.message;
     // The one outcome that is genuinely unknown: the request went out and no
     // answer came back, so it may have landed anyway. Saying "failed" flatly
@@ -79,6 +92,8 @@ export interface Machine {
    * that blob's `scannedAt`). Absent otherwise — never stale.
    */
   readonly status?: MachineStatus;
+  /** The register blob's `capabilities`, kept by identity; absent from a daemon that predates them. */
+  readonly capabilities?: readonly string[];
 }
 
 export interface RelayState {
@@ -268,7 +283,8 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.scannedAt === b.scannedAt &&
     a.lastSeen === b.lastSeen &&
     a.connected === b.connected &&
-    a.status === b.status
+    a.status === b.status &&
+    a.capabilities === b.capabilities
   );
 }
 
@@ -446,6 +462,24 @@ export class RelayClient {
     }
     this.#scans.set(deviceId, parsed);
     this.#rebuildMachines();
+    return parsed;
+  }
+
+  /**
+   * History from one machine's metrics store. Validated here rather than
+   * trusted from a type parameter, as `applyScan` is: the reply lands on a
+   * chart, and a daemon a version ahead must cost the chart, not the app. Null
+   * means the reply was unreadable; transport failures throw as any request's do.
+   * Refused here for a machine that doesn't advertise the op: its daemon drops
+   * it unanswered, and the timeout would mark a live machine offline.
+   */
+  async metrics(deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
+    const machine = this.#state.machines.find((m) => m.deviceId === deviceId);
+    if (machine !== undefined && machine.capabilities?.includes(METRICS_CAPABILITY) !== true) {
+      throw new RequestFailure("unsupported", `${quote(machine.name)} runs a daemon that predates the metrics op`);
+    }
+    const parsed = parseMetricsReply(await this.request<unknown>(deviceId, "metrics", request));
+    if (parsed === null) this.#wireLog("dropped", `from=${quote(deviceId)} reason=metrics-shape`);
     return parsed;
   }
 
@@ -917,6 +951,7 @@ export class RelayClient {
         lastSeen: entry.lastSeen,
         connected,
         ...(status !== null && status.scan === info.scannedAt ? { status } : {}),
+        ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {

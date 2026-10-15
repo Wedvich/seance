@@ -143,6 +143,7 @@ const FAILURE_REASONS: Record<FailureReason, true> = {
   offline: true,
   unknown: true,
   refused: true,
+  unsupported: true,
   timeout: true,
   disconnected: true,
 };

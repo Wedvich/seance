@@ -1,7 +1,4 @@
-import { STATUS_MAX_CT_LENGTH, type MachineStatus, type QuotaObservation } from "@seance/shared";
-
-/** AES-GCM's default tag, which `seal` leaves on the ciphertext. */
-const AEAD_TAG_BYTES = 16;
+import { AEAD_TAG_BYTES, STATUS_MAX_CT_LENGTH, type MachineStatus, type QuotaObservation } from "@seance/shared";
 
 /** The `Plain` around the payload — a UUID, a ms timestamp, the op — is fixed-width, so measured once. */
 const PLAIN_OVERHEAD = JSON.stringify({ id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: 0 }).length - 1;

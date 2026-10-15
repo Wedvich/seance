@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   APP_ID,
   importPsk,
+  METRIC_NAMES,
   open,
   parseMachineStatus,
+  parseMetricsReply,
   seal,
   STATUS_MAX_CT_LENGTH,
   toBase64,
@@ -290,6 +292,34 @@ describe("daemon ↔ relay integration", () => {
         expect(status.sess).toHaveLength(info.exclaves?.length ?? 0);
         break;
       }
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("the blob advertises metrics, and the op answers from what the telemetry tick stored", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId, info } = await registerWithRepo(relay, "myrepo");
+      expect(info.capabilities).toEqual(["metrics"]);
+      // A status leaves only after its tick wrote the store, so one in hand
+      // means there is history to ask for.
+      await relay.statuses.next();
+      const now = Math.floor(Date.now() / 1000);
+      const { id } = await appRequest(relay, deviceId, "metrics", {
+        from: now - 300,
+        to: now + 30,
+        step: 30,
+        names: [METRIC_NAMES.sess],
+      });
+      const response = await appReceive(relay);
+      expect(response.re).toBe(id);
+      const reply = parseMetricsReply(response.payload);
+      if (reply === null || !("series" in reply)) throw new Error(`no history: ${JSON.stringify(response.payload)}`);
+      expect(reply.series.length).toBeGreaterThan(0);
+      for (const series of reply.series) expect(series.metric).toBe(METRIC_NAMES.sess);
     } finally {
       daemon.stop();
       relay.stop();
