@@ -97,6 +97,40 @@ a production change.
 No Cloudflare account is needed anywhere and no real `claude` outside the
 claude-mods shard; `tmux` and `git` are.
 
+## Reproducing a flaky test
+
+A flake is fixed once it fails on demand and then passes the same way, not once
+it goes green on a rerun. The daemon and e2e suites reach their external
+processes through seams that can force the timing a flake needs, with no
+product code touched:
+
+- **A slow tmux.** Every call runs `tmux` by bare name through PATH, so a script
+  named `tmux` placed first on PATH can delay one command and then `exec` the real
+  binary (its absolute path, from `command -v tmux` before the shim goes in):
+
+  ```bash
+  #!/bin/bash
+  for a in "$@"; do [ "$a" = list-panes ] && sleep 0.4 && break; done
+  exec /opt/homebrew/bin/tmux "$@"
+  ```
+
+  `PATH="<shim dir>:$PATH" bun run test daemon/test/relay.test.ts` made the
+  status test's stale-stamp race fail every run (#83).
+
+- **A tmux setting.** The private servers read the developer's config, and tmux
+  loads `$XDG_CONFIG_HOME/tmux/tmux.conf` after `~/.tmux.conf`, so a file there
+  overrides it for every server a run boots. `set -g automatic-rename-format ''`
+  pinned every unnamed window's name to `""` (#83).
+
+- **A slow claude.** Panes inherit the environment of the tmux server, which the
+  suite boots, so a temporary env-gated `Bun.sleep` in `daemon/test/tui-stub.ts`
+  (or a stub wrapper) delays one stub without slowing the rest.
+
+Inject at these boundaries rather than inside `daemon/src`: a double of
+internal code changes what you are trying to observe. CPU load widens every
+window at once and none on demand, so it is a check on a fix, not a
+reproduction.
+
 ## The Raycast extension
 
 Install it as a bun workspace member — `bun install` from the repo root, never
