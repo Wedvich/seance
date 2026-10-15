@@ -109,9 +109,14 @@ green:
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
   requests the daemon forwards to other machines for a keyless `seanced mcp`, and `schedule` for
   the daemon's reap timer — a new surface adds an origin, never reuses one),
-  prompt text is never logged, and a service-delivered credential never leaves the daemon process
+  prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
-  every session). Don't let changes drift from them.
+  every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
+  never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
+  so only the AAD-bound `from` says which machine an entry describes), and a `register` moves a
+  route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
+  through `shared/src/identity.ts`; the seed never leaves `state.json`). Don't let changes drift
+  from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op

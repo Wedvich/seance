@@ -8,7 +8,17 @@ import {
   type RelayToDaemonFrame,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { connectApp, connectDaemon, envelope, startRelay, type Client, type TestRelay } from "./harness.ts";
+import {
+  connectApp,
+  connectDaemon,
+  envelope,
+  identityOf,
+  newDeviceId,
+  register,
+  startRelay,
+  type Client,
+  type TestRelay,
+} from "./harness.ts";
 
 const TOKEN = "test-bearer-token";
 
@@ -29,13 +39,6 @@ afterAll(async () => {
   await relay.dispose();
 });
 
-let deviceCounter = 0;
-
-function nextDeviceId(): string {
-  deviceCounter += 1;
-  return `device-${deviceCounter}`;
-}
-
 /**
  * Waits for a registry push where this machine's entry matches. Pushes from an
  * earlier test's socket teardown can still be in flight, so matching on the
@@ -55,7 +58,7 @@ async function waitForEntry(
 
 async function registeredDaemon(app: Client, deviceId: string): Promise<Client> {
   const daemon = await connectDaemon(relay);
-  daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+  daemon.send(await register(deviceId));
   await waitForEntry(app, deviceId, (entry) => entry.connected);
   return daemon;
 }
@@ -109,12 +112,12 @@ describe("presence", () => {
   });
 
   test("a register stores the encrypted info verbatim and shows the machine online", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const info = envelope(APP_ID, deviceId);
     const daemon = await connectDaemon(relay);
 
-    daemon.send({ t: "register", deviceId, info });
+    daemon.send(await register(deviceId, { info }));
     const entry = await waitForEntry(app, deviceId, (candidate) => candidate.connected);
 
     expect(entry.info).toEqual(info);
@@ -124,7 +127,7 @@ describe("presence", () => {
   });
 
   test("an offline machine stays listed with a fresh last-seen", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -148,7 +151,7 @@ describe("heartbeat", () => {
 
 describe("routing", () => {
   test("hands an app envelope to the addressed daemon untouched", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -161,7 +164,7 @@ describe("routing", () => {
   });
 
   test("broadcasts a daemon reply to every open app socket", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const phone = await connectApp(relay);
     const laptop = await connectApp(relay);
     const daemon = await registeredDaemon(phone, deviceId);
@@ -188,7 +191,7 @@ describe("routing", () => {
   });
 
   test("reports a registered but disconnected machine as undeliverable/offline", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
     daemon.close();
@@ -202,28 +205,29 @@ describe("routing", () => {
     app.close();
   });
 
-  // Scoped to what the wire can force: the supersede close can't be held open
-  // from out here, so this gates delivery across a reconnect, not the
-  // newest-first ordering itself — that rests on the production stack trace.
-  test("delivers to the surviving socket when a machine has just reconnected", async () => {
-    const deviceId = nextDeviceId();
+  // The common case: a dropped socket is gone from the object before its daemon
+  // redials, so the redial registers with nothing to supersede and owns the
+  // route. The identity suite covers the redial that races its own zombie.
+  test("delivers to the redialed socket when a machine has just reconnected", async () => {
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
-    const stale = await registeredDaemon(app, deviceId);
-    const fresh = await registeredDaemon(app, deviceId);
-    expect(await stale.waitClosed()).toBe(1000);
+    const dropped = await registeredDaemon(app, deviceId);
+    dropped.close();
+    await waitForEntry(app, deviceId, (entry) => !entry.connected);
+    const redialed = await registeredDaemon(app, deviceId);
 
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
 
-    expect((await fresh.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
     await app.expectNo("undeliverable");
-    fresh.close();
+    redialed.close();
     app.close();
   });
 
   test("fans a machines broadcast to every other registered daemon, never the sender", async () => {
-    const senderId = nextDeviceId();
-    const receiverId = nextDeviceId();
+    const senderId = await newDeviceId();
+    const receiverId = await newDeviceId();
     const app = await connectApp(relay);
     const sender = await registeredDaemon(app, senderId);
     const receiver = await registeredDaemon(app, receiverId);
@@ -245,7 +249,7 @@ describe("routing", () => {
   });
 
   test("an app-sent broadcast reaches daemons, with no undeliverable either way", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -278,7 +282,7 @@ describe("routing", () => {
 
 describe("identity", () => {
   test("drops a daemon msg whose from is not its own deviceId", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -290,7 +294,7 @@ describe("identity", () => {
   });
 
   test("drops an app msg that does not claim the app address", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -312,28 +316,102 @@ describe("identity", () => {
     app.close();
   });
 
-  test("supersedes an older socket claiming the same deviceId", async () => {
-    const deviceId = nextDeviceId();
+  // The id is the hash of a key and the register is signed with it, so a token
+  // holder cannot move a machine's route by naming its id: the forgery is
+  // closed, and the machine keeps delivering.
+  test("refuses a register whose key does not hash to the deviceId it names", async () => {
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
-    const stale = await registeredDaemon(app, deviceId);
-    const fresh = await registeredDaemon(app, deviceId);
+    const incumbent = await registeredDaemon(app, deviceId);
 
-    expect(await stale.waitClosed()).toBe(1000);
+    // A stranger with a perfectly good key of their own, signing for an id that
+    // is not that key's hash.
+    const stranger = identityOf(await newDeviceId());
+    const claimant = await connectDaemon(relay);
+    claimant.send(await register(deviceId, { key: stranger.publicKey, sig: (await register(stranger.deviceId)).sig }));
+    expect(await claimant.waitClosed()).toBe(1000);
+
+    // Delivery is the proof: the incumbent still owns the route, and the entry
+    // never stopped reporting the machine online.
+    const env = envelope(deviceId, APP_ID);
+    app.send({ t: "msg", env });
+    expect((await incumbent.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+
+    // Read off a fresh socket's first push: the refusal changes nothing, so it
+    // pushes no registry of its own to wait for.
+    const observer = await connectApp(relay);
+    const entries = (await observer.waitFor<RegistryFrame>("registry")).entries;
+    expect(entries.find((entry) => entry.deviceId === deviceId)?.connected).toBe(true);
+
+    observer.close();
+    incumbent.close();
+    app.close();
+  });
+
+  test("refuses a register that presents the right key but cannot sign for it", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const incumbent = await registeredDaemon(app, deviceId);
+
+    // The public key is public — a registry entry carries no key, but the id
+    // of one does, by construction, so assume the attacker has it. What they
+    // do not have is the seed, so a signature from anyone else's key is a
+    // signature over the right message by the wrong signer.
+    const other = await newDeviceId();
+    const forged = await register(other, { deviceId, key: identityOf(deviceId).publicKey });
+    const claimant = await connectDaemon(relay);
+    claimant.send(forged);
+    expect(await claimant.waitClosed()).toBe(1000);
 
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
-    expect((await fresh.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await incumbent.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    incumbent.close();
+    app.close();
+  });
 
-    // The machine is still online: the survivor carries the identity.
-    await waitForEntry(app, deviceId, (entry) => entry.connected);
-    fresh.close();
+  test("refuses a register signed too long ago to be this connection's", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await connectDaemon(relay);
+    // A captured register replayed later: the signature is genuine, the
+    // timestamp is not within the window the relay will accept.
+    daemon.send(await register(deviceId, { ts: Date.now() - 5 * 60_000 }));
+    expect(await daemon.waitClosed()).toBe(1000);
+    expect(await registryIds(relay)).not.toContain(deviceId);
+    app.close();
+  });
+
+  // The flip side: a verified register *is* the machine, so it never waits
+  // behind a socket the same machine left open — a laptop that changed
+  // networks redials before the relay has noticed the old socket is dead.
+  test("a machine re-registering supersedes its own live socket at once", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const zombie = await registeredDaemon(app, deviceId);
+
+    const redialed = await connectDaemon(relay);
+    redialed.send(await register(deviceId));
+    expect(await zombie.waitClosed()).toBe(1000);
+
+    // Delivery proves the route moved with it, and the entry stayed online
+    // throughout — the zombie's close must not have flipped it.
+    const env = envelope(deviceId, APP_ID);
+    app.send({ t: "msg", env });
+    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    const observer = await connectApp(relay);
+    const entries = (await observer.waitFor<RegistryFrame>("registry")).entries;
+    expect(entries.find((entry) => entry.deviceId === deviceId)?.connected).toBe(true);
+
+    observer.close();
+    redialed.close();
     app.close();
   });
 });
 
 describe("robustness", () => {
   test("ignores malformed frames without dropping the socket", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await connectDaemon(relay);
 
@@ -341,11 +419,15 @@ describe("robustness", () => {
     daemon.sendRaw("[]");
     daemon.send({ t: "register" });
     daemon.send({ t: "register", deviceId, info: { v: 1, to: APP_ID } });
+    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    daemon.send(await register(deviceId, { sig: "short" }));
     daemon.send({ t: "msg", env: { v: 1, to: APP_ID, from: deviceId, iv: "", ct: "x" } });
     daemon.send({ t: "unknown-verb" });
 
-    // The socket is still usable, and none of the above registered anything.
-    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    // The socket is still usable, and none of the above registered anything —
+    // an unsigned or mis-sized register is malformed, not unverified, so it is
+    // dropped on the floor rather than closing the socket.
+    daemon.send(await register(deviceId));
     await waitForEntry(app, deviceId, (entry) => entry.connected);
     daemon.close();
     app.close();
@@ -387,7 +469,7 @@ async function drain(app: Client): Promise<void> {
 
 describe("forget", () => {
   test("deletes an offline machine's entry and pushes the change to every app", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const observer = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
@@ -409,7 +491,7 @@ describe("forget", () => {
   });
 
   test("refuses while the machine is connected, and names which one", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
 
@@ -436,7 +518,7 @@ describe("forget", () => {
   });
 
   test("never lets a daemon socket forget a machine", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
     const other = await connectDaemon(relay);
@@ -454,7 +536,7 @@ describe("forget", () => {
   });
 
   test("drops a malformed forget without dropping the socket", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
     daemon.close();
@@ -491,32 +573,35 @@ describe("registry entry cap", () => {
 
   test("a full registry turns away unknown machines and keeps serving known ones", async () => {
     const app = await connectApp(bounded);
+    const filling = await Promise.all(Array.from({ length: MAX_DEVICES }, () => newDeviceId()));
     const daemons: Client[] = [];
-    for (let i = 0; i < MAX_DEVICES; i += 1) {
-      const deviceId = `full-${i}`;
+    for (const deviceId of filling) {
       // oxlint-disable-next-line no-await-in-loop -- the assertion is about the boundary, so fill in a known order
       const daemon = await connectDaemon(bounded);
-      daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+      // oxlint-disable-next-line no-await-in-loop -- signed per id, in the same order
+      daemon.send(await register(deviceId));
       // oxlint-disable-next-line no-await-in-loop -- each entry must land before the next is counted
       await waitForEntry(app, deviceId, (entry) => entry.connected);
       daemons.push(daemon);
     }
 
+    const overflowId = await newDeviceId();
     const overflow = await connectDaemon(bounded);
-    overflow.send({ t: "register", deviceId: "overflow", info: envelope(APP_ID, "overflow") });
+    overflow.send(await register(overflowId));
     await drain(app);
 
     const ids = await registryIds(bounded);
     expect(ids).toHaveLength(MAX_DEVICES);
-    expect(ids).not.toContain("overflow");
+    expect(ids).not.toContain(overflowId);
 
     // The cap must not cost you a machine you already had: reconnecting one of
     // the filled entries still registers, because its id is already known.
+    const first = filling[0] ?? "";
     daemons[0]?.close();
-    await waitForEntry(app, "full-0", (entry) => !entry.connected);
+    await waitForEntry(app, first, (entry) => !entry.connected);
     const rejoined = await connectDaemon(bounded);
-    rejoined.send({ t: "register", deviceId: "full-0", info: envelope(APP_ID, "full-0") });
-    await waitForEntry(app, "full-0", (entry) => entry.connected);
+    rejoined.send(await register(first));
+    await waitForEntry(app, first, (entry) => entry.connected);
 
     rejoined.close();
     overflow.close();
@@ -540,26 +625,31 @@ describe("register rate limit", () => {
   test("a socket registering faster than any daemon would is cut off", async () => {
     const app = await connectApp(limited);
     const daemon = await connectDaemon(limited);
-    for (let i = 0; i < MAX_REGISTERS_PER_WINDOW; i += 1) {
-      const deviceId = `rate-${i}`;
-      daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    const budget = await Promise.all(Array.from({ length: MAX_REGISTERS_PER_WINDOW }, () => newDeviceId()));
+    for (const deviceId of budget) {
       // oxlint-disable-next-line no-await-in-loop -- spending the window one register at a time is the point
+      daemon.send(await register(deviceId));
+      // oxlint-disable-next-line no-await-in-loop -- same
       await waitForEntry(app, deviceId, () => true);
     }
 
-    daemon.send({ t: "register", deviceId: "rate-over", info: envelope(APP_ID, "rate-over") });
+    // Genuine, and still refused: the window is spent before anything is
+    // verified, so a holder cannot make the relay pay for a verify per frame.
+    const over = await newDeviceId();
+    daemon.send(await register(over));
     await drain(app);
 
     const ids = await registryIds(limited);
     expect(ids).toHaveLength(MAX_REGISTERS_PER_WINDOW);
-    expect(ids).not.toContain("rate-over");
+    expect(ids).not.toContain(over);
 
     // Honest about the shape of the guarantee: the budget is per socket, so a
     // new connection starts a new window. This bounds one socket's write rate,
     // not an attacker's total — MAX_DEVICES is what bounds the damage.
+    const fresh = await newDeviceId();
     const second = await connectDaemon(limited);
-    second.send({ t: "register", deviceId: "rate-fresh", info: envelope(APP_ID, "rate-fresh") });
-    await waitForEntry(app, "rate-fresh", (entry) => entry.connected);
+    second.send(await register(fresh));
+    await waitForEntry(app, fresh, (entry) => entry.connected);
 
     second.close();
     daemon.close();
@@ -592,11 +682,11 @@ describe("silent-socket sweep", () => {
   });
 
   test("closes a daemon that never heartbeats and reports it offline with an honest lastSeen", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(sweeping);
     const before = Date.now();
     const daemon = await connectDaemon(sweeping);
-    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    daemon.send(await register(deviceId));
     await waitForEntry(app, deviceId, (entry) => entry.connected);
     const registeredAt = Date.now();
 
@@ -614,10 +704,10 @@ describe("silent-socket sweep", () => {
   });
 
   test("a heartbeating daemon is never swept, then is once it falls silent", async () => {
-    const deviceId = nextDeviceId();
+    const deviceId = await newDeviceId();
     const app = await connectApp(sweeping);
     const daemon = await connectDaemon(sweeping);
-    daemon.send({ t: "register", deviceId, info: envelope(APP_ID, deviceId) });
+    daemon.send(await register(deviceId));
     await waitForEntry(app, deviceId, (entry) => entry.connected);
 
     const heartbeat = setInterval(() => daemon.sendRaw("ping"), HEARTBEAT_MS);

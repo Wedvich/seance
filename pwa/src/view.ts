@@ -272,6 +272,14 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
         opensSettings: true,
       };
     }
+    if (relay.unbound > 0) {
+      return {
+        title: "Registry tampered",
+        body: `${relay.unbound} ${relay.unbound === 1 ? "entry is" : "entries are"} filed under a machine ${relay.unbound === 1 ? "it does" : "they do"} not belong to. Only the relay's bearer token can do that — rotate it.`,
+        tone: "err",
+        opensSettings: false,
+      };
+    }
     if (relay.skewed > 0) {
       return {
         title: "Version mismatch",
@@ -315,6 +323,7 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) {
     if (relay.ignored > 0) return blocked("Check your key");
+    if (relay.unbound > 0) return blocked("Registry tampered");
     return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
   }
   // Ahead of `spawning`, which it precedes: the two are never both set.
@@ -331,15 +340,17 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
 
 /**
  * Shown only beside a list that still has machines — the empty-list cases get a
- * banner instead. Key and version trouble stay separate lines: they have
- * different fixes, and "key mismatch" over skew sends someone to rotate a
- * credential that is correct.
+ * banner instead. Key, pairing and version trouble stay separate lines: they
+ * have different fixes, and "key mismatch" over either of the others sends
+ * someone to rotate a credential that is correct.
  */
 function deriveIgnoredNote(relay: RelayState): string | null {
   if (relay.machines.length === 0) return null;
   const notes: string[] = [];
   if (relay.ignored > 0)
     notes.push(`${relay.ignored} ${relay.ignored === 1 ? "entry" : "entries"} ignored (key mismatch)`);
+  if (relay.unbound > 0)
+    notes.push(`${relay.unbound} ${relay.unbound === 1 ? "entry" : "entries"} dropped (filed under the wrong machine)`);
   if (relay.skewed > 0)
     notes.push(`${relay.skewed} ${relay.skewed === 1 ? "entry" : "entries"} unreadable (version mismatch)`);
   return notes.length === 0 ? null : notes.join(" · ");

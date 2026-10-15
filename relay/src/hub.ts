@@ -4,6 +4,8 @@ import {
   HEARTBEAT_MISSES_TO_SWEEP,
   MACHINES_ID,
   quote,
+  verifyRegister,
+  type DaemonFrame,
   type Envelope,
   type RegistryEntry,
   type RegistryView,
@@ -220,7 +222,7 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.t === "register") {
-      await this.#register(ws, frame.deviceId, frame.info);
+      await this.#register(ws, frame);
       return;
     }
     const deviceId = this.#deviceIdOf(ws);
@@ -297,7 +299,8 @@ export class Hub implements DurableObject {
    * defends *against* a token holder — rotating the token does — they only keep
    * what a holder can cost from being unbounded.
    */
-  async #register(ws: WebSocket, deviceId: string, info: Envelope): Promise<void> {
+  async #register(ws: WebSocket, frame: Extract<DaemonFrame, { t: "register" }>): Promise<void> {
+    const { deviceId, info } = frame;
     const now = Date.now();
     const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
     const prior = attachment.identity;
@@ -312,6 +315,19 @@ export class Hub implements DurableObject {
       return;
     }
 
+    // Behind the rate limit, so a token holder pays for at most ten verifies a
+    // minute per socket. The id is the hash of the key and the signature proves
+    // the key, so passing this is proof the sender is the machine the id names —
+    // the one thing a blind relay can know about a register.
+    const verdict = await verifyRegister({ deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig }, now);
+    if (verdict !== "ok") {
+      console.log(`refused register from ${deviceId}: ${verdict}`);
+      // Closed, not left open: a daemon re-registers on connect only, and the
+      // reason is the one word it gets about why its identity was not accepted.
+      ws.close(1000, "register unverified");
+      return;
+    }
+
     const key = ENTRY_PREFIX + deviceId;
     const known = (await this.#ctx.storage.get<RegistryEntry>(key)) !== undefined;
     if (!known && (await this.#entryCount()) >= MAX_DEVICES) {
@@ -321,10 +337,13 @@ export class Hub implements DurableObject {
       return;
     }
 
+    // A verified register is the machine itself, so it always takes the route:
+    // whatever else holds the id is a zombie this daemon left behind (a network
+    // change, a sleep the relay has not swept yet), never a stranger, since a
+    // stranger cannot sign for the id. Two open sockets for one machine would
+    // deliver a spawn twice, so the older one loses. Attaching first keeps the
+    // loser's close handler from reporting the machine as disconnected.
     ws.serializeAttachment({ ...attachment, identity: { deviceId, ...rate } } satisfies SocketAttachment);
-    // Two open sockets for one machine would deliver a spawn twice, so the older
-    // one loses. Attaching first keeps the loser's close handler from reporting
-    // the machine as disconnected.
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
     }
@@ -392,7 +411,7 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // Newest first: a reconnecting daemon briefly leaves two sockets on one
+    // Newest first: a re-registering daemon briefly leaves two sockets on one
     // deviceId — `superseded` closes the loser, but it stays listed until its
     // close handler runs — and picking the first match can pick the dead one
     // while the live socket sits behind it.

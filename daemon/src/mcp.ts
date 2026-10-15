@@ -31,7 +31,7 @@ import {
   type FleetLease,
 } from "./fleet.ts";
 import { recordedBunCheck } from "./link.ts";
-import { localRequest, LocalUnavailable } from "./local-client.ts";
+import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -56,6 +56,8 @@ export interface LocalMachine {
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
   readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T>;
+  /** Whether its daemon is listening, asked without sending an op — nothing is run or audited. */
+  readonly reachable: () => Promise<boolean>;
 }
 
 /**
@@ -117,15 +119,35 @@ function describeMachine(machine: Machine, local: LocalMachine | null): Record<s
 }
 
 /** The local machine as `list_machines` renders it when the relay cannot be reached at all. */
-async function describeLocal(local: LocalMachine): Promise<Record<string, unknown>> {
+function describeLocal(local: LocalMachine, reachable: boolean, repos: readonly RepoEntry[]): Record<string, unknown> {
   return {
     name: local.name,
     deviceId: local.deviceId,
     platform: local.platform,
-    connected: true,
-    repos: (await local.repos()).map((repo) => repo.name),
+    connected: reachable,
+    repos: repos.map((repo) => repo.name),
     local: true,
   };
+}
+
+/**
+ * Whether the local entry is `connected`. A broker failure already observed the
+ * daemon on the very socket local ops use, so its verdict stands; probing again
+ * could race a restart and contradict the advice in the same answer.
+ */
+function localReachable(local: LocalMachine, err: unknown): Promise<boolean> {
+  if (err instanceof FleetUnreachable && err.localOps !== "unknown") return Promise.resolve(err.localOps === "up");
+  return local.reachable();
+}
+
+function fallbackNote(err: unknown, reachable: boolean): string {
+  // The broker's advice already says what local ops can expect; adding to it would only repeat or contradict it.
+  if (err instanceof FleetUnreachable) return `${err.message} Only this machine is listed.`;
+  const why = `the relay is unreachable (${failureText("connect", err)})`;
+  return reachable
+    ? `${why} — only this machine is listed, and only local spawns will work`
+    : `${why} — only this machine is listed, and its daemon is not listening either, so nothing will spawn until ` +
+        "seanced is running (`seanced status`)";
 }
 
 /** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
@@ -214,14 +236,10 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         // local machine alone beats answering with nothing: a model that cannot
         // see any machine cannot spawn on the one it is sitting on either.
         if (local === null) return errorResult(openFailureText(err));
-        const why =
-          err instanceof FleetUnreachable ? err.message : `the relay is unreachable (${failureText("connect", err)})`;
+        const [reachable, repos] = await Promise.all([localReachable(local, err), local.repos()]);
         return textResult(
           JSON.stringify(
-            {
-              machines: [await describeLocal(local)],
-              note: `${why} — only this machine is listed, and only local spawns will work`,
-            },
+            { machines: [describeLocal(local, reachable, repos)], note: fallbackNote(err, reachable) },
             null,
             2,
           ),
@@ -421,6 +439,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
     // Falls back to the startup read: a transient failure shouldn't read as "no repos".
     repos: async (): Promise<readonly RepoEntry[]> => (await readState())?.repos ?? state.repos,
     request: <T>(op: RequestOp, payload: unknown): Promise<T> => localRequest<T>(op, payload),
+    reachable: (): Promise<boolean> => localSocketReachable(),
   };
 }
 

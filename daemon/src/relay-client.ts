@@ -7,8 +7,10 @@ import {
   open,
   quote,
   seal,
+  signRegister,
   type DaemonFrame,
   type Envelope,
+  type Identity,
   type OpName,
   type Plain,
   type RelayToDaemonFrame,
@@ -18,7 +20,8 @@ import { log } from "./log.ts";
 export interface RelayClientOpts {
   readonly url: string;
   readonly bearerToken: string;
-  readonly deviceId: string;
+  /** Signs every register; `identity.deviceId` is this machine's wire address. */
+  readonly identity: Identity;
   readonly key: CryptoKey;
   /** Fresh encrypted machine-info blob — called on every register. */
   readonly buildInfo: () => Promise<Envelope>;
@@ -46,6 +49,8 @@ export class RelayClient {
   readonly #guard = new ReplayGuard();
   #ws: WebSocket | null = null;
   #attempt = 0;
+  /** Whether the current socket reached `open` — a connect that failed outright must not reset backoff. */
+  #opened = false;
   #stopped = false;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -92,7 +97,7 @@ export class RelayClient {
   async broadcast(op: OpName, payload: unknown): Promise<boolean> {
     if (!this.connected) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
-    const sealed = await seal(this.#opts.key, { to: MACHINES_ID, from: this.#opts.deviceId }, plain);
+    const sealed = await seal(this.#opts.key, { to: MACHINES_ID, from: this.#opts.identity.deviceId }, plain);
     // Re-checked after the await: sealing is async, and a socket that dropped
     // meanwhile would swallow the frame silently.
     const ws = this.#ws;
@@ -103,8 +108,19 @@ export class RelayClient {
   }
 
   async #register(): Promise<void> {
+    const { identity } = this.#opts;
     const info = await this.#opts.buildInfo();
-    const frame: DaemonFrame = { t: "register", deviceId: this.#opts.deviceId, info };
+    // Signed fresh each time: the relay bounds the timestamp, so a frame built
+    // once at start would stop verifying after a minute.
+    const ts = Date.now();
+    const frame: DaemonFrame = {
+      t: "register",
+      deviceId: identity.deviceId,
+      info,
+      key: identity.publicKey,
+      ts,
+      sig: await signRegister(identity, ts),
+    };
     this.#ws?.send(JSON.stringify(frame));
   }
 
@@ -119,9 +135,10 @@ export class RelayClient {
       perMessageDeflate: false,
     });
     this.#ws = ws;
+    this.#opened = false;
 
     ws.addEventListener("open", () => {
-      this.#attempt = 0;
+      this.#opened = true;
       log.info(`connected to ${this.#opts.url}`);
       void this.#register();
       this.#startHeartbeat();
@@ -132,20 +149,30 @@ export class RelayClient {
       void this.#onMessage(typeof event.data === "string" ? event.data : "");
     });
 
-    ws.addEventListener("close", () => this.#onDrop("closed"));
+    ws.addEventListener("close", (event) => this.#onDrop("closed", event.code, event.reason));
     ws.addEventListener("error", () => this.#onDrop("errored"));
   }
 
-  #onDrop(why: string): void {
+  #onDrop(why: string, code?: number, reason?: string): void {
     if (this.#ws === null) return; // already handled (close after error)
     this.#ws = null;
     this.#teardownHeartbeat();
     this.#opts.onDisconnect?.();
     if (this.#stopped) return;
+    // The relay refuses a register it cannot verify by closing the socket — so
+    // a socket that opened is not proof the register was accepted. Backoff
+    // resets only on the drop of a socket that was not refused: a refusal keeps
+    // it growing, so a daemon the relay will not admit (a clock a minute off, a
+    // relay without the algorithm) redials at the capped rate rather than once
+    // per base interval, and the reason is logged because the close is the only
+    // word the relay sends about it.
+    const refused = reason === "register unverified";
+    if (this.#opened && !refused) this.#attempt = 0;
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);
     const delay = Math.random() * capped; // full jitter
     this.#attempt += 1;
-    log.warn(`relay socket ${why} — reconnecting in ${Math.round(delay)}ms`);
+    const detail = code === undefined ? "" : ` code=${code}${reason ? ` reason=${quote(reason)}` : ""}`;
+    log.warn(`relay socket ${why}${detail} — reconnecting in ${Math.round(delay)}ms`);
     this.#reconnectTimer = setTimeout(() => this.#dial(), delay);
   }
 
@@ -193,7 +220,7 @@ export class RelayClient {
 
   async #onEnvelope(env: Envelope): Promise<void> {
     const broadcast = env.to === MACHINES_ID;
-    if (!broadcast && env.to !== this.#opts.deviceId) {
+    if (!broadcast && env.to !== this.#opts.identity.deviceId) {
       log.warn(`wire dropped iv=${quote(env.iv)} to=${quote(env.to)} reason=misaddressed`);
       return;
     }
@@ -236,7 +263,7 @@ export class RelayClient {
       log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=disconnected`);
       return;
     }
-    const sealed = await seal(this.#opts.key, { to: env.from, from: this.#opts.deviceId }, response);
+    const sealed = await seal(this.#opts.key, { to: env.from, from: this.#opts.identity.deviceId }, response);
     const frame: DaemonFrame = { t: "msg", env: sealed };
     const ws = this.#ws;
     if (ws === null) {

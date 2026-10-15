@@ -39,6 +39,7 @@ export function fakeRelay(
     machines,
     registrySize: machines.length,
     ignored: 0,
+    unbound: 0,
     skewed: 0,
     settling: false,
     registrySettled: status === "open",

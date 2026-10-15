@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { APP_ID, MACHINES_ID, PROTOCOL_VERSION } from "@seance/shared";
+import {
+  APP_ID,
+  IDENTITY_PUBLIC_KEY_BYTES,
+  IDENTITY_SIGNATURE_BYTES,
+  MACHINES_ID,
+  PROTOCOL_VERSION,
+  base64Length,
+} from "@seance/shared";
 import { parseAppFrame, parseDaemonFrame, parseEnvelope } from "../src/wire.ts";
 
 const env = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -11,8 +18,21 @@ const env = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   ...over,
 });
 
+// Shape only: the parser bounds the key and signature to their exact encoded
+// sizes and leaves verifying them to the hub.
+const KEY = "A".repeat(base64Length(IDENTITY_PUBLIC_KEY_BYTES));
+const SIG = "A".repeat(base64Length(IDENTITY_SIGNATURE_BYTES));
+
 const registerFrame = (over: Record<string, unknown> = {}): string =>
-  JSON.stringify({ t: "register", deviceId: "device-1", info: env({ to: APP_ID, from: "device-1" }), ...over });
+  JSON.stringify({
+    t: "register",
+    deviceId: "device-1",
+    info: env({ to: APP_ID, from: "device-1" }),
+    key: KEY,
+    ts: Date.now(),
+    sig: SIG,
+    ...over,
+  });
 
 describe("parseEnvelope bounds", () => {
   test("accepts what the daemon and app actually send", () => {
@@ -57,6 +77,16 @@ describe("parseDaemonFrame", () => {
     expect(parseDaemonFrame(registerFrame({ deviceId: "a".repeat(65) }))).toBeNull();
     expect(parseDaemonFrame(registerFrame({ deviceId: "has space" }))).toBeNull();
     expect(parseDaemonFrame(registerFrame({ deviceId: "" }))).toBeNull();
+  });
+
+  test("a key or signature of any other size, or an unusable timestamp, is refused before any crypto runs", () => {
+    expect(parseDaemonFrame(registerFrame({ key: KEY.slice(1) }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ key: `${KEY}A` }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ key: `${KEY.slice(1)}!` }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ sig: SIG.slice(1) }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ sig: undefined }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ ts: "now" }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ ts: Number.NaN }))).toBeNull();
   });
 
   test("a daemon cannot claim a reserved wire address", () => {

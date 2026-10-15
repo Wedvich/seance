@@ -23,6 +23,7 @@ import {
   makeClaudeStub,
   makeGitFixture,
   pollUntil,
+  DEATH_STAMP_TEST_TIMEOUT_MS,
   untilDeathStamped,
   usePrivateTmux,
   type ClaudeStub,
@@ -449,22 +450,26 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
     await tmuxOk(["kill-pane", "-t", handStarted]);
   });
 
-  test("a dead séance pane is closed once it has been dead long enough; a live one is reported with its id", async () => {
-    const repo = await freshRepo();
-    const dead = await openWindow(`tmux wait-for reap-dead; exec ${stub.failing} --remote-control`);
-    await tmuxOk(["set-option", "-w", "-t", dead, "remain-on-exit", "on"]);
-    await tmuxOk(["wait-for", "-S", "reap-dead"]);
-    await untilDeathStamped(dead);
-    const live = await openWindow(`exec ${stub.ok} --remote-control`);
-    await pollUntil(async () => (await listPanes()).some((p) => p.paneId === live && p.titled), "live pane to title");
+  test(
+    "a dead séance pane is closed once it has been dead long enough; a live one is reported with its id",
+    async () => {
+      const repo = await freshRepo();
+      const dead = await openWindow(`tmux wait-for reap-dead; exec ${stub.failing} --remote-control`);
+      await tmuxOk(["set-option", "-w", "-t", dead, "remain-on-exit", "on"]);
+      await tmuxOk(["wait-for", "-S", "reap-dead"]);
+      await untilDeathStamped(dead);
+      const live = await openWindow(`exec ${stub.ok} --remote-control`);
+      await pollUntil(async () => (await listPanes()).some((p) => p.paneId === live && p.titled), "live pane to title");
 
-    const report = await reap(repo);
-    expect(report.closedPanes).toContainEqual(expect.objectContaining({ paneId: dead, why: "dead" }));
-    expect(await paneExists(dead)).toBe(false);
-    expect(report.openPanes).toContainEqual(expect.objectContaining({ paneId: live, state: "live" }));
-    expect(formatReport(report).join("\n")).toContain(`seanced despawn ${live}`);
-    await tmuxOk(["kill-pane", "-t", live]);
-  });
+      const report = await reap(repo);
+      expect(report.closedPanes).toContainEqual(expect.objectContaining({ paneId: dead, why: "dead" }));
+      expect(await paneExists(dead)).toBe(false);
+      expect(report.openPanes).toContainEqual(expect.objectContaining({ paneId: live, state: "live" }));
+      expect(formatReport(report).join("\n")).toContain(`seanced despawn ${live}`);
+      await tmuxOk(["kill-pane", "-t", live]);
+    },
+    DEATH_STAMP_TEST_TIMEOUT_MS,
+  );
 });
 
 describe("withReapLock", () => {

@@ -3,9 +3,11 @@ import { mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
+import { pskFingerprint } from "../src/config.ts";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
 import {
   awaitWatcherLive,
+  captureLog,
   makeConfigTrigger,
   makeGitFixture,
   usePrivateTmux,
@@ -148,6 +150,27 @@ describe("config hot reload", () => {
     const info = await registerAs(relay, "AfterEdit");
     expect(info.repos.some((r) => r.name === "myrepo")).toBe(true);
     expect(process.pid).toBe(pid);
+  });
+
+  test("every start, the first and each reload's, logs the key's fingerprint and where it came from", async () => {
+    // On a credential-delivered box nothing outside the unit can read the key,
+    // so this line is the only place its fingerprint can come from — and doctor
+    // points there for it.
+    const live = startTestRelay(TOKEN);
+    relay = live;
+    const path = await configFile();
+    await writeConfig(path, "Fingerprinted", live.url);
+    const lines = await captureLog(async () => {
+      await startSupervised(path);
+      await registerAs(live, "Fingerprinted");
+      await writeConfig(path, "Refingerprinted", live.url);
+      await reload();
+    });
+    const expected = `psk ${await pskFingerprint(PSK)} (config)`;
+    const starts = lines.filter((line) => line.includes("seanced starting"));
+    expect(starts).toHaveLength(2);
+    for (const line of starts) expect(line).toContain(expected);
+    expect(lines.join("\n")).not.toContain(PSK);
   });
 
   test("the machine tag reaches tmux's global environment, and follows an edit", async () => {

@@ -45,8 +45,11 @@ its Tailscale lockdown defeats the relay's purpose).
 - **Pre-shared 256-bit symmetric key (PSK)**, manually placed in each
   daemon's config and the phone (SSH + paste; no pairing flow to build).
   Rejected: Ed25519 sign-only (prompts would transit Cloudflare in
-  plaintext), per-device asymmetric keypairs (needless key management when
-  one human owns every device), QR pairing (requires being at the machine).
+  plaintext), per-device asymmetric keypairs _for the payload_ (needless key
+  management when one human owns every device), QR pairing (requires being at
+  the machine). Each daemon does hold one asymmetric key, but it signs only
+  its own `register` and nobody manages it — see "Self-certifying ids" under
+  Presence & identity.
 - **AES-256-GCM via native WebCrypto** on both ends (built into browsers and
   Bun — zero crypto dependencies). Encrypt-and-authenticate in one
   primitive. Rejected: XSalsa20-Poly1305 secretbox (same properties, needs a
@@ -68,9 +71,12 @@ its Tailscale lockdown defeats the relay's purpose).
 - **PSK is generated offline by the human** (1Password) and pasted into each
   config. `seanced` never generates key material — `init` writes a skeleton
   with an empty `psk` field; `doctor` validates it decodes to 32 bytes.
-- **Post-quantum safe by construction**: symmetric-only crypto — no key
-  exchange exists to attack (Grover only halves a 256-bit key's strength;
-  ML-KEM/ML-DSA solve problems this design doesn't have).
+- **Post-quantum safe by construction**: symmetric crypto for everything
+  that carries a payload — no key exchange exists to attack (Grover only
+  halves a 256-bit key's strength; ML-KEM solves a problem this design
+  doesn't have). The one signature in the system, a daemon's register, is
+  ML-DSA-65 for the same reason: an Ed25519 identity would be the single
+  thing a quantum adversary could forge.
 - **The relay is blind**: it routes opaque blobs and stores encrypted
   machine info it cannot read. Relay compromise cannot spawn anything or
   read prompts/repo names.
@@ -207,9 +213,11 @@ Séance's noise is cover for a real intruder.
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
    the blast radius off Cloudflare, so that choice is not free. The token also
-   buys slightly more than stated: `register` overwrites by `deviceId`, so a
-   holder can blank a real machine's entry until it re-registers (T1565.001),
-   and nothing caps registry growth (T1499.003). Bounded in the DO by a
+   bought slightly more than stated: `register` overwrote by `deviceId`, so a
+   holder could blank a real machine's entry until it re-registered
+   (T1565.001) — closed by self-certifying ids below, since a register for an
+   id now has to be signed by the key that id hashes — and nothing caps
+   registry growth (T1499.003). Bounded in the DO by a
    32-entry cap that turns away only _unknown_ ids — so a full registry locks
    out machines you have not added yet and never knocks a known one offline —
    plus a per-socket register rate limit, which bounds write rate as the entry
@@ -219,8 +227,49 @@ Séance's noise is cover for a real intruder.
    is per socket, so it bounds one connection's spend, not an attacker's total.
    Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
    ≤64 KiB, so a register can never reach the DO's 128 KiB value limit as an
-   unhandled throw. `deviceId` is not required to be a UUID — it is an
-   identifier, not a credential, so exact shape buys nothing the bounds don't.
+   unhandled throw. `deviceId` has no shape of its own beyond those bounds —
+   it is the base64url SHA-256 of the daemon's public key (43 characters), and
+   the hub checks that, not the parser.
+   Two sharper reads of the same verb, closed 2026-08-16. **Blob-swap
+   misdirection** (T1036): an `/app` socket is handed every machine's `info`
+   blob on its first push, and `register` pairs a blob with an id of the
+   caller's choosing — so a holder can re-file machine A's blob under machine
+   B's id. The picker then renders A's name and A's repos on an entry that
+   routes to B, and the tap seals the spawn to B. AAD binding still holds, so
+   "a relay compromise cannot spawn anything" survives; "you know which machine
+   you are spawning on" does not. Closed by an invariant the daemon has always
+   satisfied and nothing verified: `info.from` is AAD-bound to the machine that
+   sealed it, so an entry whose blob does not name its own `deviceId` never
+   becomes a `Machine`. Checked in `#decryptInfo`, which is what populates the
+   only cache `#rebuildMachines` reads, so an unverified entry can miss but
+   never render half-built — and that cache is keyed by id _and_ iv, because
+   one blob arriving under two ids must not be served from one slot. Such an
+   entry is counted as `unbound`, apart from `ignored`: it is not a key
+   problem, no PSK rotation clears it, and the UI names the bearer token as
+   the thing to rotate rather than sending anyone to check a correct key.
+   App-side,
+   not relay-side: the relay is blind and untrusted, so a check there is a
+   courtesy the app would have to repeat anyway, and a second copy is a second
+   thing that can drift. **Socket eviction and squatting** (T1499, T1565.001):
+   `register` also moved the route, closing an incumbent socket with
+   `superseded` for an id the caller never had to prove — after which
+   app→machine envelopes went to the newcomer, undecryptable and so
+   blackholed, while the registry still read `connected: true`; and the same
+   verb let a holder squat the id of a machine that was offline. Both are the
+   same hole: a register proved the bearer token and nothing about which
+   machine sent it, so no positional rule (incumbent wins, newest wins, a
+   silence threshold between them) could refuse the eviction without making
+   the squat sticky or vice versa — the interim threshold rule, kept for one
+   release, did exactly that. Closed by making ids self-certifying (Presence &
+   identity, below): the hub verifies every register, a verified one always
+   takes the route — whatever else holds the id is a zombie this same machine
+   left behind, never a stranger — and an unverified one is closed with
+   `register unverified`, which the daemon logs and backs off on, since the
+   open it got was not an accepted register. Reconnect after a clean drop is
+   untouched; a redial that races its own zombie now displaces it at once
+   rather than after any silence. What the token still buys here is the two
+   things it always did: junk entries under ids nobody will ever sign for,
+   bounded by the entry cap, and `forget`.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -344,8 +393,10 @@ The Durable Object persists a machine registry:
 { deviceId, info, lastSeen }
 ```
 
-- `deviceId`: random UUID generated by the daemon on first run, stored in
-  its config. Plaintext routing key — an identifier, not a credential.
+- `deviceId`: the base64url SHA-256 of the daemon's ML-DSA-65 public key
+  (43 characters), derived from a 32-byte seed the daemon mints on first run
+  and keeps in `state.json`. Plaintext routing key, and the one thing a
+  register has to prove — see "Self-certifying ids" below.
 - `info`: name, platform, repo list — encrypted "hello" blob only the PWA can
   decrypt. Re-sent on reconnect and repo rescan; DO overwrites. It also carries
   the daemon checkout's git identity (`source {sha, commitTs, branch}`) and the
@@ -375,6 +426,37 @@ The Durable Object persists a machine registry:
   a vanished one is confusing). An entry is overwritten by a later register and
   removed only by an app's `forget` (see below); **there is no TTL** — nothing
   expires a machine you own just because it slept through a holiday.
+- **Self-certifying ids** (2026-10-15). A `register` carries the daemon's
+  raw public key, a timestamp, and an ML-DSA-65 signature over
+  `seance-register|<deviceId>|<ts>`; the hub (`relay/src/hub.ts`, via
+  `shared/src/identity.ts`) accepts it only if the key hashes to the id, the
+  signature verifies, and `ts` is within ±60s. The id _is_ the key, so there
+  is nothing to enrol and no registry of keys to keep: the relay learns the
+  key from the frame it is verifying, and a stranger cannot name an id
+  without also holding its seed. Verification runs behind the per-socket rate
+  limit (at most ten verifies a minute per socket, ~1ms each in workerd) and
+  before the entry cap. A verified register always takes the route and
+  closes any other socket holding the id with `superseded`; an unverified one
+  closes the claimant with `register unverified`, and a frame whose key or
+  signature is not exactly the algorithm's size is malformed and dropped
+  before any crypto runs (`relay/src/wire.ts`). The seed lives in
+  `state.json` (0600) as `identitySeed`; a state without one is a pre-identity
+  install and is upgraded in place — the machine gets a new id, logged as
+  `deviceId X becomes Y`, and the app's old entry for it is junk to `forget`.
+  A seed that does not derive the stored id is corruption and reinitializes.
+  ML-DSA-65 over Ed25519 because the identity is the one asymmetric
+  primitive in the system and the only thing a quantum adversary could
+  otherwise forge; -65 over -44 for margin at a cost (1952-byte key,
+  3309-byte signature, one frame per connect) that is nothing on this wire.
+  The relay needs workerd's `webcrypto_modern_algorithms` compatibility flag
+  (`relay/wrangler.jsonc`), a draft API, so the shape is pinned by
+  `shared/src/identity.test.ts` and the relay suite rather than assumed;
+  Bun has it natively. Rejected: a per-register challenge from the relay
+  (a round trip on every connect, and a blind relay has no secret to make the
+  challenge worth more than a fresh timestamp); the PSK as the identity (one
+  key for every machine identifies none of them); keeping the UUID and
+  registering the key beside it (two things to keep consistent, and the
+  relay would need a first-come enrolment that is the squat all over again).
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
@@ -413,7 +495,7 @@ sequenceDiagram
     participant D as Daemon
 
     D->>R: WSS /daemon (Authorization: Bearer)
-    D->>R: register { deviceId, info: envelope }
+    D->>R: register { deviceId, info: envelope, key, ts, sig }
     P->>R: WSS /app?t=token
     R->>P: registry { entries } — again on every change
 
@@ -432,22 +514,22 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                          | Handled in                                                                                                      |
-| ----------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts`                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`)                                                      |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
-| `registry`                          | `relay/src/hub.ts`                                 | `shared/src/app-client.ts`                                                                                      |
-| `undeliverable`                     | `relay/src/hub.ts`                                 | `shared/src/app-client.ts`                                                                                      |
-| `forget`                            | `shared/src/app-client.ts`                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
-| `forget-refused`                    | `relay/src/hub.ts`                                 | `shared/src/app-client.ts` — logged, never modelled                                                             |
-| `"ping"` / `"pong"`                 | both socket legs                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                             | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`  | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`  | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
-| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts` | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
+| Frame / op                          | Sent from                                                          | Handled in                                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`) | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)               |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
+| `registry`                          | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts`                                                                                      |
+| `undeliverable`                     | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts`                                                                                      |
+| `forget`                            | `shared/src/app-client.ts`                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
+| `forget-refused`                    | `relay/src/hub.ts`                                                 | `shared/src/app-client.ts` — logged, never modelled                                                             |
+| `"ping"` / `"pong"`                 | both socket legs                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                             | same file — both ends share it, or nothing decrypts                                                             |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                  | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                  | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -459,8 +541,9 @@ there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client ac
 `seanced mcp` that reached it over the local op socket with a broker frame — not a
 `Plain`, and not on this wire. To the relay and the target it is one more app.
 
-Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope> }`
-on connect and whenever the repo set changes; `msg { envelope }` for routed
+Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope>,
+key, ts, sig }` — signed afresh each time, since the relay bounds `ts` — on
+connect and whenever the repo set changes; `msg { envelope }` for routed
 traffic; literal `"ping"`/`"pong"` strings for heartbeats (bare strings, not
 JSON, so DO auto-response can answer without waking — daemon pings every 30s,
 expects pong within 10s, else closes and redials with 1→60s jittered
@@ -498,21 +581,25 @@ send error that caused it.
   the plain 401. `/daemon` is unchanged — daemons read the real status from
   `fetch`.
 - **Bearer-token blast radius, restated:** with the token but not the PSK an
-  attacker can register junk (the PWA ignores non-decrypting entries), read
-  registry metadata (machine count, deviceIds, last-seen) and delete entries,
-  but cannot spawn or read prompts.
+  attacker can register junk under ids of their own (the PWA ignores
+  non-decrypting entries), read registry metadata (machine count, deviceIds,
+  last-seen) and delete entries, but cannot spawn, read prompts, or touch a
+  real machine's entry or route — a register for an existing id has to be
+  signed by that machine's key.
 - **`forget` is authorized by the bearer token alone, and that is not a new
   hole.** An earlier revision refused a delete verb on the grounds that it would
   be the one destructive act the token authorizes, with a blind relay unable to
   demand PSK proof. Both halves of that were wrong. A registry entry is derived
   state — the daemon re-registers on its next connect and rebuilds it — so
   deleting a live machine's entry costs a reconnect, and deleting a retired one
-  destroys nothing that exists. And the destructive act was already reachable:
-  `register` overwrites `device:<id>` for any wire-supplied id, so a token holder
-  could always blank a real machine's `info` with a blob that decrypts for
-  nobody. What the delete adds over that is honesty, not authority.
-  Rotating the token is still the answer to a leaked token; the caps
-  (`MAX_DEVICES`, the register rate limit) still bound cost rather than defend.
+  destroys nothing that exists. And at the time the destructive act was
+  already reachable: `register` overwrote `device:<id>` for any wire-supplied
+  id, so a token holder could blank a real machine's `info` with a blob that
+  decrypts for nobody. Signed registers have since closed that, which leaves
+  `forget` as the one thing the token lets a holder do to a real entry — and
+  it still costs that machine only a reconnect. Rotating the token is still
+  the answer to a leaked token; the caps (`MAX_DEVICES`, the register rate
+  limit) still bound cost rather than defend.
 - **Uninstalling deregisters the machine, and does it as an app-role client.**
   `seanced uninstall` sends the same `forget` on `/app` that the PWA's bin does
   (`daemon/src/deregister.ts`), after the service is stopped and before the links
@@ -672,7 +759,7 @@ together (re-sends registry data on every poll, useless offline).
   gets exactly one retry. Rejected: reporting the error and letting the user
   re-run (observed behavior was a half-installed machine with no daemon at all).
 - **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
-  (write config skeleton + deviceId), `install`/`uninstall` (launchd plist on
+  (write config skeleton + mint the identity that is the deviceId), `install`/`uninstall` (launchd plist on
   macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
   `link`/`unlink` (opt-in `seanced` name on PATH — a plain symlink to
   `main.ts`, which is executable with a bun shebang, so it tracks the checkout
@@ -690,7 +777,8 @@ together (re-sends registry data on every poll, useless offline).
   path, so `doctor` warns when it doesn't; the failure mode is a rejected
   upgrade and a silent backoff loop — bearerToken, psk, name,
   repoRoots, tmuxSession, machineTag) and `~/.local/state/seance/state.json`
-  (daemon-owned: deviceId, repo cache, scannedAt). Rejected: single file
+  (daemon-owned: deviceId and the `identitySeed` it derives from, repo cache,
+  scannedAt). Rejected: single file
   the daemon writes back (clobbers hand edits). PSK-in-OS-keychain was
   rejected here as having no clean WSL counterpart; both halves of that are
   now revised — each platform has a store (login keychain / DPAPI blob in
@@ -731,7 +819,7 @@ together (re-sends registry data on every poll, useless offline).
   promises the opposite. Restarting `startDaemon` in-process is also what makes
   state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
   background rescan can be writing while the incoming one reads, and a torn
-  read is indistinguishable from corruption, which mints a new deviceId and
+  read is indistinguishable from corruption, which mints a new identity and
   re-registers the machine as a stranger. runtime.json stays an in-place write:
   it is fixed-size and cannot tear. One accepted gap, found 2026-07-31 while
   chasing a flaky test: macOS brings an `fs.watch` FSEvents stream up
@@ -1191,8 +1279,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   analogue the VM could hold that outlives Windows power policy — the box
   sleeps per Windows settings and shows offline; configure the power plan,
   not the daemon. Both caffeinate call sites are already platform-gated.
-- Config file: relay URL, bearer token, PSK, deviceId, machine name, repo
-  roots.
+- Config file: relay URL, bearer token, PSK, machine name, repo roots; the
+  deviceId's seed lives in state.json.
 
 ## Reap (`seanced reap`) — designed 2026-10-09
 
@@ -1763,9 +1851,21 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   executor this design exists to avoid.
 - **`list_machines` still needs the relay**, and marks the local entry `local:
 true`. When the relay cannot be reached at all it answers with this machine
-  alone plus a note. That is not a nicety: with the relay down, or with no key
-  and no daemon to broker for it, a model that can see no machine cannot spawn
-  on the one it is sitting on either.
+  alone plus a note. That is not a nicety: with the relay down, a model that can
+  see no machine cannot spawn on the one it is sitting on either. The entry's
+  `connected` is probed, not assumed — a connect to the op socket, no op sent,
+  nothing audited — because local ops ride that socket: with no key and no
+  daemon to broker for it, the daemon being down is often _why_ the fleet is out
+  of reach, and then this box cannot spawn either. The note says so rather than
+  promising local spawns (2026-10-15, after a manual acceptance on a
+  credential-delivered box found both the note and the broker advice claiming
+  otherwise). When the broker itself failed, its error already observed the
+  daemon on that same socket, so its verdict sets `connected` and the advice
+  stands as the note: a second probe could race a restart and contradict it in
+  the same answer. Only a connection the daemon took and then never answered
+  (`daemon_timeout`) or dropped (`daemon_closed`) leaves it open and is probed —
+  and neither promises local spawns, since the peer's deadline outlasts
+  everything the daemon waits on, relay included, and silence is the daemon's.
 - **The PSK is resolved lazily**, on first remote use rather than at startup.
   A key found is memoized; "no key here" is re-asked after a minute, so a locked
   keychain can be retried without re-running a refused TPM unseal on every call.

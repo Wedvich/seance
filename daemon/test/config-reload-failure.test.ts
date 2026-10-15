@@ -7,6 +7,7 @@ import { watchConfigFile } from "../src/config.ts";
 import { startDaemon, type DaemonHandle, type RunOpts } from "../src/run.ts";
 import { startSupervisor, type SuperviseOpts, type SupervisorHandle } from "../src/supervise.ts";
 import {
+  captureLog,
   makeConfigTrigger,
   makeGitFixture,
   pollUntil,
@@ -118,25 +119,6 @@ function injectStart(shouldFail: (opts: RunOpts) => boolean): (opts: RunOpts) =>
     if (shouldFail(opts)) throw new Error("injected startDaemon failure");
     return startDaemon(opts);
   };
-}
-
-/** Captures both streams — `log.ts` splits `error` onto console.error. */
-async function captureLog(body: () => Promise<void>): Promise<string[]> {
-  const lines: string[] = [];
-  const capture = (...args: unknown[]): void => {
-    lines.push(args.map(String).join(" "));
-  };
-  const realLog = console.log;
-  const realError = console.error;
-  console.log = capture;
-  console.error = capture;
-  try {
-    await body();
-  } finally {
-    console.log = realLog;
-    console.error = realError;
-  }
-  return lines;
 }
 
 /** One config file per test: the watcher is per-directory, so shared dirs cross-talk. */

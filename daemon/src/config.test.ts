@@ -17,7 +17,7 @@ import { importDpapiPskValue } from "./dpapi.ts";
 import { importTpmPskValue, tpmAvailable } from "./tpmcreds.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
 import { credentialStore, dpapiStore, keychainStore, tpmStore, type PskStore } from "./psk-store.ts";
-import { loadOrInitState, readRuntime, saveState } from "./state.ts";
+import { identityOfState, loadOrInitState, readRuntime, saveState } from "./state.ts";
 import { isWsl } from "./wsl.ts";
 
 const hasTpm = await tpmAvailable();
@@ -285,10 +285,40 @@ describe("state", () => {
     const dir = await tempDir();
     const path = join(dir, "state.json");
     const first = await loadOrInitState(path);
-    expect(first.deviceId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(first.deviceId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(first.repos).toEqual([]);
     const second = await loadOrInitState(path);
     expect(second.deviceId).toBe(first.deviceId);
+    expect((await identityOfState(second)).deviceId).toBe(first.deviceId);
+  });
+
+  test("a legacy state without an identity gets one, and a new deviceId with it", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "state.json");
+    const legacy = {
+      deviceId: crypto.randomUUID(),
+      repos: [{ name: "x", path: "/x", defaultBranch: "main" }],
+      scannedAt: 7,
+    };
+    await writeFile(path, JSON.stringify(legacy));
+    const upgraded = await loadOrInitState(path);
+    expect(upgraded.deviceId).not.toBe(legacy.deviceId);
+    expect(upgraded.repos).toEqual(legacy.repos);
+    expect(upgraded.scannedAt).toBe(7);
+    expect((await identityOfState(upgraded)).deviceId).toBe(upgraded.deviceId);
+    // Persisted, so the next load keeps the minted id rather than minting again.
+    expect((await loadOrInitState(path)).deviceId).toBe(upgraded.deviceId);
+  });
+
+  test("a seed that does not derive the stored deviceId reinitializes", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "state.json");
+    const genuine = await loadOrInitState(path);
+    await writeFile(path, JSON.stringify({ ...genuine, deviceId: "forged" }));
+    const state = await loadOrInitState(path);
+    expect(state.deviceId).not.toBe("forged");
+    expect(state.deviceId).not.toBe(genuine.deviceId);
+    expect((await identityOfState(state)).deviceId).toBe(state.deviceId);
   });
 
   test("reinitializes on corrupt state", async () => {
@@ -296,14 +326,14 @@ describe("state", () => {
     const path = join(dir, "state.json");
     await writeFile(path, "not json");
     const state = await loadOrInitState(path);
-    expect(state.deviceId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(state.deviceId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   });
 
   test("saveState roundtrips repos", async () => {
     const dir = await tempDir();
     const path = join(dir, "state.json");
     const state = {
-      deviceId: crypto.randomUUID(),
+      ...(await loadOrInitState(path)),
       repos: [{ name: "x", path: "/x", defaultBranch: "main" }],
       scannedAt: 123,
     };

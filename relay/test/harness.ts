@@ -1,5 +1,14 @@
-import { PROTOCOL_VERSION, type Envelope } from "@seance/shared";
-import { Miniflare } from "miniflare";
+import {
+  APP_ID,
+  PROTOCOL_VERSION,
+  generateIdentitySeed,
+  identityFromSeed,
+  signRegister,
+  type DaemonFrame,
+  type Envelope,
+  type Identity,
+} from "@seance/shared";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { join } from "node:path";
 
 /**
@@ -17,6 +26,7 @@ export interface TestRelay {
 
 interface WranglerConfig {
   readonly compatibility_date: string;
+  readonly compatibility_flags?: readonly string[];
   readonly durable_objects: { readonly bindings: readonly { readonly name: string; readonly class_name: string }[] };
 }
 
@@ -60,21 +70,27 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
 
-  const mf = new Miniflare({
-    modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
-    compatibilityDate: config.compatibility_date,
-    // Free-tier Durable Objects are SQLite-backed; match that here.
-    durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
-    bindings: {
-      BEARER_TOKEN: token,
-      ...(sweep === undefined
-        ? {}
-        : {
-            SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
-            SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
-          }),
-    },
-  });
+  // Miniflare 5 moved worker options under a `config` object with a different
+  // schema; the v4 shape still describes this worker exactly, so it is fed
+  // through the adapter the package ships rather than ported by hand.
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
+      compatibilityDate: config.compatibility_date,
+      compatibilityFlags: [...(config.compatibility_flags ?? [])],
+      // Free-tier Durable Objects are SQLite-backed; match that here.
+      durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
+      bindings: {
+        BEARER_TOKEN: token,
+        ...(sweep === undefined
+          ? {}
+          : {
+              SWEEP_INTERVAL_MS: String(sweep.sweepIntervalMs),
+              SWEEP_SILENCE_LIMIT_MS: String(sweep.sweepSilenceLimitMs),
+            }),
+      },
+    }),
+  );
   const url = await mf.ready;
 
   return {
@@ -225,5 +241,45 @@ export function envelope(to: string, from: string): Envelope {
     from,
     iv: `iv-${ivCounter}`,
     ct: "Y2lwaGVydGV4dA==",
+  };
+}
+
+const identities = new Map<string, Identity>();
+
+/**
+ * A deviceId the relay will accept a register for: the hash of a freshly minted
+ * key, remembered here so `register()` can sign for it later. Tests pass ids
+ * around as strings, exactly as the wire does; this is the one place that knows
+ * which key stands behind each.
+ */
+export async function newDeviceId(): Promise<string> {
+  const identity = await identityFromSeed(generateIdentitySeed());
+  identities.set(identity.deviceId, identity);
+  return identity.deviceId;
+}
+
+export function identityOf(deviceId: string): Identity {
+  const identity = identities.get(deviceId);
+  if (identity === undefined) throw new Error(`no identity minted for ${deviceId} — use newDeviceId()`);
+  return identity;
+}
+
+type RegisterFrame = Extract<DaemonFrame, { t: "register" }>;
+
+/** A register the relay verifies, for an id from `newDeviceId()`. `over` forges fields on purpose. */
+export async function register(
+  deviceId: string,
+  over: Partial<RegisterFrame> & { readonly info?: Envelope } = {},
+): Promise<RegisterFrame> {
+  const identity = identityOf(deviceId);
+  const ts = over.ts ?? Date.now();
+  return {
+    t: "register",
+    deviceId,
+    info: over.info ?? envelope(APP_ID, deviceId),
+    key: identity.publicKey,
+    ts,
+    sig: await signRegister(identity, ts),
+    ...over,
   };
 }

@@ -375,7 +375,10 @@ git pull && bun daemon/src/main.ts restart    # daemon, on one machine
 Daemons self-propagate: the restarted daemon notices its version changed and
 announces it over the relay, and every other machine fetches, fast-forwards
 its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
-A machine that was asleep or offline catches up on its next reconnect. A
+A machine that was asleep or offline catches up on its next reconnect. One
+update is not transparent: the first daemon with a signed identity (October 2026) mints a key and a new `deviceId` for the machine, so the app lists the
+old id as an offline stranger — forget it there; `seanced status` shows the new
+one. A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` on that machine shows its version
 and its last update outcome. The relay and the app deploy themselves from CI on a

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import { generateIdentitySeed, identityFromSeed, toBase64, type RepoEntry } from "@seance/shared";
 import { loadOrInitState, readState, saveState, writeRuntime, type State } from "../src/state.ts";
 
 let base: string;
@@ -32,20 +32,26 @@ function repos(count: number): RepoEntry[] {
  */
 const RACY_REPO_COUNT = 5_000;
 
+/** A seed and the deviceId it derives, so a state built here survives a reload unchanged. */
+async function freshIdentity(): Promise<{ deviceId: string; identitySeed: string }> {
+  const seed = generateIdentitySeed();
+  return { deviceId: (await identityFromSeed(seed)).deviceId, identitySeed: toBase64(seed) };
+}
+
 describe("state writes", () => {
   test("a concurrent reader never sees a partial state file", async () => {
     const dir = await mkdtemp(join(base, "concurrent-"));
     const path = join(dir, "state.json");
-    const deviceId = crypto.randomUUID();
+    const { deviceId, identitySeed } = await freshIdentity();
     const big = repos(RACY_REPO_COUNT);
-    await saveState({ deviceId, repos: big, scannedAt: 0 }, path);
+    await saveState({ deviceId, identitySeed, repos: big, scannedAt: 0 }, path);
 
     // A truncated read is indistinguishable from corruption, so `loadOrInitState`
     // mints a *new* deviceId and the machine re-registers as a stranger. Alternating
     // sizes keeps every write a real rewrite rather than an identical overwrite.
     const reads: Promise<State>[] = [];
     for (let round = 0; round < 60; round++) {
-      const write = saveState({ deviceId, repos: round % 2 === 0 ? [] : big, scannedAt: round }, path);
+      const write = saveState({ deviceId, identitySeed, repos: round % 2 === 0 ? [] : big, scannedAt: round }, path);
       for (let i = 0; i < 8; i++) reads.push(loadOrInitState(path));
       await write;
     }

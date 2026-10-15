@@ -1,6 +1,14 @@
-import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { RepoEntry, UpdateReport } from "@seance/shared";
+import {
+  fromBase64,
+  generateIdentitySeed,
+  identityFromSeed,
+  toBase64,
+  type Identity,
+  type RepoEntry,
+  type UpdateReport,
+} from "@seance/shared";
 import { log } from "./log.ts";
 import { runtimePath, statePath } from "./paths.ts";
 
@@ -13,7 +21,16 @@ import { runtimePath, statePath } from "./paths.ts";
 const STATE_MODE = 0o600;
 
 export interface State {
+  /** SHA-256 of the identity's public key, base64url — never chosen, always derived. */
   readonly deviceId: string;
+  /**
+   * base64, 32 bytes: the ML-DSA-65 seed the daemon signs registers with
+   * (`shared/src/identity.ts`). Lives here, 0600, rather than in the PSK store:
+   * it proves which machine this is, not who may spawn on it — a thief gains a
+   * squat on one id, and only with the bearer token too. Absent only on a state
+   * file written before identities existed; `loadOrInitState` mints one.
+   */
+  readonly identitySeed?: string;
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number | null;
   /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
@@ -26,8 +43,27 @@ export interface State {
   readonly lastReapAt?: number;
 }
 
-function freshState(): State {
-  return { deviceId: crypto.randomUUID(), repos: [], scannedAt: null };
+async function mintIdentity(): Promise<{ readonly seed: string; readonly identity: Identity }> {
+  const seed = generateIdentitySeed();
+  return { seed: toBase64(seed), identity: await identityFromSeed(seed) };
+}
+
+async function freshState(): Promise<State> {
+  const { seed, identity } = await mintIdentity();
+  return { deviceId: identity.deviceId, identitySeed: seed, repos: [], scannedAt: null };
+}
+
+/**
+ * The identity a loaded state's seed derives — what signs this machine's
+ * registers. Only `loadOrInitState` output is a valid argument: it guarantees
+ * the seed is present and derives the stored id, so either failing here is a
+ * caller that read the file some other way.
+ */
+export async function identityOfState(state: State): Promise<Identity> {
+  if (state.identitySeed === undefined) throw new Error("state has no identity seed — load it with loadOrInitState");
+  const identity = await identityFromSeed(fromBase64(state.identitySeed));
+  if (identity.deviceId !== state.deviceId) throw new Error("state's identity seed does not derive its deviceId");
+  return identity;
 }
 
 function isState(raw: unknown): raw is State {
@@ -36,14 +72,27 @@ function isState(raw: unknown): raw is State {
   return typeof obj["deviceId"] === "string" && Array.isArray(obj["repos"]);
 }
 
-/** Null when the file is absent; the problem string when it is there but unusable. */
+/**
+ * Null when the file is absent; the problem string when it is there but unusable.
+ *
+ * `readFile` rather than `Bun.file(path).json()`: the writer is temp-plus-rename,
+ * so the file on disk is always whole, but `Bun.file` is lazy by path and a read
+ * that sizes itself before it opens can land on the far side of a rename and
+ * come back short — read as corruption, which re-mints the deviceId. `readFile`
+ * sizes from the descriptor it opened, so one open sees one whole file. Seen
+ * once on a GitHub macOS runner, never reproduced locally.
+ */
 async function parseState(path: string): Promise<{ readonly state: State } | { readonly problem: string } | null> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) return null;
+  let text: string;
   try {
-    const raw: unknown = await file.json();
-    if (isState(raw)) return { state: raw };
-    return { problem: "has unexpected shape" };
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return { problem: `could not be read (${String(err)})` };
+  }
+  try {
+    const raw: unknown = JSON.parse(text);
+    return isState(raw) ? { state: raw } : { problem: "has unexpected shape" };
   } catch {
     return { problem: "is not valid JSON" };
   }
@@ -64,17 +113,34 @@ export async function readState(path: string = statePath()): Promise<State | nul
 }
 
 /**
- * Loads state or initializes it (deviceId is generated exactly here, on first
- * run). A corrupt file is replaced — losing deviceId only means the machine
- * registers as a new entry; the stale one is forgettable from the PWA.
+ * Loads state or initializes it (the identity, and so the deviceId, is minted
+ * exactly here, on first run). A corrupt file is replaced — losing the identity
+ * only means the machine registers as a new entry; the stale one is
+ * forgettable from the PWA. A state file from before identities existed gets
+ * one the same way, and its deviceId changes with it: the id is the key's
+ * hash, so a random UUID cannot be kept, and the old entry is likewise
+ * forgettable. A seed that no longer derives the stored id is treated as the
+ * same kind of damage rather than trusted.
  */
 export async function loadOrInitState(path: string = statePath()): Promise<State> {
   const result = await parseState(path);
   if (result !== null) {
-    if ("state" in result) return result.state;
-    log.warn(`state at ${path} ${result.problem} — reinitializing`);
+    if ("state" in result) {
+      const { state } = result;
+      if (state.identitySeed !== undefined) {
+        const identity = await identityFromSeed(fromBase64(state.identitySeed)).catch(() => null);
+        if (identity !== null && identity.deviceId === state.deviceId) return state;
+        log.warn(`state at ${path} has an identity that does not derive its deviceId — reinitializing`);
+      } else {
+        const { seed, identity } = await mintIdentity();
+        log.info(`minted an identity for state at ${path}: deviceId ${state.deviceId} becomes ${identity.deviceId}`);
+        const upgraded: State = { ...state, deviceId: identity.deviceId, identitySeed: seed };
+        await saveState(upgraded, path);
+        return upgraded;
+      }
+    } else log.warn(`state at ${path} ${result.problem} — reinitializing`);
   }
-  const state = freshState();
+  const state = await freshState();
   await saveState(state, path);
   return state;
 }

@@ -3,7 +3,15 @@ import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import type { SessionBackend } from "./backend.ts";
-import { loadConfig, loadPsk, REAP_DEFAULTS, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
+import {
+  loadConfig,
+  loadPsk,
+  pskFingerprint,
+  REAP_DEFAULTS,
+  runnableProblems,
+  type Config,
+  type ResolvedPsk,
+} from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -12,7 +20,7 @@ import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
-import { loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
+import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
 /**
@@ -36,6 +44,7 @@ export interface RunOpts {
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
+  readonly maxBackoffMs?: number;
   /** The session backend; defaults to `createBackend(config)`. Tests inject one with a tighter pane-death budget. */
   readonly backend?: SessionBackend;
   readonly rescanIntervalMs?: number;
@@ -83,6 +92,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   if (logProblem !== null) log.warn(logProblem);
 
   let state: State = await loadOrInitState();
+  const identity = await identityOfState(state);
   const key = await importPsk(resolved.psk);
   const startedAt = Date.now();
 
@@ -173,7 +183,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
-    deviceId: state.deviceId,
+    identity,
     key,
     buildInfo,
     handle: createHandler(handlerCtx),
@@ -196,6 +206,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     ...(opts.pingIntervalMs !== undefined ? { pingIntervalMs: opts.pingIntervalMs } : {}),
     ...(opts.pongTimeoutMs !== undefined ? { pongTimeoutMs: opts.pongTimeoutMs } : {}),
     ...(opts.baseBackoffMs !== undefined ? { baseBackoffMs: opts.baseBackoffMs } : {}),
+    ...(opts.maxBackoffMs !== undefined ? { maxBackoffMs: opts.maxBackoffMs } : {}),
   });
 
   if (opts.selfUpdate !== undefined && source !== null) {
@@ -215,7 +226,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     });
   }
 
-  log.info(`seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos`);
+  // Which key we came up with, so a half-rotated PSK reads as a mismatch in the
+  // log instead of a silent stream of undecryptable frames. On a credential-
+  // delivered box nothing outside the unit can read the key, so this line is
+  // the only place its fingerprint can come from.
+  log.info(
+    `seanced starting — device ${state.deviceId}, ${state.repos.length} cached repos, ` +
+      `psk ${await pskFingerprint(resolved.psk)} (${resolved.source})`,
+  );
   client.start();
 
   try {
