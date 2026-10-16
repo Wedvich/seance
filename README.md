@@ -224,9 +224,12 @@ relay — see [From another Claude Code session](#from-another-claude-code-sessi
 `seanced mcp uninstall` removes it; `seanced doctor` reports whether it is
 registered.
 
-The entry records bun by its PATH name, so upgrading bun doesn't break it. It is
-per Claude config directory, though: if you run Claude Code with a non-default
-`CLAUDE_CONFIG_DIR`, run `seanced mcp install` once from a session using it.
+The entry records bun by its PATH name, so upgrading bun doesn't break it. A
+user-scope entry lives in one Claude config directory, so `mcp install` registers
+it in every exclave's (`~/.claude`, plus `~/.claude-<name>` for each name in
+`~/.exclaves`) and in the shell's own `CLAUDE_CONFIG_DIR` when no exclave owns it.
+An exclave whose config directory doesn't exist yet is skipped: add an exclave
+later and re-run it.
 
 ### 7. Optional: spawn from Raycast (macOS)
 

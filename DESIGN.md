@@ -2011,7 +2011,13 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   invariant) rather than editing `~/.claude.json` — Claude Code owns that
   schema. What gets registered is PATH-resolved bun plus this checkout's
   `main.ts`, the same target `link` points at, so the entry survives both a
-  `git pull` and a bun upgrade. `doctor` reports whether the entry exists.
+  `git pull` and a bun upgrade. A user-scope entry reaches one `.claude.json`, so
+  both commands run once per exclave (`mcpTargets` in `daemon/src/mcp.ts`):
+  `default` with `CLAUDE_CONFIG_DIR` unset, each named one with it set, plus the
+  ambient dir when no exclave owns it. One that has no config dir yet is skipped,
+  because `claude mcp add` would create it. `doctor` reports the entry per exclave.
+  Rejected: registering only in the invoking shell's config dir, which is what
+  left the exclaves without it.
   Nothing re-registers on its own — no self-update path touches Claude config —
   so a machine that predates a change to the recorded argv needs
   `seanced mcp install` run again by hand. Which is why `install` clears the name

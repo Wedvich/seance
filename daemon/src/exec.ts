@@ -21,10 +21,13 @@ export interface ExecResult {
  * Exported so the one caller that spawns a long-running child itself
  * (`raycast.ts`, watching `ray develop`) inherits the scrub rather than
  * rebuilding it. `overrides` layer on top — a caller that has to point a child
- * at a different PATH must not have to reconstruct the exclusion to do it.
+ * at a different PATH must not have to reconstruct the exclusion to do it. An
+ * `undefined` override unsets the variable: `default`'s Claude config is the
+ * one reached *without* `CLAUDE_CONFIG_DIR`, so pointing at it means removal.
  */
-export function childEnv(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
+export function childEnv(overrides: Readonly<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
   const env = { ...process.env, ...overrides };
+  for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete env[key];
   // Children only: the daemon's own process.env must keep it, or a supervisor reload
   // re-resolves the key from another source and silently turns the fleet broker off.
   delete env["CREDENTIALS_DIRECTORY"];
@@ -37,7 +40,7 @@ export async function exec(
     readonly cwd?: string;
     readonly timeoutMs?: number;
     readonly stdin?: string;
-    readonly env?: Readonly<Record<string, string>>;
+    readonly env?: Readonly<Record<string, string | undefined>>;
   } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
