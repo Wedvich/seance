@@ -528,7 +528,15 @@ describe("leader in the daemon", () => {
       };
       relay.rejectApps = true;
       relay.lead(deviceId, 1);
-      const resigned = await nextRegister();
+      let resigned = await nextRegister();
+      // The startup rescan's re-register can land first (it does on macOS runners):
+      // sent before the resign, on the same socket, it still asks for the role.
+      while (resigned.frame.roles?.length !== 0) {
+        expect(resigned.frame.roles).toEqual(["scheduler"]);
+        expect(resigned.connection).toBe(1);
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive one at a time
+        resigned = await nextRegister();
+      }
       expect(resigned.frame.roles).toEqual([]);
       // The same connection: the relay moves only the socket a signed register arrives on.
       expect(resigned.connection).toBe(1);
