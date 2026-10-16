@@ -38,6 +38,13 @@ import { quote } from "./fmt.ts";
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 
 /**
+ * What the scheduler leader's leg hands an envelope `to: SCHEDULER_ID` that
+ * answers nothing — a daemon's `session-event` — once opened and replay-checked,
+ * with the sealing machine's AAD-bound id.
+ */
+export type SchedulerEventHandler = (plain: Plain, from: string) => void;
+
+/**
  * Why a request will never get an answer. "refused" is an `undeliverable` whose
  * code this build does not know: what it means is unknown, but that the relay
  * declined delivery is not — the request certainly did not land. "unsupported"
@@ -398,7 +405,7 @@ export class RelayClient {
   /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
   readonly #term: number | null;
   /** The leader's leg only: what an envelope `to: SCHEDULER_ID` that answers nothing is handed to. */
-  readonly #onEvent: ((plain: Plain, from: string) => void) | null;
+  readonly #onEvent: SchedulerEventHandler | null;
 
   constructor(opts: {
     readonly url: string;
@@ -427,7 +434,7 @@ export class RelayClient {
      */
     readonly scheduler?: {
       readonly term: number;
-      readonly onEvent?: (plain: Plain, from: string) => void;
+      readonly onEvent?: SchedulerEventHandler;
     };
   }) {
     this.#url = opts.url;

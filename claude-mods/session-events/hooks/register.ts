@@ -27,6 +27,9 @@ const SEND_TIMEOUT_MS = 3_000;
 /** Waiting on a person, as opposed to idle: a permission prompt or a question the session asked. */
 const NEEDS_INPUT = new Set(["permission_prompt", "elicitation_dialog"]);
 
+/** SessionEnd reasons after which the same process, in the same pane, carries on. */
+const CONTINUES: ReadonlySet<string> = new Set(["clear", "resume"]);
+
 export function notificationState(type: string): State | null {
   if (NEEDS_INPUT.has(type)) return "needs-input";
   return type === "idle_prompt" ? "idle" : null;
@@ -64,7 +67,8 @@ function send($: EngineInterface, report: Report): void {
 // oxlint-disable promise/no-callback-in-promise -- each `.catch` is a hook registration's, not a Promise's
 export const register: Register = (on) => {
   on("classic.SessionStart", ($, e, next) => {
-    send($, { state: "idle" });
+    // A compaction can land mid-turn: the session is not idle because of it.
+    if (e.source !== "compact") send($, { state: "idle" });
     return next(e);
   }).catch(($, e, next) => next(e));
   on("classic.UserPromptSubmit", ($, e, next) => {
@@ -87,8 +91,10 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e));
   // Unawaited like the rest, so it may not outlive a fast exit; the daemon's
   // `ended` backstop counts a launched task whose pane is gone either way.
+  // `/clear` and `/resume` end a conversation, not the process: the pane runs
+  // on, so `ended` — terminal for the task — would be a lie.
   on("classic.SessionEnd", ($, e, next) => {
-    send($, { state: "ended" });
+    if (!CONTINUES.has(e.reason)) send($, { state: "ended" });
     return next(e);
   }).catch(($, e, next) => next(e));
   // Rate limits as the status line has them, pushed after each turn and when a

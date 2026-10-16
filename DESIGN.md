@@ -2611,8 +2611,9 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   window moves a whole point, whether or not a status line renders. The daemon turns
   them into a `session` quota observation for the pane's exclave, stamped with its
   receive time. `SessionQuota` keeps the newest per exclave in memory. The telemetry
-  tick takes the newer of it and the config dir's cache (`newestQuota`), carrying the
-  cache's per-model `w` along. That is safe because a reading is a lower bound: use
+  tick takes the newer of it and the config dir's cache (`newestQuota`), the cache
+  filling what the report lacks: its per-model `w`, and a five-hour or seven-day
+  window (with its reset) the report left out. That is safe because a reading is a lower bound: use
   only raises it until reset, and a passed reset reads 0%. The observation rides
   `status` under the same metric names. Rejected: wrapping each exclave's
   `statusLine.command` in `settings.json`. It would rewrite the user's config in
@@ -2893,8 +2894,10 @@ update` refreshes, and the checkout already on the machine is the version the
   daemon runs).
 - **Tested by `claude plugin test`, not `bun:test`** — the one exception to the
   runner rule: a mod's tests import `claude-code/testing`, which only Claude
-  Code provides. `scripts/test.ts` runs them as their own shard (the summary
-  format matches bun's), and skips that shard, visibly, where `claude` isn't on
+  Code provides. `scripts/test.ts` runs each mod as a shard of its own —
+  `claude plugin test` takes one folder and silently ignores any after it, which
+  once left session-events' tests unrun behind tmux-rename's — (the summary
+  format matches bun's), and skips those shards, visibly, where `claude` isn't on
   PATH — which today includes CI.
 
 ## Scheduler (`scheduler/`) — library landed 2026-10-16 (M2 item 1)

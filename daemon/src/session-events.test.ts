@@ -81,12 +81,13 @@ test("SessionQuota keeps the newest per exclave", () => {
 
 describe("newestQuota", () => {
   const cache = { x: 0, s: "cache" as const, at: 100, h: 50, d: 20, w: [{ m: "Fable", p: 30 }] };
-  test("a newer report wins and carries the cache's per-model windows; an older one loses", () => {
+  test("a newer report wins and the cache fills the windows it lacks; an older one loses", () => {
     expect(newestQuota(cache, { x: 0, s: "session", at: 200, h: 60 })).toEqual({
       x: 0,
       s: "session",
       at: 200,
       h: 60,
+      d: 20,
       w: [{ m: "Fable", p: 30 }],
     });
     expect(newestQuota(cache, { x: 0, s: "session", at: 50, h: 1 })).toBe(cache);

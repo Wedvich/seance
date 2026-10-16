@@ -143,8 +143,10 @@ export class RelayClient {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload: event };
     const sealed = await seal(this.#opts.key, { to: SCHEDULER_ID, from: this.#opts.identity.deviceId }, plain);
+    // Re-checked after the seal: a redial meanwhile leaves a socket that is open
+    // but not yet registered, and the relay drops anything sent on it before one.
     const ws = this.#ws;
-    if (ws === null || !this.connected) return false;
+    if (ws === null || !this.connected || !this.#registered) return false;
     ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
     log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(plain.op)} to=${quote(SCHEDULER_ID)}`);
     return true;

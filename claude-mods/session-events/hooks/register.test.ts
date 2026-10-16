@@ -81,6 +81,16 @@ describe("reports", () => {
     ]);
   });
 
+  test("a /clear, a /resume or a compaction is neither an end nor idleness", async ($, on) => {
+    const sent = record(on);
+    await $.classic.SessionEnd({ reason: "clear" });
+    await $.classic.SessionStart({ source: "clear" });
+    await $.classic.SessionEnd({ reason: "resume" });
+    await $.classic.SessionStart({ source: "compact" });
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "idle" }]);
+  });
+
   test("a PR opened through gh is reported with its URL", async ($, on) => {
     const sent = record(on);
     await $.classic.PostToolUse({

@@ -227,8 +227,8 @@ export class EndedTasks {
     this.#put(this.#ended, taskId);
   }
 
-  /** Nothing remembered, so a `sessions` reply need not list panes to answer. */
-  get empty(): boolean {
+  /** Nothing remembered once what has aged out is dropped — then a `sessions` reply need not list panes. */
+  isEmpty(): boolean {
     this.#prune(this.#ended);
     this.#prune(this.#launched);
     return this.#ended.size === 0 && this.#launched.size === 0;
@@ -263,7 +263,7 @@ export async function reportEnded(
   ended: EndedTasks,
   panes: () => Promise<readonly BoundPane[]> = listPanePids,
 ): Promise<readonly string[]> {
-  if (ended.empty) return [];
+  if (ended.isEmpty()) return [];
   const live = new Set<string>();
   for (const pane of await panes()) if (!pane.dead && pane.taskId !== null) live.add(pane.taskId);
   return ended.report(live);

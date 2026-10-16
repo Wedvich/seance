@@ -17,7 +17,7 @@ import {
   type DespawnResponse,
   type Envelope,
   type ErrorResponse,
-  type Plain,
+  type SchedulerEventHandler,
   type SessionsResponse,
   type SessionState,
   type SpawnResponse,
@@ -66,7 +66,7 @@ export interface LeaderOpts {
    * `onEvent` is what the leg hands an envelope that answers nothing — a
    * daemon's `session-event` — once it has opened and replay-checked it.
    */
-  readonly createRelay: (term: number, onEvent: (plain: Plain, from: string) => void) => LeaderRelay;
+  readonly createRelay: (term: number, onEvent: SchedulerEventHandler) => LeaderRelay;
   /** This machine's ops, audited under origin `leader`. */
   readonly local: LocalOps;
   /**
@@ -211,7 +211,7 @@ function startTerm(
   // What another daemon sent the scheduler, already opened and replay-checked
   // by the leg. The sealer's id is AAD-bound; the event's fields are its
   // daemon's own binding, re-validated here — the PR URL above all.
-  const onEvent = (plain: Plain, from: string): void => {
+  const onEvent: SchedulerEventHandler = (plain, from) => {
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
     if (event === null) {
       log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event`);

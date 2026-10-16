@@ -240,17 +240,29 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
 
 /**
  * One exclave's observation for the status: the newer of the cache and a
- * session's report. A report carries no per-model windows, so the cache's `w`
- * rides along under the report's stamp — safe because a quota reading is a
- * lower bound (use only raises it until reset, and a passed reset reads 0%
- * whatever its age), so an older `w` never understates the account.
+ * session's report. A report carries no per-model windows, and may lack a
+ * window the cache has, so the cache fills what the report leaves out, under
+ * the report's stamp — safe because a quota reading is a lower bound (use only
+ * raises it until reset, and a passed reset reads 0% whatever its age), so an
+ * older window never understates the account.
  */
 export function newestQuota(
   cached: QuotaObservation | null,
   reported: QuotaObservation | null,
 ): QuotaObservation | null {
   if (reported === null || (cached !== null && cached.at > reported.at)) return cached;
-  return cached?.w === undefined ? reported : { ...reported, w: cached.w };
+  if (cached === null) return reported;
+  // Window and its reset travel as a pair: a report's `h` never takes the cache's `hr`.
+  return {
+    ...reported,
+    ...(reported.h === undefined && cached.h !== undefined
+      ? { h: cached.h, ...(cached.hr === undefined ? {} : { hr: cached.hr }) }
+      : {}),
+    ...(reported.d === undefined && cached.d !== undefined
+      ? { d: cached.d, ...(cached.dr === undefined ? {} : { dr: cached.dr }) }
+      : {}),
+    ...(cached.w === undefined ? {} : { w: cached.w }),
+  };
 }
 
 /** Wire integers: whole, never negative, and a percent never over 100. */
