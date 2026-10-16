@@ -87,7 +87,7 @@ async function startTestDaemon(relayUrl: string, home?: string): Promise<DaemonH
   const config = makeConfig(relayUrl);
   return startDaemon({
     config,
-    backend: createBackend(config, { waitMs: 700 }),
+    backend: createBackend(config, { home: home ?? join(base, "home"), waitMs: 700 }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,

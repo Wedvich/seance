@@ -90,7 +90,7 @@ async function startTestDaemon(
   const config = { ...makeConfig(relayUrl), repoRoots: [fixture.root, ...extraRoots] };
   return startDaemon({
     config,
-    backend: createBackend(config, { waitMs: spawnWaitMs }),
+    backend: createBackend(config, { home: rest.home ?? join(base, "home"), waitMs: spawnWaitMs }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,

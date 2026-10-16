@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
@@ -7,7 +7,7 @@ import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
-import { sessionName, spawnSession } from "../src/spawn.ts";
+import { sessionName, spawnSession, type SpawnOptions } from "../src/spawn.ts";
 import { tmux, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
@@ -22,13 +22,15 @@ import {
 // A deadline, not a duration: the wait returns on the stub's title (0.3s after
 // startup, which macOS can stretch under load), so a wide one adds no latency
 // to a spawn that registers. Only the stuck stub ever runs it out, and it
-// gets its own budget below.
-const WAIT = { tmuxSession: "main", waitMs: 5_000 };
-const STUCK_WAIT = { tmuxSession: "main", waitMs: 700 };
+// gets its own budget below. Each carries the fixture home, so pre-trust never
+// reaches the developer's own config; set once `beforeAll` has made it.
+let WAIT: SpawnOptions;
+let STUCK_WAIT: SpawnOptions;
 // Failure tests race the stub's actual death (0.3s sleep + process startup)
 // against the deadline the same way; polling makes the width free.
-const FAIL_WAIT = { tmuxSession: "main", waitMs: 5_000 };
+let FAIL_WAIT: SpawnOptions;
 let base: string;
+let home: string;
 let privateTmux: PrivateTmux | undefined;
 let fixture: GitFixture;
 let stub: ClaudeStub;
@@ -41,6 +43,11 @@ beforeAll(async () => {
   // suite runs inside a séance session — which no window may inherit.
   process.env["SEANCE_MACHINE_TAG"] = "outer";
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
+  home = join(base, "home");
+  await mkdir(home, { recursive: true });
+  WAIT = { tmuxSession: "main", waitMs: 5_000, home };
+  STUCK_WAIT = { tmuxSession: "main", waitMs: 700, home };
+  FAIL_WAIT = { tmuxSession: "main", waitMs: 5_000, home };
   fixture = await makeGitFixture(base);
   stub = await makeClaudeStub(base);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
@@ -54,6 +61,13 @@ afterAll(async () => {
   delete process.env["CLAUDE_CONFIG_DIR"];
   await rm(base, { recursive: true, force: true });
 });
+
+type TrustMap = Record<string, { hasTrustDialogAccepted?: boolean } | undefined>;
+
+async function trustOf(claudeConfig: string): Promise<TrustMap> {
+  const config = (await Bun.file(claudeConfig).json()) as { projects?: TrustMap };
+  return config.projects ?? {};
+}
 
 describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("scan found the fixture repo with its default branch", () => {
@@ -142,16 +156,32 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   });
 
   test("spawn answers claude's trust dialog up front in its config", async () => {
-    const claudeConfig = join(base, "claude-config", ".claude.json");
+    const claudeConfig = join(home, ".claude.json");
     await Bun.write(claudeConfig, JSON.stringify({ projects: {} }));
 
     const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Trusting" }, repos, WAIT);
 
-    const config = (await Bun.file(claudeConfig).json()) as {
-      projects: Record<string, { hasTrustDialogAccepted?: boolean } | undefined>;
-    };
-    expect(config.projects[fixture.repoPath]?.hasTrustDialogAccepted).toBe(true);
+    expect((await trustOf(claudeConfig))[fixture.repoPath]?.hasTrustDialogAccepted).toBe(true);
     await tmux(["kill-window", "-t", `main:${outcome.window}`]);
+  });
+
+  // The owner's shell hook runs claude in a named exclave with that exclave's
+  // config dir, so trust written anywhere else leaves the dialog up and the
+  // session dead — whatever CLAUDE_CONFIG_DIR the daemon itself runs with.
+  test("a repo in a named exclave is trusted in that exclave's config, not the default one", async () => {
+    const workConfig = join(home, ".claude-work", ".claude.json");
+    const defaultConfig = join(home, ".claude.json");
+    await Bun.write(workConfig, JSON.stringify({ projects: {} }));
+    await Bun.write(defaultConfig, JSON.stringify({ projects: {} }));
+    const inWork = repos.map((repo) => ({ ...repo, exclave: "work" }));
+
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "In Work" }, inWork, WAIT);
+    try {
+      expect((await trustOf(workConfig))[fixture.repoPath]?.hasTrustDialogAccepted).toBe(true);
+      expect((await trustOf(defaultConfig))[fixture.repoPath]).toBeUndefined();
+    } finally {
+      await tmux(["kill-window", "-t", `main:${outcome.window}`]);
+    }
   });
 
   test("worktree name falls back to the prompt slug and dodges a leftover branch", async () => {

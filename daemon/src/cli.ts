@@ -27,6 +27,7 @@ import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from ".
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
+import { scanExclaves, tagExclaves } from "./exclaves.ts";
 import { mcpFleetChecks } from "./fleet.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, socketPath, statePath } from "./paths.ts";
@@ -152,7 +153,11 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const args = parseSpawnArgs(argv);
   const config = await loadConfig();
   const state = await loadOrInitState();
-  const repos = state.repos.length > 0 ? state.repos : await scanRepos(config.repoRoots);
+  // Tagged either way, so the spawn pre-trusts the repo in its own exclave's config.
+  const repos =
+    state.repos.length > 0
+      ? state.repos
+      : tagExclaves(await scanRepos(config.repoRoots), (await scanExclaves(homedir())).exclaves);
   const request: SpawnRequest = {
     repo: args.repo,
     mode: args.here ? "here" : "worktree",
@@ -162,7 +167,7 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const audit = spawnAudit("cli", cliSink);
   await audit.request(request);
   try {
-    const outcome = await createBackend(config).spawn(request, repos);
+    const outcome = await createBackend(config, { home: homedir() }).spawn(request, repos);
     await audit.ok(outcome);
     if (outcome.note !== undefined) console.log(`note: ${outcome.note}`);
     console.log(`spawned '${outcome.window}' (${outcome.path})`);
@@ -198,7 +203,7 @@ export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
  */
 export async function cmdDespawn(argv: readonly string[]): Promise<void> {
   const args = parseDespawnArgs(argv);
-  const backend = createBackend(await loadConfig());
+  const backend = createBackend(await loadConfig(), { home: homedir() });
   const audit = despawnAudit("cli", cliSink);
   const request: DespawnRequest = { id: args.id, ...(args.force ? { force: true } : {}) };
   await audit.request(request);
@@ -438,7 +443,7 @@ export async function cmdDoctor(): Promise<void> {
     // The backend owns its own preflight — the tmux one checks its binaries and
     // probes the server; a replacement reports whatever it depends on instead.
     console.log("backend");
-    render(await createBackend(config).doctor());
+    render(await createBackend(config, { home: homedir() }).doctor());
 
     console.log("relay");
     if (/^wss?:\/\/.+/u.test(config.relayUrl)) {
@@ -626,7 +631,7 @@ export async function cmdRestart(): Promise<void> {
 }
 
 export async function cmdSessions(): Promise<void> {
-  const backend = createBackend(await loadConfig());
+  const backend = createBackend(await loadConfig(), { home: homedir() });
   const state = await loadOrInitState();
   const sessions = await backend.sessions(state.repos);
   // The id first: it is what `seanced despawn` takes.

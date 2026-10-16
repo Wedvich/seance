@@ -43,8 +43,22 @@ async function readLines(file: string): Promise<readonly string[]> {
   }
 }
 
-async function exclaveAt(id: string, root: string, configDir: string, configFile: string): Promise<Exclave> {
-  return { id, root: await canonical(root), configDir, configFile };
+function exclaveConfigDir(home: string, id: string): string {
+  return id === DEFAULT_EXCLAVE ? join(home, ".claude") : join(home, `.claude-${id}`);
+}
+
+/** The `.claude.json` an exclave's sessions read — `Exclave.configFile`, from the id alone. */
+export function exclaveConfigFile(home: string, id: string): string {
+  return id === DEFAULT_EXCLAVE ? join(home, ".claude.json") : join(exclaveConfigDir(home, id), ".claude.json");
+}
+
+async function exclaveAt(home: string, id: string, root: string): Promise<Exclave> {
+  return {
+    id,
+    root: await canonical(root),
+    configDir: exclaveConfigDir(home, id),
+    configFile: exclaveConfigFile(home, id),
+  };
 }
 
 /** The named exclaves, in file order, deduplicated; `default` on the file is a stray line (it is implied). */
@@ -64,11 +78,8 @@ export async function listExclaves(home: string): Promise<{
     if (!names.includes(line)) names.push(line);
   }
   const exclaves = await Promise.all([
-    exclaveAt(DEFAULT_EXCLAVE, home, join(home, ".claude"), join(home, ".claude.json")),
-    ...names.map((name) => {
-      const configDir = join(home, `.claude-${name}`);
-      return exclaveAt(name, join(home, name), configDir, join(configDir, ".claude.json"));
-    }),
+    exclaveAt(home, DEFAULT_EXCLAVE, home),
+    ...names.map((name) => exclaveAt(home, name, join(home, name))),
   ]);
   return { exclaves, rejected };
 }

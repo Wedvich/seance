@@ -88,7 +88,7 @@ async function daemonWith(reap: ReapConfig | undefined): Promise<DaemonHandle> {
   };
   const daemon = await startDaemon({
     config,
-    backend: createBackend(config),
+    backend: createBackend(config, { home: join(base, "home") }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,

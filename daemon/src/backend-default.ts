@@ -24,7 +24,7 @@ const REPUBLISH_TAG_MS = 60_000;
  */
 export function createBackend(
   config: Config,
-  opts: { readonly waitMs?: number; readonly republishTagMs?: number } = {},
+  opts: { readonly home: string; readonly waitMs?: number; readonly republishTagMs?: number },
 ): SessionBackend {
   let republish: ReturnType<typeof setInterval> | null = null;
   return {

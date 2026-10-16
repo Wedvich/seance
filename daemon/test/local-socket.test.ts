@@ -57,7 +57,7 @@ beforeAll(async () => {
     machineTag: "testbox",
   };
   const ctx: HandlerContext = {
-    backend: createBackend(config, { waitMs: 700 }),
+    backend: createBackend(config, { home: join(base, "home"), waitMs: 700 }),
     getRepos: () => repos,
     rescan: () => Promise.resolve(repos),
     auditSink: collect,

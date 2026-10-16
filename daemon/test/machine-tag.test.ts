@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 async function started(): Promise<SessionBackend> {
-  backend = createBackend(CONFIG, { republishTagMs: REPUBLISH_MS });
+  backend = createBackend(CONFIG, { home: join(tmpdir(), "seance-no-home"), republishTagMs: REPUBLISH_MS });
   await backend.start?.();
   return backend;
 }
