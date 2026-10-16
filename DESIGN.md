@@ -542,7 +542,11 @@ The Durable Object persists a machine registry:
   the account's newest until the clock caught up. Freshness is the consumer's
   call, never the client's: `isStatusStale` is true past three beats
   (`STATUS_STALE_MS`, 90s) or for a stamp further ahead than skew. The PWA
-  shows a snapshot's age instead. `isQuotaTrimmed` says a trim happened, and
+  shows a connected machine's snapshot with its age instead, and draws no
+  pressure or session counts on an asleep card: the app can hold a machine
+  asleep (a timed-out request) while the relay still lists its socket and last
+  beat, and that beat would read as current load beside "last seen". Its quota
+  still counts, since an observation carries its own stamp. `isQuotaTrimmed` says a trim happened, and
   then an exclave without an observation is unknown, not unobserved.
   **Encoding** (`MachineStatus` in `shared/src/types.ts`): the blob shares a
   2 KiB attachment and base64 costs a third, so every number is an integer
@@ -1866,7 +1870,7 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   (`/machines`), which would need boot-time path parsing and a rethink of entry depth for deep
   links — a separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
-  its exclaves (account, running sessions); quota is a property of an account, not of any
+  its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, newest
   observation wins, since every daemon hosting one of its exclaves reports it. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
@@ -1879,7 +1883,10 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   that lands after the chart moved on is dropped. Disk is collected and stored but never
   shown: a fill level is upkeep, not load — it feeds the scheduler's free-space floor and
   M4's health alert instead. The chart is inline SVG geometry (`chart.ts`), no charting
-  dependency; gauges break their line at a missed tick, quota holds its level between
+  dependency; gauges break their line at a missed tick and bridge the break with a faint
+  dotted run (nothing was measured there, but a sleep should read as one gap, not as
+  missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
+  sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
