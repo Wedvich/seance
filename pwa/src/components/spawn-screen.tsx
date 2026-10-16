@@ -223,7 +223,7 @@ function ActiveSheet(props: {
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         <SheetItem
           label="Auto"
-          sub={auto.reason ?? "the scheduler picks the machine and the account"}
+          sub={auto.reason ?? "the scheduler picks the machine"}
           dot={auto.available ? "auto" : "off"}
           selected={view.auto !== null}
           disabled={!auto.available}

@@ -376,7 +376,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
 function deriveFooterStatus(state: AppState, machine: Machine | null, now: number): string {
   if (state.form.auto) {
     const { reason } = deriveAutoAvailability(state.relay);
-    return reason ?? "The scheduler picks the machine and the account";
+    return reason ?? "The scheduler picks the machine";
   }
   if (machine === null) return "";
   if (!machine.connected) return `Last seen ${formatSeen(machine.lastSeen, now)} · sessions unknown`;
