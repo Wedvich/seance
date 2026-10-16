@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useMemo } from "preact/hooks";
-import { chartLines } from "../chart.ts";
+import { type ChartLine, chartLines } from "../chart.ts";
 import type { AccountCard, Gauge, MachineCard, MachinesView, QuotaBar } from "../machines-view.ts";
 import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
 import type { ConnectionState } from "../view.ts";
@@ -224,61 +224,31 @@ function Bar(props: { gauge: Gauge; trailing: string }): JSX.Element {
 
 function HistoryChart(props: { history: HistoryView; onPick: (range: HistoryRange) => void }): JSX.Element {
   const { history, onPick } = props;
-  const { result } = history;
+  const { result, from, to, step } = history;
+  const series = result.kind === "ok" ? result.series : null;
+  // The screen re-renders on every status beat; the geometry changes only with the reply or its window.
+  const lines = useMemo(
+    () =>
+      series === null
+        ? []
+        : chartLines(series, { from, to, step }, { width: CHART_WIDTH, height: CHART_HEIGHT }).filter(
+            (line) => line.d !== "",
+          ),
+    [series, from, to, step],
+  );
 
+  // Every state fills the same frame, axis and legend row, so a range pick can't collapse the card mid-load.
   return (
     <div className="chart">
       <div className="chart-controls">
         <Seg label="Range" options={HISTORY_RANGES} value={history.range} render={(range) => range} onChange={onPick} />
       </div>
-      {result.kind === "loading" && <p className="chart-status">Loading…</p>}
-      {result.kind === "failed" && <p className="chart-status chart-failed">{result.message}</p>}
-      {result.kind === "ok" && <ChartPlot history={history} series={result.series} />}
-    </div>
-  );
-}
-
-function ChartPlot(props: { history: HistoryView; series: Parameters<typeof chartLines>[0] }): JSX.Element {
-  const { history, series } = props;
-  const { from, to, step } = history;
-  // The screen re-renders on every status beat; the geometry changes only with the reply or its window.
-  const lines = useMemo(
-    () =>
-      chartLines(series, { from, to, step }, { width: CHART_WIDTH, height: CHART_HEIGHT }).filter(
-        (line) => line.d !== "",
-      ),
-    [series, from, to, step],
-  );
-  if (lines.length === 0) return <p className="chart-status">Nothing recorded in this range.</p>;
-
-  return (
-    <>
-      <svg
-        className="chart-plot"
-        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`${TARGET_LABELS[history.target.kind]} over the last ${history.range}`}
-      >
-        {[25, 50, 75].map((pct) => (
-          <line
-            key={pct}
-            className="chart-grid"
-            x1="0"
-            x2={CHART_WIDTH}
-            y1={CHART_HEIGHT - (pct / 100) * CHART_HEIGHT}
-            y2={CHART_HEIGHT - (pct / 100) * CHART_HEIGHT}
-          />
-        ))}
-        {lines.map((line, index) =>
-          line.gaps === "" ? null : (
-            <path key={`${line.key}/gaps`} className={`chart-gap chart-c${index % PALETTE_SIZE}`} d={line.gaps} />
-          ),
-        )}
-        {lines.map((line, index) => (
-          <path key={line.key} className={`chart-line chart-c${index % PALETTE_SIZE}`} d={line.d} />
-        ))}
-      </svg>
+      <div className="chart-frame">
+        {result.kind === "loading" && <p className="chart-status">Loading…</p>}
+        {result.kind === "failed" && <p className="chart-status chart-failed">{result.message}</p>}
+        {result.kind === "ok" && lines.length === 0 && <p className="chart-status">Nothing recorded in this range.</p>}
+        {lines.length > 0 && <ChartPlot history={history} lines={lines} />}
+      </div>
       <div className="chart-axis">
         <span>{history.range} ago</span>
         <span>now</span>
@@ -291,6 +261,38 @@ function ChartPlot(props: { history: HistoryView; series: Parameters<typeof char
           </li>
         ))}
       </ul>
-    </>
+    </div>
+  );
+}
+
+function ChartPlot(props: { history: HistoryView; lines: readonly ChartLine[] }): JSX.Element {
+  const { history, lines } = props;
+  return (
+    <svg
+      className="chart-plot"
+      viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`${TARGET_LABELS[history.target.kind]} over the last ${history.range}`}
+    >
+      {[25, 50, 75].map((pct) => (
+        <line
+          key={pct}
+          className="chart-grid"
+          x1="0"
+          x2={CHART_WIDTH}
+          y1={CHART_HEIGHT - (pct / 100) * CHART_HEIGHT}
+          y2={CHART_HEIGHT - (pct / 100) * CHART_HEIGHT}
+        />
+      ))}
+      {lines.map((line, index) =>
+        line.gaps === "" ? null : (
+          <path key={`${line.key}/gaps`} className={`chart-gap chart-c${index % PALETTE_SIZE}`} d={line.gaps} />
+        ),
+      )}
+      {lines.map((line, index) => (
+        <path key={line.key} className={`chart-line chart-c${index % PALETTE_SIZE}`} d={line.d} />
+      ))}
+    </svg>
   );
 }

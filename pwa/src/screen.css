@@ -1204,8 +1204,17 @@
   gap: 8px;
 }
 
+/* Fixed height whatever fills it: a range pick swaps the plot for "Loading…" and back. */
+.chart-frame {
+  display: grid;
+  place-items: center;
+  height: 140px;
+  background: var(--bg);
+  border-radius: 10px;
+}
+
 .chart-status {
-  margin: 12px 0;
+  margin: 0 12px;
   font-size: 13px;
   color: var(--fg2);
   text-align: center;
@@ -1217,9 +1226,7 @@
 
 .chart-plot {
   width: 100%;
-  height: 140px;
-  background: var(--bg);
-  border-radius: 10px;
+  height: 100%;
 }
 
 .chart-grid {
@@ -1265,6 +1272,9 @@
   padding: 0;
   list-style: none;
   font-size: 12.5px;
+  /* One row held open while empty, so loading doesn't drop the legend's height. */
+  line-height: 18px;
+  min-height: 18px;
   color: var(--fg2);
 }
 
