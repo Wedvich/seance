@@ -276,7 +276,7 @@ place from the checkout, so a `git pull` reaches new sessions with nothing re-ru
 
 Type what the session should do — or leave the prompt blank to start an empty one —
 then pick where it runs. Four tiles open pickers: **machine**, **repository**,
-**model** (Fable / Opus / Sonnet), and **effort** (Low through Max). **Fresh
+**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max). **Fresh
 worktree** is on by default; switching it off runs the session in the repo as it
 stands. Then start it.
 
