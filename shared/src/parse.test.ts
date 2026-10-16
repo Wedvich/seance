@@ -125,6 +125,18 @@ describe("parseMachineStatus", () => {
   test("requires the scan stamp that binds indexes to a register blob", () => {
     expect(parseMachineStatus({ at: 1 })).toBeNull();
   });
+
+  test("keeps the trim marker, 0 included, and refuses one that is not a count", () => {
+    expect(parseMachineStatus({ ...status, tr: 2 })).toEqual({ ...status, tr: 2 });
+    expect(parseMachineStatus({ ...status, tr: 0 })?.tr).toBe(0);
+    expect(parseMachineStatus({ ...status, tr: -1 })).toBeNull();
+    expect(parseMachineStatus({ ...status, tr: "2" })).toBeNull();
+  });
+
+  test("drops the padding filler without reading it", () => {
+    expect(parseMachineStatus({ ...status, _: " ".repeat(300) })).toEqual(status);
+    expect(parseMachineStatus({ ...status, _: 7 })).toEqual(status);
+  });
 });
 
 function withNames(names: readonly string[]): boolean {

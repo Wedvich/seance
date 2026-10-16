@@ -212,6 +212,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (sess === null) return null;
   const quota = value["quota"] === undefined ? undefined : parseList(value["quota"], parseQuotaObservation);
   if (quota === null) return null;
+  const { tr } = value;
+  if (!isOptionalUint(tr)) return null;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -223,6 +225,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(wr === undefined ? {} : { wr }),
     ...(sess === undefined ? {} : { sess }),
     ...(quota === undefined ? {} : { quota }),
+    ...(tr === undefined ? {} : { tr }),
   };
 }
 

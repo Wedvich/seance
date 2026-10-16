@@ -220,9 +220,10 @@ Séance's noise is cover for a real intruder.
    Events and any Logpush sink — enabling Logpush to a third party later moves
    the blast radius off Cloudflare, so that choice is not free. It also buys a
    passive feed: every `/app` socket receives every machine's `status` every
-   30s. The payload is sealed, but its ciphertext length is unpadded and varies
-   with load, session counts and whether quota is present — a coarse activity
-   channel per machine, accepted. The relay logs no line for an accepted beat,
+   30s. The payload is sealed, and padded to one length before sealing
+   (Presence & identity, "Encoding"): unpadded, its ciphertext length varied
+   with load, session counts and whether quota was present — a coarse activity
+   channel per machine. The relay logs no line for an accepted beat,
    only its drops (`status-not-app`, `status-rate`) and failed fan-out sends:
    a `wire status … apps=N` line per beat once made Workers logs a 30s
    timeline of when an app was open, which a Logpush sink would have carried
@@ -527,7 +528,15 @@ The Durable Object persists a machine registry:
   into the register blob's `exclaves` rather than by the 73-char account id —
   which is why `scan` must match. Rejected: a positional tuple or bit-packed
   body (saves ~100 bytes and loses the optional-field skew tolerance every
-  other blob relies on). Sent every 30s whether or not an app is watching:
+  other blob relies on). After trimming, the daemon pads the JSON to exactly
+  the payload budget with a trailing `_` of spaces, a field the parser drops,
+  so every status seals to one `ct` length: every bearer-token holder receives
+  every status, and an unpadded length tracked load, session counts and
+  whether quota was present (measured 260–384 characters). A trim leaves
+  `tr`, the count of quota entries dropped (0 when only detail went, absent
+  when nothing did), because a trimmed-away exclave otherwise reads as one
+  with no quota observed — and a scheduler filtering on quota would let an
+  over-threshold account through. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -1298,8 +1307,9 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   rescan while a re-register happens only on a changed set, and a reader drops
   a status whose stamp disagrees with the blob it holds — and trimmed to the
   relay's bound when a machine's exclaves outgrow it (`daemon/src/status.ts`:
-  per-model windows, then reset stamps, then quota from the last exclave down;
-  pressure and sessions always fit, and the trim is logged once). Sent after
+  per-model windows, then reset stamps, then quota from the last exclave down,
+  marking the status with `tr`; pressure and sessions always fit, and the trim
+  is logged once) and then padded to one sealed length. Sent after
   each register too, re-arming the beat so the next lands past the relay's
   floor: the register just changed the blob a status indexes, and the registry
   push an app got carries no snapshot until this one. History is the
