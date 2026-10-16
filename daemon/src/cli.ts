@@ -458,6 +458,8 @@ export async function cmdDoctor(): Promise<void> {
   console.log("state");
   const state = await loadOrInitState();
   ok(`deviceId ${state.deviceId} (${statePath()})`);
+  // The relay's allowlist is a secret doctor cannot read, so this is a pointer, not a check.
+  console.log("        to let this machine lead the scheduler, add its deviceId to the relay's SCHEDULER_LEADERS");
   const source = await readSource();
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}`);

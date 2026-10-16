@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  DAEMON_ROLES,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
   MACHINES_ID,
@@ -19,7 +20,7 @@ import {
 } from "@seance/shared";
 import { roleForPath, type Role } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { knownRoles, nominate } from "./leadership.ts";
+import { knownRoles, nominate, parseLeaders } from "./leadership.ts";
 import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
@@ -152,11 +153,16 @@ export class Hub implements DurableObject {
   readonly #ctx: DurableObjectState;
   readonly #sweepIntervalMs: number;
   readonly #silenceLimitMs: number;
+  /** Who may be nominated. Parsed per wake: a secret change rolls a new version, so it cannot change under one. */
+  readonly #leaders: ReadonlySet<string>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
+    const leaders = parseLeaders(env.SCHEDULER_LEADERS);
+    this.#leaders = leaders.ids;
+    for (const entry of leaders.invalid) console.log(`SCHEDULER_LEADERS: ignored ${quote(entry)}, not a deviceId`);
     // Re-applied on every wake. Heartbeats are answered without waking the object;
     // only the sweep alarm reads their timestamps.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -443,7 +449,9 @@ export class Hub implements DurableObject {
     // Ahead of the put: the socket routes from here on, so it can lead from here on.
     await this.#renominate([]);
     if (!(await this.#put(key, { deviceId, info, lastSeen: now }))) return;
-    console.log(`registered ${deviceId}`);
+    // The one hint an operator gets for "auto is unavailable": a capable daemon the list leaves out.
+    const unlisted = frame.roles?.includes(DAEMON_ROLES.scheduler) === true && !this.#leaders.has(deviceId);
+    console.log(`registered ${deviceId}${unlisted ? " (scheduler-capable, not in SCHEDULER_LEADERS)" : ""}`);
     await this.#pushRegistry();
   }
 
@@ -661,7 +669,7 @@ export class Hub implements DurableObject {
       roles: attachment.identity?.roles ?? [],
       connectedAt: attachment.connectedAt,
     }));
-    const next = nominate(candidates, record.deviceId);
+    const next = nominate(candidates, record.deviceId, this.#leaders);
     const connectedAt = next === null ? null : (live.get(next)?.connectedAt ?? null);
     if (next === record.deviceId && connectedAt === record.connectedAt) return;
     const updated: LeaderRecord = { term: record.term + 1, deviceId: next, connectedAt };
@@ -696,8 +704,8 @@ export class Hub implements DurableObject {
   /**
    * The fence on an envelope sent as the scheduler. The term is no credential —
    * every registry push carries it — so this stops a leader that was demoted
-   * without noticing, not a stranger; an allowlist of who may lead (M3's gate)
-   * belongs in nomination, not here.
+   * without noticing, not a stranger; who may lead at all is nomination's
+   * allowlist, not this.
    */
   async #holdsTerm(term: number | undefined): Promise<boolean> {
     if (term === undefined) return false;

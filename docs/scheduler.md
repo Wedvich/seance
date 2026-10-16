@@ -406,7 +406,8 @@ _Local op socket_ ("Session events"), _Presence & identity_ (the kept `status`),
 ids"), _PWA_ (`auto`) and _Threat model_ (signed `roles`, leader capture and the reader check).
 Every exit criterion has a test: two real daemons and an `auto` spawn landing where its record
 says, with the other machine's rejection in it, and a bearer-token holder's squatting socket read
-as "leader unverified" with nothing sent to it (e2e); a stopped leader replaced within one sweep
+as "leader unverified" with nothing sent to it (e2e — since M3's gate a squatter is never
+nominated, so the case is a listed machine's seed without the PSK); a stopped leader replaced within one sweep
 under a higher term, with `auto` greying and returning (relay + e2e); `not_leader` for a demoted
 leader's dispatch and an unsigned `roles` never nominated (relay); `task_running` for a duplicate
 task id (daemon + e2e); a session event reaching the leader's state, bound to the sender's own
@@ -422,8 +423,9 @@ instead of hearing `queue-changed`. An account nothing has observed yet is `quot
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
 A `submit` whose reply is lost cannot be reconciled — the verdict says it may have queued and
 offers no retry. A `lost` task waits for its own machine indefinitely and cannot be cancelled.
-Leader capture is visible, not prevented: a squatter's term holds `auto` unavailable until its
-socket goes, and M3's gate (Risks, _Leader capture_) closes it. One edge stays as item 1 left it:
+Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
+socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
+`SCHEDULER_LEADERS` allowlist. One edge stays as item 1 left it:
 a _reserved_ task whose machine disconnects before answering is released to `ready` once its TTL
 passes, and may be routed elsewhere; `task_running` guards only a re-dispatch to the same machine.
 
@@ -432,9 +434,16 @@ passes, and may be routed elsewhere; `task_running` guards only a re-dispatch to
 **Goal.** Queue a block of work with dependencies and leave; it runs, survives leader changes,
 and finishes without anyone watching.
 
-**Gate.** Leader capture reopens and is settled with a relay-side guard (Risks, _Leader
-capture_) before the store lands — under M2's reader-only check a squatter's term would delete
-the queue.
+**Gate (done 2026-10-16).** Leader capture reopens and is settled with a relay-side guard (Risks,
+_Leader capture_) before the store lands — under M2's reader-only check a squatter's term would
+delete the queue. Settled with the `SCHEDULER_LEADERS` allowlist, a Worker secret the relay
+filters nomination through (unset nominates nobody), with M2's reader check kept as its tripwire;
+recorded in DESIGN.md _Scheduler_ ("Leadership") and _Threat model_ (item 3). Exit, as tests: a
+bearer-token holder's self-minted daemon with signed roles and the oldest socket is never
+nominated while a listed one is, an unset list nominates nobody (`scheduler: null`, the address
+`offline`), and junk entries are ignored (relay); a current leader taken off the list loses the
+role (`leadership.test.ts`); and end to end, a squatter is never nominated while a listed seed
+without the PSK reads "leader unverified" and is sent nothing (e2e).
 
 **Lands, in order.**
 
@@ -559,9 +568,10 @@ mcp` has), and a direct spawn stays relay-free.
 Nothing below is open. An implementer who wants a different value changes this section in the
 same PR, with the reason.
 
-1. **Leader** = earliest-connected capable daemon, ties by `deviceId`; nomination only, no
-   voting. Capable is signed `roles`; readers ignore a leader whose entry does not open, and
-   a relay-side guard is owed before M3 (Risks, _Leader capture_).
+1. **Leader** = earliest-connected capable daemon on the relay's `SCHEDULER_LEADERS`
+   allowlist, ties by `deviceId`; nomination only, no voting. Capable is signed `roles`; the
+   allowlist is a Worker secret, and unset or empty nominates nobody. Readers still ignore a
+   leader whose entry does not open (Risks, _Leader capture_).
 2. **Enqueue needs no leader.** Apps create tasks in the store at `expect: 0`; everything else
    waits for one. Matters only for old daemons and the ≤ ~90s re-nomination gap, and costs
    nothing (a token holder could already fill the registry with junk).
@@ -617,7 +627,7 @@ same PR, with the reason.
   an alias is a label, retyped in a second. Holding the leader's term would be a larger act,
   and as planned it is not an edge case — next item.
 - **Leader capture is routine. Decided for M2: readers ignore an unverifiable leader (B
-  below); reopens before M3's store.**
+  below); for M3's gate: the deploy-time allowlist, with the reader check kept.**
   Earliest `connectedAt` wins, and `roles` is the only other gate. Device ids are
   self-certifying, so anyone with the bearer token can mint one, sign a valid register with
   `roles: ["scheduler"]` and hold one socket open. A real leader's socket is replaced after
@@ -649,6 +659,17 @@ same PR, with the reason.
   that acts on the term — stops that. So the question reopens as M3's gate; the allowlist is
   the standing recommendation, with the reader check kept as its tripwire (an allowlisted seed
   copied out of `state.json` without the PSK then reads "leader unverified").
+
+  **Decision (owner, 2026-10-16, M3 gate): the allowlist, as a secret; the reader check
+  kept.** `SCHEDULER_LEADERS` is a Worker secret (`wrangler secret put`), not a var — not
+  because ids are secret, but so a CI deploy never overwrites it and no ids sit in git. Unset
+  or empty nominates nobody; there is no wildcard. The cost is as planned, plus one effect of
+  the mechanism: adding a leader-capable machine is a `wrangler secret put` with its id off
+  `seanced doctor`, which rolls a new relay version, so every socket drops and re-registers.
+  What remains open is the allowlist's own trust — whoever can put secrets on the Cloudflare
+  account, who could already replace the relay — and a listed machine's stolen seed, which the
+  reader check catches unless the PSK went with it. Built and recorded in DESIGN.md
+  (_Scheduler_, "Leadership"; _Threat model_, item 3).
 
 - **Prompts at rest on Cloudflare.** Sealed under the PSK like `info`, and ciphertext length is
   unpadded, so the relay bounds prompt length — the same concession as live frames.

@@ -50,14 +50,20 @@ import {
 let base: string;
 let privateTmux: PrivateTmux | undefined;
 let stack: Stack;
+/** A listed machine's seed, copied out without the PSK: the reader check's case once the allowlist holds. */
+let stolenSeedId: string;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-e2e-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   privateTmux = usePrivateTmux(base, "e2e");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
+  stolenSeedId = await newDeviceId();
   // Observed well before any second machine's reading, so that one is the newest.
-  stack = await startStack(base, [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }]);
+  stack = await startStack(base, [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }], {
+    secondLeaders: ["LeaderBox"],
+    leaders: [stolenSeedId],
+  });
 });
 
 afterAll(async () => {
@@ -994,14 +1000,18 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // M2's Exit, the reader check: a bearer-token holder's daemon socket with
-  // signed roles and no PSK, connected first, is nominated; the app reads it as
-  // "leader unverified", greys auto, and sends it nothing. With the real leader
-  // down auto greys too, and it returns under a higher term.
-  test("a squatter nominated first reads as leader unverified: auto greys and nothing is sent to it", async () => {
+  // The M3 gate's exit, with M2's reader check kept as its tripwire. A
+  // bearer-token holder's daemon socket with signed roles and no PSK, connected
+  // while the real leader is down, is never nominated: auto stays "no
+  // scheduler". A listed machine's seed copied out without the PSK is
+  // nominated, and the app reads it as "leader unverified", greys auto, and
+  // sends it nothing. When it goes, the real daemon leads under a higher term.
+  test("a squatter is never nominated; a stolen listed seed reads as leader unverified, and nothing is sent to either", async () => {
     const app = startApp(stack, { auto: true });
+    const watch = watchLeader();
     const squatterId = await newDeviceId();
     let squatter: Awaited<ReturnType<typeof connectDaemon>> | null = null;
+    let stolen: Awaited<ReturnType<typeof connectDaemon>> | null = null;
     let down = false;
     try {
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the suite's daemon verified as leader");
@@ -1011,22 +1021,31 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       stack.daemon.stop();
       down = true;
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
+
+      // Signed roles and the oldest socket, but not on SCHEDULER_LEADERS.
+      squatter = await connectDaemon(stack.relay);
+      squatter.send(await register(squatterId, { roles: [DAEMON_ROLES.scheduler] }));
+      // Its entry does not open, so only the raw push shows it registered.
+      await pollUntil(() => watch.connected(squatterId), "the squatter registered");
+      expect(watch.current()).toBeNull();
+      await squatter.expectNo("lead", 500);
+      expect(app.client.getState().scheduler).toEqual({ kind: "none" });
       expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({
         available: false,
         reason: "No scheduler is leading right now",
       });
 
-      // Signed roles, so the relay nominates it; an info blob it cannot seal under the PSK.
-      squatter = await connectDaemon(stack.relay);
-      squatter.send(await register(squatterId, { roles: [DAEMON_ROLES.scheduler] }));
-      await squatter.waitFor("lead");
+      // Listed, so the relay nominates it; an info blob it cannot seal under the PSK.
+      stolen = await connectDaemon(stack.relay);
+      stolen.send(await register(stolenSeedId, { roles: [DAEMON_ROLES.scheduler] }));
+      await stolen.waitFor("lead");
       await stack.restartDaemon();
       down = false;
       const seen = await app.waitForApp(
         (state) => state.relay.scheduler.kind === "unverified" && ownMachine(state, stack.deviceId)?.connected === true,
-        "the squatter nominated, with the real daemon back and following",
+        "the stolen seed nominated, with the real daemon back and following",
       );
-      expect(seen.relay.scheduler).toMatchObject({ kind: "unverified", deviceId: squatterId });
+      expect(seen.relay.scheduler).toMatchObject({ kind: "unverified", deviceId: stolenSeedId });
       const view = deriveView(seen, Date.now());
       expect(view.autoAvailability).toEqual({
         available: false,
@@ -1039,10 +1058,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await app.store.spawn();
       expect(app.store.getState().verdict).toBeNull();
       await expect(app.client.queue()).rejects.toMatchObject({ reason: "leader_unverified" });
-      await squatter.expectNo("msg", 500);
+      await stolen.expectNo("msg", 500);
 
-      // The squatter's socket goes: the real daemon leads, verified, under a higher term.
-      squatter.close();
+      // The stolen seed's socket goes: the real daemon leads, verified, under a
+      // higher term — and the squatter, connected longer than either, still does not.
+      stolen.close();
       const back = await app.waitForApp(
         (state) => state.relay.scheduler.kind === "ready" && state.relay.scheduler.deviceId === stack.deviceId,
         "the real daemon to lead again",
@@ -1051,10 +1071,14 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(now.kind === "ready" ? now.term : 0).toBeGreaterThan(term);
       // The form asks the new leader at once, mid-takeover: `not_ready` is waited out, not shown.
       await app.waitForApp((state) => state.preview?.kind === "ok", "the preview from the new leader");
+      await squatter.expectNo("lead");
+      await squatter.expectNo("msg");
     } finally {
       squatter?.close();
+      stolen?.close();
       if (down) await stack.restartDaemon();
       app.stop();
+      watch.close();
     }
   }, 60_000);
 });

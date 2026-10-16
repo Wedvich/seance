@@ -36,9 +36,16 @@ const OTHER_PSK = toBase64(new Uint8Array(32).fill(9));
 let relay: TestRelay;
 let key: CryptoKey;
 let otherKey: CryptoKey;
+/**
+ * The ids the scheduler suites nominate, minted before boot so the relay's
+ * SCHEDULER_LEADERS can list them, as an operator lists real machines.
+ */
+let listed: { readonly legLeader: string; readonly stolenSeed: string; readonly autoLeader: string };
 
 beforeAll(async () => {
-  relay = await startRelay(TOKEN);
+  const [legLeader, stolenSeed, autoLeader] = await Promise.all([newDeviceId(), newDeviceId(), newDeviceId()]);
+  listed = { legLeader, stolenSeed, autoLeader };
+  relay = await startRelay(TOKEN, { leaders: [legLeader, stolenSeed, autoLeader] });
   key = await importPsk(PSK);
   otherKey = await importPsk(OTHER_PSK);
 });
@@ -847,7 +854,7 @@ describe("scheduler leg", () => {
   type Msg = { t: "msg"; env: Envelope };
 
   test("a request goes out as the scheduler under its term, and the reply is correlated through deliver", async () => {
-    const leaderId = await newDeviceId();
+    const leaderId = listed.legLeader;
     const targetId = await newDeviceId();
     // Sealed blobs, so both show as machines and can be forgotten after: the
     // registry is capped and permanent, and this file runs close to the cap.
@@ -901,11 +908,12 @@ describe("auto", () => {
   const decision: Decision = { at: 1, chosen: null, candidates: [] };
 
   test("a nominee whose entry does not open is unverified and is sent nothing; one whose entry opens answers", async () => {
-    const squatterId = await newDeviceId();
-    const leaderId = await newDeviceId();
+    const squatterId = listed.stolenSeed;
+    const leaderId = listed.autoLeader;
     const { client, waitFor } = startClient();
-    // A bearer-token holder's daemon socket: a signed register with roles, and an
-    // info blob it could not seal under the PSK.
+    // The reader check as the allowlist's tripwire: a listed machine's seed
+    // copied out of state.json without the PSK — a signed register with roles,
+    // and an info blob it could not seal under the PSK.
     const squatter = await connectDaemon(relay);
     squatter.send(await register(squatterId, { roles: [DAEMON_ROLES.scheduler] }));
     await squatter.waitFor("lead");

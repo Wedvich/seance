@@ -7,6 +7,7 @@ import type { Config } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
 import { MemoryQueueStore } from "../daemon/src/leader.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
+import { loadOrInitState } from "../daemon/src/state.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
 import {
   makeClaudeStub,
@@ -140,20 +141,53 @@ export interface Stack {
   readonly dispose: () => Promise<void>;
 }
 
+export interface StackOptions {
+  /** Second daemons, by `startSecondDaemon` name, that the relay may nominate. */
+  readonly secondLeaders?: readonly string[];
+  /** Further ids for SCHEDULER_LEADERS — one minted by `newDeviceId`, say. */
+  readonly leaders?: readonly string[];
+}
+
+/** A second daemon's directory, from its name: where its state is pre-seeded and where it later boots. */
+function secondDir(base: string, name: string): string {
+  return join(base, `second-${name.toLowerCase()}`);
+}
+
+/**
+ * The deviceId a daemon on this state dir will register as, minted now by the
+ * daemon's own first-start path rather than when it boots: the relay's
+ * SCHEDULER_LEADERS is fixed at boot, as a deploy fixes it, and the daemon
+ * then loads this state as its own.
+ */
+async function mintDeviceId(stateDir: string): Promise<string> {
+  return (await loadOrInitState(join(stateDir, "state.json"))).deviceId;
+}
+
 /**
  * Env seams must be set before this runs: SEANCE_STATE_DIR (one per suite —
  * one stable deviceId), SEANCE_TMUX_SOCKET (`usePrivateTmux`, whose server
  * outlives dispose), SEANCE_CLAUDE_BIN. The caller owns
  * them because they are process-global and the daemon suite plays the same
- * game in its own files. `exclaves` populate the daemon's fixture home.
+ * game in its own files. `exclaves` populate the daemon's fixture home. The
+ * suite's own daemon is always on the relay's SCHEDULER_LEADERS; `stackOpts` adds others.
  */
-export async function startStack(base: string, exclaves: readonly ExclaveFixture[] = []): Promise<Stack> {
+export async function startStack(
+  base: string,
+  exclaves: readonly ExclaveFixture[] = [],
+  stackOpts: StackOptions = {},
+): Promise<Stack> {
   const fixture = await makeGitFixture(base);
   const stub = await makeClaudeStub(base);
   const home = await makeHome(join(base, "home"), exclaves);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+  const stateDir = process.env["SEANCE_STATE_DIR"];
+  if (stateDir === undefined) throw new Error("startStack requires SEANCE_STATE_DIR to be set first");
 
-  const relay = await startRelay(TOKEN);
+  const leaders = await Promise.all([
+    mintDeviceId(stateDir),
+    ...(stackOpts.secondLeaders ?? []).map((name) => mintDeviceId(join(secondDir(base, name), "state"))),
+  ]);
+  const relay = await startRelay(TOKEN, { leaders: [...leaders, ...(stackOpts.leaders ?? [])] });
   const appKey = await importPsk(PSK);
 
   const config: Config = {
@@ -188,8 +222,6 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
     });
 
   let daemon = await startTestDaemon();
-  const stateDir = process.env["SEANCE_STATE_DIR"];
-  if (stateDir === undefined) throw new Error("startStack requires SEANCE_STATE_DIR to be set first");
   const { deviceId } = (await Bun.file(join(stateDir, "state.json")).json()) as { deviceId: string };
 
   const secondProcs = new Set<Subprocess>();
@@ -197,7 +229,7 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
     readonly name: string;
     readonly exclaves?: readonly ExclaveFixture[];
   }): Promise<SecondDaemon> => {
-    const dir = join(base, `second-${opts.name.toLowerCase()}`);
+    const dir = secondDir(base, opts.name);
     const secondState = join(dir, "state");
     const configDir = join(dir, "config");
     const tmuxSession = `${TMUX_SESSION}-${opts.name.toLowerCase()}`;

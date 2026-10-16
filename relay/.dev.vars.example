@@ -1,3 +1,7 @@
 # Copy to .dev.vars (gitignored) for `wrangler dev`. Same value as every daemon's
 # config.json bearerToken and the app's stored token.
 BEARER_TOKEN=
+# Device ids the relay may nominate as scheduler leader, comma-separated — each
+# machine's `deviceId` line in `seanced doctor`. Empty nominates nobody, so auto
+# stays unavailable until your local daemon's id is here.
+SCHEDULER_LEADERS=

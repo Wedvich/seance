@@ -94,7 +94,9 @@ bun run deploy                             # prints https://seance-relay.<subdom
 This first deploy is by hand; afterwards CI redeploys the relay on every push to
 `main` that touches it, which needs a `CLOUDFLARE_API_TOKEN` repository secret and a
 `CLOUDFLARE_ACCOUNT_ID` repository variable. The bearer token stays a Worker secret
-and a CI deploy leaves it alone.
+and a CI deploy leaves it alone — as does `SCHEDULER_LEADERS`, the second secret,
+set in step 4 once your machines have ids. Until it is set no machine leads the
+scheduler and **Auto** stays greyed; direct spawns don't need it.
 
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
@@ -204,6 +206,21 @@ systemd: nothing outside the unit can read it, so the fingerprint is in the
 daemon's log instead.) A daemon with the right token and PSK simply appears in
 the app; there is no pairing step.
 
+**Let it lead the scheduler.** The relay nominates a scheduler leader — the daemon
+that runs **Auto** — only from an allowlist: `SCHEDULER_LEADERS`, comma-separated
+device ids, a Worker secret like the bearer token. Without it anyone holding the
+bearer token could mint an id of their own and hold the role. Read the id off
+`seanced doctor` (the `deviceId` line under `state`), then from `relay/`:
+
+```sh
+bun run wrangler secret put SCHEDULER_LEADERS   # paste every leader's id, comma-separated
+```
+
+It replaces the whole value, so paste the ids already on it too. Unset or empty, no
+machine leads. List the machines that are usually awake; the role moves between
+them as they come and go. Putting a secret rolls a new relay version, so every
+daemon and app drops and reconnects once.
+
 ### 5. Set up the phone
 
 Open `https://seance-pwa.<subdomain>.workers.dev`, add it to your home screen,
@@ -308,7 +325,8 @@ picker then lists repos by origin, across every machine that has a clone, and a
 placement preview under the tiles says where it would start and why each other
 machine lost. **Queue on auto** hands it to the scheduler, and the verdict follows
 the task until it is running, with the decision behind it. Auto is greyed — with
-the reason — when no scheduler is leading, or when the one nominated can't be
+the reason — when no scheduler is leading (no machine on the relay's
+`SCHEDULER_LEADERS` is connected — step 4), or when the one nominated can't be
 verified (its registry entry doesn't open with your key); picking a machine directly
 always works, with or without one.
 
@@ -411,12 +429,17 @@ its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
 A machine that was asleep or offline catches up on its next reconnect. One
 update is not transparent: the first daemon with a signed identity (October 2026) mints a key and a new `deviceId` for the machine, so the app lists the
 old id as an offline stranger — forget it there; `seanced status` shows the new
-one. A
+one. A machine whose id changes — that update, a reinstall, a lost `state.json` —
+also drops off `SCHEDULER_LEADERS` until you put its new id there (step 4). A
 checkout that is dirty, on another branch, or has local commits is skipped —
 never forced — and reports why; `seanced status` on that machine shows its version
 and its last update outcome. The relay and the app deploy themselves from CI on a
 push to `main` that touches them (`Deploy` in Actions also runs on demand, per
 component), so deploying either by hand would race that.
+
+The relay that brought in the leader allowlist (October 2026) nominates nobody
+until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that
+deploy lands; set after, **Auto** is unavailable in between, and nothing else is.
 
 The Raycast extension does not self-propagate: it is a built copy, so a machine
 that has it needs `seanced raycast install` re-run after the pull. `seanced
