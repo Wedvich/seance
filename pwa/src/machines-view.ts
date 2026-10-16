@@ -1,4 +1,12 @@
-import { CAPABILITIES, type ExclaveInfo, type Machine, type QuotaObservation } from "@seance/shared";
+import {
+  CAPABILITIES,
+  effectivePct,
+  newestQuotaByAccount,
+  type ExclaveInfo,
+  type Machine,
+  type NewestQuota,
+  type QuotaObservation,
+} from "@seance/shared";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -130,34 +138,24 @@ function machineCard(machine: Machine, now: number): MachineCard {
   };
 }
 
-interface Observed {
-  readonly observation: QuotaObservation;
-  readonly machine: Machine;
-}
-
 interface AccountGroup {
   readonly accountId: string;
   readonly exclaves: Set<string>;
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
-  newest: Observed | null;
 }
 
 function servesMetrics(machine: Machine): boolean {
   return machine.connected && machine.capabilities?.includes(CAPABILITIES.metrics) === true;
 }
 
-/**
- * A window whose reset has passed is empty however old the reading — its
- * percentage describes a window that no longer exists (docs/scheduler.md,
- * "Quota telemetry": the `resets_at` floor). A cache reading can be hours old,
- * so without this a spent 5h window stays red long after it refilled.
- */
+/** The reset floor is `effectivePct`'s; this only says when the window resets, or that it has. */
 function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
-  if (resetsAt === undefined) return { ...gauge(label, pct), resets: null };
-  if (resetsAt * 1000 <= now) return { ...gauge(label, 0), resets: "reset" };
-  return { ...gauge(label, pct), resets: formatUntil(resetsAt * 1000, now) };
+  const bar = gauge(label, effectivePct(pct, resetsAt, now));
+  if (resetsAt === undefined) return { ...bar, resets: null };
+  if (resetsAt * 1000 <= now) return { ...bar, resets: "reset" };
+  return { ...bar, resets: formatUntil(resetsAt * 1000, now) };
 }
 
 function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
@@ -172,15 +170,21 @@ function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
  * Each daemon stores only what its own exclaves observed, so the host that saw
  * the account last has the freshest history; any other online host beats none.
  */
-function historyHost(group: AccountGroup): string | null {
-  const newest = group.newest?.machine;
+function historyHost(group: AccountGroup, newest: Machine | undefined): string | null {
   if (newest !== undefined && servesMetrics(newest)) return newest.deviceId;
   return group.charted[0] ?? null;
 }
 
+function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): string {
+  if (quota === undefined || observer === undefined) {
+    return "No quota seen yet. It shows once a session has run while its machine is online.";
+  }
+  return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${observer.name}`;
+}
+
 /**
- * Grouped by account id across every machine, newest observation wins — the
- * reader's rule (DESIGN.md, PWA). An asleep machine has no status, so its
+ * Grouped by account id across every machine; whose numbers show is
+ * `newestQuotaByAccount`'s rule (DESIGN.md, PWA). An asleep machine has no status, so its
  * exclaves still name the account but contribute no numbers. Exclaves that
  * aren't signed in have no account to group under and appear only on their card.
  */
@@ -195,34 +199,27 @@ function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[
         exclaves: new Set(),
         machines: new Set(),
         charted: [],
-        newest: null,
       };
       group.exclaves.add(exclave.id);
       group.machines.add(machine.name);
       if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
       groups.set(exclave.accountId, group);
     }
-    for (const observation of machine.status?.quota ?? []) {
-      const accountId = exclaves[observation.x]?.accountId;
-      const group = accountId === undefined || accountId === null ? undefined : groups.get(accountId);
-      if (group === undefined) continue;
-      if (group.newest === null || observation.at > group.newest.observation.at) {
-        group.newest = { observation, machine };
-      }
-    }
   }
 
-  return [...groups.values()].map((group) => ({
-    accountId: group.accountId,
-    title: [...group.exclaves].join(" · "),
-    detail: `${shortAccount(group.accountId)} · on ${[...group.machines].join(", ")}`,
-    bars: group.newest === null ? [] : quotaBars(group.newest.observation, now),
-    observed:
-      group.newest === null
-        ? "No quota seen yet. It shows once a session has run while its machine is online."
-        : `${group.newest.observation.s} · ${formatSeen(group.newest.observation.at * 1000, now)} on ${group.newest.machine.name}`,
-    historyFrom: historyHost(group),
-  }));
+  const newest = newestQuotaByAccount(machines);
+  return [...groups.values()].map((group) => {
+    const quota = newest.get(group.accountId);
+    const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
+    return {
+      accountId: group.accountId,
+      title: [...group.exclaves].join(" · "),
+      detail: `${shortAccount(group.accountId)} · on ${[...group.machines].join(", ")}`,
+      bars: quota === undefined ? [] : quotaBars(quota.observation, now),
+      observed: observedLine(quota, observer, now),
+      historyFrom: historyHost(group, observer),
+    };
+  });
 }
 
 export function deriveMachines(machines: readonly Machine[], now: number): MachinesView {
