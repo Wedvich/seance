@@ -29,7 +29,7 @@ import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { scanExclaves, tagExclaves } from "./exclaves.ts";
 import { mcpFleetChecks } from "./fleet.ts";
-import { mcpChecks, runMcpServer } from "./mcp.ts";
+import { mcpChecks, mcpTargets, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, socketPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
@@ -731,6 +731,7 @@ export async function cmdPskImport(): Promise<void> {
  * ~/.claude.json — Claude Code owns that schema. Registered as PATH-resolved bun
  * plus this checkout's main.ts (the same target `link` points at), so it tracks a
  * git pull and a bun upgrade alike, and works whether or not `seanced` is on PATH.
+ * Once per exclave (`mcpTargets`): a user-scope entry reaches one config dir.
  */
 export async function cmdMcp(rest: readonly string[]): Promise<void> {
   const [sub] = rest;
@@ -740,23 +741,40 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   }
   const claude = Bun.which("claude");
   if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
-  // `claude mcp add` refuses a name already in the config, and the machines that
-  // most need re-registering — a recorded interpreter that has moved — are exactly
-  // the registered ones. So clear first: the same bootout-before-bootstrap shape
-  // `install` uses for launchd. Failure is ignored (nothing registered yet is the
-  // common case); a failing `add` after a clean remove reports itself below.
-  if (sub === "install") await exec([claude, "mcp", "remove", "--scope", "user", "seance"]);
-  const argv =
-    sub === "install"
-      ? [claude, "mcp", "add", "--scope", "user", "seance", "--", resolvedBun(), await resolvedMain(), "mcp"]
-      : [claude, "mcp", "remove", "--scope", "user", "seance"];
-  const result = await exec(argv, { timeoutMs: 30_000 });
-  if (result.exitCode !== 0)
-    throw new Error(`claude mcp ${sub === "install" ? "add" : "remove"}: ${execFailure(result)}`);
+  const { present, missing } = await mcpTargets();
+  for (const target of missing) console.log(`skipped ${target.label} — ${target.configDir} does not exist yet`);
+  const remove = [claude, "mcp", "remove", "--scope", "user", "seance"];
+  const add = [claude, "mcp", "add", "--scope", "user", "seance", "--", resolvedBun(), await resolvedMain(), "mcp"];
+  const failures: string[] = [];
+  // Sequential: each `claude` rewrites its own .claude.json only, but one at a
+  // time keeps the output in exclave order and the failure list readable.
+  for (const target of present) {
+    // `claude mcp add` refuses a name already in the config, and the machines that
+    // most need re-registering — a recorded interpreter that has moved — are exactly
+    // the registered ones. So clear first: the same bootout-before-bootstrap shape
+    // `install` uses for launchd. Failure is ignored (nothing registered yet is the
+    // common case); a failing `add` after a clean remove reports itself below.
+    // oxlint-disable-next-line no-await-in-loop -- see above
+    if (sub === "install") await exec(remove, { env: target.env });
+    // oxlint-disable-next-line no-await-in-loop
+    const result = await exec(sub === "install" ? add : remove, { timeoutMs: 30_000, env: target.env });
+    if (result.exitCode === 0) {
+      console.log(`${sub === "install" ? "registered in" : "removed from"} ${target.label}`);
+      continue;
+    }
+    // Uninstall reaches exclaves that never had the entry. Matching Claude's text is
+    // brittle, but a miss only degrades to reporting a failure, as before exclaves.
+    if (sub === "uninstall" && /No MCP server named/u.test(result.stdout + result.stderr)) {
+      console.log(`nothing registered in ${target.label}`);
+      continue;
+    }
+    failures.push(`${target.label}: claude mcp ${sub === "install" ? "add" : "remove"}: ${execFailure(result)}`);
+  }
+  if (failures.length > 0) throw new Error(failures.join("\n"));
   console.log(
     sub === "install"
-      ? "registered — Claude Code sessions can now list machines, query sessions, and spawn via the relay"
-      : "removed — Claude Code no longer loads the séance MCP server",
+      ? "Claude Code sessions can now list machines, query sessions, and spawn via the relay — running ones need a restart"
+      : "Claude Code no longer loads the séance MCP server",
   );
 }
 

@@ -40,4 +40,19 @@ describe("exec environment", () => {
       delete process.env["SEANCE_EXEC_CANARY"];
     }
   });
+
+  // `default`'s Claude config is the one reached with CLAUDE_CONFIG_DIR unset, so
+  // pointing a child at it from inside an exclave session means removing the var.
+  test("an undefined override unsets the variable; a string one sets it", async () => {
+    process.env["SEANCE_EXEC_UNSET"] = "inherited";
+    try {
+      const result = await exec(["sh", "-c", 'echo "${SEANCE_EXEC_UNSET-absent}/${SEANCE_EXEC_SET-absent}"'], {
+        env: { SEANCE_EXEC_UNSET: undefined, SEANCE_EXEC_SET: "set" },
+      });
+      expect(result.stdout.trim()).toBe("absent/set");
+      expect(process.env["SEANCE_EXEC_UNSET"]).toBe("inherited");
+    } finally {
+      delete process.env["SEANCE_EXEC_UNSET"];
+    }
+  });
 });

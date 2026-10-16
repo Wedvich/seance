@@ -189,3 +189,31 @@ export function tagExclaves(repos: readonly RepoEntry[], exclaves: readonly Excl
 export function exclaveInfoEqual(a: readonly ExclaveInfo[], b: readonly ExclaveInfo[]): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
+
+/** One Claude config dir a user-scope registration (`mcp install`) has to reach, and the env that selects it. */
+export interface ClaudeConfigTarget {
+  /** An exclave id, or the ambient dir's path when it is no exclave's. */
+  readonly label: string;
+  readonly configDir: string;
+  /** `undefined` unsets: `default` is the config reached without `CLAUDE_CONFIG_DIR`. */
+  readonly env: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * Every exclave, plus the ambient `CLAUDE_CONFIG_DIR` when it names a dir no
+ * exclave owns — the shell hook sets it by cwd, so a session outside every
+ * exclave tree with a hand-set dir is still somewhere the user runs Claude.
+ * Exported for tests.
+ */
+export function claudeConfigTargets(
+  exclaves: readonly Exclave[],
+  ambient: string | undefined,
+): readonly ClaudeConfigTarget[] {
+  const targets: ClaudeConfigTarget[] = exclaves.map((exclave) => ({
+    label: exclave.id,
+    configDir: exclave.configDir,
+    env: { CLAUDE_CONFIG_DIR: exclave.id === DEFAULT_EXCLAVE ? undefined : exclave.configDir },
+  }));
+  if (ambient === undefined || ambient === "" || targets.some((t) => t.configDir === ambient)) return targets;
+  return [...targets, { label: ambient, configDir: ambient, env: { CLAUDE_CONFIG_DIR: ambient } }];
+}
