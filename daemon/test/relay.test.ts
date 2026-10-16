@@ -306,6 +306,36 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  // The real relay lets one status through per interval, so the first one a
+  // daemon sends is the one an app sees for the next 30s. A restart boots from
+  // cached state, whose register carries a real stamp at once; the tick the
+  // boot began before that register committed must not go out first stamped 0.
+  test("a restarted daemon's first status carries its boot register's stamp", async () => {
+    process.env["SEANCE_STATE_DIR"] = await mkdtemp(join(base, "state-"));
+    const first = startTestRelay(TOKEN);
+    let daemon = await startTestDaemon(first.url);
+    try {
+      await registerWithRepo(first, "myrepo");
+      daemon.stop();
+      first.stop();
+
+      const relay = startTestRelay(TOKEN);
+      try {
+        daemon = await startTestDaemon(relay.url);
+        const { info } = await registerWithRepo(relay, "myrepo");
+        expect(info.scannedAt).toBeGreaterThan(0);
+        const status = parseMachineStatus((await open(appKey, await relay.statuses.next())).payload);
+        expect(status?.scan).toBe(info.scannedAt);
+      } finally {
+        relay.stop();
+      }
+    } finally {
+      daemon.stop();
+      first.stop();
+      process.env["SEANCE_STATE_DIR"] = join(base, "state");
+    }
+  });
+
   test("the blob advertises metrics, and the op answers from what the telemetry tick stored", async () => {
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url);
