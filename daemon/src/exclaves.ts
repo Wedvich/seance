@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isRecord, type ExclaveInfo, type RepoEntry } from "@seance/shared";
@@ -192,7 +192,7 @@ export function exclaveInfoEqual(a: readonly ExclaveInfo[], b: readonly ExclaveI
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** One Claude config dir a user-scope registration (`mcp install`) has to reach, and the env that selects it. */
+/** One Claude config dir a user-scope registration (`mcp install`, `mod install`) has to reach, and the env that selects it. */
 export interface ClaudeConfigTarget {
   /** An exclave id, or the ambient dir's path when it is no exclave's. */
   readonly label: string;
@@ -218,4 +218,30 @@ export function claudeConfigTargets(
   }));
   if (ambient === undefined || ambient === "" || targets.some((t) => t.configDir === ambient)) return targets;
   return [...targets, { label: ambient, configDir: ambient, env: { CLAUDE_CONFIG_DIR: ambient } }];
+}
+
+export interface UserScopeTargets {
+  readonly present: readonly ClaudeConfigTarget[];
+  /** Listed in `~/.exclaves` but never set up — registering would create the dir, so these are skipped. */
+  readonly missing: readonly ClaudeConfigTarget[];
+}
+
+/**
+ * Where a user-scope registration lands: every exclave's config dir, not just
+ * the one the invoking shell happens to select — an MCP entry lives in one
+ * `.claude.json` and plugins under one `<configDir>/plugins`, and each exclave
+ * has its own. Shared by `mcp install`, `mod install` and their doctor checks,
+ * so all four agree on the set.
+ */
+export async function userScopeTargets(home: string = homedir()): Promise<UserScopeTargets> {
+  const { exclaves } = await listExclaves(home);
+  const targets = claudeConfigTargets(exclaves, process.env["CLAUDE_CONFIG_DIR"]);
+  const exists = await Promise.all(
+    targets.map((t) =>
+      stat(t.configDir)
+        .then((info) => info.isDirectory())
+        .catch(() => false),
+    ),
+  );
+  return { present: targets.filter((_, i) => exists[i]), missing: targets.filter((_, i) => !exists[i]) };
 }

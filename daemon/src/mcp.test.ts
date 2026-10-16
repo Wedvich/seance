@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import type { RepoEntry, RequestOp, SpawnRequest } from "@seance/shared";
@@ -7,7 +10,15 @@ import { LazyRelay } from "./app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
-import { buildMcpServer, isLocalRef, mcpBunPath, resolveMachine, type LocalMachine } from "./mcp.ts";
+import {
+  buildMcpServer,
+  isLocalRef,
+  mcpBunPath,
+  mcpScriptCheck,
+  mcpScriptPath,
+  resolveMachine,
+  type LocalMachine,
+} from "./mcp.ts";
 
 interface FakeLocal extends LocalMachine {
   requests: { op: RequestOp; payload: unknown }[];
@@ -73,6 +84,60 @@ describe("mcpBunPath", () => {
   test("output without a Command line is null, not a finding", () => {
     expect(mcpBunPath("seance:\n  Type: http\n")).toBeNull();
     expect(mcpBunPath("")).toBeNull();
+  });
+});
+
+describe("mcpScriptPath", () => {
+  test("reads the script out of the Args: line, without the subcommand", () => {
+    expect(mcpScriptPath("  Command: /opt/homebrew/bin/bun\n  Args: /repos/seance/daemon/src/main.ts mcp\n")).toBe(
+      "/repos/seance/daemon/src/main.ts",
+    );
+    expect(mcpScriptPath("  Args: /My Repos/seance/daemon/src/main.ts mcp\n")).toBe(
+      "/My Repos/seance/daemon/src/main.ts",
+    );
+  });
+
+  test("output without an Args line ending in mcp is null, not a finding", () => {
+    expect(mcpScriptPath("seance:\n  Type: http\n")).toBeNull();
+    expect(mcpScriptPath("  Args: /repos/seance/daemon/src/main.ts serve\n")).toBeNull();
+  });
+});
+
+describe("mcpScriptCheck", () => {
+  let base = "";
+  afterAll(async () => {
+    if (base !== "") await rm(base, { recursive: true, force: true });
+  });
+
+  /** A checkout's main.ts, realpath'd as `resolvedMain()` returns it, plus a symlink to the checkout. */
+  const checkout = async (): Promise<{ readonly main: string; readonly linked: string }> => {
+    base = await realpath(await mkdtemp(join(tmpdir(), "seance-mcp-script-")));
+    const src = join(base, "seance", "daemon", "src");
+    await mkdir(src, { recursive: true });
+    await writeFile(join(src, "main.ts"), "");
+    await symlink(join(base, "seance"), join(base, "linked"));
+    return { main: join(src, "main.ts"), linked: join(base, "linked", "daemon", "src", "main.ts") };
+  };
+
+  test("an entry running this checkout is fine, even through a symlinked path", async () => {
+    const { main, linked } = await checkout();
+    expect(await mcpScriptCheck(main, "default", main)).toBeNull();
+    expect(await mcpScriptCheck(linked, "default", main)).toBeNull();
+  });
+
+  test("an entry running another clone warns, naming the exclave, both paths and the remedy", async () => {
+    const { main } = await checkout();
+    const other = "/Users/someone/pengefix2/seance/daemon/src/main.ts";
+    const check = await mcpScriptCheck(other, "pengefix2", main);
+    expect(check?.level).toBe("warn");
+    expect(check?.message).toContain("(pengefix2)");
+    expect(check?.message).toContain(other);
+    expect(check?.message).toContain(main);
+    expect(check?.message).toContain("`seanced mcp install` repoints it");
+  });
+
+  test("no parsable script is no finding", async () => {
+    expect(await mcpScriptCheck(null, "default", "/x/daemon/src/main.ts")).toBeNull();
   });
 });
 

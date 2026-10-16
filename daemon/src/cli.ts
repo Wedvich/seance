@@ -27,9 +27,9 @@ import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from ".
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
-import { scanExclaves, tagExclaves } from "./exclaves.ts";
+import { scanExclaves, tagExclaves, userScopeTargets } from "./exclaves.ts";
 import { mcpFleetChecks } from "./fleet.ts";
-import { mcpChecks, mcpTargets, runMcpServer } from "./mcp.ts";
+import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, socketPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
@@ -733,7 +733,7 @@ export async function cmdPskImport(): Promise<void> {
  * ~/.claude.json — Claude Code owns that schema. Registered as PATH-resolved bun
  * plus this checkout's main.ts (the same target `link` points at), so it tracks a
  * git pull and a bun upgrade alike, and works whether or not `seanced` is on PATH.
- * Once per exclave (`mcpTargets`): a user-scope entry reaches one config dir.
+ * Once per exclave (`userScopeTargets`): a user-scope entry reaches one config dir.
  */
 export async function cmdMcp(rest: readonly string[]): Promise<void> {
   const [sub] = rest;
@@ -743,7 +743,7 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   }
   const claude = Bun.which("claude");
   if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
-  const { present, missing } = await mcpTargets();
+  const { present, missing } = await userScopeTargets();
   for (const target of missing) console.log(`skipped ${target.label} — ${target.configDir} does not exist yet`);
   const remove = [claude, "mcp", "remove", "--scope", "user", "seance"];
   const add = [claude, "mcp", "add", "--scope", "user", "seance", "--", resolvedBun(), await resolvedMain(), "mcp"];
@@ -794,13 +794,11 @@ export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
 /** Like `mcp install`, Claude's own CLI does the writing — see claude-mod.ts. */
 export async function cmdMod(argv: readonly string[]): Promise<void> {
   if (parseModArgs(argv) === "install") {
-    const market = await installMods();
-    for (const plugin of market.plugins) console.log(`installed ${plugin.name}@${market.name}`);
+    await installMods((line) => console.log(line));
     console.log("read in place from this checkout: new sessions pick it up, running ones on /reload-plugins");
     return;
   }
-  const { market, removed } = await uninstallMods();
-  console.log(removed ? `removed the ${market.name} marketplace and every mod installed from it` : "nothing installed");
+  await uninstallMods((line) => console.log(line));
 }
 
 export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast uninstall";

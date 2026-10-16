@@ -11,10 +11,14 @@ const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 // whole product. The stub answers `marketplace remove` with the real CLI's
 // not_configured result when nothing is registered — observed on 2.1.295, and
 // the one failure uninstall must read as "nothing to do" rather than an error.
+// Plugins live per config dir, so the stub keys its state on CLAUDE_CONFIG_DIR
+// and prefixes each record with it ("-" when unset — the default exclave).
 describe("seanced mod install/uninstall through the CLI", () => {
   let root: string;
   let recorded: string;
   let checkout: string;
+  let work: string;
+  let gone: string;
   let env: Record<string, string | undefined>;
 
   beforeEach(async () => {
@@ -22,28 +26,41 @@ describe("seanced mod install/uninstall through the CLI", () => {
     const bin = join(root, "bin");
     await mkdir(bin);
     recorded = join(root, "argv");
-    const marker = join(root, "added");
+    work = join(root, ".claude-work");
+    gone = join(root, ".claude-gone");
     checkout = await realpath(fileURLToPath(new URL("../../", import.meta.url)));
     await Bun.write(
       join(bin, "claude"),
       // Builtins only: PATH is just the stub dir plus bun's. One record per call,
       // args space-joined — none of them carry spaces here.
       `#!/bin/sh
-echo "$*" >> "${recorded}"
-if [ "$1 $2 $3" = "plugin marketplace add" ]; then
-  echo added > "${marker}"
+echo "\${CLAUDE_CONFIG_DIR:--} $*" >> "${recorded}"
+dir="\${CLAUDE_CONFIG_DIR:-${root}/.claude}"
+marker="$dir/added"
+if [ -e "$dir/broken" ]; then
+  echo "settings.json: unexpected token" >&2
+  exit 1
+elif [ "$1 $2 $3" = "plugin marketplace add" ]; then
+  echo added > "$marker"
 elif [ "$1 $2 $3" = "plugin marketplace remove" ]; then
-  if [ ! -s "${marker}" ]; then
+  if [ ! -s "$marker" ]; then
     echo '{"command":"marketplace-remove","outcome":"failed","failureCode":"not_configured"}'
     exit 1
   fi
-  : > "${marker}"
+  : > "$marker"
 fi
 exit 0
 `,
     );
     await chmod(join(bin, "claude"), 0o755);
+    // default and work set up; gone listed but never run, so it has no config dir.
+    await mkdir(join(root, ".claude"));
+    await mkdir(work);
+    await Bun.write(join(root, ".exclaves"), "work\ngone\n");
     env = { ...process.env, HOME: root, PATH: `${bin}${delimiter}${dirname(process.execPath)}` };
+    // An inherited one is an extra, ambient target — a developer's shell would
+    // install into it where CI wouldn't.
+    delete env["CLAUDE_CONFIG_DIR"];
   });
 
   afterEach(async () => {
@@ -61,16 +78,30 @@ exit 0
     return { out, err, code, argv: argv.split("\n").filter((line) => line !== "") };
   };
 
-  test("install adds this checkout as the marketplace, then installs every mod it lists", async () => {
+  test("install adds this checkout and every mod it lists in each exclave's config dir, skipping one never set up", async () => {
     const { out, code, argv } = await run("install");
     expect(code).toBe(0);
-    expect(argv).toEqual([
-      `plugin marketplace add ${checkout} --scope user --json`,
-      "plugin install tmux-rename@seance --scope user",
-      "plugin install session-events@seance --scope user",
-    ]);
-    expect(out).toContain("installed tmux-rename@seance");
-    expect(out).toContain("installed session-events@seance");
+    const once = (dir: string): string[] => [
+      `${dir} plugin marketplace add ${checkout} --scope user --json`,
+      `${dir} plugin install tmux-rename@seance --scope user`,
+      `${dir} plugin install session-events@seance --scope user`,
+    ];
+    expect(argv).toEqual([...once("-"), ...once(work)]);
+    expect(out).toContain(`skipped gone — ${gone} does not exist yet`);
+    for (const label of ["default", "work"]) {
+      expect(out).toContain(`Claude mod tmux-rename installed in ${label}`);
+      expect(out).toContain(`Claude mod session-events installed in ${label}`);
+    }
+  });
+
+  test("a failing exclave is reported and fails the run, without stopping the ones after it", async () => {
+    await Bun.write(join(root, ".claude", "broken"), "");
+    const { out, err, code, argv } = await run("install");
+    expect(code).not.toBe(0);
+    expect(err).toContain("default: claude plugin marketplace add");
+    expect(err).toContain("unexpected token");
+    expect(argv.filter((line) => line.startsWith(work))).toHaveLength(3);
+    expect(out).toContain("Claude mod session-events installed in work");
   });
 
   test("a repeat install never removes first — that would delete the mods' saved data", async () => {
@@ -80,16 +111,21 @@ exit 0
     expect(argv.filter((line) => line.includes("remove"))).toEqual([]);
   });
 
-  test("uninstall removes the marketplace, and says so only when there was one", async () => {
+  test("uninstall removes the marketplace from each exclave, and says so only where there was one", async () => {
     const before = await run("uninstall");
     expect(before.code).toBe(0);
-    expect(before.out).toContain("nothing installed");
+    expect(before.out).toContain("nothing installed in default");
+    expect(before.out).toContain("nothing installed in work");
 
     await run("install");
     const after = await run("uninstall");
     expect(after.code).toBe(0);
-    expect(after.out).toContain("removed the seance marketplace");
-    expect(after.argv.at(-1)).toBe("plugin marketplace remove seance --json");
+    expect(after.out).toContain("removed the seance marketplace and its mods from default");
+    expect(after.out).toContain("removed the seance marketplace and its mods from work");
+    expect(after.argv.slice(-2)).toEqual([
+      "- plugin marketplace remove seance --json",
+      `${work} plugin marketplace remove seance --json`,
+    ]);
   });
 
   test("an unknown subcommand fails with the usage line and touches nothing", async () => {

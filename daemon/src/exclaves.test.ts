@@ -9,6 +9,7 @@ import {
   listExclaves,
   scanExclaves,
   tagExclaves,
+  userScopeTargets,
 } from "./exclaves.ts";
 
 const cleanups: string[] = [];
@@ -242,5 +243,24 @@ describe("claudeConfigTargets", () => {
     const extra = claudeConfigTargets(exclaves, "/elsewhere/claude");
     expect(extra.map((t) => t.label)).toEqual(["default", "work", "/elsewhere/claude"]);
     expect(extra[2]?.env).toEqual({ CLAUDE_CONFIG_DIR: "/elsewhere/claude" });
+  });
+});
+
+describe("userScopeTargets", () => {
+  test("every exclave whose config dir exists is present; one never set up is missing, not created", async () => {
+    const home = await makeHome("work\ngone\n");
+    await mkdir(join(home, ".claude"));
+    await mkdir(join(home, ".claude-work"));
+    // An inherited one would be an extra, ambient target — a developer's shell has it where CI doesn't.
+    const ambient = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const { present, missing } = await userScopeTargets(home);
+      expect(present.map((t) => t.label)).toEqual(["default", "work"]);
+      expect(present[1]?.env).toEqual({ CLAUDE_CONFIG_DIR: join(home, ".claude-work") });
+      expect(missing.map((t) => t.configDir)).toEqual([join(home, ".claude-gone")]);
+    } finally {
+      if (ambient !== undefined) process.env["CLAUDE_CONFIG_DIR"] = ambient;
+    }
   });
 });

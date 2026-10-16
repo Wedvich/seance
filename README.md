@@ -272,7 +272,7 @@ artifacts; Raycast keeps listing the extension until you also remove it in
 ### 8. Optional: Claude Code mods — `/rename` and session reports
 
 ```sh
-seanced mod install    # installs this checkout's Claude Code mods (user scope)
+seanced mod install    # installs this checkout's Claude Code mods (user scope, every exclave)
 ```
 
 After a `/rename` in any Claude session in tmux — spawned or started by hand —
@@ -285,7 +285,10 @@ tag change) needs a new window. The mod is read in
 place from the checkout, so a `git pull` reaches new sessions with nothing re-run
 (running ones on `/reload-plugins`). `seanced mod uninstall` removes it;
 `seanced doctor` reports whether it is installed from this checkout. Like
-`mcp install`, it is per Claude config directory.
+`mcp install`, it reaches every Claude config directory: plugins are per config
+directory, so install, uninstall and doctor run once per exclave (`~/.claude`
+plus each `~/.claude-<name>` listed in `~/.exclaves`), skipping any not set up yet.
+An exclave created later needs `seanced mod install` run again.
 
 The same command installs **session-events**. It tells this machine's daemon what
 each session is doing (busy, idle, waiting on you, ended), the PR it opened, and the

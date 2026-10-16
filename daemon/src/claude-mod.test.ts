@@ -4,35 +4,43 @@ import { modChecksFrom, parseMarketplace, readMarketplace, realCheckoutRoot } fr
 
 const MARKET = { name: "seance", plugins: [{ name: "tmux-rename", source: "./claude-mods/tmux-rename" }] };
 const ROOT = "/repos/seance";
+const LABEL = "pengefix2";
 const listed = (extra: Record<string, unknown> = {}): unknown => [
   { id: "tmux-rename@seance", enabled: true, readFromFolder: join(ROOT, "claude-mods/tmux-rename"), ...extra },
 ];
 
 describe("modChecksFrom", () => {
-  test("ok when installed, enabled and read from this checkout", () => {
-    expect(modChecksFrom(MARKET, ROOT, listed())).toEqual([
-      { level: "ok", message: "Claude mod tmux-rename installed" },
+  test("ok when installed, enabled and read from this checkout — naming the exclave it checked", () => {
+    expect(modChecksFrom(MARKET, ROOT, listed(), LABEL)).toEqual([
+      { level: "ok", message: "Claude mod tmux-rename installed in pengefix2" },
     ]);
   });
 
   test("warns, with the remedy, when not installed — or when claude printed no list", () => {
     for (const output of [[], [{ id: "tmux-rename@elsewhere" }], { not: "a list" }]) {
-      const [check] = modChecksFrom(MARKET, ROOT, output);
+      const [check] = modChecksFrom(MARKET, ROOT, output, LABEL);
       expect(check?.level).toBe("warn");
+      expect(check?.message).toContain("not installed in pengefix2");
       expect(check?.message).toContain("seanced mod install");
     }
   });
 
   test("warns when read from another clone — the stale-checkout hazard", () => {
-    const [check] = modChecksFrom(MARKET, ROOT, listed({ readFromFolder: "/old/seance/claude-mods/tmux-rename" }));
+    const [check] = modChecksFrom(
+      MARKET,
+      ROOT,
+      listed({ readFromFolder: "/old/seance/claude-mods/tmux-rename" }),
+      LABEL,
+    );
     expect(check?.level).toBe("warn");
     expect(check?.message).toContain("/old/seance");
     expect(check?.message).toContain("repoints it");
   });
 
   test("warns when disabled in Claude Code", () => {
-    const [check] = modChecksFrom(MARKET, ROOT, listed({ enabled: false }));
+    const [check] = modChecksFrom(MARKET, ROOT, listed({ enabled: false }), LABEL);
     expect(check?.level).toBe("warn");
+    expect(check?.message).toContain("pengefix2");
     expect(check?.message).toContain("disabled");
   });
 });
