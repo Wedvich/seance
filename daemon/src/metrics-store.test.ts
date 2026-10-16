@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -209,5 +210,41 @@ describe("MetricsStore", () => {
     const again = await MetricsStore.open(path);
     expect(again.query({ from: NOW, to: NOW, step: 30 })[0]?.points).toEqual([[NOW, 1]]);
     again.close();
+  });
+
+  test("a store from before the time-first key is rebuilt on open, and then writes and reads", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-metrics-"));
+    cleanups.push(dir);
+    const path = join(dir, "metrics.sqlite");
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE series (id INTEGER PRIMARY KEY, metric TEXT NOT NULL, labels TEXT NOT NULL, UNIQUE (metric, labels));
+      ${["raw", "m5", "h1"]
+        .map(
+          (tier) => `
+      CREATE TABLE ${tier} (series INTEGER NOT NULL REFERENCES series(id), ts INTEGER NOT NULL, value REAL NOT NULL,
+        PRIMARY KEY (series, ts)) WITHOUT ROWID;
+      CREATE INDEX ${tier}_ts ON ${tier} (ts);`,
+        )
+        .join("")}
+      INSERT INTO series (id, metric, labels) VALUES (1, 'cpu_pct', '{"machine":"mac"}');
+      INSERT INTO raw VALUES (1, ${NOW - 30}, 7);`);
+    old.close();
+
+    const store = await MetricsStore.open(path);
+    store.write([{ metric: "cpu_pct", labels: machine, ts: NOW, value: 1 }], NOW);
+    expect(store.query({ from: 0, to: NOW, step: 30 })).toEqual([
+      { metric: "cpu_pct", labels: machine, points: [[NOW, 1]] },
+    ]);
+    store.close();
+
+    const db = new Database(path, { readonly: true });
+    for (const tier of ["raw", "m5", "h1"]) {
+      const pk = db.query<{ name: string }, []>(`PRAGMA index_list(${tier})`).all();
+      expect(pk.map((index) => index.name)).toEqual([`sqlite_autoindex_${tier}_1`]);
+      const columns = db.query<{ name: string }, []>(`PRAGMA index_info(sqlite_autoindex_${tier}_1)`).all();
+      expect(columns.map((column) => column.name)).toEqual(["ts", "series"]);
+    }
+    db.close();
   });
 });

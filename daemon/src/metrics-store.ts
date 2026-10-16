@@ -45,11 +45,19 @@ const SCHEMA = `
     series INTEGER NOT NULL REFERENCES series(id),
     ts INTEGER NOT NULL,
     value REAL NOT NULL,
-    PRIMARY KEY (series, ts)
-  ) WITHOUT ROWID;
-  CREATE INDEX IF NOT EXISTS ${TIERS[step]}_ts ON ${TIERS[step]} (ts);`,
+    PRIMARY KEY (ts, series)
+  ) WITHOUT ROWID;`,
   ).join("")}
 `;
+
+/**
+ * `PRAGMA user_version` this code's tiers are at. Version 1 keyed them
+ * time-first: every rollup, prune and query is a range on `ts`, and a
+ * series-first key turned each rollup into a full scan plus a sort, ~3 ms and
+ * ~150 KiB of WAL a tick. Below it the tiers are dropped, not migrated —
+ * their history only began 2026-10-15, and `IF NOT EXISTS` would keep the old key.
+ */
+const SCHEMA_VERSION = 1;
 
 interface PointRow {
   readonly metric: string;
@@ -93,7 +101,14 @@ export class MetricsStore {
     this.#db = db;
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
-    db.exec(SCHEMA);
+    db.transaction(() => {
+      const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+      if (version < SCHEMA_VERSION) {
+        for (const step of METRICS_STEPS) db.exec(`DROP TABLE IF EXISTS ${TIERS[step]}`);
+        db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      }
+      db.exec(SCHEMA);
+    })();
     this.#seriesId = db.query<{ id: number }, [string, string]>(
       "INSERT INTO series (metric, labels) VALUES (?, ?) ON CONFLICT DO UPDATE SET metric = metric RETURNING id",
     );
