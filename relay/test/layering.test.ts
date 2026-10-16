@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
  * never the PSK, so no module under relay/src may reach the envelope crypto
  * or a payload parser. `status` is the frame that makes this worth enforcing
  * rather than remembering — plaintext pressure numbers were the tempting
- * shortcut (docs/scheduler.md, "Wire changes"), and the first readable payload
+ * shortcut (DESIGN.md, "Presence & identity"), and the first readable payload
  * would turn the relay's logs into an activity timeline.
  */
 const SRC = join(import.meta.dir, "../src");

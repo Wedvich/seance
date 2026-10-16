@@ -30,9 +30,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   the suite, setting up local dev, or deploying; don't restate it here — a change to commands,
   deploys or test layout updates that file.
 - **docs/scheduler.md** — the scheduler plan (a sealed queue in the relay, run by a relay-nominated
-  daemon; filter/score routing across machines and
-  subscriptions, the relay `status` frame, daemon telemetry). Not built yet: it records decisions
-  ahead of code, and DESIGN.md takes over each part as it lands. Read it before scheduler work.
+  daemon; filter/score routing across machines and accounts). M1 (visibility: the `status`
+  frame, daemon telemetry, the Machines screen) is built and recorded in DESIGN.md; the rest
+  records decisions ahead of code, and DESIGN.md takes over each part as it lands. Read it before
+  scheduler work.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -83,7 +84,7 @@ green:
 - Parallelism lives between shard processes (`scripts/test.ts`), never `bun test --parallel` at the
   top level: `--parallel` implies `--isolate`, which re-evaluates modules per file and resets the
   once-per-process memos below — and under `--isolate` neither `globalThis` nor `process.env` carries
-  across files, so no in-process cache can survive it. `--parallel` inside the two daemon shards is fine — two because a GitHub-runner `--parallel` run stops dead past ~64 KiB of output (`SHARDS` says more).
+  across files, so no in-process cache can survive it. `--parallel` inside the two daemon shards is fine — two because a GitHub-runner run stopped dead past ~64 KiB of output, probably the non-blocking-stdout drop `flush` now works around rather than `--parallel` (`SHARDS` says more).
 - Reuse `relay/test/harness.ts`'s `startRelay`; never boot your own Miniflare. Its worker bundle is
   memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
   fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.

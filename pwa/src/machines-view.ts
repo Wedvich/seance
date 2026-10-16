@@ -180,7 +180,7 @@ function historyHost(group: AccountGroup): string | null {
 
 /**
  * Grouped by account id across every machine, newest observation wins — the
- * reader's rule from docs/scheduler.md. An asleep machine has no status, so its
+ * reader's rule (DESIGN.md, PWA). An asleep machine has no status, so its
  * exclaves still name the account but contribute no numbers. Exclaves that
  * aren't signed in have no account to group under and appear only on their card.
  */

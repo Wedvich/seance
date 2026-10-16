@@ -96,26 +96,32 @@ inherit, and as a frame for the paths into it. What it doesn't cover is
 recorded as invariants below.
 
 **Assets, in order**: the PSK (it is the only trust boundary); code execution
-on four dev machines; prompts and repo names; presence metadata. The bearer
+on four dev machines; prompts and repo names; presence and telemetry metadata —
+each machine's pressure, sessions per exclave and quota (the `status` beat), the
+hourly history in `metrics.sqlite` kept forever, account ids, skill names and
+repo origins, sealed in transit and plaintext at rest on the machine. The bearer
 token is not an asset in the same sense — see its blast radius above.
 
 **Séance's own footprint.** The daemon is structurally a remote access tool and
 reads as one to any EDR:
 
-| Behaviour                                                            | ATT&CK                            |
-| -------------------------------------------------------------------- | --------------------------------- |
-| launchd agent runs `seanced`                                         | T1543.001 Launch Agent            |
-| systemd user unit runs it on Linux/WSL (+ Windows logon task on WSL) | T1543.002, T1053.005 (WSL)        |
-| persistent outbound WSS to the relay                                 | T1071.001, T1102.002              |
-| AES-256-GCM under a PSK                                              | T1573.001 Symmetric Cryptography  |
-| remotely starting an interactive coding agent                        | **T1219.001 IDE Tunneling**       |
-| pre-answering claude's trust dialog in its config                    | T1562.001 Disable or Modify Tools |
-| `caffeinate -is` per spawn + the AC-power hold                       | T1653 Power Settings              |
-| depth-2 `.git` scan of `repoRoots`                                   | T1083                             |
-| tmux pane enumeration                                                | T1057                             |
-| `despawn`: keys into a session's pane, `kill-pane`, signals          | T1489-adjacent (stopping work)    |
-| `reap`: git fetch/status, worktree removal, branch deletion per repo | T1070.004-adjacent (deletion)     |
-| `git pull` + service kickstart as the update path                    | T1195.001                         |
+| Behaviour                                                             | ATT&CK                            |
+| --------------------------------------------------------------------- | --------------------------------- |
+| launchd agent runs `seanced`                                          | T1543.001 Launch Agent            |
+| systemd user unit runs it on Linux/WSL (+ Windows logon task on WSL)  | T1543.002, T1053.005 (WSL)        |
+| persistent outbound WSS to the relay                                  | T1071.001, T1102.002              |
+| AES-256-GCM under a PSK                                               | T1573.001 Symmetric Cryptography  |
+| remotely starting an interactive coding agent                         | **T1219.001 IDE Tunneling**       |
+| pre-answering claude's trust dialog in its config                     | T1562.001 Disable or Modify Tools |
+| `caffeinate -is` per spawn + the AC-power hold                        | T1653 Power Settings              |
+| depth-2 `.git` scan of `repoRoots`                                    | T1083                             |
+| host discovery every 30s: `statfs`, `/proc`, `sysctl` on macOS        | T1082                             |
+| reading every exclave's `.claude.json` and `skills/` dir              | T1083, T1087-adjacent (ids only)  |
+| a local activity history (`metrics.sqlite`, hourly tier kept forever) | T1074.001-adjacent                |
+| tmux pane enumeration                                                 | T1057                             |
+| `despawn`: keys into a session's pane, `kill-pane`, signals           | T1489-adjacent (stopping work)    |
+| `reap`: git fetch/status, worktree removal, branch deletion per repo  | T1070.004-adjacent (deletion)     |
+| `git pull` + service kickstart as the update path                     | T1195.001                         |
 
 T1219.001 is the closest published match — ATT&CK added it for `code tunnel`
 and JetBrains Gateway, i.e. this exact shape. Consequence: those persistence
@@ -212,7 +218,13 @@ Séance's noise is cover for a real intruder.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reaches Workers Trace
    Events and any Logpush sink — enabling Logpush to a third party later moves
-   the blast radius off Cloudflare, so that choice is not free. The token also
+   the blast radius off Cloudflare, so that choice is not free. It also buys a
+   passive feed: every `/app` socket receives every machine's `status` every
+   30s. The payload is sealed, but its ciphertext length is unpadded and varies
+   with load, session counts and whether quota is present — a coarse activity
+   channel per machine, accepted. And the relay logs one `wire status … apps=N`
+   line per beat, so Workers logs hold a 30s timeline of when an app was open —
+   which a Logpush sink would carry off Cloudflare too. The token also
    bought slightly more than stated: `register` overwrote by `deviceId`, so a
    holder could blank a real machine's entry until it re-registered
    (T1565.001) — closed by self-certifying ids below, since a register for an
@@ -290,7 +302,11 @@ Séance's noise is cover for a real intruder.
    iv, it otherwise grows for as long as a peer cares to mint them. One
    unstated dependency: the ±60s window trusts local
    time and NTP is unauthenticated, so an attacker who can skew a daemon's
-   clock widens the window.
+   clock widens the window. A relay can also replay or withhold a `status`: the
+   app binds one to its register blob through `scan`, and that stamp can stay
+   fixed for hours (it moves only on a re-register), so an old beat replays
+   cleanly within one register period. Its freshness rests on the daemon's `at`
+   — the age the Machines screen shows — and so on the same clock.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -300,6 +316,10 @@ Séance's noise is cover for a real intruder.
    compromising an agent — MITRE ATLAS is the companion frame. Two parts: a PSK
    holder's `prompt` reaches Claude under the machine's configured permission
    mode, and the spawned agent then reads repo content Séance does not control.
+   A spawned session also runs as the daemon's user and can write what telemetry
+   reads — `.claude.json`, `~/.exclaves`, the skills dirs — so it can spoof its
+   own exclave's account and quota view. Nothing routes from those figures yet;
+   they are claims by the box, not observations of it.
 
 **What "structured payloads only" does and does not mean.** It stops wire input
 being interpolated into the daemon's own shell construction. It is not a
@@ -364,11 +384,18 @@ nothing checked it. The last is the gap they leave.
 - **Files at rest are owner-only.** `config.json` and the sealed PSK blobs
   already were; the audit log, `state.json` and `runtime.json` were 0644 by
   umask alone, and they hold repo paths, device ids and window titles (which,
-  unlike the prompt, are logged verbatim). All created at 0600 rather than
+  unlike the prompt, are logged verbatim). `metrics.sqlite` and its `-wal` and
+  `-shm` join them: the database is created as an empty 0600 file before SQLite
+  opens it, and SQLite gives the files it spawns the database's mode. All
+  created at 0600 rather than
   written and chmod'd, so no umask-mode window exists. Enforced as explicit
   modes and not as a `UMask=` in the unit, deliberately: the daemon may
   cold-boot the tmux server as its child, and a umask there would follow every
   file a Claude session writes.
+- **The relay never receives plaintext telemetry.** `status` is sealed to the
+  app like `info`, and `relay/test/layering.test.ts` keeps any module under
+  `relay/src` from reaching the envelope crypto or a payload parser — the first
+  readable payload would make the relay's logs an activity timeline.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -458,7 +485,7 @@ The Durable Object persists a machine registry:
   registering the key beside it (two things to keep consistent, and the
   relay would need a first-come enrolment that is the squat all over again).
 - **The latest `status` lives on the daemon socket's attachment** (added
-  2026-10-15 for the scheduler, docs/scheduler.md): the daemon seals its
+  2026-10-15, scheduler M1): the daemon seals its
   telemetry snapshot to the app like the register blob and sends it as its own
   frame every 30s and right after each register; the hub keeps it beside the
   socket's identity (`serializeAttachment`, 2 KiB for both), forwards it to
@@ -475,8 +502,10 @@ The Durable Object persists a machine registry:
   and the floor with it, so the status the daemon sends right after every
   register is let through (measured: without this the boot register's status
   stood for the first beat while the rescan's re-register sent one into the
-  floor). Accepted only from a registered socket, sealed `from` its own id and
-  `to` the app. The relay stays
+  floor). Accepted only from a registered socket whose envelope's plaintext
+  routing names it — `from` its own id (`from-mismatch` otherwise) and `to` the
+  app (`status-not-app`); the relay cannot see the seal, so the app's AAD check
+  is what proves who sealed it. The relay stays
   blind — ciphertext and routing only, as with `info`; plaintext numbers were
   rejected because pressure over time is an activity timeline — and
   `relay/test/layering.test.ts` keeps it so. The app opens it as it opens
@@ -484,9 +513,21 @@ The Durable Object persists a machine registry:
   every push), bound to its `deviceId` through the AAD `from`, and shown only
   while its `scan` names the register blob this app decrypted — the relay
   already drops a socket's snapshot at each register, so this is the app's own
-  guard against a sender stamping the wrong blob (docs/scheduler.md,
-  "Encoding"). A status that opened is proof of life and clears a timeout's
-  offline mark, as a reply does.
+  guard against a sender stamping the wrong blob. "The register blob" means the
+  one last _registered_, not the merged `Machine`: a `rescan` reply moves
+  `Machine.scannedAt` without a register, and comparing against it would drop
+  every status until the repo set next changed. A status that opened is proof
+  of life and clears a timeout's offline mark, as a reply does.
+  **Encoding** (`MachineStatus` in `shared/src/types.ts`): the blob shares a
+  2 KiB attachment and base64 costs a third, so every number is an integer
+  (whole percent, unix seconds, MiB), keys are short, an unknown field is
+  absent rather than `null`, and quota entries name their account by index
+  into the register blob's `exclaves` rather than by the 73-char account id —
+  which is why `scan` must match. Rejected: a positional tuple or bit-packed
+  body (saves ~100 bytes and loses the optional-field skew tolerance every
+  other blob relies on). Sent every 30s whether or not an app is watching:
+  one DO wake per machine per beat (the sweep alarm already wakes it every
+  60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
@@ -544,25 +585,25 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                                                                | Handled in                                                                                                      |
-| ----------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)               |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts` |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                               |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                 |
-| `registry`                          | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                      |
-| `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                      |
-| `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack         |
-| `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                             |
-| `"ping"` / `"pong"`                 | both socket legs                                                                         | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                 |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                   | same file — both ends share it, or nothing decrypts                                                             |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                           |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                   |
-| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                          |
-| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored  |
-| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped          |
-| op `metrics`                        | `shared/src/app-client.ts` `metrics()`, gated and parsed; the PWA chart is M1 step 6     | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized there against the envelope |
+| Frame / op                          | Sent from                                                                                | Handled in                                                                                                                                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                  |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                    |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                  |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                   |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                    |
+| `registry`                          | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                         |
+| `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                         |
+| `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                            |
+| `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                                                                |
+| `"ping"` / `"pong"`                 | both socket legs                                                                         | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                    |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                   | same file — both ends share it, or nothing decrypts                                                                                                |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                              |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                      |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                             |
+| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored                                     |
+| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                             |
+| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed          | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`) |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -576,7 +617,8 @@ there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client ac
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope>,
 key, ts, sig }` — signed afresh each time, since the relay bounds `ts` — on
-connect and whenever the repo set changes; `msg { envelope }` for routed
+connect, whenever a rescan changes the repo set or the exclaves (list or info),
+and after a self-update report (the blob carries `lastUpdate`); `msg { envelope }` for routed
 traffic; `status { envelope }` — the telemetry snapshot sealed to the app,
 every 30s and right after each register (see Presence & identity);
 literal `"ping"`/`"pong"` strings for heartbeats (bare strings, not
@@ -733,7 +775,7 @@ send error that caused it.
   opened but was not shaped like a `MachineInfo`, names its sender instead.
   Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
-  90s) because the right values derive from daemon internals — `exec.ts`'s 60s
+  90s, despawn 20s, metrics 15s) because the right values derive from daemon internals — `exec.ts`'s 60s
   command timeout plus `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
@@ -787,15 +829,16 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   average otherwise serializes to seventeen digits, a third of the reply. Sized
   against measurement: one machine with two exclaves keeps ~14 series, and all
   of them at a day of 5-min points is ~77 KB, so a chart asks for its panel's
-  `names` (pressure is three series, ~16 KB). Rejected: a points cap alone (the
+  `names` (the machine chart's pressure is two series, cpu and memory, ~11 KB). Rejected: a points cap alone (the
   series count grows with exclaves, accounts and models, so no cap fits every
   machine); trimming the oldest points to fit (the chart silently shows less
   range than it asked for); positional value arrays with implied timestamps
-  (~3.5× smaller, and no longer Prometheus's shape).
+  (~3.5× smaller, and no longer Prometheus's shape). History lives only on its
+  daemon, so an asleep machine's is unavailable until it wakes — accepted.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
-offline machines. Rejected: a `status` op returning repos + sessions
+offline machines. Rejected: one combined poll op returning repos + sessions
 together (re-sends registry data on every poll, useless offline).
 
 ## Daemon (`seanced`, Bun)
@@ -1193,7 +1236,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   is a daemon change here. Read with every repo scan (startup, hourly, `rescan`)
   from one reading, so the blob's `exclaves` and each repo's tag never come
   from two versions of the file — `status` quota entries index into that list
-  (docs/scheduler.md, "Encoding") — and a change in either re-registers, as a
+  (Presence & identity, "Encoding") — and a change in either re-registers, as a
   new clone does. Rejected: an mtime watch on `~/.exclaves` (the hourly scan is
   the cadence everything else in the blob already has, and a sign-in changes
   `.claude.json`, not the list); reporting the config dir path (derivable, and
@@ -1210,7 +1253,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
   laptop back from sleep resets to its first reading instead of trusting a stale
   average, and no reader keeps a window of its own. Collectors are exec-free
-  where the host allows: `os.cpus()` deltas, `/proc/meminfo` (`MemAvailable`)
+  where the host allows — macOS memory is the one exec, `/usr/sbin/sysctl`
+  once a tick: `os.cpus()` deltas, `/proc/meminfo` (`MemAvailable`)
   or, on macOS, `100 − kern.memorystatus_level` (the kernel's free percentage —
   what jetsam acts on and `memory_pressure` prints), `statfs` over the configured
   repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
@@ -1224,7 +1268,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
   nothing else — metric, label set, timestamp, number — in three tiers sharing
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
-  Rollups are recomputed from the tier below for every bucket a write touches,
+  Each write re-rolls every bucket from its oldest new sample onward, across
+  all series, from the tier below,
   so a quota observation stamped hours back still lands in its own hour, and the
   same observation re-read every tick is one row and widens no rollup; one
   stamped past the raw tier's 48h is dropped (the same write would prune it,
@@ -1241,7 +1286,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   each register too, re-arming the beat so the next lands past the relay's
   floor: the register just changed the blob a status indexes, and the registry
   push an app got carries no snapshot until this one. History is the
-  `metrics` op's. Rejected: the 1-min load average as cpu (counts runnable
+  `metrics` op's. Nothing routes from this store — the scheduler reads only the
+  latest `status` — so a Prometheus + Grafana stack later is one more consumer
+  (an exposition endpoint, or remote write, since daemons dial out and laptops
+  roam), not a redesign. Not built: PSI and cgroup v2 views in an LXC, the
+  Proxmox node view (docs/scheduler.md, M4), macOS I/O rates. Rejected: the 1-min load average as cpu (counts runnable
   tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
   macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
   (sleep gaps); a positional store schema (a new metric must cost nothing but a
@@ -1744,7 +1793,7 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions); quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, newest
-  observation wins (docs/scheduler.md). A window whose `resets_at` has passed shows 0% and
+  observation wins, since every daemon hosting one of its exclaves reports it. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Charts follow the split — HISTORY on a machine asks
   that daemon for `cpu_pct`/`mem_pct`; on an account it asks one online host of the account

@@ -944,7 +944,7 @@ export class RelayClient {
       // Against the register blob's own stamp, never `scanned.scannedAt`: a
       // rescan reply moves that without re-registering, and the status indexes
       // the blob's `exclaves`. A mismatch is a status from before a re-register,
-      // held back until the next beat replaces it (docs/scheduler.md, "Encoding").
+      // held back until the next beat replaces it (DESIGN.md, Presence & identity).
       const status = this.#statuses.get(entry.deviceId)?.status ?? null;
       const built: Machine = {
         deviceId: entry.deviceId,

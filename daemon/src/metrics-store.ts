@@ -10,9 +10,10 @@ import { stateDir } from "./paths.ts";
  * a sample a `(unix seconds, number)` on one — in three tiers that share the
  * `METRICS_STEPS` the `metrics` op requests by. Raw 30s samples live 48h,
  * 5-min averages 30d, hourly averages forever: one row per series per hour is
- * megabytes a decade. Rollups are recomputed from the tier below for every
- * bucket a write touches, so a late sample (a quota observation stamped at its
- * fetch time) still lands in the right hour. A sample older than the raw tier
+ * about 5 MB a year at 16 series. Each write re-rolls every bucket from its
+ * oldest new sample onward, across all series, from the tier below, so a late
+ * sample (a quota observation stamped at its fetch time) still lands in the
+ * right hour. A sample older than the raw tier
  * keeps is dropped at the door: the same transaction would prune it, and a
  * cached quota stamp days old would otherwise re-enter and re-roll every tick.
  */

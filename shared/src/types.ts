@@ -68,7 +68,7 @@ export type DaemonFrame =
    * like the register blob), every STATUS_INTERVAL_MS. The relay keeps only the
    * latest, on the socket's attachment — never in storage — so it vanishes with
    * the socket, which is right: a disconnected machine's snapshot is stale by
-   * definition. docs/scheduler.md, "Wire changes".
+   * definition. DESIGN.md, Presence & identity.
    */
   | { readonly t: "status"; readonly env: Envelope };
 

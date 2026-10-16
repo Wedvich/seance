@@ -127,11 +127,12 @@ The same shape applies to launchd on macOS — `StandardOutPath` is a redirect t
 opens — but there the agent is per-login and the opener is already the user, so only the
 mode is ever wrong.
 
-`seanced.log`, `state.json` and `runtime.json` are 0600, joining `config.json` and the
-sealed PSK blobs: the log records repo paths, device ids and window titles verbatim, and
-`state.json` lists every repo the machine scanned. Machines installed earlier keep the old
-0644 until each file is next written — the log on the next daemon start, the other two on
-the next write of theirs; nothing has to be re-run. The modes are set on the
+`seanced.log`, `state.json`, `runtime.json` and `metrics.sqlite` (with its `-wal` and `-shm`)
+are 0600, joining `config.json` and the sealed PSK blobs: the log records repo paths, device ids
+and window titles verbatim, `state.json` lists every repo the machine scanned, and
+`metrics.sqlite` is the machine's activity history. Machines installed earlier keep the old
+0644 until each file is next written — the log on the next daemon start, `state.json` and
+`runtime.json` on the next write of theirs; `metrics.sqlite` was 0600 from the start; nothing has to be re-run. The modes are set on the
 files themselves rather than with a `UMask=` in the unit, because the daemon may have
 cold-booted the tmux server as its child and a unit umask would follow into every file a
 Claude session writes.
