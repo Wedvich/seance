@@ -121,13 +121,17 @@ export class RelayClient {
    * never storing it. Fire-and-forget like `broadcast` — nothing answers — and
    * not logged per frame: one every 30s is the daemon's steadiest traffic, and
    * the relay's log carries each `iv` for the rare one worth chasing.
+   *
+   * `current` is asked after the seal, in the same turn as the send: a
+   * register can leave while the seal is awaited, and a status that lands
+   * behind it is the one the relay keeps until the next beat.
    */
-  async sendStatus(status: MachineStatus): Promise<boolean> {
+  async sendStatus(status: MachineStatus, current: () => boolean = () => true): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: status };
     const sealed = await seal(this.#opts.key, { to: APP_ID, from: this.#opts.identity.deviceId }, plain);
     const ws = this.#ws;
-    if (ws === null || !this.connected) return false;
+    if (ws === null || !this.connected || !current()) return false;
     ws.send(JSON.stringify({ t: "status", env: sealed } satisfies DaemonFrame));
     return true;
   }

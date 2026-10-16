@@ -264,6 +264,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       .tick()
       .then((snapshot) => {
         if (stopped || !client.connected) return false;
+        // A tick begun before the latest register names the blob before it —
+        // at boot, none at all — and every reader would drop it. Sent anyway it
+        // spends the relay's one-per-interval floor, and the tick the register
+        // queued behind it, carrying the right stamp, is the one refused. Asked
+        // again by `sendStatus` after its seal, since a register can leave meanwhile.
+        const current = (): boolean => snapshot.scan === registered.scan;
+        if (!current()) return false;
         const status = fitStatus(snapshot);
         if (status.tr !== undefined && !trimWarned) {
           // Once: the condition is structural (too many exclaves for the bound),
@@ -271,7 +278,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");
           trimWarned = true;
         }
-        return client.sendStatus(status);
+        return client.sendStatus(status, current);
       })
       .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
   };

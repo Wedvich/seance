@@ -1350,7 +1350,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   committed by `run.ts` once the register frame has left and read once as a
   tick starts, so a register mid-tick can't pair one scan's indexes with
   another's stamp; a tick asked for after a register waits out the one in
-  flight rather than sharing it. History is the
+  flight rather than sharing it. The one in flight is then not sent at all: its
+  stamp names the blob before (at boot, none), every reader would drop it, and
+  sent first it would take the relay's floor from the status that matters. The
+  check runs again after the seal, in the turn that sends, since a register can
+  leave while the seal is awaited. History is the
   `metrics` op's. Nothing routes from this store — the scheduler reads only the
   latest `status` — so a Prometheus + Grafana stack later is one more consumer
   (an exposition endpoint, or remote write, since daemons dial out and laptops
