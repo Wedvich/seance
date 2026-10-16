@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionEvent } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
+import { LaunchLedger } from "./launch-ledger.ts";
 import { parseProcStatPpid, parsePsParents } from "./peer.ts";
 import {
   createSessionEvents,
@@ -96,24 +100,74 @@ describe("newestQuota", () => {
 });
 
 describe("EndedTasks", () => {
-  test("ended and launched-but-gone tasks report; a live one never does", () => {
-    const ended = new EndedTasks(() => 0);
+  test("ended and launched-but-not-carried tasks report; one a session carries never does", async () => {
+    const ended = new EndedTasks(
+      LaunchLedger.memory(() => 5),
+      () => 0,
+    );
     ended.ended("a");
-    ended.launched("b");
-    ended.launched("c");
-    expect(ended.report(new Set(["c"]))).toEqual(["a", "b"]);
+    for (const id of ["b", "c"]) await (await ended.launch(id))(true);
+    expect(ended.report(new Set(["c"]))).toEqual({ ended: ["a", "b"], ledgerSince: 5 });
   });
 
-  test("bounded by age and by count", () => {
+  test("ended events are bounded by age and by count", () => {
     const clock = { now: 0 };
-    const ended = new EndedTasks(() => clock.now);
+    const ended = new EndedTasks(LaunchLedger.memory(), () => clock.now);
     ended.ended("old");
     clock.now = ENDED_TTL_MS + 1;
     for (let i = 0; i <= ENDED_MAX; i++) ended.ended(`t${i}`);
-    const report = ended.report(new Set());
+    const report = ended.report(new Set()).ended;
     expect(report).toHaveLength(ENDED_MAX);
     expect(report).not.toContain("old");
     expect(report).not.toContain("t0");
+  });
+
+  test("a launch that never ran leaves the ledger; task_running's earlier launch stays", async () => {
+    const ended = new EndedTasks(LaunchLedger.memory());
+    await (
+      await ended.launch("refused")
+    )(false);
+    await (
+      await ended.launch("dup")
+    )(true);
+    await (
+      await ended.launch("dup")
+    )(false);
+    expect(ended.report(new Set()).ended).toEqual(["dup"]);
+  });
+
+  test("settled waits for every launch in flight, one begun while waiting included", async () => {
+    const ended = new EndedTasks(LaunchLedger.memory());
+    const first = await ended.launch("a");
+    let done = false;
+    const waiting = (async () => {
+      await ended.settled();
+      done = true;
+    })();
+    const second = ended.launch("b");
+    await first(true);
+    await Bun.sleep(0);
+    expect(done).toBe(false);
+    await (
+      await second
+    )(true);
+    await waiting;
+    expect(done).toBe(true);
+  });
+
+  test("a ledger that cannot record refuses the launch and holds nothing back", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-ledger-"));
+    try {
+      // A directory where the file should be: every write fails.
+      const path = join(dir, "launched.json");
+      await mkdir(join(path, "x"), { recursive: true });
+      const ended = new EndedTasks(await LaunchLedger.open(path));
+      await expect(ended.launch("t1")).rejects.toThrow();
+      await ended.settled();
+      expect(ended.report(new Set()).ended).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

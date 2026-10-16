@@ -167,7 +167,10 @@ function fencedStore(inner: QueueStore, term: number, live: () => boolean): Queu
 
 function sessionsOf(reply: SessionsResponse | ErrorResponse | Unreachable): TaskSessionsReply {
   if ("ok" in reply) return reply;
-  return { ok: true, sessions: reply.sessions, ...(reply.ended === undefined ? {} : { ended: reply.ended }) };
+  const { sessions, ended, ledgerSince } = reply;
+  // A proof that does not parse proves nothing: the task then fails rather than risk a twin.
+  const proof = typeof ledgerSince === "number" && Number.isFinite(ledgerSince) ? { ledgerSince } : {};
+  return { ok: true, sessions, ...(ended === undefined ? {} : { ended }), ...proof };
 }
 
 interface TermFleetOpts {

@@ -22,7 +22,7 @@ import {
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
-import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend } from "./backend.ts";
+import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
 import { log } from "./log.ts";
 
 export interface HandlerContext {
@@ -41,14 +41,25 @@ export interface HandlerContext {
   /** The local metrics store's read; absent, a `metrics` request is answered with a code, not dropped. */
   readonly metrics?: (request: MetricsRequest) => readonly MetricsSeries[];
   /**
-   * Task ids whose sessions ended recently and no live pane runs (`EndedTasks`),
-   * for the `sessions` reply's `ended`; absent, the field is left off.
+   * Task launches (`EndedTasks`): a spawn with a task id is recorded here before
+   * it runs, and the `sessions` reply's `ended` and `ledgerSince` come from it.
+   * Absent, spawns record nothing and neither field is sent.
    */
-  readonly endedTasks?: () => Promise<readonly string[]>;
-  /** Told of every task a spawn here launched, so it reads as ended once its pane is gone. */
-  readonly taskLaunched?: (taskId: string) => void;
+  readonly tasks?: TaskLaunches;
   /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
+}
+
+/** What the handlers need of `EndedTasks` (`session-events.ts`). */
+export interface TaskLaunches {
+  /** Write-ahead: throws when the task cannot be recorded, and the spawn then must not run. */
+  readonly launch: (taskId: string) => Promise<(launched: boolean) => Promise<void>>;
+  /** Resolves once no launch is in flight. */
+  readonly settled: () => Promise<void>;
+  readonly report: (carried: ReadonlySet<string>) => {
+    readonly ended: readonly string[];
+    readonly ledgerSince: number;
+  };
 }
 
 export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
@@ -102,9 +113,31 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
   await audit.request(payload);
+  let settle: ((launched: boolean) => Promise<void>) | undefined;
+  if (payload.taskId !== undefined && ctx.tasks !== undefined) {
+    try {
+      settle = await ctx.tasks.launch(payload.taskId);
+    } catch (err) {
+      // Launched unrecorded, a lost reply could later read as proof it never ran.
+      log.error(`spawn refused: could not record task ${quote(payload.taskId)} before launching it: ${String(err)}`);
+      await audit.failed("launch_error");
+      return {
+        ok: false,
+        code: "launch_error",
+        message: `could not record the task before launching it: ${String(err)}`,
+      };
+    }
+  }
   try {
-    const outcome = await ctx.backend.spawn(payload, ctx.getRepos());
-    if (payload.taskId !== undefined) ctx.taskLaunched?.(payload.taskId);
+    let outcome: SpawnOutcome;
+    try {
+      outcome = await ctx.backend.spawn(payload, ctx.getRepos());
+    } catch (err) {
+      // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
+      await settle?.(!(err instanceof SpawnFailure) || err.code === "task_running");
+      throw err;
+    }
+    await settle?.(true);
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
@@ -192,12 +225,18 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
   await ctx.auditSink(`audit request origin=${origin} op=${quote(op)} id=${quote(id)}`);
 }
 
+/**
+ * `ended` is reckoned from this reply's own `sessions`, not a second tmux read:
+ * a session ending between two reads would otherwise be in neither, which is
+ * what proves a spawn never landed.
+ */
 async function listSessions(ctx: HandlerContext): Promise<SessionsResponse> {
-  const [sessions, ended] = await Promise.all([
-    ctx.backend.sessions(ctx.getRepos()),
-    ctx.endedTasks?.() ?? Promise.resolve(undefined),
-  ]);
-  return { sessions, at: Date.now(), ...(ended === undefined || ended.length === 0 ? {} : { ended }) };
+  await ctx.tasks?.settled();
+  const sessions = await ctx.backend.sessions(ctx.getRepos());
+  const at = Date.now();
+  if (ctx.tasks === undefined) return { sessions, at };
+  const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
+  return { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
 }
 
 /** The three ops the scheduler dispatches, typed, for a caller inside this process. */

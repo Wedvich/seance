@@ -34,7 +34,8 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { createSessionEvents, EndedTasks, listPanePids, reportEnded, SessionQuota } from "./session-events.ts";
+import { createSessionEvents, EndedTasks, listPanePids, SessionQuota } from "./session-events.ts";
+import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
@@ -103,6 +104,23 @@ export interface SelfUpdateOpts {
 function warnRejected(scan: ExclaveScan): void {
   if (scan.rejected.length === 0) return;
   log.warn(`~/.exclaves: skipped ${scan.rejected.map((line) => JSON.stringify(line)).join(", ")}`);
+}
+
+/**
+ * One per ledger file per process: a config reload restarts `startDaemon` in
+ * process while the outgoing instance may still be mid-spawn, and two ledgers
+ * over one file would each overwrite the other's launches — or answer
+ * `sessions` without waiting for the other's spawn.
+ */
+const endedTasksByLedger = new Map<string, Promise<EndedTasks>>();
+
+function endedTasksFor(path: string): Promise<EndedTasks> {
+  let tasks = endedTasksByLedger.get(path);
+  if (tasks === undefined) {
+    tasks = LaunchLedger.open(path).then((ledger) => new EndedTasks(ledger));
+    endedTasksByLedger.set(path, tasks);
+  }
+  return tasks;
 }
 
 /** Wires config/state/scan/handlers into a running relay client. */
@@ -242,7 +260,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // ended tasks into the `sessions` reply, and task sessions' states go to the
   // leader. Built before the handler context, which reads the two stores.
   const sessionQuota = new SessionQuota();
-  const endedTasks = new EndedTasks();
+  const endedTasks = await endedTasksFor(launchLedgerPath());
 
   // One context, a handler per inbound surface. The relay leg and the local op
   // socket share the backend, the repo set and the audit sink, and differ only
@@ -254,8 +272,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     rescan,
     auditSink: daemonSink,
     metrics: (request) => metrics.query(request),
-    endedTasks: () => reportEnded(endedTasks),
-    taskLaunched: (taskId) => endedTasks.launched(taskId),
+    tasks: endedTasks,
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {

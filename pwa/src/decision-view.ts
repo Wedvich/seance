@@ -212,8 +212,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "done":
       return `It finished${place}.`;
     case "failed":
-      return `It didn't take${place}.`;
+      return task.failure?.code === "dispatch_unconfirmed"
+        ? `Never confirmed${place} — it may have started there.`
+        : `It didn't take${place}.`;
     case "cancelled":
-      return "Cancelled.";
+      return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";
   }
 }

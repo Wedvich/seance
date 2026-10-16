@@ -561,7 +561,19 @@ function parseAssignment(value: unknown): Assignment | null {
  */
 export function parseTask(value: unknown): Task | null {
   if (!isRecord(value)) return null;
-  const { id, state, createdAt, spec, assignment, reservation, decision, failure, absentSince } = value;
+  const {
+    id,
+    state,
+    createdAt,
+    spec,
+    assignment,
+    reservation,
+    decision,
+    failure,
+    absentSince,
+    reservedAt,
+    leftRunning,
+  } = value;
   if (typeof id !== "string" || !isFiniteNumber(createdAt)) return null;
   const known = TASK_STATES.find((s) => s === state);
   if (known === undefined || !isRecord(spec)) return null;
@@ -572,6 +584,8 @@ export function parseTask(value: unknown): Task | null {
   const record = decision === undefined ? undefined : parseDecision(decision);
   if (placed === null || reserved === null || record === null) return null;
   if (absentSince !== undefined && !isFiniteNumber(absentSince)) return null;
+  if (reservedAt !== undefined && !isFiniteNumber(reservedAt)) return null;
+  if (leftRunning !== undefined && leftRunning !== true) return null;
   let failed: Task["failure"];
   if (failure !== undefined) {
     if (!isRecord(failure) || typeof failure["code"] !== "string" || typeof failure["message"] !== "string")
@@ -588,6 +602,8 @@ export function parseTask(value: unknown): Task | null {
     ...(record === undefined ? {} : { decision: record }),
     ...(failed === undefined ? {} : { failure: failed }),
     ...(absentSince === undefined ? {} : { absentSince }),
+    ...(reservedAt === undefined ? {} : { reservedAt }),
+    ...(leftRunning === undefined ? {} : { leftRunning }),
   };
 }
 

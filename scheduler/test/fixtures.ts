@@ -81,6 +81,11 @@ export class FakeFleet implements Fleet {
   readonly running = new Map<string, SessionEntry[]>();
   /** Task ids each daemon would report in `sessions`' `ended`. */
   readonly ended = new Map<string, string[]>();
+  /**
+   * Each daemon's `ledgerSince`; null is a daemon that predates the ledger. A
+   * day before `NOW` unless set: a ledger that long predates every reservation.
+   */
+  readonly ledgerSince = new Map<string, number | null>();
   sessionsReply: ((deviceId: string) => TaskSessionsReply) | null = null;
   #pane = 0;
 
@@ -132,8 +137,16 @@ export class FakeFleet implements Fleet {
   async sessions(deviceId: string): Promise<TaskSessionsReply> {
     this.sessionCalls.push(deviceId);
     if (this.sessionsReply !== null) return this.sessionsReply(deviceId);
+    // As the relay answers a request to a machine with no socket.
+    if (!this.fleet.some((m) => m.deviceId === deviceId && m.connected)) return unreachable;
     const ended = this.ended.get(deviceId);
-    return { ok: true, sessions: this.running.get(deviceId) ?? [], ...(ended === undefined ? {} : { ended }) };
+    const since = this.ledgerSince.has(deviceId) ? this.ledgerSince.get(deviceId) : NOW - 86_400_000;
+    return {
+      ok: true,
+      sessions: this.running.get(deviceId) ?? [],
+      ...(ended === undefined ? {} : { ended }),
+      ...(since === null || since === undefined ? {} : { ledgerSince: since }),
+    };
   }
 
   async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {

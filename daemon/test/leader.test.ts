@@ -12,6 +12,7 @@ import {
   parseSubmitReply,
   QUEUE_PROMPT_PREVIEW,
   RelayClient,
+  REPLAY_WINDOW_MS,
   RequestFailure,
   SCHEDULER_ID,
   seal,
@@ -509,6 +510,49 @@ describe("leader in the daemon", () => {
     // Both sessions are gone, so both tasks ended while no leader was listening.
     expect(ended).toEqual({ remote: "done", self: "done" });
     expect(lines.some((line) => line.includes('audit request origin=leader op="sessions"'))).toBe(true);
+  });
+
+  test("takeover settles a never-confirmed task on its machine's ledger — carried through the relay, and read locally", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const { daemon, deviceId } = await startLeaderDaemon(relay, store);
+    try {
+      const unconfirmed = (id: string, on: string, reservedAt: number): Promise<unknown> =>
+        store.put(id, 0, task(id, { state: "lost", reservedAt, assignment: { deviceId: on, ...target } }));
+      await unconfirmed("on-b", "b", Date.now());
+      await unconfirmed("on-c", "c", Date.now());
+      // Ahead of this daemon's own ledger by more than the skew: ready only if its `ledgerSince` arrives.
+      await unconfirmed("on-self", deviceId, Date.now() + REPLAY_WINDOW_MS + 60_000);
+
+      relay.lead(deviceId, 3);
+      // `b` proves its ledger predates the reservation; `c` sends a stamp that is no number, which proves nothing.
+      const proofs: Record<string, unknown> = { b: Date.now() - 3_600_000, c: "yesterday" };
+      for (let i = 0; i < 2; i++) {
+        // oxlint-disable-next-line no-await-in-loop -- one request per machine, answered as it comes
+        const asked = await relay.appFrames.next(5_000);
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const request = await open(key, asked.env);
+        const from = asked.env.to;
+        const payload = { sessions: [], at: Date.now(), ledgerSince: proofs[from] };
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const reply = await seal(
+          key,
+          { to: SCHEDULER_ID, from },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "sessions", re: request.id, payload },
+        );
+        relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: reply }));
+      }
+      await daemon.leader.settled();
+      expect((await store.get("on-b"))?.body.state).toBe("ready");
+      expect((await store.get("on-c"))?.body).toMatchObject({
+        state: "failed",
+        failure: { code: "dispatch_unconfirmed" },
+      });
+      expect((await store.get("on-self"))?.body.state).toBe("ready");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
   });
 
   test("a session event another daemon sends the scheduler reaches the leader's state, from the machine it names", async () => {

@@ -8,14 +8,18 @@ import {
   type Plain,
   type RepoEntry,
   type SessionEntry,
+  type SessionsResponse,
+  type SpawnRequest,
   type SpawnResponse,
 } from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
-import { createHandler, type HandlerContext } from "./handlers.ts";
+import { createHandler, type HandlerContext, type TaskLaunches } from "./handlers.ts";
+import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
+import { EndedTasks } from "./session-events.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -217,6 +221,111 @@ describe("a spawn for a task already running", () => {
     await createHandler(ctx)(spawnNope());
     expect(logged()).not.toContain("task=");
     expect(logged()).not.toContain("target=");
+  });
+});
+
+/** A backend whose sessions are whatever `live` holds, and whose spawn runs `onSpawn` first. */
+function taskBackend(onSpawn: (spawn: SpawnRequest) => Promise<void>) {
+  const live: SessionEntry[] = [];
+  const backend: SessionBackend = {
+    spawn: async (spawn) => {
+      await onSpawn(spawn);
+      live.push({ id: `%${live.length + 1}`, window: "w", repo: "myrepo", path: "/p", taskId: spawn.taskId });
+      return { window: "w", path: "/p", registered: true, handle: "@1" };
+    },
+    sessions: () => Promise.resolve([...live]),
+    doctor: () => Promise.resolve([]),
+  };
+  return { backend, live };
+}
+
+/** A backend whose every spawn fails with `failure`. */
+function failing(failure: Error): SessionBackend {
+  return {
+    spawn: () => Promise.reject(failure),
+    sessions: () => Promise.resolve([]),
+    doctor: () => Promise.resolve([]),
+  };
+}
+
+const spawnTask = (taskId: string): Plain => request("spawn", { repo: "myrepo", mode: "here", taskId });
+
+async function sessionsOf(handle: (plain: Plain) => Promise<Plain | null>): Promise<SessionsResponse> {
+  const reply = await handle(request("sessions", {}));
+  return reply?.payload as SessionsResponse;
+}
+
+describe("a task's launch is recorded before it runs", () => {
+  test("on the ledger as the spawn runs; listed in `ended` once no session carries it, beside the ledger's since", async () => {
+    const ledger = LaunchLedger.memory(() => 1_000);
+    const tasks = new EndedTasks(ledger);
+    let seen: readonly string[] = [];
+    const { backend, live } = taskBackend(() => {
+      seen = ledger.ids();
+      return Promise.resolve();
+    });
+    const handle = createHandler({ ...ctx, backend, tasks });
+    await handle(spawnTask("t-1"));
+    expect(seen).toEqual(["t-1"]);
+
+    let reply = await sessionsOf(handle);
+    expect(reply.ended).toBeUndefined();
+    expect(reply.ledgerSince).toBe(1_000);
+    live.length = 0;
+    reply = await sessionsOf(handle);
+    expect(reply.ended).toEqual(["t-1"]);
+  });
+
+  test("a refusal leaves the ledger; task_running and a crash keep it", async () => {
+    const tasks = new EndedTasks(LaunchLedger.memory());
+    await createHandler({ ...ctx, backend: failing(new SpawnFailure("repo_not_found", "gone")), tasks })(
+      spawnTask("refused"),
+    );
+    await createHandler({ ...ctx, backend: failing(new SpawnFailure("task_running", "already", "%3")), tasks })(
+      spawnTask("dup"),
+    );
+    await createHandler({ ...ctx, backend: failing(new Error("boom")), tasks })(spawnTask("crashed"));
+    expect((await sessionsOf(createHandler({ ...ctx, tasks }))).ended).toEqual(["dup", "crashed"]);
+  });
+
+  test("a sessions reply waits for a spawn in flight, so the task is never in neither list", async () => {
+    const gate = Promise.withResolvers<void>();
+    const { backend } = taskBackend(() => gate.promise);
+    const handle = createHandler({ ...ctx, backend, tasks: new EndedTasks(LaunchLedger.memory()) });
+    const spawning = handle(spawnTask("t-1"));
+    await Bun.sleep(0);
+    let answered: SessionsResponse | null = null;
+    const listing = (async () => {
+      answered = await sessionsOf(handle);
+    })();
+    await Bun.sleep(10);
+    expect(answered).toBeNull();
+    gate.resolve();
+    await Promise.all([spawning, listing]);
+    expect(answered).toMatchObject({ sessions: [{ taskId: "t-1" }] });
+  });
+
+  test("a launch the ledger cannot record is refused before the backend runs", async () => {
+    let spawned = false;
+    const { backend } = taskBackend(() => {
+      spawned = true;
+      return Promise.resolve();
+    });
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("disk full")),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(spawnTask("t-1"));
+    expect(reply?.payload).toMatchObject({ ok: false, code: "launch_error" });
+    expect(spawned).toBe(false);
+    expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
+  });
+
+  test("a daemon keeping no launches sends neither field", async () => {
+    const reply = await sessionsOf(createHandler(ctx));
+    expect(reply.ended).toBeUndefined();
+    expect(reply.ledgerSince).toBeUndefined();
   });
 });
 

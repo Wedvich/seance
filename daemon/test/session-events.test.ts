@@ -13,7 +13,6 @@ import {
   createSessionEvents,
   EndedTasks,
   listPanePids,
-  reportEnded,
   SESSION_EVENT_KIND,
   SESSION_EVENT_VERSION,
   SessionQuota,
@@ -93,7 +92,7 @@ beforeAll(async () => {
       getRepos: () => [],
       rescan: () => Promise.resolve([]),
       auditSink: () => {},
-      endedTasks: () => reportEnded(ended),
+      tasks: ended,
     },
     "local",
   );
@@ -212,6 +211,7 @@ describe("binding", () => {
     await tmuxOk(["kill-pane", "-t", forger.pane]);
     const reply = await localRequest<SessionsResponse>("sessions", {}, { path: sockPath });
     expect("sessions" in reply ? reply.ended : undefined).toEqual(["task-a"]);
+    expect("sessions" in reply ? reply.ledgerSince : undefined).toEqual(expect.any(Number));
   });
 
   test("a sender in no pane is refused, whatever pane it names", async () => {

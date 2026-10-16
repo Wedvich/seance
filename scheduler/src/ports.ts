@@ -61,10 +61,15 @@ export type TaskSessionsReply =
       readonly ok: true;
       readonly sessions: readonly SessionEntry[];
       /**
-       * `SessionsResponse.ended`: task ids whose sessions ran here and ended
-       * recently. Absent from older daemons, and when none ended.
+       * `SessionsResponse.ended`: task ids launched or ended here that no live
+       * pane carries. Absent from older daemons, and when there are none.
        */
       readonly ended?: readonly string[];
+      /**
+       * `SessionsResponse.ledgerSince`, the machine's clock: `ended` is complete
+       * for launches from here on. Absent from older daemons, which prove nothing.
+       */
+      readonly ledgerSince?: number;
     }
   | ErrorResponse
   | Unreachable;
