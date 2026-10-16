@@ -98,25 +98,16 @@ table gains rows.
 
 **Relay (`hub.ts`, `wire.ts`, `index.ts`)**
 
-- **Leadership.** `register` gains a plaintext `roles?: ["scheduler"]` — the one capability the
-  relay must read, since it is what it nominates on; an old daemon sends none and is never
-  nominated. **`roles` joins the signed message**, and so does any other register field the
-  relay comes to act on: `registerMessage` (`shared/src/identity.ts`) covers only
-  `seance-register|deviceId|ts`, so today a register's signature vouches for the route and for
-  nothing else in the frame. The extended message takes a new domain tag
-  (`seance-register-v2|deviceId|ts|roles`), so a v1 register still verifies — as a daemon with
-  no roles, never nominated. After every daemon connect, close and sweep the relay
-  re-evaluates: the leader is the capable connected daemon socket with the earliest
-  `connectedAt` (tie: lowest `deviceId`), where capable is signed `roles`; readers then
-  ignore a leader they cannot verify (Risks, _Leader capture_). **Nomination is a pure module**,
-  `relay/src/leadership.ts`: the candidates' `{ deviceId, roles, connectedAt }` and the
-  current leader in, the next leader out, with its own suite that needs no workerd. `hub.ts`
-  (580 lines already) only calls it from its connect, close and sweep paths and applies the
-  result. A change bumps `scheduler:term` (DO storage, monotonic) and sends `lead { term }` to
-  the new leader and `follow` to the old one if still connected. Term is a fencing token: a leader that
-  was demoted while partitioned still holds a socket and may still write, so every leader write
-  carries its term and the relay refuses a stale one with `not_leader`. Nomination is the only
-  election; daemons never vote.
+- **Leadership — landed 2026-10-16 (M2 item 2); DESIGN.md _Scheduler_, "Leadership", is the
+  record.** Signed `roles` on `register` (v2 domain tag; v1 registers roleless), nomination in
+  the pure `relay/src/leadership.ts` called from `hub.ts`'s register, close and sweep paths,
+  `scheduler:term` in DO storage, `lead`/`follow`, and the term fence. Decided while building
+  it, beyond what this plan said: a current leader keeps the role across its own reconnect
+  (the term still bumps, since its socket changed); `not_leader` is an `undeliverable` code,
+  answered by `iv` to an app-leg `msg` sent `from: "scheduler"` whose `term` is stale or
+  missing; and a daemon whose v2 register is refused alternates to v1, so one that updated ahead
+  of its relay is not locked out. Every leader write in M3 carries its term through the same
+  check.
 - **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
 version, env }]`, `store-put { key, expect, env, term? }` → `{ version }` or
   `version_conflict`, `store-delete { key, expect, term? }`. Values live at their key as
@@ -151,11 +142,10 @@ version, env }]`, `store-put { key, expect, env, term? }` → `{ version }` or
   registry push carries it for an offline machine, and a `register` clears it. Readers take
   quota from it, never pressure (Routing, _quota freshness_): `newestQuotaByAccount` folds it,
   and pressure goes through `liveStatus`, which answers only while `connected`.
-- Envelopes `to: "scheduler"` route to the leader's socket; no leader → `undeliverable { code:
-"offline" }` to apps, dropped for daemon-origin events. `SCHEDULER_ID = "scheduler"` is
-  reserved, refused by `register` like `"app"`/`"machines"`.
-- Registry push to apps gains `scheduler: { deviceId, term } | null` so the PWA can grey out
-  `auto` without a round trip.
+- Envelopes `to: "scheduler"`, the reserved `SCHEDULER_ID`, and the registry push's
+  `scheduler: { deviceId, term } | null` landed with leadership (above). The push's field is
+  null unless the recorded leader is connected; the app-role client does not read it yet (item
+  6).
 - **`status { env }`** (daemon→relay, landed in M1; DESIGN.md _Presence & identity_): the
   leader's app-role leg receives it like any app, from the registry push and as it arrives, so
   the routing loop reads the same snapshot the PWA renders.
@@ -422,7 +412,7 @@ queue yet.
 1. `scheduler/` library + in-memory fakes of `QueueStore` and `Fleet`; filter / score /
    sticky / reserve / record over fixtures. No wire change — depends only on M1's schema. Includes the layering test: nothing in `scheduler/`
    imports `daemon/`, and nothing in `daemon/` imports `scheduler/` except `leader.ts`.
-2. Relay leadership — `roles` on `register`, inside the signed message (v2 domain tag);
+2. **(Landed 2026-10-16.)** Relay leadership — `roles` on `register`, inside the signed message (v2 domain tag);
    nomination as the pure `relay/src/leadership.ts`, called from `hub.ts` on connect, close and
    sweep; `scheduler:term`, `lead`/`follow`,
    `not_leader` on a stale term, `scheduler: { deviceId,

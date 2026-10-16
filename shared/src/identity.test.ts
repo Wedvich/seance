@@ -71,6 +71,28 @@ describe("identity", () => {
     expect(await verifyRegister(claim, ts - REGISTER_FRESHNESS_MS - 1)).toBe("stale");
   });
 
+  // v2 is what makes `roles` something the relay can act on: a token holder
+  // relaying a captured register must not be able to add, drop or reorder them,
+  // and a v1 signature must never stand in for a frame that carries roles.
+  test("a v2 signature covers exactly its roles, and the two versions never verify as each other", async () => {
+    const identity = await identityFromSeed(generateIdentitySeed());
+    const ts = Date.now();
+    const claim = { deviceId: identity.deviceId, publicKey: identity.publicKey, ts };
+    const v2 = await signRegister(identity, ts, ["scheduler"]);
+    expect(await verifyRegister({ ...claim, sig: v2, roles: ["scheduler"] }, ts)).toBe("ok");
+    expect(await verifyRegister({ ...claim, sig: v2, roles: [] }, ts)).toBe("bad-signature");
+    expect(await verifyRegister({ ...claim, sig: v2, roles: ["scheduler", "x"] }, ts)).toBe("bad-signature");
+    expect(await verifyRegister({ ...claim, sig: v2 }, ts)).toBe("bad-signature");
+
+    const v1 = await signRegister(identity, ts);
+    expect(await verifyRegister({ ...claim, sig: v1 }, ts)).toBe("ok");
+    expect(await verifyRegister({ ...claim, sig: v1, roles: ["scheduler"] }, ts)).toBe("bad-signature");
+    expect(await verifyRegister({ ...claim, sig: v1, roles: [] }, ts)).toBe("bad-signature");
+
+    const ordered = await signRegister(identity, ts, ["a", "b"]);
+    expect(await verifyRegister({ ...claim, sig: ordered, roles: ["b", "a"] }, ts)).toBe("bad-signature");
+  });
+
   test("a key or signature of the wrong size, or not base64, is malformed rather than thrown", async () => {
     const identity = await identityFromSeed(generateIdentitySeed());
     const ts = Date.now();

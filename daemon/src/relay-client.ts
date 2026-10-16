@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  DAEMON_ROLES,
   ENVELOPE_MAX_CT_LENGTH,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
@@ -59,6 +60,16 @@ export class RelayClient {
   #attempt = 0;
   /** Whether the current socket reached `open` — a connect that failed outright must not reset backoff. */
   #opened = false;
+  /**
+   * Sign the next register v1, without roles. Flipped by each refusal, so a
+   * daemon that updated ahead of its relay — which verifies v1 only and refuses
+   * the v2 message — still registers, roleless, on the redial after; the one
+   * after that tries v2 again. A refusal with some other cause (a skewed clock)
+   * fails both alike, so alternating costs it nothing. Reset by any drop that
+   * was not a refusal, or a daemon admitted v1 would stay roleless after its
+   * relay is upgraded, until it restarted.
+   */
+  #signV1 = false;
   #stopped = false;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -142,13 +153,16 @@ export class RelayClient {
     // Signed fresh each time: the relay bounds the timestamp, so a frame built
     // once at start would stop verifying after a minute.
     const ts = Date.now();
+    // Every daemon may lead: the relay nominates among those that say so.
+    const roles = this.#signV1 ? undefined : [DAEMON_ROLES.scheduler];
     const frame: DaemonFrame = {
       t: "register",
       deviceId: identity.deviceId,
       info,
       key: identity.publicKey,
       ts,
-      sig: await signRegister(identity, ts),
+      sig: await signRegister(identity, ts, roles),
+      ...(roles === undefined ? {} : { roles }),
     };
     const ws = this.#ws;
     if (ws === null) return;
@@ -207,6 +221,7 @@ export class RelayClient {
     // per base interval, and the reason is logged because the close is the only
     // word the relay sends about it.
     const refused = reason === "register unverified";
+    this.#signV1 = refused ? !this.#signV1 : false;
     if (this.#opened && !refused) this.#attempt = 0;
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);
     const delay = Math.random() * capped; // full jitter
@@ -246,6 +261,17 @@ export class RelayClient {
       frame = JSON.parse(data) as RelayToDaemonFrame;
     } catch {
       log.warn("dropped non-JSON frame from relay");
+      return;
+    }
+    if (frame === null || typeof frame !== "object") {
+      log.warn("dropped non-object frame from relay");
+      return;
+    }
+    // Leadership is logged and nothing more until the scheduler runs here
+    // (docs/scheduler.md, M2 item 3); nothing in this process acts on it yet.
+    if (frame.t === "lead" || frame.t === "follow") {
+      const term = frame.t === "lead" && typeof frame.term === "number" ? ` term=${frame.term}` : "";
+      log.info(`relay says ${frame.t}${term}`);
       return;
     }
     // `typeof null === "object"`, so null has to be named: it would otherwise reach

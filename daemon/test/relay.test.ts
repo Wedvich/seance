@@ -104,7 +104,7 @@ async function registerWithRepo(relay: TestRelay, repoName: string): Promise<{ d
     const frame = await relay.registers.next();
     // The fake relay accepts anything; the real one would refuse an unsigned
     // or mis-signed register, so every one the daemon sends has to verify.
-    const claim = { deviceId: frame.deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig };
+    const claim = { deviceId: frame.deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig, roles: frame.roles };
     expect(await verifyRegister(claim, Date.now())).toBe("ok");
     const plain = await open(appKey, frame.info);
     const info = plain.payload as MachineInfo;
@@ -228,6 +228,33 @@ describe("daemon ↔ relay integration", () => {
       expect(payload.ok).toBe(false);
       if (!payload.ok) expect(payload.code).toBe("internal_error");
     } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  // Logged only until the scheduler runs on the daemon (M2 item 3) — but an
+  // unhandled frame must not cost the socket what it already does.
+  test("lead and follow from the relay are logged, and the socket keeps serving", async () => {
+    const relay = startTestRelay(TOKEN);
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId } = await registerWithRepo(relay, "myrepo");
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "lead", term: 7 }));
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "follow" }));
+
+      await appRequest(relay, deviceId, "sessions", {});
+      const response = await appReceive(relay);
+      expect((response.payload as SessionsResponse).sessions).toBeDefined();
+      expect(lines.some((line) => line.includes("relay says lead term=7"))).toBe(true);
+      expect(lines.some((line) => line.includes("relay says follow"))).toBe(true);
+    } finally {
+      console.log = realLog;
       daemon.stop();
       relay.stop();
     }
@@ -603,6 +630,58 @@ describe("daemon ↔ relay integration", () => {
       );
     } finally {
       console.log = realWarn;
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  // A v2 register is what lets this daemon lead, but a relay a deploy behind
+  // verifies only v1 and refuses it. Alternating on refusal lets such a daemon
+  // in, roleless, without giving up the role for good.
+  test("a register signs its roles, and each refusal flips the next between v2 and v1", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.refuseRegisters = true;
+    const daemon = await startTestDaemon(relay.url, { maxBackoffMs: 50 });
+    try {
+      const seen: (readonly string[] | undefined)[] = [];
+      for (let i = 0; i < 3; i++) {
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive one per redial, in order
+        const frame = await relay.registers.next();
+        const claim = { deviceId: frame.deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig };
+        // oxlint-disable-next-line no-await-in-loop -- each frame is checked as it arrives
+        expect(await verifyRegister({ ...claim, roles: frame.roles }, Date.now())).toBe("ok");
+        seen.push(frame.roles);
+      }
+      expect(seen).toEqual([["scheduler"], undefined, ["scheduler"]]);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  // Admitted v1 by a relay a deploy behind, a daemon must try v2 again once that
+  // socket goes for any other reason — or the role stays lost after the relay
+  // catches up, until the daemon restarts.
+  test("a drop that was not a refusal signs the next register v2 again", async () => {
+    const relay = startTestRelay(TOKEN);
+    // Counted, not flipped from here: the redial can beat the test's own await.
+    relay.refuseNextRegisters = 1;
+    const daemon = await startTestDaemon(relay.url, { maxBackoffMs: 50, pingIntervalMs: 50, pongTimeoutMs: 50 });
+    try {
+      expect((await relay.registers.next()).roles).toEqual(["scheduler"]);
+      expect((await relay.registers.next()).roles).toBeUndefined();
+      const admitted = relay.registerConnections[1];
+      // A missed pong closes the socket from the daemon's side: a drop with no refusal.
+      relay.autoPong = false;
+      // Past any re-register the admitted socket sent (a repo scan landing), to the redial's.
+      let after = await relay.registers.next();
+      for (let i = 2; relay.registerConnections[i] === admitted; i++) {
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive in order
+        after = await relay.registers.next();
+      }
+      relay.autoPong = true;
+      expect(after.roles).toEqual(["scheduler"]);
+    } finally {
       daemon.stop();
       relay.stop();
     }

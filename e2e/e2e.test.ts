@@ -7,6 +7,7 @@ import {
   newestQuotaByAccount,
   type RegistryView,
   type RelayToAppFrame,
+  type SchedulerLeader,
   type SessionEntry,
   type SpawnResponse,
 } from "@seance/shared";
@@ -660,6 +661,71 @@ describe("two daemons ↔ relay ↔ app", () => {
     } finally {
       app.stop();
       await second.stop();
+    }
+  });
+});
+
+/**
+ * The leader the latest registry push named, read off a bare app socket: the
+ * app's RelayClient does not model leadership yet (M2 item 6).
+ */
+function watchLeader(): {
+  readonly current: () => SchedulerLeader | null;
+  readonly connected: (deviceId: string) => boolean;
+  readonly close: () => void;
+} {
+  const url = new URL(wsUrl(stack.relay, "/app"));
+  url.searchParams.set("t", TOKEN);
+  const ws = new WebSocket(url.href, { perMessageDeflate: false });
+  let latest: Extract<RelayToAppFrame, { t: "registry" }> | null = null;
+  ws.addEventListener("message", (event) => {
+    if (typeof event.data !== "string" || event.data === "pong") return;
+    const frame = JSON.parse(event.data) as RelayToAppFrame;
+    if (frame.t === "registry") latest = frame;
+  });
+  return {
+    current: () => latest?.scheduler ?? null,
+    connected: (deviceId) => latest?.entries.some((entry) => entry.deviceId === deviceId && entry.connected) === true,
+    close: () => ws.close(),
+  };
+}
+
+describe("scheduler leadership ↔ real daemons", () => {
+  test("real daemons are nominated, a stopped leader hands over under a higher term, and a returning one follows", async () => {
+    const watch = watchLeader();
+    const second = await stack.startSecondDaemon({ name: "LeaderBox" });
+    let down = false;
+    try {
+      // The suite's own daemon has been connected longest.
+      await pollUntil(() => watch.current()?.deviceId === stack.deviceId, "the suite's daemon to lead");
+      const term = watch.current()?.term ?? 0;
+
+      // Stopped and kept down until the handover shows, not restarted outright:
+      // a redial that registers before the relay has processed its old socket's
+      // close finds itself still a candidate, and a current leader keeps the
+      // role across its own reconnect — on a fast runner, every time.
+      stack.daemon.stop();
+      down = true;
+      await pollUntil(
+        () => watch.current()?.deviceId === second.deviceId && (watch.current()?.term ?? 0) > term,
+        "the second daemon to take over",
+        10_000,
+      );
+      const handedOver = watch.current()?.term ?? 0;
+      await stack.restartDaemon();
+      down = false;
+      // The first daemon is back, and connected later: it follows.
+      await pollUntil(() => watch.connected(stack.deviceId), "the restarted daemon to reconnect", 10_000);
+      expect(watch.current()).toEqual({ deviceId: second.deviceId, term: handedOver });
+      await pollUntil(
+        async () => (await Bun.file(second.log).text()).includes(`relay says lead term=${handedOver}`),
+        "the second daemon to log its lead",
+      );
+    } finally {
+      // The suites after this one need the stack's own daemon up.
+      if (down) await stack.restartDaemon();
+      await second.stop();
+      watch.close();
     }
   });
 });

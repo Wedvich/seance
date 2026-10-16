@@ -170,6 +170,8 @@ function wrap(ws: WebSocket): Client {
         const remaining = Math.ceil((deadline - Bun.nanoseconds()) / 1e6);
         if (remaining <= 0) throw new Error(`no "${t}" frame within ${timeoutMs}ms`);
         const text = await frames.next(remaining);
+        // A heartbeating socket's pongs are bare strings, not frames.
+        if (text === "pong") continue;
         const frame = JSON.parse(text) as { t: string };
         if (frame.t === t) return frame as T;
       }
@@ -182,6 +184,7 @@ function wrap(ws: WebSocket): Client {
         if (remaining <= 0) return;
         const text = await frames.next(remaining).catch(() => null);
         if (text === null) return;
+        if (text === "pong") continue;
         // Registry pushes are background traffic; only the named type is a failure.
         if ((JSON.parse(text) as { t: string }).t === t) throw new Error(`expected no "${t}" frame, got ${text}`);
       }
@@ -279,7 +282,7 @@ export async function register(
     info: over.info ?? envelope(APP_ID, deviceId),
     key: identity.publicKey,
     ts,
-    sig: await signRegister(identity, ts),
+    sig: await signRegister(identity, ts, over.roles),
     ...over,
   };
 }

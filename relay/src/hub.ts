@@ -3,22 +3,42 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
   MACHINES_ID,
+  SCHEDULER_ID,
   STATUS_MIN_INTERVAL_MS,
   quote,
   verifyRegister,
   type DaemonFrame,
+  type DaemonRole,
   type Envelope,
   type RegistryEntry,
   type RegistryView,
   type RelayToAppFrame,
   type RelayToDaemonFrame,
+  type SchedulerLeader,
   type UndeliverableCode,
 } from "@seance/shared";
 import { roleForPath, type Role } from "./auth.ts";
 import type { Env } from "./env.ts";
+import { knownRoles, nominate } from "./leadership.ts";
 import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
+
+/**
+ * The scheduler leader record. In storage rather than on an attachment because
+ * `term` must outlive every socket — it is monotonic for the life of the DO, so
+ * a term a demoted leader holds can never come round again.
+ */
+const LEADER_KEY = "scheduler:term";
+
+interface LeaderRecord {
+  readonly term: number;
+  readonly deviceId: string | null;
+  /** The leader socket's accept time: a new socket under the same id is a new term. */
+  readonly connectedAt: number | null;
+}
+
+const NO_LEADER: LeaderRecord = { term: 0, deviceId: null, connectedAt: null };
 
 /**
  * One shape for every routing line. `iv` is the only per-message identifier a
@@ -116,6 +136,8 @@ interface SocketStatus {
 
 interface SocketIdentity {
   readonly deviceId: string;
+  /** Known roles a verified v2 register signed; absent on attachments from before roles existed. */
+  readonly roles?: readonly DaemonRole[];
   /** Start of the current register-rate window, ms. */
   readonly windowStart: number;
   readonly registers: number;
@@ -190,7 +212,10 @@ export class Hub implements DurableObject {
       if (now - lastAlive > this.#silenceLimitMs) swept.set(ws, lastAlive);
     }
     await Promise.all([...swept].map(([ws, lastAlive]) => this.#sweep(ws, lastAlive, now)));
-    if (swept.size > 0) await this.#pushRegistry(undefined, [...swept.keys()]);
+    if (swept.size > 0) {
+      await this.#renominate([...swept.keys()]);
+      await this.#pushRegistry(undefined, [...swept.keys()]);
+    }
     if (this.#ctx.getWebSockets("daemon").some((ws) => !swept.has(ws))) {
       await this.#ctx.storage.setAlarm(now + this.#sweepIntervalMs);
     }
@@ -302,7 +327,14 @@ export class Hub implements DurableObject {
       await this.#forget(ws, frame.deviceId);
       return;
     }
-    if (frame.env.from !== APP_ID) {
+    if (frame.env.from === SCHEDULER_ID) {
+      if (!(await this.#holdsTerm(frame.term))) {
+        const notice: RelayToAppFrame = { t: "undeliverable", to: frame.env.to, iv: frame.env.iv, code: "not_leader" };
+        const err = trySend(ws, JSON.stringify(notice));
+        wireLog(err === null ? "undeliverable" : "dropped", frame.env, ` code=not_leader term=${frame.term ?? "none"}`);
+        return;
+      }
+    } else if (frame.env.from !== APP_ID) {
       console.log(`wire dropped iv=${quote(frame.env.iv)} from=${quote(frame.env.from)} reason=not-app-id`);
       return;
     }
@@ -371,7 +403,10 @@ export class Hub implements DurableObject {
     // minute per socket. The id is the hash of the key and the signature proves
     // the key, so passing this is proof the sender is the machine the id names —
     // the one thing a blind relay can know about a register.
-    const verdict = await verifyRegister({ deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig }, now);
+    const verdict = await verifyRegister(
+      { deviceId, publicKey: frame.key, ts: frame.ts, sig: frame.sig, roles: frame.roles },
+      now,
+    );
     if (verdict !== "ok") {
       console.log(`refused register from ${deviceId}: ${verdict}`);
       // Closed, not left open: a daemon re-registers on connect only, and the
@@ -400,11 +435,13 @@ export class Hub implements DurableObject {
     // the status a daemon sends right after registering is let through.
     ws.serializeAttachment({
       connectedAt: attachment.connectedAt,
-      identity: { deviceId, ...rate },
+      identity: { deviceId, roles: knownRoles(frame.roles ?? []), ...rate },
     } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
     }
+    // Ahead of the put: the socket routes from here on, so it can lead from here on.
+    await this.#renominate([]);
     if (!(await this.#put(key, { deviceId, info, lastSeen: now }))) return;
     console.log(`registered ${deviceId}`);
     await this.#pushRegistry();
@@ -469,11 +506,17 @@ export class Hub implements DurableObject {
       return;
     }
 
+    // The scheduler address resolves to whoever leads now; the envelope keeps
+    // `to: "scheduler"`, which the AAD binds.
+    const addressee = env.to === SCHEDULER_ID ? (await this.#leaderRecord()).deviceId : env.to;
     // Newest first: a re-registering daemon briefly leaves two sockets on one
     // deviceId — `superseded` closes the loser, but it stays listed until its
     // close handler runs — and picking the first match can pick the dead one
     // while the live socket sits behind it.
-    const targets = this.#daemonsNewestFirst([]).filter(({ attachment }) => attachment?.identity?.deviceId === env.to);
+    const targets =
+      addressee === null
+        ? []
+        : this.#daemonsNewestFirst([]).filter(({ attachment }) => attachment?.identity?.deviceId === addressee);
     const text = JSON.stringify({ t: "msg", env } satisfies RelayToDaemonFrame);
     for (const { ws: target } of targets) {
       // A failure falls through to the next candidate and, past the last, to
@@ -495,8 +538,10 @@ export class Hub implements DurableObject {
       wireLog("dropped", env, " reason=unroutable");
       return;
     }
-    const known = await this.#ctx.storage.get<RegistryEntry>(ENTRY_PREFIX + env.to);
-    const code: UndeliverableCode = known === undefined ? "unknown" : "offline";
+    // No leader is `offline`, never `unknown`: the address is real, and one will be back.
+    const known =
+      env.to === SCHEDULER_ID || (await this.#ctx.storage.get<RegistryEntry>(ENTRY_PREFIX + env.to)) !== undefined;
+    const code: UndeliverableCode = known ? "offline" : "unknown";
     // Correlated by `iv`: the request `id` is inside the ciphertext.
     const notice: RelayToAppFrame = { t: "undeliverable", to: env.to, iv: env.iv, code };
     // The `await` above yields the isolate — the window the app tab vanishes in.
@@ -514,6 +559,7 @@ export class Hub implements DurableObject {
     if (entry !== undefined) {
       await this.#put(key, this.#leftBy(ws, entry, Date.now()));
     }
+    await this.#renominate([ws]);
     await this.#pushRegistry(undefined, [ws]);
   }
 
@@ -544,7 +590,13 @@ export class Hub implements DurableObject {
   async #pushRegistry(targets?: readonly WebSocket[], exclude: readonly WebSocket[] = []): Promise<void> {
     const apps = targets ?? this.#ctx.getWebSockets("app");
     if (apps.length === 0) return;
-    const frame: RelayToAppFrame = { t: "registry", entries: await this.#views(exclude) };
+    // Once per push: every attachment carries a ~1 KiB `status` to decode.
+    const live = this.#liveSockets(exclude);
+    const frame: RelayToAppFrame = {
+      t: "registry",
+      entries: await this.#views(live),
+      scheduler: await this.#schedulerView(live),
+    };
     const text = JSON.stringify(frame);
     // Per-socket: a throw would escape the caller (`#register`, `alarm`,
     // `webSocketClose`) and starve every app behind it of its only presence signal.
@@ -554,9 +606,8 @@ export class Hub implements DurableObject {
     }
   }
 
-  async #views(exclude: readonly WebSocket[]): Promise<RegistryView[]> {
+  async #views(live: ReadonlyMap<string, SocketAttachment>): Promise<RegistryView[]> {
     const stored = await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX });
-    const live = this.#liveSockets(exclude);
     const views: RegistryView[] = [];
     // Spelled out rather than spread: this is the wire projection of an entry.
     for (const entry of stored.values()) {
@@ -589,6 +640,68 @@ export class Hub implements DurableObject {
       if (!live.has(deviceId)) live.set(deviceId, attachment);
     }
     return live;
+  }
+
+  async #leaderRecord(): Promise<LeaderRecord> {
+    return (await this.#ctx.storage.get<LeaderRecord>(LEADER_KEY)) ?? NO_LEADER;
+  }
+
+  /**
+   * Re-runs nomination (`leadership.ts`) over the live sockets and applies the
+   * answer. Writes only on a change — a new leader, none, or the leader's own
+   * new socket — so a close or sweep that moves nothing costs a read. Every
+   * change bumps the term, so whatever the previous holder still has in flight
+   * is refused `not_leader`. `exclude` as for `#pushRegistry`.
+   */
+  async #renominate(exclude: readonly WebSocket[]): Promise<void> {
+    const live = this.#liveSockets(exclude);
+    const record = await this.#leaderRecord();
+    const candidates = [...live].map(([deviceId, attachment]) => ({
+      deviceId,
+      roles: attachment.identity?.roles ?? [],
+      connectedAt: attachment.connectedAt,
+    }));
+    const next = nominate(candidates, record.deviceId);
+    const connectedAt = next === null ? null : (live.get(next)?.connectedAt ?? null);
+    if (next === record.deviceId && connectedAt === record.connectedAt) return;
+    const updated: LeaderRecord = { term: record.term + 1, deviceId: next, connectedAt };
+    try {
+      await this.#ctx.storage.put(LEADER_KEY, updated);
+    } catch (err) {
+      // Nothing sent: the next connect, close or sweep retries from the old record.
+      console.log(`failed to persist ${LEADER_KEY}: ${String(err)}`);
+      return;
+    }
+    console.log(`scheduler term=${updated.term} leader=${next ?? "none"}`);
+    const socketOf = (deviceId: string): WebSocket | undefined =>
+      this.#daemonsNewestFirst(exclude).find(({ attachment }) => attachment?.identity?.deviceId === deviceId)?.ws;
+    if (next !== null) this.#tell(socketOf(next), { t: "lead", term: updated.term });
+    // Same id on a new socket: the old one is closing as superseded and needs no word.
+    if (record.deviceId !== null && record.deviceId !== next) this.#tell(socketOf(record.deviceId), { t: "follow" });
+  }
+
+  #tell(ws: WebSocket | undefined, frame: RelayToDaemonFrame): void {
+    if (ws === undefined) return;
+    const err = trySend(ws, JSON.stringify(frame));
+    // A socket that just went: its close handler re-nominates.
+    if (err !== null) console.log(`scheduler ${frame.t} not sent: ${err}`);
+  }
+
+  /** Only a connected leader is one: a record a relay restart left behind names nobody routable. */
+  async #schedulerView(live: ReadonlyMap<string, SocketAttachment>): Promise<SchedulerLeader | null> {
+    const { deviceId, term } = await this.#leaderRecord();
+    return deviceId !== null && live.has(deviceId) ? { deviceId, term } : null;
+  }
+
+  /**
+   * The fence on an envelope sent as the scheduler. The term is no credential —
+   * every registry push carries it — so this stops a leader that was demoted
+   * without noticing, not a stranger; an allowlist of who may lead (M3's gate)
+   * belongs in nomination, not here.
+   */
+  async #holdsTerm(term: number | undefined): Promise<boolean> {
+    if (term === undefined) return false;
+    return (await this.#schedulerView(this.#liveSockets([])))?.term === term;
   }
 
   /**
