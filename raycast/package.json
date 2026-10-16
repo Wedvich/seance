@@ -69,6 +69,10 @@
         {
           "title": "Sonnet",
           "value": "sonnet"
+        },
+        {
+          "title": "Haiku",
+          "value": "haiku"
         }
       ]
     },

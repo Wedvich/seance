@@ -10,7 +10,7 @@ import {
 } from "@seance/shared";
 
 /** Offered models. The wire keeps `model` a free string so this can change without a daemon deploy. */
-export const MODELS = ["fable", "opus", "sonnet"] as const;
+export const MODELS = ["fable", "opus", "sonnet", "haiku"] as const;
 export type Model = (typeof MODELS)[number];
 
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -29,6 +29,7 @@ export const MODEL_LABELS: Record<Model, string> = {
   fable: "Fable",
   opus: "Opus",
   sonnet: "Sonnet",
+  haiku: "Haiku",
 };
 
 export type SheetKind = "machine" | "repo" | "model" | "effort";
