@@ -205,7 +205,8 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
   the OAuth poll (M4) add quota observations to the same store under the same metric names.
   Collectors not yet built — LXC PSI/cgroup views, the Proxmox node view, macOS I/O rates — are
   listed there too.
-- `quota.ts` (M4): OAuth usage poll per exclave when the newest session report is older than
+- `daemon/src/oauth-quota.ts` (M4; not `shared/src/quota.ts`, the fleet fold readers
+  share): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
 - Local socket: `session-event` as its own frame kind, never a `Plain` or an `OpName` — the
@@ -489,7 +490,7 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
 - **Stacking** — `baseBranch` + `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
-- **OAuth quota poll** — `quota.ts`, token never leaves the daemon. Exit: an idle exclave's
+- **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an idle exclave's
   quota refreshes within `staleAfter`; a failing endpoint is quiet.
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
