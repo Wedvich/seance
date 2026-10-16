@@ -48,10 +48,17 @@ describe("parseExclaveList", () => {
     expect(parseExclaveList([exclave, signedOut])).toEqual([exclave, signedOut]);
   });
 
+  test("carries an email when there is one; an old daemon's exclave has none", () => {
+    expect(parseExclaveList([{ ...exclave, email: "x@y" }])?.[0]?.email).toBe("x@y");
+    expect(parseExclaveList([exclave])?.[0]).not.toHaveProperty("email");
+    expect(parseExclaveList([{ ...exclave, email: "" }])?.[0]).not.toHaveProperty("email");
+  });
+
   test("one unreadable exclave invalidates the list — status indexes into it", () => {
     expect(parseExclaveList([exclave, { ...exclave, id: "" }])).toBeNull();
     expect(parseExclaveList([exclave, { ...exclave, skills: "dataviz" }])).toBeNull();
     expect(parseExclaveList([exclave, { ...exclave, authOk: "yes" }])).toBeNull();
+    expect(parseExclaveList([exclave, { ...exclave, email: 7 }])).toBeNull();
   });
 });
 

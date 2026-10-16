@@ -93,14 +93,19 @@ export function formatUntil(at: number, now: number): string {
   return `resets in ${Math.floor(left / DAY)}d`;
 }
 
-/** The account half of `organizationUuid:accountUuid`, shortened: enough to tell two apart. */
-function shortAccount(accountId: string): string {
+/**
+ * What an account is called on screen: its email, else the account half of
+ * `organizationUuid:accountUuid` shortened — enough to tell two apart. M4's
+ * alias goes in front of both (docs/scheduler.md, _Account records_).
+ */
+function accountName(accountId: string, email: string | undefined): string {
+  if (email !== undefined) return email;
   const account = accountId.split(":").at(-1) ?? accountId;
   return `acct ${account.slice(0, 8)}`;
 }
 
 function accountLabel(exclave: ExclaveInfo): string {
-  if (exclave.accountId !== null) return shortAccount(exclave.accountId);
+  if (exclave.accountId !== null) return accountName(exclave.accountId, exclave.email);
   return exclave.authOk ? "signed in" : "not signed in";
 }
 
@@ -147,6 +152,8 @@ interface AccountGroup {
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
+  /** The first email any of its exclaves reports; one account has one. */
+  email: string | undefined;
 }
 
 function servesMetrics(machine: Machine): boolean {
@@ -202,8 +209,10 @@ function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[
         exclaves: new Set(),
         machines: new Set(),
         charted: [],
+        email: undefined,
       };
       group.exclaves.add(exclave.id);
+      group.email ??= exclave.email;
       group.machines.add(machine.name);
       if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
       groups.set(exclave.accountId, group);
@@ -217,7 +226,7 @@ function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[
     return {
       accountId: group.accountId,
       title: [...group.exclaves].join(" · "),
-      detail: `${shortAccount(group.accountId)} · on ${[...group.machines].join(", ")}`,
+      detail: `${accountName(group.accountId, group.email)} · on ${[...group.machines].join(", ")}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),

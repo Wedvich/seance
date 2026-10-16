@@ -68,7 +68,7 @@ function named(home: string, name: string): { id: string; root: string; configDi
 }
 
 describe("describeExclave", () => {
-  test("reads account ids and the extra-usage flag, never the rest", async () => {
+  test("reads account ids, email and the extra-usage flag, never the rest", async () => {
     const home = await makeHome();
     await writeClaudeJson(join(home, ".claude-work"), { oauthAccount: account, cachedUsageUtilization: {} });
     await mkdir(join(home, ".claude-work", "skills", "dataviz"), { recursive: true });
@@ -79,6 +79,7 @@ describe("describeExclave", () => {
     expect(info).toEqual({
       id: "work",
       accountId: "org-1:acct-1",
+      email: "x@y",
       extraUsageEnabled: true,
       authOk: true,
       skills: ["alpha", "dataviz"],
@@ -105,6 +106,7 @@ describe("describeExclave", () => {
     expect(torn.info[1]).toEqual({
       id: "busy",
       accountId: "org-1:acct-1",
+      email: "x@y",
       extraUsageEnabled: true,
       authOk: true,
       skills: ["alpha"],
@@ -124,7 +126,27 @@ describe("describeExclave", () => {
     const home = await makeHome();
     await writeClaudeJson(join(home, ".claude-partial"), { oauthAccount: { emailAddress: "x@y" } });
     const info = await describeExclave(named(home, "partial"));
-    expect(info).toEqual({ id: "partial", accountId: null, extraUsageEnabled: null, authOk: true, skills: [] });
+    expect(info).toEqual({
+      id: "partial",
+      accountId: null,
+      email: "x@y",
+      extraUsageEnabled: null,
+      authOk: true,
+      skills: [],
+    });
+  });
+
+  test("a missing, empty or mistyped email is left out, not reported", async () => {
+    const home = await makeHome();
+    const { emailAddress: _, ...noEmail } = account;
+    for (const [name, oauthAccount] of [
+      ["none", noEmail],
+      ["empty", { ...account, emailAddress: "" }],
+      ["typed", { ...account, emailAddress: 7 }],
+    ] as const) {
+      await writeClaudeJson(join(home, `.claude-${name}`), { oauthAccount });
+      expect(await describeExclave(named(home, name))).not.toHaveProperty("email");
+    }
   });
 });
 
@@ -190,7 +212,14 @@ describe("scanExclaves", () => {
     await mkdir(join(home, ".claude", "skills", "alpha"), { recursive: true });
     const { info } = await scanExclaves(home);
     expect(info).toEqual([
-      { id: "default", accountId: "org-1:acct-1", extraUsageEnabled: true, authOk: true, skills: ["alpha"] },
+      {
+        id: "default",
+        accountId: "org-1:acct-1",
+        email: "x@y",
+        extraUsageEnabled: true,
+        authOk: true,
+        skills: ["alpha"],
+      },
     ]);
   });
 });

@@ -1272,7 +1272,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   The daemon reports which exclave each clone sits in (`RepoEntry.exclave`,
   longest named root by path prefix, `default` for the rest of `~` and anything
   outside it) and, per exclave, what its config dir says (`MachineInfo.exclaves`:
-  `accountId` = `organizationUuid:accountUuid` and the extra-usage flag from
+  `accountId` = `organizationUuid:accountUuid`, `email` and the extra-usage flag from
   `.claude.json`'s `oauthAccount`, `authOk` = that object's presence, `skills` =
   directory names under `skills/`). `.claude.json` sits in the config dir only
   when `CLAUDE_CONFIG_DIR` is set: `default` runs without it, so its file is
@@ -1281,7 +1281,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   exclave's `.claude.json`, so a read can land mid-write: an unparsable file
   keeps the previous scan's account for that exclave (signed out only on the
   first scan), while a missing one is signed out at once — a retry would narrow
-  the window, not close it. Nothing else in that file is read — it holds
+  the window, not close it. `email` is display only — what the PWA names the
+  account by — and never a key: the blob is sealed under the PSK, which is the
+  owner's, so carrying it costs nothing the owner has not chosen. Nothing else in
+  that file is read — it holds
   no token — and the daemon never sets a config dir: the owner's shell hook picks
   it by cwd, so location is the whole fact. **The `~/.exclaves` contract**: one
   name per line matching `^[a-z0-9][a-z0-9-]*$`; `default` is implied and a
@@ -1874,7 +1877,8 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   links — a separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
-  machine, so it sits on account cards: one per `accountId` across the fleet, newest
+  machine, so it sits on account cards: one per `accountId` across the fleet, named by the
+  email any of its exclaves reports (the short account id from a daemon that predates it), newest
   observation wins, since every daemon hosting one of its exclaves reports it. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
