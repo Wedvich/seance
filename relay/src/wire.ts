@@ -49,6 +49,16 @@ function routableId(value: unknown): value is string {
 }
 
 /**
+ * What a register may name itself. APP_ID, MACHINES_ID and SCHEDULER_ID are wire
+ * addresses, not machines: a daemon squatting one would show up as a machine
+ * called "app", swallow every broadcast addressed to the group, or every
+ * envelope for the leader.
+ */
+export function isDeviceId(value: unknown): value is string {
+  return routableId(value) && value !== APP_ID && value !== MACHINES_ID && value !== SCHEDULER_ID;
+}
+
+/**
  * Raw, not narrowed to the roles this relay knows: the signature covers the
  * list as sent, so dropping an unknown one here would fail a newer daemon's
  * register outright. The id charset is what keeps v2's `,`-joined message
@@ -91,12 +101,8 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
   if (!isRecord(value)) return null;
   if (value["t"] === "register") {
     const info = parseEnvelope(value["info"]);
-    if (info === null || !routableId(value["deviceId"])) return null;
-    // APP_ID, MACHINES_ID and SCHEDULER_ID are wire addresses, not machines: a
-    // daemon squatting one would show up as a machine called "app", swallow
-    // every broadcast addressed to the group, or every envelope for the leader.
     const id = value["deviceId"];
-    if (id === APP_ID || id === MACHINES_ID || id === SCHEDULER_ID) return null;
+    if (info === null || !isDeviceId(id)) return null;
     if (!exactBase64(value["key"], KEY_LENGTH) || !exactBase64(value["sig"], SIG_LENGTH)) return null;
     if (typeof value["ts"] !== "number" || !Number.isFinite(value["ts"])) return null;
     const roles = value["roles"] === undefined ? undefined : parseRoles(value["roles"]);

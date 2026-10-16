@@ -65,7 +65,19 @@ export interface SweepOverrides {
   readonly sweepSilenceLimitMs: number;
 }
 
-export async function startRelay(token: string, sweep?: SweepOverrides): Promise<TestRelay> {
+export interface RelayOptions {
+  readonly sweep?: SweepOverrides;
+  /**
+   * `SCHEDULER_LEADERS`, joined with commas; absent leaves the binding unset,
+   * which nominates nobody. Fixed at boot as a deploy fixes it, so a test that
+   * needs a leader mints its id (`newDeviceId`, or a daemon's pre-seeded state)
+   * before calling this.
+   */
+  readonly leaders?: readonly string[];
+}
+
+export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
+  const { sweep, leaders } = opts;
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
@@ -82,6 +94,7 @@ export async function startRelay(token: string, sweep?: SweepOverrides): Promise
       durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
       bindings: {
         BEARER_TOKEN: token,
+        ...(leaders === undefined ? {} : { SCHEDULER_LEADERS: leaders.join(",") }),
         ...(sweep === undefined
           ? {}
           : {

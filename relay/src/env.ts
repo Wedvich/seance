@@ -6,6 +6,13 @@ export interface Env {
    */
   readonly BEARER_TOKEN: string;
   /**
+   * Device ids the relay may nominate as scheduler leader, comma-separated, set
+   * with `wrangler secret put SCHEDULER_LEADERS`. Not secret: a secret only so a
+   * CI deploy never overwrites it and no ids sit in git. Unset or empty
+   * nominates nobody (`parseLeaders` in leadership.ts).
+   */
+  readonly SCHEDULER_LEADERS?: string;
+  /**
    * Test-only overrides for the silent-socket sweep, in ms (vars are strings).
    * Unset in production — the defaults in hub.ts apply.
    */

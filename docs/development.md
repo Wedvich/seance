@@ -3,7 +3,9 @@
 ## Running locally
 
 Put `BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see `.dev.vars.example`),
-then `bun run dev` in `relay/` and in `pwa/`. Outside production builds the app
+then `bun run dev` in `relay/` and in `pwa/`. Add `SCHEDULER_LEADERS=<deviceId>` there
+too — your daemon's id, off `seanced doctor` — or no daemon is nominated and `auto`
+stays unavailable. Outside production builds the app
 defaults to `ws://127.0.0.1:8787/app`, so no `VITE_RELAY_URL` is needed for local
 work.
 
@@ -47,7 +49,17 @@ that failed or was replaced while pending leaves its changes for the next one. T
 need the repo secret `CLOUDFLARE_API_TOKEN` plus the `CLOUDFLARE_ACCOUNT_ID`
 repository variable; the pwa also needs the `VITE_RELAY_URL` variable. The relay's
 `BEARER_TOKEN` secret is not CI's business — it stays a one-time `wrangler secret put`,
-and a deploy leaves it in place. Nothing gates Durable Object migrations: a change to
+and a deploy leaves it in place.
+
+`SCHEDULER_LEADERS` is the relay's other secret, for the same reason rather than
+secrecy: the device ids the relay may nominate as scheduler leader, comma-separated.
+A var in `wrangler.jsonc` would sit in git and be rewritten by every CI deploy; a
+secret is neither. Unset or empty, nobody is nominated (fail closed — DESIGN.md,
+"Leadership"); an entry outside the deviceId bounds is logged and ignored. A machine's
+id is the `deviceId` line `seanced doctor` prints under `state`. `bun run wrangler
+secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a new
+version, so every socket drops and re-registers. Set it before deploying a relay that
+first reads it (October 2026): until it is set, `auto` is unavailable. Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
 a production change.
 
@@ -66,7 +78,9 @@ a production change.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
-  a double.
+  a double. `SCHEDULER_LEADERS` is fixed at boot as a deploy fixes it, so a suite that
+  needs a leader mints its ids (`newDeviceId`) before `startRelay({ leaders })`; left
+  out, the binding is unset and nobody leads.
 - **e2e** — all three real components at once: the daemon from `daemon/src`, the
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,
@@ -77,7 +91,11 @@ a production change.
   daemons in one process would share a deviceId and an op socket. Every daemon gets a
   fixture home (`home` in its run opts), so its exclaves and account are the test's, never
   the developer's `~/.exclaves` and `~/.claude.json`. The suite's own daemon starts with a
-  credential-sourced `resolvedPsk`, since only such a daemon brokers.
+  credential-sourced `resolvedPsk`, since only such a daemon brokers. Daemons mint
+  their ids at first start, after the relay has booted, so `startStack` mints the
+  suite daemon's — and each second daemon named in `secondLeaders` — through the
+  daemon's own `loadOrInitState` first and lists them; the daemon then loads that
+  state as its own.
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,

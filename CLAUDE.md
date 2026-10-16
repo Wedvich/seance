@@ -129,7 +129,9 @@ green:
   and a `register` moves a route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
   through `shared/src/identity.ts`; the seed never leaves `state.json`), and any register field the
   relay acts on — today `roles`, which decides nomination — is covered by that signature (the v2
-  message), never trusted as plaintext. Don't let changes drift from them.
+  message), never trusted as plaintext, and the relay nominates only ids on its
+  `SCHEDULER_LEADERS` secret — unset nominates nobody, and no wildcard exists, in product code or
+  as a test escape hatch. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op

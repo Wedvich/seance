@@ -32,4 +32,8 @@
   // BEARER_TOKEN is deliberately absent: it is a secret, not a var.
   //   deploy: bun run --cwd relay wrangler secret put BEARER_TOKEN
   //   local:  echo 'BEARER_TOKEN=...' > relay/.dev.vars   (gitignored)
+  // So is SCHEDULER_LEADERS (device ids that may lead, comma-separated): not
+  // secret, but a var here would be overwritten by every CI deploy. Unset, no
+  // daemon is nominated and auto is unavailable.
+  //   deploy: bun run --cwd relay wrangler secret put SCHEDULER_LEADERS
 }

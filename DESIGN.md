@@ -286,21 +286,29 @@ Séance's noise is cover for a real intruder.
    rather than after any silence. What the token still buys here is the two
    things it always did: junk entries under ids nobody will ever sign for,
    bounded by the entry cap, and `forget`.
-   **Leader capture** (added 2026-10-16, scheduler M2). `roles` is plaintext
-   but signed (v2), so a holder cannot add the role to a real machine's
-   register — but it can mint an id of its own, sign `roles`, and hold one
-   socket open; a real leader's socket resets its `connectedAt` on every sleep
-   or network change, the squatter's never does, so it becomes leader as a
-   matter of routine. Accepted for M2: there is no store yet, apps treat a
-   leader whose entry does not open as no leader, and what the squatter would
-   be sent is sealed under the PSK. What it holds is the term, so it can keep
-   `auto` unavailable until its socket goes — a visible stall, not a silent
-   one. Built in M2 item 6: the PWA greys `auto` as "leader unverified" and the
-   app-role client refuses to send to such a leader at all. Daemons cannot
-   make the check — they never see the registry — but all they send the
-   scheduler is fire-and-forget `session-event`s, sealed under the PSK, so a
-   squatter learns their timing and nothing else. M3's term-fenced store would let it delete the queue, so a relay-side
-   gate lands before it (Scheduler, "Leadership").
+   **Leader capture** (added 2026-10-16, scheduler M2; closed 2026-10-16, M3
+   gate). `roles` is plaintext but signed (v2), so a holder cannot add the role
+   to a real machine's register — but it can mint an id of its own, sign
+   `roles`, and hold one socket open; a real leader's socket resets its
+   `connectedAt` on every sleep or network change, the squatter's never does,
+   so under M2 it became leader as a matter of routine. The relay now nominates
+   only ids on `SCHEDULER_LEADERS`, a deploy-time allowlist (Scheduler,
+   "Leadership"), so a self-minted id is never nominated however long it holds
+   its socket, and M3's term-fenced store cannot be reached through the term.
+   What remains is the allowlist's own trust: anyone who can deploy to the
+   Cloudflare account or put a Worker secret on it can list an id of their
+   choosing — the same party who could already replace the relay outright, so
+   no new principal — and a seed copied out of a listed machine's `state.json`
+   signs as that machine. Neither yields the PSK. M2's reader check stays as
+   the tripwire for that case: apps treat a leader whose entry does not open
+   as no leader, so a stolen seed without the PSK reads "leader unverified",
+   the PWA greys `auto`, and the app-role client refuses to send it anything.
+   What it holds is the term, so it can keep `auto` unavailable — and, once the
+   store lands, act on the queue as the leader may — until its socket goes or
+   its id leaves the list. Daemons cannot make the reader check — they never
+   see the registry — but all they send the scheduler is fire-and-forget
+   `session-event`s, sealed under the PSK, so such a leader learns their timing
+   and nothing else.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -999,11 +1007,11 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
   deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
   Any drop that was not a refusal resets it to v2, so the role comes back once the relay catches up.
-- **Nomination is a pure function**, `nominate(candidates, current)`: the connected, registered
-  daemons' `{ deviceId, roles, connectedAt }` — one per id, its newest socket's — and the current
-  leader in, the next leader (or null) out. A current leader that is still capable keeps the
-  role, even across its own reconnect; otherwise the earliest `connectedAt` wins, ties to the
-  lowest `deviceId`. Stickiness matters only in the race where a leader's new socket registers
+- **Nomination is a pure function**, `nominate(candidates, current, leaders)`: the connected,
+  registered daemons' `{ deviceId, roles, connectedAt }` — one per id, its newest socket's — the
+  current leader and the allowlist in, the next leader (or null) out. Eligible is capable _and_
+  listed. A current leader that is still eligible keeps the role, even across its own reconnect;
+  otherwise the earliest `connectedAt` wins, ties to the lowest `deviceId`. Stickiness matters only in the race where a leader's new socket registers
   before its old one's close is processed — without it the role would move to whoever has sat
   connected longest on every redial. Its suite (`relay/test/leadership.test.ts`) needs no workerd.
   `hub.ts` calls it from exactly three places — after a register, a socket close and a sweep — in
@@ -1034,14 +1042,27 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   `entries`, so an app can grey out `auto` without a round trip. Null unless the recorded leader is
   connected: a record a relay restart left behind names nobody routable until the next register
   re-nominates.
-- **Leader capture is open, by decision, until M3.** Anyone with the bearer token can mint an id,
-  sign `roles` and hold a socket, and connected-longest wins. M2's answer is the reader check:
-  apps ignore a leader whose registry entry does not open (`info` sealed `from` its own id), so a
-  squatter reads as "leader unverified" and is sent nothing — everything it would receive is
-  sealed under the PSK it lacks. M3's store is the point where the term starts protecting state,
-  and a relay-side gate (the `SCHEDULER_LEADERS` allowlist in docs/scheduler.md, Risks) lands
-  first. Its place is fixed: a filter over `nominate`'s candidates in `#renominate`, before
-  anything acts on a term.
+- **Only allowlisted ids lead** (M3 gate, owner, 2026-10-16). Anyone with the bearer token can
+  mint an id, sign `roles` and hold a socket, and connected-longest would win; under M2 only the
+  reader check stood against that. `SCHEDULER_LEADERS` — comma-separated device ids, a Worker
+  secret — names the daemons the relay may nominate. A secret rather than a `wrangler.jsonc` var
+  only for deploy mechanics: CI deploys never overwrite it and no ids sit in git; ids are not
+  secret. **Unset or empty nominates nobody** — fail closed, never "everyone". The hub parses it
+  once per wake (`parseLeaders`: trimmed, blanks dropped, each entry held to the register's
+  deviceId bounds; an invalid one is logged and ignored, never fatal) and hands the set to
+  `nominate` as a required input rather than filtering candidates before the call, so no caller
+  can nominate without stating it and the pure suite covers the gate with stickiness. That keeps
+  the gate where the term is decided — before anything acts on one — and register verification
+  is what makes it sound: a socket registered under a listed id proved it holds that id's key. A
+  current leader taken off the list loses the role at the next re-nomination; since putting a
+  secret rolls a new relay version, every socket reconnects then anyway. A register that is
+  capable but unlisted logs as such, the operator's one hint for "auto is unavailable". The
+  reader check stays as the tripwire for a listed seed stolen without the PSK (Threat model,
+  item 3). Cost: a new leader-capable machine is a `wrangler secret put` with its id read off
+  `seanced doctor`, which rolls the relay and drops every socket once. No relay op exposes the
+  list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var
+  (CI would overwrite it), and the reader check alone (it changes what readers believe, not who
+  holds the term).
 
 ### The leader (`daemon/src/leader.ts`) — landed 2026-10-16, M2 item 3
 
@@ -2237,7 +2258,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   open into a `Machine` — the rule that already decides which entries render, here deciding who
   is believed to hold the PSK (Scheduler, "Leadership"). The client enforces the same check at
   the source: `routePreview`, `submit` and `queue` throw `leader_unverified` or `no_leader`
-  without sending, so nothing reaches a squatter however the UI is driven; the relay's `offline`
+  without sending, so nothing reaches an unverified nominee however the UI is driven; the relay's `offline`
   for the scheduler address (no leader socket) comes back as `no_leader` too, and marks no
   machine offline. On `auto` the repo
   picker lists repos by `origin` across the fleet (a clone's name is machine-local), remembered
