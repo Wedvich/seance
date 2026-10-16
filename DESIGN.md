@@ -222,9 +222,11 @@ Séance's noise is cover for a real intruder.
    passive feed: every `/app` socket receives every machine's `status` every
    30s. The payload is sealed, but its ciphertext length is unpadded and varies
    with load, session counts and whether quota is present — a coarse activity
-   channel per machine, accepted. And the relay logs one `wire status … apps=N`
-   line per beat, so Workers logs hold a 30s timeline of when an app was open —
-   which a Logpush sink would carry off Cloudflare too. The token also
+   channel per machine, accepted. The relay logs no line for an accepted beat,
+   only its drops (`status-not-app`, `status-rate`) and failed fan-out sends:
+   a `wire status … apps=N` line per beat once made Workers logs a 30s
+   timeline of when an app was open, which a Logpush sink would have carried
+   off Cloudflare too. The token also
    bought slightly more than stated: `register` overwrote by `deviceId`, so a
    holder could blank a real machine's entry until it re-registered
    (T1565.001) — closed by self-certifying ids below, since a register for an
