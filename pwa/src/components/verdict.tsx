@@ -209,6 +209,7 @@ export function VerdictView(props: {
         <DecisionCard
           summary={describeDecision(decision, machines, now, placed ? "did" : "would")}
           title={placed ? "WHY THERE" : "WHERE IT WOULD GO"}
+          quota
         />
       )}
       <div className="verdict-actions">

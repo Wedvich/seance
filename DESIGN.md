@@ -2243,8 +2243,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   auto restores the machine picked last. A **placement preview** card asks `route-preview`
   whenever auto is chosen, its repo changes, or the leader changes or is verified — the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
-  disclosure (`decision-view.ts` holds the wording; quota ages read as the account cards read
-  them, observer named and "asleep" when it is). **Queue on auto** sends `submit` (M2 only); the
+  disclosure (`decision-view.ts` holds the wording). The preview leaves out the quota reading
+  each candidate was judged on; the queued task's record shows it, its age read as the account
+  cards read it, observer named and "asleep" when it is. **Queue on auto** sends `submit` (M2 only); the
   verdict shows the task and its decision and re-reads `queue` every 2s, at most 30 times, while
   the task is `ready` or `reserved` — a poll, because M2 has no `queue-changed` push (M3). A lost
   `submit` reply says it may have been queued anyway and offers no retry: a second submit would be

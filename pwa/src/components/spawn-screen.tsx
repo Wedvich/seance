@@ -336,7 +336,11 @@ function PreviewCard(props: {
   if (preview.kind === "ok") {
     return (
       <div className="preview">
-        <DecisionCard summary={describeDecision(preview.decision, machines, now, "would")} title="PLACEMENT PREVIEW" />
+        <DecisionCard
+          summary={describeDecision(preview.decision, machines, now, "would")}
+          title="PLACEMENT PREVIEW"
+          quota={false}
+        />
         {refresh}
       </div>
     );
