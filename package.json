@@ -10,6 +10,7 @@
     "pwa",
     "raycast",
     "relay",
+    "scheduler",
     "shared"
   ],
   "type": "module",

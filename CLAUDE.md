@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Séance spawns remote-controlled Claude Code sessions on dev machines via a blind relay. Bun workspaces
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
 (Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
-envelope crypto + the app-role RelayClient), `e2e/` (full-stack test suite, no shipped code).
+envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pure library: routing,
+task state, reservations — no I/O, hosted only by `daemon/src/leader.ts`), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
 `seanced mod install` (DESIGN.md, "Claude Code mods").
 

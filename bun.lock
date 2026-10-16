@@ -87,6 +87,16 @@
         "wrangler": "^4.151.0",
       },
     },
+    "scheduler": {
+      "name": "@seance/scheduler",
+      "version": "0.0.0",
+      "dependencies": {
+        "@seance/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.2",
+      },
+    },
     "shared": {
       "name": "@seance/shared",
       "version": "0.0.0",
@@ -673,6 +683,8 @@
     "@seance/pwa": ["@seance/pwa@workspace:pwa"],
 
     "@seance/relay": ["@seance/relay@workspace:relay"],
+
+    "@seance/scheduler": ["@seance/scheduler@workspace:scheduler"],
 
     "@seance/shared": ["@seance/shared@workspace:shared"],
 

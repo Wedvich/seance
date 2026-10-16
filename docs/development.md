@@ -78,6 +78,12 @@ a production change.
   fixture home (`home` in its run opts), so its exclaves and account are the test's, never
   the developer's `~/.exclaves` and `~/.claude.json`. The suite's own daemon starts with a
   credential-sourced `resolvedPsk`, since only such a daemon brokers.
+- **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
+  double in `scheduler/test/fixtures.ts`: every filter reason, score component and
+  stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,
+  and the layering test. No tmux, git or workerd. The fixtures' statuses are stamped
+  against a fixed clock, so a test that moves it past 90s calls `fleet.beat()` or every
+  machine reads stale.
 - **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
   import the daemon's and the PWA's implementations alongside the extension's and
   assert they agree. No React harness — the relay client underneath is already
