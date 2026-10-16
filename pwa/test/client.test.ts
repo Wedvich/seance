@@ -616,6 +616,7 @@ describe("requests", () => {
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
       const reply = await client.request<SessionsResponse>(deviceId, "sessions", {});
+      if ("ok" in reply) throw new Error(reply.message);
       expect(reply.sessions[0]?.window).toBe("port-the-pane-20260727-093214");
     } finally {
       daemon.close();

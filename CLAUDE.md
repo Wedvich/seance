@@ -102,7 +102,9 @@ green:
 - A PostToolUse hook (`.claude/settings.json`) runs oxfmt on every file you write — don't add
   manual formatting steps.
 - Errors that cross the wire are structured codes (`SPAWN_ERROR_CODES` in `shared/src/types.ts`),
-  not free-text throws.
+  not free-text throws. Any op can also answer with an `ErrorResponse` (`TRANSPORT_ERROR_CODES`:
+  a crashed handler, an oversized reply), so an op's code list spreads those, and every `request<T>`
+  resolves to `T | ErrorResponse` — narrow it (`"ok" in reply`, or `reply.ok`) before reading a field.
 - Comments state rationale and constraints, not narration — match that density and style.
 - Never persist `process.execPath`. It's the realpath'd binary (on Homebrew,
   `…/Cellar/bun/1.3.14/bin/bun`), so anything recording it — launchd plist, systemd unit, the Claude
