@@ -105,7 +105,8 @@ describe("a delivered credential survives the daemon's own spawning", () => {
         buildInfo: () => Promise.reject(new Error("never registers")),
         handle: () => Promise.resolve(null),
       });
-      return { client, stop: (): void => {}, updater: null, localSocket: null };
+      const leader = { term: (): null => null, settled: async (): Promise<void> => {} };
+      return { client, stop: (): void => {}, updater: null, localSocket: null, leader };
     };
     const trigger = makeConfigTrigger();
     const supervisor = await startSupervisor({ configPath: path, startDaemon: start, watch: trigger.watch });

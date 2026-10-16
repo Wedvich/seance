@@ -238,6 +238,69 @@ describe("cancel", () => {
   });
 });
 
+describe("takeover", () => {
+  /** What a leader that died mid-dispatch leaves in the store: four tasks in flight across two machines. */
+  async function leftBehind() {
+    const fleet = new FakeFleet([machine("a"), machine("b")]);
+    const { store, clock, scheduler } = setup(fleet);
+    // Every spawn lands, but no verdict comes back to the leader that sent it.
+    for (const id of ["a", "b"]) {
+      fleet.scripts.set(id, (request) => {
+        fleet.start(id, request);
+        return unreachable;
+      });
+    }
+    const tasks = await Promise.all([scheduler.submit(spec()), scheduler.submit(spec())]);
+    await scheduler.tick();
+    // A third task whose spawn never reached its machine, and a fourth that ran and ended.
+    fleet.scripts.set("a", () => unreachable);
+    fleet.scripts.set("b", () => unreachable);
+    const lost = await scheduler.submit(spec({ pin: { deviceId: "a" } }));
+    await scheduler.tick();
+    fleet.scripts.clear();
+    const ended = await scheduler.submit(spec({ pin: { deviceId: "b" } }));
+    await scheduler.tick();
+    fleet.running.set(
+      "b",
+      (fleet.running.get("b") ?? []).filter((s) => s.taskId !== ended.id),
+    );
+    expect(scheduler.tasks().map((t) => t.state)).toEqual(["reserved", "reserved", "reserved", "running"]);
+    fleet.sessionCalls.length = 0;
+    fleet.spawns.length = 0;
+    return { fleet, store, clock, landed: tasks, lost, ended };
+  }
+
+  test("before any dispatch: a landed reservation runs, an unlanded one waits its TTL, an ended session is done", async () => {
+    const { fleet, store, clock, landed, lost, ended } = await leftBehind();
+    const successor = new Scheduler({ store, fleet, now: () => clock.now });
+    await successor.takeover();
+
+    // One sessions call per machine, and nothing spawned.
+    expect(fleet.sessionCalls.toSorted()).toEqual(["a", "b"]);
+    expect(fleet.spawns).toEqual([]);
+    for (const task of landed) expect(successor.task(task.id)?.state).toBe("running");
+    expect(successor.task(lost.id)?.state).toBe("reserved");
+    expect(successor.task(ended.id)?.state).toBe("done");
+
+    // Past the TTL with still no session, it is released and dispatched once.
+    clock.now += 120_000;
+    fleet.beat(clock.now);
+    await successor.tick();
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual([lost.id]);
+    expect(successor.task(lost.id)?.state).toBe("running");
+  });
+
+  test("an unanswered machine keeps its tasks as they were", async () => {
+    const { fleet, store, clock, landed, lost, ended } = await leftBehind();
+    fleet.sessionsReply = () => unreachable;
+    const successor = new Scheduler({ store, fleet, now: () => clock.now });
+    await successor.takeover();
+    for (const task of [...landed, lost]) expect(successor.task(task.id)?.state).toBe("reserved");
+    expect(successor.task(ended.id)?.state).toBe("running");
+    expect(fleet.spawns).toEqual([]);
+  });
+});
+
 describe("store", () => {
   test("load replaces the view with the store's: a new leader picks up what an old one left", async () => {
     const { store, fleet, scheduler } = setup();

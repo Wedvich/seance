@@ -116,8 +116,9 @@ green:
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
-  requests the daemon forwards to other machines for a keyless `seanced mcp`, and `schedule` for
-  the daemon's reap timer — a new surface adds an origin, never reuses one),
+  requests the daemon forwards to other machines for a keyless `seanced mcp`, `schedule` for
+  the daemon's reap timer, and `leader` for the scheduler loop dispatching to its own machine in
+  process — a new surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`

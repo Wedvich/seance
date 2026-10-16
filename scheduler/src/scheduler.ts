@@ -1,7 +1,15 @@
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
-import { UNREACHABLE, type Fleet, type QueueStore, type TaskSpawnReply } from "./ports.ts";
+import { UNREACHABLE, type Fleet, type QueueStore, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
 import { route, type Decision } from "./route.ts";
-import { advance, type Assignment, type Reservation, type Task, type TaskSpec, type TaskState } from "./task.ts";
+import {
+  advance,
+  IN_FLIGHT,
+  type Assignment,
+  type Reservation,
+  type Task,
+  type TaskSpec,
+  type TaskState,
+} from "./task.ts";
 
 /** The `client` a scheduler spawn audits as: `origin=relay client=scheduler` (Settled defaults 3). */
 export const SCHEDULER_CLIENT = "scheduler";
@@ -54,12 +62,46 @@ export class Scheduler {
     this.#newId = options.newId ?? (() => crypto.randomUUID());
   }
 
-  /** Takeover: the store's view replaces this one. Reservations resolve on the next tick, against `sessions`. */
+  /** The store's view replaces this one, unreconciled — a new leader calls `takeover` instead. */
   async load(): Promise<void> {
     const stored = await this.#store.list();
     this.#held.clear();
     this.#decisions.clear();
     for (const { id, version, body } of stored) this.#held.set(id, { version, task: body });
+  }
+
+  /**
+   * Takeover (docs/scheduler.md): load the store, then check every task the
+   * previous leader left in flight against its machine's own `sessions` — one
+   * call per machine — before the host's first `tick` dispatches anything. A
+   * reservation is settled as the TTL check settles one, except that a session
+   * carrying its id counts at any age. A running task whose session is gone
+   * ended while no leader was listening, so it is `done` (M2 has no done
+   * detection). An unanswered machine leaves its running tasks as they are.
+   */
+  async takeover(): Promise<void> {
+    await this.load();
+    const inFlight = this.tasks().filter((t) => IN_FLIGHT.includes(t.state));
+    const machines = new Set(inFlight.flatMap((t) => (t.reservation ?? t.assignment)?.deviceId ?? []));
+    const replies = new Map(
+      await Promise.all([...machines].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
+    );
+    await Promise.all(
+      inFlight.map(async (task) => {
+        const at = task.reservation;
+        if (at !== undefined) {
+          const reply = replies.get(at.deviceId);
+          if (reply !== undefined) await this.#reconcileReserved(task.id, at, reply);
+          return;
+        }
+        const reply = task.assignment === undefined ? undefined : replies.get(task.assignment.deviceId);
+        if (reply?.ok !== true || reply.sessions.some((s) => s.taskId === task.id)) return;
+        const current = this.task(task.id);
+        if (current?.state === "running" || current?.state === "needs-input") {
+          await this.#write(current, advance(current, "done"));
+        }
+      }),
+    );
   }
 
   tasks(): readonly Task[] {
@@ -206,27 +248,32 @@ export class Scheduler {
     if (next !== null) await this.#write(current, next);
   }
 
-  /**
-   * Past its TTL, a reservation with no verdict is resolved from the machine's
-   * own `sessions`: a session carrying the task id is the spawn that landed.
-   * An unanswered check keeps waiting while the machine is connected and
-   * releases once it is not — the daemon's `task_running` is the backstop for
-   * a machine that comes back still running it.
-   */
+  /** Past its TTL, a reservation with no verdict is resolved from the machine's own `sessions`. */
   async #resolveExpired(task: Task): Promise<void> {
     const at = task.reservation;
     if (at === undefined || at.expiresAt > this.#now()) return;
-    const reply = await this.#fleet.sessions(at.deviceId);
-    const current = this.task(task.id);
+    await this.#reconcileReserved(task.id, at, await this.#fleet.sessions(at.deviceId));
+  }
+
+  /**
+   * A session carrying the task id is the spawn that landed. With none, the
+   * reservation stands until its TTL and is released past it. An unanswered
+   * check keeps waiting while the machine is connected and releases an expired
+   * one once it is not — the daemon's `task_running` is the backstop for a
+   * machine that comes back still running it.
+   */
+  async #reconcileReserved(id: string, at: Reservation, reply: TaskSessionsReply): Promise<void> {
+    const current = this.task(id);
     if (current?.state !== "reserved") return;
+    const expired = at.expiresAt <= this.#now();
     if (!reply.ok) {
       const connected = this.#fleet.machines().some((m) => m.deviceId === at.deviceId && m.connected);
-      if (!connected) await this.#write(current, advance(current, "ready"));
+      if (expired && !connected) await this.#write(current, advance(current, "ready"));
       return;
     }
-    const session = reply.sessions.find((s) => s.taskId === task.id);
+    const session = reply.sessions.find((s) => s.taskId === id);
     if (session === undefined) {
-      await this.#write(current, advance(current, "ready"));
+      if (expired) await this.#write(current, advance(current, "ready"));
       return;
     }
     const assignment: Assignment = {

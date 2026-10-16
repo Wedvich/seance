@@ -23,9 +23,11 @@ import { logPath } from "./paths.ts";
  * the keyboard; `relay` at 3am with the phone in a drawer is not. `local` is
  * neither: something on this box drove the daemon over its op socket without
  * touching the relay — in practice a Claude session holding the MCP server, so
- * the `client` tag beside it is the rest of the answer.
+ * the `client` tag beside it is the rest of the answer. `leader` is this
+ * daemon's own scheduler loop dispatching to this machine, which it reaches in
+ * process rather than through the relay (`leader.ts`).
  */
-export type SpawnOrigin = "relay" | "cli" | "local";
+export type SpawnOrigin = "relay" | "cli" | "local" | "leader";
 
 export type AuditSink = (line: string) => void | Promise<void>;
 

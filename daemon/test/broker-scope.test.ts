@@ -8,16 +8,16 @@ import { BrokerError, brokerMachines } from "../src/broker-client.ts";
 import type { Config, PskSource } from "../src/config.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
-import { pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 /**
  * Where the fleet broker runs at all: only on a daemon whose key is
  * service-delivered. A real daemon, its real local socket and the real broker
  * client; the source reaches `startDaemon` through `resolvedPsk`, the plumbing
- * the supervisor uses. The relay double counts every upgrade — it accepts the
- * daemon leg and rejects an app-role dial (no bearer header) — so "never dialled"
- * is one connection and no rejections.
+ * the supervisor uses. The relay double counts daemon and app upgrades apart,
+ * so "never dialled" is one daemon connection, no app connection and no
+ * rejections.
  */
 
 const PSK = toBase64(new Uint8Array(32).fill(3));
@@ -85,6 +85,7 @@ describe("the broker runs only where the key is service-delivered", () => {
         if ("ok" in reply) throw new Error(reply.message);
         expect(Array.isArray(reply.sessions)).toBe(true);
         expect(relay.connectionCount()).toBe(1);
+        expect(relay.appConnectionCount()).toBe(0);
         expect(relay.rejectedCount()).toBe(0);
       });
     });
@@ -92,11 +93,11 @@ describe("the broker runs only where the key is service-delivered", () => {
 
   test("a credential-sourced daemon serves broker frames over its own app-role dial", async () => {
     await withDaemon("credential", async (relay, _daemon, path) => {
-      // The double cannot authenticate an app, so the dial is what is observable:
-      // the request reaches the broker and the broker reaches for the relay.
-      const reply = brokerMachines({ path, timeoutMs: 3_000 }).catch((caught: unknown) => caught);
-      await pollUntil(() => relay.rejectedCount() > 0, "the broker's app-role dial");
-      expect(await reply).not.toMatchObject({ code: "broker_disabled" });
+      // The request reaches the broker and the broker dials the relay as an app;
+      // the double's registry is empty, so the answer is an empty fleet.
+      const reply = await brokerMachines({ path, timeoutMs: 3_000 });
+      expect(reply).toEqual([]);
+      expect(relay.appConnectionCount()).toBe(1);
     });
   });
 });

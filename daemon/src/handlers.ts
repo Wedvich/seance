@@ -13,7 +13,7 @@ import type {
   SpawnResponse,
   UpdateAvailable,
 } from "@seance/shared";
-import { isMetricsRequest, isTaskId, quote } from "@seance/shared";
+import { isMetricsRequest, isRecord, isTaskId, quote } from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -176,6 +176,60 @@ function handleMetrics(ctx: HandlerContext, payload: unknown): MetricsReply {
 }
 
 /**
+ * Every op, not just spawn: with a stolen PSK, "something enumerated my
+ * sessions at 3am" is the same signal as "something spawned" — and the origin
+ * is on this line for the same reason it is on the spawn lines.
+ */
+async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string, id: string): Promise<void> {
+  await ctx.auditSink(`audit request origin=${origin} op=${quote(op)} id=${quote(id)}`);
+}
+
+async function listSessions(ctx: HandlerContext): Promise<SessionsResponse> {
+  return { sessions: await ctx.backend.sessions(ctx.getRepos()), at: Date.now() };
+}
+
+/** The three ops the scheduler dispatches, typed, for a caller inside this process. */
+export interface LocalOps {
+  readonly sessions: () => Promise<SessionsResponse | ErrorResponse>;
+  readonly spawn: (payload: unknown) => Promise<SpawnResponse | ErrorResponse>;
+  readonly despawn: (payload: unknown) => Promise<DespawnResponse | ErrorResponse>;
+}
+
+/**
+ * The leader reaching its own machine (`leader.ts`): the same validation,
+ * backend and audit lines as `createHandler`, under the caller's origin. No
+ * `Plain` goes in, so nothing but these three ops can be asked for.
+ */
+export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
+  const audit = spawnAudit(origin, ctx.auditSink);
+  const despawnTrail = despawnAudit(origin, ctx.auditSink);
+  // No `Plain` id to join on: a spawn's request line carries its task id, which the
+  // spawn lines after it and the scheduler's task both name; the rest get a fresh one.
+  const run = async <T>(op: string, id: string, body: () => Promise<T>): Promise<T | ErrorResponse> => {
+    await auditRequest(ctx, origin, op, id);
+    return guarded(op, body);
+  };
+  return {
+    sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx)),
+    spawn: (payload) => {
+      const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();
+      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload));
+    },
+    despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload)),
+  };
+}
+
+/** A handler that throws still answers, with a code — for the relay leg and local ops alike. */
+async function guarded<T>(op: string, body: () => Promise<T>): Promise<T | ErrorResponse> {
+  try {
+    return await body();
+  } catch (err) {
+    log.error(`handler for ${quote(op)} crashed: ${String(err)}`);
+    return { ok: false, code: "internal_error", message: String(err) };
+  }
+}
+
+/**
  * Routes decrypted request ops to their implementations and wraps the reply.
  * `origin` tags everything this handler audits; the daemon builds one per
  * inbound surface over a single shared context, so the relay and the local op
@@ -188,10 +242,7 @@ export function createHandler(
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
   return async (plain: Plain): Promise<Plain | null> => {
-    // Every op, not just spawn: with a stolen PSK, "something enumerated my
-    // sessions at 3am" is the same signal as "something spawned" — and the
-    // origin is on this line for the same reason it is on the spawn lines.
-    await ctx.auditSink(`audit request origin=${origin} op=${quote(plain.op)} id=${quote(plain.id)}`);
+    await auditRequest(ctx, origin, plain.op, plain.id);
 
     const reply = (payload: unknown): Plain => ({
       id: crypto.randomUUID(),
@@ -201,23 +252,21 @@ export function createHandler(
       payload,
     });
 
-    try {
+    // Null is "no reply at all"; anything else is wrapped as the op's answer.
+    const answer = async (): Promise<{ readonly payload: unknown } | null> => {
       switch (plain.op) {
-        case "sessions": {
-          const sessions = await ctx.backend.sessions(ctx.getRepos());
-          const payload: SessionsResponse = { sessions, at: Date.now() };
-          return reply(payload);
-        }
+        case "sessions":
+          return { payload: await listSessions(ctx) };
         case "spawn":
-          return reply(await handleSpawn(ctx, audit, plain.payload));
+          return { payload: await handleSpawn(ctx, audit, plain.payload) };
         case "despawn":
-          return reply(await handleDespawn(ctx, despawnTrail, plain.payload));
+          return { payload: await handleDespawn(ctx, despawnTrail, plain.payload) };
         case "metrics":
-          return reply(handleMetrics(ctx, plain.payload));
+          return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {
           const repos = await ctx.rescan();
           const payload: RescanResponse = { repos, scannedAt: Date.now() };
-          return reply(payload);
+          return { payload };
         }
         case "update-available": {
           // Fire-and-forget: never replied to. The payload is advisory — the
@@ -230,10 +279,9 @@ export function createHandler(
           log.warn(`ignoring unknown op ${quote(plain.op)}`);
           return null;
       }
-    } catch (err) {
-      log.error(`handler for ${quote(plain.op)} crashed: ${String(err)}`);
-      const payload: ErrorResponse = { ok: false, code: "internal_error", message: String(err) };
-      return reply(payload);
-    }
+    };
+    const out = await guarded(plain.op, answer);
+    if (out === null) return null;
+    return reply("payload" in out ? out.payload : out);
   };
 }

@@ -233,8 +233,8 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
-  // Logged only until the scheduler runs on the daemon (M2 item 3) — but an
-  // unhandled frame must not cost the socket what it already does.
+  // What the role does is leader.test.ts's; here, only that taking it up and
+  // putting it down never cost the daemon's own socket what it already serves.
   test("lead and follow from the relay are logged, and the socket keeps serving", async () => {
     const relay = startTestRelay(TOKEN);
     const lines: string[] = [];

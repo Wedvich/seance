@@ -23,7 +23,9 @@ import {
   type ResolvedPsk,
 } from "./config.ts";
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
-import { createHandler, type HandlerContext } from "./handlers.ts";
+import { appRelayClient } from "./app-relay.ts";
+import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
+import { createLeader, type Leader, type LeaderOpts } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
@@ -51,6 +53,8 @@ export interface DaemonHandle {
   readonly updater: Updater | null;
   /** Where the local op socket bound, or null when it could not — see `local-socket.ts`. */
   readonly localSocket: string | null;
+  /** The scheduler role, as far as anything outside the daemon needs it: tests read its term and await its takeover. */
+  readonly leader: Pick<Leader, "term" | "settled">;
 }
 
 export interface RunOpts {
@@ -82,6 +86,8 @@ export interface RunOpts {
    * main.ts passes `{}`.
    */
   readonly selfUpdate?: SelfUpdateOpts;
+  /** The scheduler role's store and tick cadence; tests seed the one and shorten the other. */
+  readonly leader?: Pick<LeaderOpts, "store" | "tickIntervalMs">;
 }
 
 export interface SelfUpdateOpts {
@@ -295,6 +301,15 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     sampleTelemetry();
   };
 
+  // Every daemon may be nominated; this is what runs if it is. Its app-role leg
+  // is built per term over the key imported above, never the broker's.
+  const leader = createLeader({
+    selfDeviceId: state.deviceId,
+    createRelay: (term) => appRelayClient(config, key, (line) => log.info(line), { term }),
+    local: createLocalOps(handlerCtx, "leader"),
+    ...opts.leader,
+  });
+
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
@@ -302,6 +317,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     key,
     buildInfo,
     handle: createHandler(handlerCtx),
+    onLead: (term) => leader.lead(term),
+    onFollow: () => leader.follow("the relay moved the role elsewhere"),
+    onScheduler: (env) => leader.deliver(env),
     onRegister: (info): void => {
       registered = candidates.get(info) ?? registered;
       sampleNow();
@@ -321,7 +339,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // machine's redial is the only moment it can learn what it missed.
       updater?.check("register");
     },
-    onDisconnect: () => updateRuntime(false),
+    onDisconnect: () => {
+      updateRuntime(false);
+      // The term belongs to this socket: replies to the leader arrive on it, and
+      // the relay re-nominates — under a new term — once the redial registers.
+      leader.follow("the daemon's relay socket dropped");
+    },
     ...(opts.pingIntervalMs !== undefined ? { pingIntervalMs: opts.pingIntervalMs } : {}),
     ...(opts.pongTimeoutMs !== undefined ? { pongTimeoutMs: opts.pongTimeoutMs } : {}),
     ...(opts.baseBackoffMs !== undefined ? { baseBackoffMs: opts.baseBackoffMs } : {}),
@@ -433,6 +456,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // Its app-role socket and timers go with this handle: a reload builds a
       // fresh broker, and an orphaned one would hold a relay socket forever.
       broker?.stop();
+      // Its leg, timer and loop go with the handle too, before the client it hears terms on.
+      leader.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();
@@ -446,5 +471,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       updateRuntime(false);
     },
     updater,
+    leader,
   };
 }

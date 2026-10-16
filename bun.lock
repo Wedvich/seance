@@ -19,6 +19,7 @@
       },
       "dependencies": {
         "@modelcontextprotocol/server": "^2.0.0",
+        "@seance/scheduler": "workspace:*",
         "@seance/shared": "workspace:*",
         "zod": "^4.4.3",
       },
