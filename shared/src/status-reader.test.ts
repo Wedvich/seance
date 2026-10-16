@@ -41,13 +41,6 @@ describe("sanitizeStatus", () => {
     expect(sanitizeStatus({ at: NOW_S, scan: 1 }, 0, NOW_MS)).toEqual({ at: NOW_S, scan: 1 });
   });
 
-  test("a number past the safe-integer range is refused, top level or in quota", () => {
-    expect(sanitizeStatus({ ...status, free: 1e308 }, 2, NOW_MS)).toBeNull();
-    expect(sanitizeStatus({ ...status, at: 2 ** 60 }, 2, NOW_MS)).toBeNull();
-    expect(sanitizeStatus({ ...status, sess: [1, 1e308] }, 2, NOW_MS)).toBeNull();
-    expect(sanitizeStatus({ ...status, quota: [observation(0, { dr: 1e308 })] }, 2, NOW_MS)).toBeNull();
-  });
-
   test("a percent over 100 is refused — pressure, quota windows and per-model caps", () => {
     expect(sanitizeStatus({ ...status, cpu: 101 }, 2, NOW_MS)).toBeNull();
     expect(sanitizeStatus({ ...status, disk: 100 }, 2, NOW_MS)).not.toBeNull();

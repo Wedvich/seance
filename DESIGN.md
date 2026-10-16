@@ -529,11 +529,12 @@ The Durable Object persists a machine registry:
   `Machine.scannedAt` without a register, and comparing against it would drop
   every status until the repo set next changed. A status that opened is proof
   of life and clears a timeout's offline mark, as a reply does.
-  **Reading** (`shared/src/status-reader.ts`): the parser checks types, and
-  one set of rules checks ranges and relations, so the PWA and the scheduler
-  cannot disagree on one. `RelayClient` applies `sanitizeStatus` against the
-  register blob's exclave count before setting `Machine.status`. It refuses
-  the whole snapshot for a number past `Number.MAX_SAFE_INTEGER`, a percent
+  **Reading** (`shared/src/status-reader.ts`): the parser checks types —
+  every wire integer a non-negative safe integer, since `Number.isInteger`
+  alone accepts `1e308` — and one set of rules checks ranges and relations, so
+  the PWA and the scheduler cannot disagree on one. `RelayClient` applies
+  `sanitizeStatus` against the register blob's exclave count before setting
+  `Machine.status`. It refuses the whole snapshot for a percent
   over 100, a `sess` that is not one count per exclave, a quota index out of
   range or repeated, or more entries kept plus trimmed (`tr`) than there are
   exclaves. It drops one observation stamped further ahead than clock skew
