@@ -1,5 +1,6 @@
 import {
   CAPABILITIES,
+  DEFAULT_EXCLAVE,
   effectivePct,
   isQuotaTrimmed,
   isStatusStale,
@@ -63,6 +64,8 @@ interface Pass {
   readonly inFlight: readonly Task[];
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
+  /** Accounts signed into a `default` exclave anywhere — keyed by account, so the same one in a named exclave pays too. */
+  readonly preserved: ReadonlySet<string>;
   readonly capReached: Reason | null;
 }
 
@@ -79,6 +82,11 @@ export function route(input: RouteInput): Decision {
     accountAt: (placement) =>
       machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
         ?.accountId ?? null,
+    preserved: new Set(
+      machines
+        .flatMap((m) => m.exclaves ?? [])
+        .flatMap((x) => (x.id === DEFAULT_EXCLAVE && x.accountId !== null ? [x.accountId] : [])),
+    ),
     capReached:
       inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
@@ -146,14 +154,17 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
     queuePressure: inFlight.filter((t) => (t.assignment ?? t.reservation)?.deviceId === machine.deviceId).length,
   };
   const sticky = samePlacement(task.spec.lineage, placement) ? config.stickyBonus : 0;
+  const preserve =
+    exclave.accountId !== null && pass.preserved.has(exclave.accountId) ? config.defaultAccountPenalty : 0;
   const { weights } = config;
   const total =
     weights.accountPressure * components.accountPressure +
     weights.machinePressure * components.machinePressure +
     weights.dependencyDistance * components.dependencyDistance +
     weights.queuePressure * components.queuePressure -
-    sticky;
-  return { ...base, score: { components, sticky, total } };
+    sticky +
+    preserve;
+  return { ...base, score: { components, sticky, preserve, total } };
 }
 
 interface AccountJudgement {

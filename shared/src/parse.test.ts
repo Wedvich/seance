@@ -3,6 +3,7 @@ import {
   isMetricsRequest,
   parseExclaveList,
   parseMachineInfo,
+  parseDecision,
   parseMachineStatus,
   parseMetricsReply,
   parseMetricsResponse,
@@ -287,5 +288,27 @@ describe("parseTaskRequest", () => {
       expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit) })).not.toBeNull();
       expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit + 1) })).toBeNull();
     }
+  });
+});
+
+const scoreComponents = { accountPressure: 0.25, machinePressure: 0.4, dependencyDistance: 0, queuePressure: 1 };
+const record = (score: Record<string, unknown>): unknown => ({
+  at: 1,
+  chosen: { deviceId: "mac", exclave: "default", clone: "app" },
+  candidates: [{ deviceId: "mac", machine: "mac", exclave: "default", clone: "app", rejected: [], score }],
+});
+
+describe("parseDecision", () => {
+  test("a score from a leader predating the default-account penalty reads as none applied", () => {
+    const decision = parseDecision(record({ components: scoreComponents, sticky: 0, total: 1 }));
+    expect(decision?.candidates[0]?.score?.preserve).toBe(0);
+    expect(
+      parseDecision(record({ components: scoreComponents, sticky: 0, preserve: 1, total: 2 }))?.candidates[0]?.score
+        ?.preserve,
+    ).toBe(1);
+  });
+
+  test("a penalty that is not a number nulls the record", () => {
+    expect(parseDecision(record({ components: scoreComponents, sticky: 0, preserve: "1", total: 1 }))).toBeNull();
   });
 });

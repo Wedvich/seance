@@ -12,6 +12,12 @@ export interface SchedulerConfig {
   };
   /** Subtracted from the lineage owner's total — the only thing stickiness does. */
   readonly stickyBonus: number;
+  /**
+   * Added to the total of any account signed into a `default` exclave — the one
+   * the owner's phone (chat, Cowork) also uses — so fleet work prefers the others
+   * while they have headroom. A constant, so it fades as the others fill.
+   */
+  readonly defaultAccountPenalty: number;
   /** Projected usage above this, in any window, filters the account unless it may spill into credits. */
   readonly quotaLinePct: number;
   /** A window resetting within this counts as empty for the filter: a task started now runs mostly after it. */
@@ -36,6 +42,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   // farthest base, on the scale of an account near 70% (docs/scheduler.md).
   weights: { accountPressure: 1, machinePressure: 4, dependencyDistance: 4, queuePressure: 1 },
   stickyBonus: 2,
+  // Account pressure is 1 at 50%: an empty default loses to another account up to ~50%.
+  defaultAccountPenalty: 1,
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: 5,

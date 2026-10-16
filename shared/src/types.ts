@@ -337,6 +337,9 @@ export interface RepoEntry {
   readonly origin?: string;
 }
 
+/** The exclave every machine has: `~` with `~/.claude`, implied and never listed in `~/.exclaves`. */
+export const DEFAULT_EXCLAVE = "default";
+
 /**
  * One exclave as the daemon reports it: a tree at `~/<id>` whose Claude Code
  * config dir is `~/.claude-<id>` (`default` is `~` with `~/.claude`). The
@@ -940,6 +943,8 @@ export interface Score {
   readonly components: ScoreComponents;
   /** The bonus subtracted for the lineage owner; 0 elsewhere. */
   readonly sticky: number;
+  /** The penalty added for an account signed into some machine's `default` exclave; 0 elsewhere. */
+  readonly preserve: number;
   readonly total: number;
 }
 

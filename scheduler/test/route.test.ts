@@ -358,6 +358,51 @@ describe("stickiness", () => {
   });
 });
 
+/** One machine, a `default` and a `work` exclave, so only the account differs. */
+function twoAccounts(defaultPct: number, workPct: number): Machine[] {
+  return [
+    machine("a", {
+      exclaves: [exclave("default", "org:phone"), exclave("work", "org:work")],
+      repos: [clone("app", "default"), clone("app-1", "work")],
+      status: status({ quota: [obs(0, { h: defaultPct, d: 0 }), obs(1, { h: workPct, d: 0 })] }),
+    }),
+  ];
+}
+
+describe("default-account penalty", () => {
+  test("an emptier default account loses to another one with headroom", () => {
+    const decision = decide(twoAccounts(0, 40));
+    expect(decision.chosen?.exclave).toBe("work");
+    const preserve = Object.fromEntries(decision.candidates.map((c) => [c.exclave, c.score?.preserve]));
+    expect(preserve).toEqual({ default: DEFAULT_CONFIG.defaultAccountPenalty, work: 0 });
+  });
+
+  test("once the other account fills past the penalty, the default is used", () => {
+    // 60% + 5% → (0.65/0.35)² ≈ 3.4, over the default's 0.003 + 1.
+    expect(decide(twoAccounts(0, 60)).chosen?.exclave).toBe("default");
+  });
+
+  test("keyed by account: the default's account in a named exclave elsewhere pays too", () => {
+    // b's default holds org:phone without a clone, so it only marks the account.
+    const decision = decide([
+      machine("a", {
+        exclaves: [exclave("work", "org:phone"), exclave("side", "org:side")],
+        repos: [clone("app", "work"), clone("app-1", "side")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      }),
+      machine("b", { exclaves: [exclave("default", "org:phone")], repos: [] }),
+    ]);
+    const scored = decision.candidates.filter((c) => c.score !== undefined);
+    expect(Object.fromEntries(scored.map((c) => [c.exclave, c.score?.preserve]))).toEqual({ work: 1, side: 0 });
+    expect(decision.chosen?.exclave).toBe("side");
+  });
+
+  test("the penalty comes from config; 0 turns it off", () => {
+    const decision = decide(twoAccounts(0, 40), { config: { defaultAccountPenalty: 0 } });
+    expect(decision.chosen?.exclave).toBe("default");
+  });
+});
+
 describe("decision record", () => {
   test("scored candidates first by total, then the rejected; nothing placeable chooses nothing", () => {
     const decision = decide([

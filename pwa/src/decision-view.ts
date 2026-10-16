@@ -79,6 +79,7 @@ function scoreText(score: Score): string {
   ];
   if (c.dependencyDistance > 0) parts.push(`distance ${n(c.dependencyDistance)}`);
   if (score.sticky > 0) parts.push(`continuation −${n(score.sticky)}`);
+  if (score.preserve > 0) parts.push(`default account +${n(score.preserve)}`);
   return `score ${n(score.total)} (${parts.join(" · ")})`;
 }
 

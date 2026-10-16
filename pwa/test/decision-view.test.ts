@@ -18,6 +18,7 @@ const scored = (deviceId: string, name: string, total: number, observedAgoS = 18
   score: {
     components: { accountPressure: 0.25, machinePressure: 0.4, dependencyDistance: 0, queuePressure: 1 },
     sticky: 0,
+    preserve: 0,
     total,
   },
   quota: { observedAt: NOW_S - observedAgoS, observer: deviceId, source: "session" },
@@ -106,11 +107,16 @@ describe("describeDecision", () => {
     );
   });
 
-  test("credits spill and a continuation's bonus are part of the why", () => {
+  test("credits spill, a continuation's bonus and the default-account penalty are part of the why", () => {
     const base = scored("mac", "Mac", 0.5);
     const sticky: Candidate = {
       ...base,
-      score: { components: { ...base.score!.components, dependencyDistance: 0.25 }, sticky: 2, total: 0.5 },
+      score: {
+        components: { ...base.score!.components, dependencyDistance: 0.25 },
+        sticky: 2,
+        preserve: 1,
+        total: 0.5,
+      },
       spill: { window: "7d", projectedPct: 93.4 },
     };
     const summary = describeDecision(
@@ -120,7 +126,7 @@ describe("describeDecision", () => {
       "would",
     );
     expect(summary.chosen?.why).toBe(
-      "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00) — would spend credits (7d at 93%)",
+      "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00 · default account +1.00) — would spend credits (7d at 93%)",
     );
   });
 });
