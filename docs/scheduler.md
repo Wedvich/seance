@@ -563,7 +563,8 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   (`oauth|<org>:<acct>`), so a later kind — an API key, a Foundry deployment — gets ids
   disjoint from these; what identifies such an account (the provider's org or workspace, or a
   fingerprint of the key, which changes on rotation) is decided with that kind. PWA: rename on
-  the account card. Exit: an alias set in one client shows in another; a record whose
+  the account card, which shows the alias, else the email (DESIGN.md _PWA_), else the short
+  account id — clearing an alias falls back to the email. Exit: an alias set in one client shows in another; a record whose
   `accountId` does not hash to its key is ignored (shared + e2e). Record: DESIGN.md _Threat
   model_ (the HKDF label, what the key reveals, a token holder can delete an alias).
 - **Fleet quota record** (follow-up, after account records) — a single `quota` key,

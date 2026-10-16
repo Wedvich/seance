@@ -124,12 +124,21 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   if (typeof value["id"] !== "string" || value["id"] === "") return null;
   const accountId = value["accountId"];
   if (accountId !== null && typeof accountId !== "string") return null;
+  const email = value["email"];
+  if (!isOptionalString(email)) return null;
   const extraUsageEnabled = value["extraUsageEnabled"];
   if (extraUsageEnabled !== null && typeof extraUsageEnabled !== "boolean") return null;
   if (typeof value["authOk"] !== "boolean") return null;
   const skills = value["skills"];
   if (!isStringArray(skills)) return null;
-  return { id: value["id"], accountId, extraUsageEnabled, authOk: value["authOk"], skills };
+  return {
+    id: value["id"],
+    accountId,
+    ...(email === undefined || email === "" ? {} : { email }),
+    extraUsageEnabled,
+    authOk: value["authOk"],
+    skills,
+  };
 }
 
 export function parseExclaveList(value: unknown): readonly ExclaveInfo[] | null {

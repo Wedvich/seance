@@ -1156,7 +1156,9 @@
 
 .exclave {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  /* The account (an email since `ExclaveInfo.email`) is what gives way: an exclave name is
+     short by the `~/.exclaves` contract, and is the row's identity. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   padding: 9px 0 0;
   font-size: 13px;
@@ -1168,6 +1170,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.exclave-account {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .exclave-account,

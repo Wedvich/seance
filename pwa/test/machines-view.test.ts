@@ -89,6 +89,25 @@ describe("deriveMachines", () => {
     expect(accounts[0]?.historyFrom).toBe("b");
   });
 
+  test("an account is named by the email any of its exclaves reports, else its short id", () => {
+    const first = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [exclave("default", ACCOUNT), exclave("work", "org-2:acct-bbbbbbbb-2222")],
+    });
+    // An old daemon reports no email for the same account; the other machine's still names it.
+    const old = machine({ deviceId: "b", name: "b", exclaves: [exclave("default", ACCOUNT)] });
+    const named = machine({
+      deviceId: "c",
+      name: "c",
+      exclaves: [{ ...exclave("default", ACCOUNT), email: "me@example.com" }],
+    });
+    const { cards, accounts } = deriveMachines([first, old, named], NOW);
+    expect(accounts.map((account) => account.detail)).toEqual(["me@example.com · on a, b, c", "acct acct-bbb · on a"]);
+    expect(cards[2]?.exclaves[0]?.account).toBe("me@example.com");
+    expect(cards[0]?.exclaves[0]?.account).toBe("acct acct-aaa");
+  });
+
   test("a window past its reset reads empty, however full the reading was", () => {
     const quota = [
       {

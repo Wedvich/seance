@@ -86,8 +86,8 @@ export async function listExclaves(home: string): Promise<{
 
 /**
  * Account presence as Claude Code records it in the exclave's `.claude.json`.
- * Only `oauthAccount`'s ids and the extra-usage flag are read — never a token,
- * which that file does not hold anyway. A missing file is a signed-out
+ * Only `oauthAccount`'s ids, email and extra-usage flag are read — never a
+ * token, which that file does not hold anyway. A missing file is a signed-out
  * exclave, not an error: the daemon reports, it doesn't require.
  *
  * An unparsable file keeps `previous`'s account: every running session
@@ -101,11 +101,11 @@ export async function describeExclave(exclave: Exclave, previous?: ExclaveInfo):
     listSkills(join(exclave.configDir, "skills")),
   ]);
   if (account !== UNPARSABLE) return { id: exclave.id, ...account, skills };
-  const { accountId, extraUsageEnabled, authOk } = previous ?? SIGNED_OUT;
-  return { id: exclave.id, accountId, extraUsageEnabled, authOk, skills };
+  const { accountId, email, extraUsageEnabled, authOk } = previous ?? SIGNED_OUT;
+  return { id: exclave.id, accountId, ...(email === undefined ? {} : { email }), extraUsageEnabled, authOk, skills };
 }
 
-type Account = Pick<ExclaveInfo, "accountId" | "extraUsageEnabled" | "authOk">;
+type Account = Pick<ExclaveInfo, "accountId" | "email" | "extraUsageEnabled" | "authOk">;
 
 const SIGNED_OUT: Account = { accountId: null, extraUsageEnabled: null, authOk: false };
 const UNPARSABLE = Symbol("unparsable");
@@ -129,8 +129,10 @@ async function readAccount(file: string): Promise<Account | typeof UNPARSABLE> {
   const org = account["organizationUuid"];
   const acct = account["accountUuid"];
   const extra = account["hasExtraUsageEnabled"];
+  const email = account["emailAddress"];
   return {
     accountId: typeof org === "string" && typeof acct === "string" ? `${org}:${acct}` : null,
+    ...(typeof email === "string" && email !== "" ? { email } : {}),
     extraUsageEnabled: typeof extra === "boolean" ? extra : null,
     authOk: true,
   };

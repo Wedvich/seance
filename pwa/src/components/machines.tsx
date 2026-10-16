@@ -125,7 +125,9 @@ function MachineCardView(props: {
           {card.exclaves.map((row) => (
             <li key={row.id} className="exclave">
               <span className="exclave-id">{row.id}</span>
-              <span className="exclave-account">{row.account}</span>
+              <span className="exclave-account" title={row.account}>
+                {row.account}
+              </span>
               <span className="exclave-sessions">
                 {row.sessions === null ? "–" : `${row.sessions} ${row.sessions === 1 ? "session" : "sessions"}`}
               </span>

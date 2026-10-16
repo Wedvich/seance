@@ -251,6 +251,12 @@ export interface ExclaveInfo {
   readonly id: string;
   /** `organizationUuid:accountUuid` from the exclave's `.claude.json` (`~/.claude.json` for `default`); null when not signed in. Never the email. */
   readonly accountId: string | null;
+  /**
+   * `oauthAccount.emailAddress`, for display only: what the PWA names the
+   * account by when no alias is set. Never a key — `accountId` is. Absent from
+   * older daemons and from accounts whose file doesn't carry one.
+   */
+  readonly email?: string;
   /** Whether the account may spill into credits; null when its `.claude.json` doesn't say. */
   readonly extraUsageEnabled: boolean | null;
   /** The config dir holds a signed-in account. */
