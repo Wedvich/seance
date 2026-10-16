@@ -436,6 +436,9 @@ term } | null` in the registry push.
    `Fleet` adapter over it, lifecycle on `lead` / `follow` / socket loss, leaking nothing on
    demotion. `QueueStore` is the in-memory fake for this milestone.
 4. `taskId` on `spawn`, `task_running`, `taskId` in `sessions`; advertised in `capabilities`.
+   **Landed 2026-10-16** — DESIGN.md _Daemon_, "Task ids", is the record: a tmux pane option,
+   so it survives a daemon restart, and `taskIdOfPane` in `daemon/src/sessions.ts` is item 5's
+   pane → task lookup.
 5. `session-event` on the local socket + `claude-mods/session-events`; the daemon binds each
    event to a pane and takes session and task from its own pane map, keeps only `https:` PR
    URLs, and forwards to the leader sealed to `"scheduler"`.
@@ -596,6 +599,23 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   change (a `/login`); the next poll decides. PWA: "needs `/login`" on the exclave row; a Web
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; an expired access token alone never reads as `expired` (daemon).
+
+- **CLI/MCP `auto`** — enqueue through the store, as the PWA does (M3 item 6): seal the task,
+  `store-put` it at `expect: 0`, so it queues with no leader up. The scheduler mints the
+  `taskId` and dispatches, so neither surface ever takes a `taskId` itself. The verdict is
+  "queued" plus the task id, not a window; `get_sessions` finds the session by `taskId` once
+  it runs. Spelling is open (e.g. `seanced spawn --auto`, `spawn_session { machine: "auto" }`).
+  Needs M3's store. Two constraints:
+  - `seanced spawn` is relay-free today: it drives local tmux and audits `origin=cli`.
+    `--auto` is the one form that needs the relay and the PSK (an app-role leg, as `seanced
+mcp` has), and a direct spawn stays relay-free.
+  - A keyless `seanced mcp` reaches the relay only through the fleet broker, whose actions
+    are fixed. An enqueue there is a new broker action, which is a threat-model change
+    (DESIGN.md "Fleet broker"); without it, keyless MCP gets no `auto`.
+
+  Raycast attaches the same way. Exit: a CLI and an MCP `auto` spawn each land as a task with
+  no leader up and run once one leads (e2e); `seanced spawn` without `--auto` still works with
+  the relay unreachable (daemon).
 
 ## Settled defaults (interview, 2026-10-15)
 

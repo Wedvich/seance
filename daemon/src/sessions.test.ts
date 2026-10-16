@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { RepoEntry } from "@seance/shared";
 import { EXIT_PROMPT_SCREEN } from "../test/fixtures.ts";
-import { parsePaneInfo, parsePanes, screenState, stuckWindows } from "./sessions.ts";
+import { paneRunningTask, parsePaneInfo, parsePanes, screenState, stuckWindows } from "./sessions.ts";
 import { slugify } from "./spawn.ts";
 
 const repos: readonly RepoEntry[] = [
@@ -17,8 +17,9 @@ function line(
   path: string,
   ours: "0" | "1" = "0",
   pane = `%${id.slice(1)}`,
+  task = "",
 ): string {
-  return `${pane}|${id}|${name}|${cmd}|${ours}|${titled}|${path}`;
+  return `${pane}|${id}|${name}|${cmd}|${ours}|${titled}|${task}|${path}`;
 }
 
 describe("parsePanes", () => {
@@ -126,6 +127,17 @@ describe("parsePanes", () => {
   test("tolerates malformed lines and trailing newline", () => {
     expect(parsePanes("garbage\n\n", repos)).toEqual([]);
   });
+
+  test("reports a spawn's taskId, and none for a pane without one or with a value no spawn could write", () => {
+    const raw = [
+      line("@1", "tracked", "claude", "1", "/Users/m/repos/seance", "1", "%1", "task-7f3a"),
+      line("@2", "plain", "claude", "1", "/Users/m/repos/seance", "1", "%2"),
+      line("@3", "forged", "claude", "1", "/Users/m/repos/seance", "1", "%3", "$(rm -rf ~)"),
+    ].join("\n");
+    const sessions = parsePanes(raw, repos);
+    expect(sessions[0]?.taskId).toBe("task-7f3a");
+    expect(sessions.slice(1).map((s) => "taskId" in s)).toEqual([false, false]);
+  });
 });
 
 interface InfoLine {
@@ -137,6 +149,7 @@ interface InfoLine {
   readonly deadTime?: string;
   readonly titled?: string;
   readonly name?: string;
+  readonly task?: string;
   readonly path?: string;
 }
 
@@ -151,6 +164,7 @@ function infoLine(fields: InfoLine): string {
     fields.deadTime ?? "",
     fields.titled ?? "1",
     fields.name ?? "task",
+    fields.task ?? "",
     fields.path ?? "/Users/m/repos/seance",
   ].join("|");
 }
@@ -172,6 +186,7 @@ describe("parsePaneInfo", () => {
         titled: true,
         command: "claude",
         path: "/Users/m/repos/seance",
+        taskId: null,
       },
       {
         paneId: "%2",
@@ -183,6 +198,7 @@ describe("parsePaneInfo", () => {
         titled: false,
         command: "claude",
         path: "/Users/m/repos/seance",
+        taskId: null,
       },
     ]);
   });
@@ -206,6 +222,25 @@ describe("parsePaneInfo", () => {
 
   test("tolerates malformed lines and a trailing newline", () => {
     expect(parsePaneInfo("garbage\n%1|@1\n\n")).toEqual([]);
+  });
+});
+
+describe("paneRunningTask", () => {
+  test("finds the live pane carrying the task, registered or still starting", () => {
+    const raw = [
+      infoLine({ pane: "%1", window: "@1", task: "other" }),
+      infoLine({ pane: "%2", window: "@2", task: "t1", titled: "0" }),
+    ].join("\n");
+    expect(paneRunningTask(parsePaneInfo(raw), "t1")?.paneId).toBe("%2");
+  });
+
+  test("a dead pane has finished with its task", () => {
+    const panes = parsePaneInfo(infoLine({ pane: "%1", dead: "1", task: "t1" }));
+    expect(paneRunningTask(panes, "t1")).toBeNull();
+  });
+
+  test("a pane without a task never matches", () => {
+    expect(paneRunningTask(parsePaneInfo(infoLine({ pane: "%1" })), "t1")).toBeNull();
   });
 });
 

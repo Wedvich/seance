@@ -150,7 +150,8 @@ async function writable(path: string): Promise<boolean> {
 export interface SpawnAudit {
   readonly request: (request: SpawnRequest) => Promise<void>;
   readonly ok: (outcome: SpawnOutcome) => Promise<void>;
-  readonly failed: (code: string) => Promise<void>;
+  /** `id`: the session a `task_running` refusal points at. */
+  readonly failed: (code: string, id?: string) => Promise<void>;
   readonly rejected: (reason: string) => Promise<void>;
 }
 
@@ -173,18 +174,20 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
+      const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
+          taskNote +
           promptNote,
       );
     },
     ok: async (outcome: SpawnOutcome): Promise<void> => {
       await emit(`ok window=${quote(outcome.window)} path=${quote(outcome.path)}`);
     },
-    failed: async (code: string): Promise<void> => {
-      await emit(`failed code=${code}`);
+    failed: async (code: string, id?: string): Promise<void> => {
+      await emit(`failed code=${code}${id === undefined ? "" : ` target=${quote(id)}`}`);
     },
     rejected: async (reason: string): Promise<void> => {
       await emit(`rejected ${reason}`);

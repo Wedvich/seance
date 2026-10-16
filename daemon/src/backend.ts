@@ -21,6 +21,8 @@ export class SpawnFailure extends Error {
   constructor(
     readonly code: SpawnErrorCode,
     message: string,
+    /** With `task_running`: the `SessionEntry.id` already running the task. */
+    readonly id?: string,
   ) {
     super(message);
     this.name = "SpawnFailure";
@@ -66,7 +68,10 @@ export interface SpawnOutcome {
 export interface SessionBackend {
   /**
    * Resolves `request.repo` by name against `repos` — the cached scan set, never
-   * a path join (threat model). Throws `SpawnFailure` with a wire code.
+   * a path join (threat model). Throws `SpawnFailure` with a wire code. A
+   * `taskId` must survive the daemon (a restarted one still refuses its
+   * duplicate) and be reported back by `sessions`; a duplicate throws
+   * `task_running` carrying the running session's id.
    */
   readonly spawn: (request: SpawnRequest, repos: readonly RepoEntry[]) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;

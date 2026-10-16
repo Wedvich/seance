@@ -12,7 +12,7 @@ import {
 } from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import type { SessionBackend } from "./backend.ts";
+import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { createHandler, type HandlerContext } from "./handlers.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
@@ -88,6 +88,15 @@ describe("relay ops are audited", () => {
   test("a non-boolean plan is rejected rather than coerced", async () => {
     await createHandler(ctx)(spawnNope({ plan: "yes" }));
     expect(logged()).toContain("audit spawn origin=relay rejected");
+  });
+
+  test("a taskId outside its bounds is rejected before the backend sees it", async () => {
+    for (const taskId of ["", "a b", "x".repeat(65), "t;rm", 7]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope({ taskId }));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
   });
 
   test("a newline in a wire value cannot forge an audit line", async () => {
@@ -179,6 +188,35 @@ describe("the spawn ack carries the window it announced", () => {
     expect(payload.note).toBeUndefined();
     expect(payload.pending).toBeUndefined();
     expect(captured).toBe(false);
+  });
+});
+
+describe("a spawn for a task already running", () => {
+  const running: SessionBackend = {
+    spawn: () => Promise.reject(new SpawnFailure("task_running", "task t-1 is already running in fix", "%12")),
+    sessions: () => Promise.resolve([]),
+    doctor: () => Promise.resolve([]),
+  };
+
+  test("is refused with the code and the running session's id, and the trail names both the task and that session", async () => {
+    const reply = await createHandler({ ...ctx, backend: running })(
+      request("spawn", { repo: "myrepo", mode: "here", taskId: "t-1" }),
+    );
+    expect(reply?.payload).toEqual({
+      ok: false,
+      code: "task_running",
+      message: "task t-1 is already running in fix",
+      id: "%12",
+    });
+    expect(logged()).toContain('mode=here title="" model=');
+    expect(logged()).toContain('task="t-1" prompt=none');
+    expect(logged()).toContain('audit spawn origin=relay failed code=task_running target="%12"');
+  });
+
+  test("an untracked spawn's lines carry no task, and its failures no target", async () => {
+    await createHandler(ctx)(spawnNope());
+    expect(logged()).not.toContain("task=");
+    expect(logged()).not.toContain("target=");
   });
 });
 

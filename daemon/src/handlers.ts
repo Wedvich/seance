@@ -13,7 +13,7 @@ import type {
   SpawnResponse,
   UpdateAvailable,
 } from "@seance/shared";
-import { isMetricsRequest, quote } from "@seance/shared";
+import { isMetricsRequest, isTaskId, quote } from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -53,6 +53,8 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
   if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
+  // Bounded, not just typed: it is written to the pane and echoed into every session list.
+  if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
   return true;
 }
 
@@ -114,8 +116,8 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
     };
   } catch (err) {
     if (err instanceof SpawnFailure) {
-      await audit.failed(err.code);
-      return { ok: false, code: err.code, message: err.message };
+      await audit.failed(err.code, err.id);
+      return { ok: false, code: err.code, message: err.message, ...(err.id === undefined ? {} : { id: err.id }) };
     }
     log.error(`spawn crashed: ${String(err)}`);
     return { ok: false, code: "internal_error", message: String(err) };

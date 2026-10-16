@@ -1,6 +1,6 @@
-import type { RepoEntry, SessionEntry } from "@seance/shared";
+import { isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { capturePane, FIELD_SEP, PANE_TITLED, tmux } from "./tmux.ts";
+import { capturePane, FIELD_SEP, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
@@ -87,6 +87,7 @@ interface Pane {
   readonly id: string;
   readonly window: string;
   readonly path: string;
+  readonly taskId: string | null;
 }
 
 function attribute(panes: readonly Pane[], repos: readonly RepoEntry[], links: GitLinks): readonly SessionEntry[] {
@@ -95,7 +96,13 @@ function attribute(panes: readonly Pane[], repos: readonly RepoEntry[], links: G
     window: pane.window,
     repo: repoFor(pane.path, repos, links),
     path: pane.path,
+    ...(pane.taskId === null ? {} : { taskId: pane.taskId }),
   }));
+}
+
+/** The pane option read back; anything outside the wire's bounds was not written by a spawn and reads as none. */
+function taskIdFrom(raw: string | undefined): string | null {
+  return isTaskId(raw) ? raw : null;
 }
 
 function registeredPanes(raw: string): readonly Pane[] {
@@ -103,7 +110,7 @@ function registeredPanes(raw: string): readonly Pane[] {
   const panes: Pane[] = [];
   for (const line of raw.split("\n")) {
     // Path last and taken as the remainder: a separator inside it can't shift the fields.
-    const [paneId, windowId, windowName, command, ours, titled, ...rest] = line.split(FIELD_SEP);
+    const [paneId, windowId, windowName, command, ours, titled, task, ...rest] = line.split(FIELD_SEP);
     const panePath = rest.join(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || windowName === undefined || command === undefined) continue;
     if (panePath === "") continue;
@@ -112,7 +119,7 @@ function registeredPanes(raw: string): readonly Pane[] {
     if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
     seen.add(windowId);
     // The registered pane's id, not the window's first: in a split it is claude's that `despawn` must reach.
-    panes.push({ id: paneId, window: windowName, path: panePath });
+    panes.push({ id: paneId, window: windowName, path: panePath, taskId: taskIdFrom(task) });
   }
   return panes;
 }
@@ -134,6 +141,8 @@ export interface PaneInfo {
   readonly titled: boolean;
   readonly command: string;
   readonly path: string;
+  /** The `taskId` the pane was spawned with (`TASK_OPTION`); null for none. */
+  readonly taskId: string | null;
 }
 
 /**
@@ -167,6 +176,7 @@ const PANE_INFO_FORMAT = [
   "#{pane_dead_time}",
   PANE_TITLED,
   `#{s/[${FIELD_SEP}]/-/:window_name}`,
+  TASK_FIELD,
   "#{pane_current_path}",
 ].join(FIELD_SEP);
 
@@ -175,9 +185,9 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
   const seen = new Set<string>();
   const panes: PaneInfo[] = [];
   for (const line of raw.split("\n")) {
-    const [paneId, windowId, command, ours, dead, deadTime, titled, windowName, ...rest] = line.split(FIELD_SEP);
+    const [paneId, windowId, command, ours, dead, deadTime, titled, windowName, task, ...rest] = line.split(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
-    if (deadTime === undefined || windowName === undefined || rest.length === 0) continue;
+    if (deadTime === undefined || windowName === undefined || task === undefined || rest.length === 0) continue;
     // Grouped sessions repeat every pane; a split's panes are distinct.
     if (seen.has(paneId)) continue;
     seen.add(paneId);
@@ -192,6 +202,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       titled: titled === "1",
       command,
       path: rest.join(FIELD_SEP),
+      taskId: taskIdFrom(task),
     });
   }
   return panes;
@@ -212,6 +223,25 @@ export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
   const result = await tmux(["display-message", "-p", "-t", paneId, PANE_INFO_FORMAT]);
   if (result.exitCode !== 0) return null;
   return parsePaneInfo(result.stdout).find((pane) => pane.paneId === paneId) ?? null;
+}
+
+/**
+ * The live pane carrying `taskId`, if any — what makes a second spawn for it a
+ * duplicate. Every live pane, registered or not: one still on a startup dialog
+ * is running the task as much as one that has registered. A dead pane (held
+ * open by remain-on-exit) has finished with it.
+ */
+export function paneRunningTask(panes: readonly PaneInfo[], taskId: string): PaneInfo | null {
+  return panes.find((pane) => !pane.dead && pane.taskId === taskId) ?? null;
+}
+
+/**
+ * The task a pane was spawned for, from the pane itself — never from anything
+ * a caller says about it. The lookup a pane-bound event attributes through;
+ * `paneId` must already be a validated `%n`, as for `paneInfo`.
+ */
+export async function taskIdOfPane(paneId: string): Promise<string | null> {
+  return (await paneInfo(paneId))?.taskId ?? null;
 }
 
 /** What the list-panes fields settle alone; null when only the screen can tell. */
@@ -301,7 +331,7 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
     // substitutes the separator out of them before the line reaches us.
     `#{pane_id}${FIELD_SEP}#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}` +
       `#{pane_current_command}${FIELD_SEP}` +
-      `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}#{pane_current_path}`,
+      `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}${TASK_FIELD}${FIELD_SEP}#{pane_current_path}`,
   ]);
   if (result.exitCode !== 0) return []; // no tmux server — nothing running
   const panes = registeredPanes(result.stdout);

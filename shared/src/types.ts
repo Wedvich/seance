@@ -275,6 +275,12 @@ export interface SessionEntry {
   /** Repo name mapped by path prefix — a linked worktree's through its main clone; null when outside every known repo. */
   readonly repo: string | null;
   readonly path: string;
+  /**
+   * The `SpawnRequest.taskId` the session was spawned with, read back from the
+   * pane rather than remembered, so it survives a daemon restart. Absent for a
+   * session spawned without one, and from daemons without the capability.
+   */
+  readonly taskId?: string;
 }
 
 /** Git identity of a daemon's own checkout. `commitTs` is ms, like every other wire timestamp. */
@@ -341,7 +347,7 @@ export interface MachineInfo {
   readonly exclaves?: readonly ExclaveInfo[];
   /**
    * What this daemon's handlers support beyond the base ops (`"metrics"`,
-   * later `"taskId"`, `"baseBranch"`), so no reader relies on a field an old
+   * `"taskId"`, later `"baseBranch"`), so no reader relies on a field an old
    * daemon would drop. Sealed, unlike the relay-read `roles` of M2.
    */
   readonly capabilities?: readonly string[];
@@ -349,9 +355,10 @@ export interface MachineInfo {
 
 /**
  * `MachineInfo.capabilities` entries. `metrics`: the op — a daemon without it
- * ignores the op, which an app sees only as a timeout.
+ * ignores the op, which an app sees only as a timeout. `taskId`: the spawn
+ * field — a daemon without it spawns a duplicate rather than refusing one.
  */
-export const CAPABILITIES = { metrics: "metrics" } as const;
+export const CAPABILITIES = { metrics: "metrics", taskId: "taskId" } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
 
@@ -585,10 +592,22 @@ export interface SpawnRequest {
    * clients don't send it, older daemons ignore it.
    */
   readonly client?: string;
+  /**
+   * Dispatch idempotency (docs/scheduler.md): a daemon refuses a second spawn for a
+   * task id one of its sessions already carries, with `task_running`. Bounded by
+   * `TASK_ID_PATTERN`; a request outside it is malformed. Old daemons ignore it —
+   * `CAPABILITIES.taskId` says which don't.
+   */
+  readonly taskId?: string;
 }
+
+/** What `SpawnRequest.taskId` may hold: a UUID or a scheduler key fits, a shell metacharacter or a separator doesn't. */
+export const TASK_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/u;
 
 export const SPAWN_ERROR_CODES = [
   "repo_not_found",
+  /** A session already carries the request's `taskId`; the reply's `id` names it. */
+  "task_running",
   "fetch_failed",
   "no_default_branch",
   "launch_error",
@@ -621,7 +640,13 @@ export type SpawnResponse =
       readonly pending?: true;
       readonly sessions: readonly SessionEntry[];
     }
-  | { readonly ok: false; readonly code: SpawnErrorCode; readonly message: string };
+  | {
+      readonly ok: false;
+      readonly code: SpawnErrorCode;
+      readonly message: string;
+      /** With `task_running` only: the `SessionEntry.id` of the session already running the task. */
+      readonly id?: string;
+    };
 
 /**
  * Ends one session: claude is asked to exit, and its pane is killed if it

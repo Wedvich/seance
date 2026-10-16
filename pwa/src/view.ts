@@ -187,6 +187,9 @@ export function failureBody(code: string, repo: string, machine: string): string
       return "The daemon couldn't open a window for the session. Nothing is running.";
     case "repo_not_found":
       return `${repo} isn't on ${machine} anymore. Rescan its repos and try again.`;
+    case "task_running":
+      // The app sends no taskId, so only a daemon answering someone else's request says this.
+      return `That task is already running on ${machine}. Nothing new was started.`;
     case "fetch_failed":
     case "timeout":
       return "Couldn't reach the git remote in time. Nothing is running.";
