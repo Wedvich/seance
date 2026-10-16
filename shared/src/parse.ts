@@ -5,12 +5,26 @@ import {
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
+  SCHEDULER_ERROR_CODES,
   SCHEDULER_OPS,
   SESSION_STATES,
   SPAWN_ERROR_CODES,
   TASK_ID_PATTERN,
   TASK_REQUEST_LIMITS,
+  TASK_STATES,
+  type Assignment,
+  type Candidate,
+  type Decision,
+  type QueueReply,
+  type QuotaBasis,
+  type Reason,
+  type RoutePreviewReply,
+  type SchedulerError,
   type SchedulerOp,
+  type Score,
+  type SubmitReply,
+  type Target,
+  type Task,
   type TaskRequest,
   type Envelope,
   type ExclaveInfo,
@@ -405,6 +419,197 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
     ...(effort === undefined ? {} : { effort }),
     ...(plan === undefined ? {} : { plan }),
   };
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseTarget(value: unknown): Target | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, exclave, clone } = value;
+  if (typeof deviceId !== "string" || typeof exclave !== "string" || typeof clone !== "string") return null;
+  return { deviceId, exclave, clone };
+}
+
+/**
+ * A reason this build knows, with the fields its line reads; null for one it
+ * does not. The caller drops those rather than the decision: a leader a
+ * version ahead may reject for a reason minted after this app, and the
+ * candidate still reads as rejected.
+ */
+function parseReason(value: unknown): Reason | null {
+  if (!isRecord(value)) return null;
+  const { code } = value;
+  switch (code) {
+    case "offline":
+    case "status_stale":
+    case "task_id_unsupported":
+    case "exclaves_unknown":
+    case "pressure_unknown":
+    case "repo_absent":
+    case "auth_missing":
+      return { code };
+    case "disk_low":
+      return isFiniteNumber(value["freeMib"]) ? { code, freeMib: value["freeMib"] } : null;
+    case "pin_mismatch": {
+      const field = value["field"];
+      return field === "deviceId" || field === "exclave" ? { code, field } : null;
+    }
+    case "quota_unknown": {
+      const why = value["why"];
+      return why === "unobserved" || why === "trimmed" ? { code, why } : null;
+    }
+    case "quota_over_line": {
+      const { window, projectedPct } = value;
+      return typeof window === "string" && isFiniteNumber(projectedPct) ? { code, window, projectedPct } : null;
+    }
+    case "cap_reached": {
+      const { inFlight, max } = value;
+      return isUint(inFlight) && isUint(max) ? { code, inFlight, max } : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function parseScore(value: unknown): Score | null {
+  if (!isRecord(value) || !isRecord(value["components"])) return null;
+  const { accountPressure, machinePressure, dependencyDistance, queuePressure } = value["components"];
+  const { sticky, total } = value;
+  const numbers = [accountPressure, machinePressure, dependencyDistance, queuePressure, sticky, total];
+  if (!numbers.every(isFiniteNumber)) return null;
+  return {
+    components: {
+      accountPressure: Number(accountPressure),
+      machinePressure: Number(machinePressure),
+      dependencyDistance: Number(dependencyDistance),
+      queuePressure: Number(queuePressure),
+    },
+    sticky: Number(sticky),
+    total: Number(total),
+  };
+}
+
+function parseCandidate(value: unknown): Candidate | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, machine, exclave, clone, rejected, score, quota, spill } = value;
+  if (typeof deviceId !== "string" || typeof machine !== "string") return null;
+  if (exclave !== null && typeof exclave !== "string") return null;
+  if (!isOptionalString(clone) || !Array.isArray(rejected)) return null;
+  const reasons = rejected.map(parseReason).filter((reason) => reason !== null);
+  const parsedScore = score === undefined ? undefined : parseScore(score);
+  if (parsedScore === null) return null;
+  let basis: QuotaBasis | undefined;
+  if (quota !== undefined) {
+    if (!isRecord(quota) || !isUint(quota["observedAt"]) || typeof quota["observer"] !== "string") return null;
+    const source = QUOTA_SOURCES.find((s) => s === quota["source"]);
+    if (source === undefined) return null;
+    basis = { observedAt: quota["observedAt"], observer: quota["observer"], source };
+  }
+  let spilled: Candidate["spill"];
+  if (spill !== undefined) {
+    if (!isRecord(spill) || typeof spill["window"] !== "string" || !isFiniteNumber(spill["projectedPct"])) return null;
+    spilled = { window: spill["window"], projectedPct: spill["projectedPct"] };
+  }
+  return {
+    deviceId,
+    machine,
+    exclave,
+    rejected: reasons,
+    ...(clone === undefined ? {} : { clone }),
+    ...(parsedScore === undefined ? {} : { score: parsedScore }),
+    ...(basis === undefined ? {} : { quota: basis }),
+    ...(spilled === undefined ? {} : { spill: spilled }),
+  };
+}
+
+/**
+ * The decision record as the app renders it. Checked like any reply that
+ * lands on the render path (DESIGN.md, threat model, relay compromise): one
+ * unreadable candidate nulls the record rather than shortening it, since a
+ * missing loser would misstate why the winner won.
+ */
+export function parseDecision(value: unknown): Decision | null {
+  if (!isRecord(value) || !isFiniteNumber(value["at"])) return null;
+  const chosen = value["chosen"] === null ? null : parseTarget(value["chosen"]);
+  if (value["chosen"] !== null && chosen === null) return null;
+  const candidates = parseList(value["candidates"], parseCandidate);
+  if (candidates === null) return null;
+  return { at: value["at"], chosen, candidates };
+}
+
+function parseAssignment(value: unknown): Assignment | null {
+  const target = parseTarget(value);
+  if (target === null || !isRecord(value)) return null;
+  const { window, pane } = value;
+  if (!isOptionalString(window) || !isOptionalString(pane)) return null;
+  return { ...target, ...(window === undefined ? {} : { window }), ...(pane === undefined ? {} : { pane }) };
+}
+
+/**
+ * A task as `queue` and `submit` carry it — the fields the app shows. A state
+ * this build does not know nulls the task: it cannot say what the task is
+ * doing, and guessing would be worse than leaving it out.
+ */
+export function parseTask(value: unknown): Task | null {
+  if (!isRecord(value)) return null;
+  const { id, state, createdAt, spec, assignment, reservation, decision, failure, absentSince } = value;
+  if (typeof id !== "string" || !isFiniteNumber(createdAt)) return null;
+  const known = TASK_STATES.find((s) => s === state);
+  if (known === undefined || !isRecord(spec)) return null;
+  const request = parseTaskRequest(spec);
+  if (request === null) return null;
+  const placed = assignment === undefined ? undefined : parseAssignment(assignment);
+  const reserved = reservation === undefined ? undefined : parseTarget(reservation);
+  const record = decision === undefined ? undefined : parseDecision(decision);
+  if (placed === null || reserved === null || record === null) return null;
+  if (absentSince !== undefined && !isFiniteNumber(absentSince)) return null;
+  let failed: Task["failure"];
+  if (failure !== undefined) {
+    if (!isRecord(failure) || typeof failure["code"] !== "string" || typeof failure["message"] !== "string")
+      return null;
+    failed = { code: failure["code"], message: failure["message"] };
+  }
+  const expiresAt = isRecord(reservation) && isFiniteNumber(reservation["expiresAt"]) ? reservation["expiresAt"] : 0;
+  return {
+    id,
+    state: known,
+    createdAt,
+    spec: request,
+    ...(placed === undefined ? {} : { assignment: placed }),
+    ...(reserved === undefined ? {} : { reservation: { ...reserved, expiresAt } }),
+    ...(record === undefined ? {} : { decision: record }),
+    ...(failed === undefined ? {} : { failure: failed }),
+    ...(absentSince === undefined ? {} : { absentSince }),
+  };
+}
+
+/** A scheduler refusal; an unknown code is no refusal this build can word, so the reply is unreadable. */
+function parseSchedulerError(value: unknown): SchedulerError | null {
+  if (!isRecord(value) || value["ok"] !== false || typeof value["message"] !== "string") return null;
+  const code = SCHEDULER_ERROR_CODES.find((c) => c === value["code"]);
+  return code === undefined ? null : { ok: false, code, message: value["message"] };
+}
+
+export function parseQueueReply(value: unknown): QueueReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  if (!isRecord(value) || !isFiniteNumber(value["at"]) || !Array.isArray(value["tasks"])) return null;
+  // Lenient per task, as the registry is per entry: one a leader ahead wrote must not hide the rest.
+  const tasks = value["tasks"].map(parseTask).filter((task) => task !== null);
+  return { tasks, at: value["at"] };
+}
+
+export function parseRoutePreviewReply(value: unknown): RoutePreviewReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const decision = isRecord(value) ? parseDecision(value["decision"]) : null;
+  return decision === null ? null : { decision };
+}
+
+export function parseSubmitReply(value: unknown): SubmitReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const task = isRecord(value) ? parseTask(value["task"]) : null;
+  return task === null ? null : { task };
 }
 
 export function isSchedulerOp(value: unknown): value is SchedulerOp {

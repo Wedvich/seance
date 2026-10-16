@@ -147,6 +147,8 @@ const FAILURE_REASONS: Record<FailureReason, true> = {
   timeout: true,
   disconnected: true,
   not_leader: true,
+  no_leader: true,
+  leader_unverified: true,
 };
 
 function isBrokerErrorCode(value: unknown): value is BrokerErrorCode {

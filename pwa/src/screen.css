@@ -1420,3 +1420,103 @@
     opacity: 0;
   }
 }
+
+/* ---- decision record: the `auto` preview and a queued task's verdict ---- */
+
+.preview {
+  position: relative;
+}
+
+/* Sits in the card's label row, so it costs the card no height. */
+.preview-refresh {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  font-size: 17px;
+  cursor: pointer;
+}
+
+.decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  text-align: left;
+}
+
+.decision-headline {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.decision-failed {
+  font-weight: 500;
+  color: var(--err);
+}
+
+.decision-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
+.decision-chosen {
+  border-left-color: var(--ok);
+}
+
+.decision-rejected {
+  border-left-color: var(--err);
+}
+
+.decision-where {
+  font-size: 14px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.decision-lead {
+  font-weight: 600;
+}
+
+.decision-why,
+.decision-quota {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.decision-others > summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.decision-others[open] > summary {
+  margin-bottom: 6px;
+}

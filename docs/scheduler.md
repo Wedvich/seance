@@ -146,8 +146,8 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   and pressure goes through `liveStatus`, which answers only while `connected`.
 - Envelopes `to: "scheduler"`, the reserved `SCHEDULER_ID`, and the registry push's
   `scheduler: { deviceId, term } | null` landed with leadership (above). The push's field is
-  null unless the recorded leader is connected; the app-role client does not read it yet (item
-  6).
+  null unless the recorded leader is connected; the app-role client reads it since item 6,
+  checked against the entries that opened (`RelayState.scheduler`).
 - **`status { env }`** (daemon→relay, landed in M1; DESIGN.md _Presence & identity_): the
   leader's app-role leg receives it like any app, from the registry push and as it arrives, so
   the routing loop reads the same snapshot the PWA renders.

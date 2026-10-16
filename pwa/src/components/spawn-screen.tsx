@@ -1,6 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Machine } from "@seance/shared";
+import { describeDecision } from "../decision-view.ts";
 import {
   EFFORTS,
   EFFORT_LABELS,
@@ -9,10 +10,12 @@ import {
   type Effort,
   type Model,
   type PersistedForm,
+  type PreviewState,
   type RescanState,
   type SheetKind,
 } from "../state.ts";
 import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
+import { DecisionCard } from "./decision.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Sheet, SheetItem } from "./sheet.tsx";
 
@@ -42,6 +45,8 @@ export interface SpawnActions {
   readonly spawn: () => void;
   readonly dismissLayer: () => void;
   readonly selectMachine: (deviceId: string) => void;
+  readonly selectAuto: () => void;
+  readonly refreshPreview: () => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
   readonly rescan: () => void;
@@ -213,8 +218,16 @@ function ActiveSheet(props: {
   const close = actions.dismissLayer;
 
   if (kind === "machine") {
+    const auto = view.autoAvailability;
     return (
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
+        <SheetItem
+          label="Auto"
+          sub={auto.reason ?? "the scheduler picks the machine and the account"}
+          selected={view.auto !== null}
+          disabled={!auto.available}
+          onClick={actions.selectAuto}
+        />
         {machines
           .toSorted((a, b) => collator.compare(a.name, b.name))
           .map((machine) => (
@@ -227,7 +240,7 @@ function ActiveSheet(props: {
                   : `offline · last seen ${formatSeen(machine.lastSeen, now)}`
               }
               dot={machine.connected ? "ok" : "off"}
-              selected={machine.deviceId === view.machine?.deviceId}
+              selected={view.auto === null && machine.deviceId === view.machine?.deviceId}
               disabled={!machine.connected}
               // Only offered while offline: the relay refuses to forget a machine
               // it holds a socket for, so on a connected row it would do nothing.
@@ -236,6 +249,25 @@ function ActiveSheet(props: {
               onClick={() => actions.selectMachine(machine.deviceId)}
             />
           ))}
+      </Sheet>
+    );
+  }
+
+  if (kind === "repo" && view.auto !== null) {
+    const selected = view.auto.repo?.origin ?? null;
+    return (
+      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
+        {view.auto.repos.map((repo) => (
+          <SheetItem
+            key={repo.origin}
+            label={repo.label}
+            mono
+            sub={repo.origin === repo.label ? null : repo.origin}
+            selected={repo.origin === selected}
+            onClick={() => actions.selectRepo(repo.origin)}
+          />
+        ))}
+        {view.auto.repos.length === 0 && <p className="sheet-note">No machine reports a clone with an origin.</p>}
       </Sheet>
     );
   }
@@ -283,6 +315,44 @@ function ActiveSheet(props: {
   );
 }
 
+/**
+ * What `auto` would do with the form as it stands, before anything is queued
+ * (docs/scheduler.md, M2 item 6). Shown only while the form is on `auto`.
+ */
+function PreviewCard(props: {
+  preview: PreviewState | null;
+  machines: readonly Machine[];
+  now: number;
+  onRefresh: () => void;
+}): JSX.Element | null {
+  const { preview, machines, now, onRefresh } = props;
+  if (preview === null) return null;
+  const refresh = (
+    <button type="button" className="preview-refresh" onClick={onRefresh} aria-label="Preview again">
+      ↻
+    </button>
+  );
+  if (preview.kind === "ok") {
+    return (
+      <div className="preview">
+        <DecisionCard summary={describeDecision(preview.decision, machines, now, "would")} title="PLACEMENT PREVIEW" />
+        {refresh}
+      </div>
+    );
+  }
+  return (
+    <div className="preview">
+      <section className="decision card" aria-label="PLACEMENT PREVIEW">
+        <span className="label">PLACEMENT PREVIEW</span>
+        <p className={preview.kind === "failed" ? "decision-headline decision-failed" : "decision-headline"}>
+          {preview.kind === "loading" ? "Asking the scheduler…" : preview.message}
+        </p>
+      </section>
+      {refresh}
+    </div>
+  );
+}
+
 export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
@@ -293,9 +363,10 @@ export function SpawnScreen(props: {
   machines: readonly Machine[];
   now: number;
   rescan: RescanState;
+  preview: PreviewState | null;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, rescan } = props;
-  const offline = view.machine !== null && !view.machine.connected;
+  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview } = props;
+  const offline = view.auto === null && view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
 
@@ -379,6 +450,10 @@ export function SpawnScreen(props: {
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
+
+        {view.auto !== null && (
+          <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
+        )}
 
         <button
           type="button"

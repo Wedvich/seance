@@ -43,6 +43,7 @@ export function fakeRelay(
     skewed: 0,
     settling: false,
     registrySettled: status === "open",
+    scheduler: { kind: "none" },
   };
   const listeners = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();

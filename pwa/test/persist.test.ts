@@ -26,6 +26,8 @@ describe("form persistence", () => {
   test("round-trips a form", () => {
     const form = {
       machineId: "dev-1",
+      auto: true,
+      autoRepo: "github.com/acme/app",
       repos: { "dev-1": "seance" },
       prompt: "port the pane",
       worktree: false,
