@@ -145,7 +145,10 @@ async function senderPane(name: string, cwd: string, command: string, taskId?: s
   return { pane, go: () => writeFile(go, "") };
 }
 
-/** A raw frame from inside a pane — not through the CLI, so it can claim whatever it likes. */
+/**
+ * A raw frame from inside a pane — not through the CLI, so it can claim whatever it likes.
+ * The reply lands by rename, so once `reply` exists it is whole.
+ */
 async function rawSender(name: string, frame: object): Promise<{ readonly script: string; readonly reply: string }> {
   const file = join(base, `${name}.frame.json`);
   const reply = join(base, `${name}.reply`);
@@ -153,11 +156,16 @@ async function rawSender(name: string, frame: object): Promise<{ readonly script
   const script = join(base, `${name}.send.ts`);
   await writeFile(
     script,
-    `const frame = await Bun.file(${JSON.stringify(file)}).text();
+    `import { rename } from "node:fs/promises";
+const frame = await Bun.file(${JSON.stringify(file)}).text();
 await new Promise((resolve) => {
   void Bun.connect({ unix: ${JSON.stringify(sockPath)}, socket: {
     open: (s) => void s.write(frame + "\\n"),
-    data: async (_s, chunk) => { await Bun.write(${JSON.stringify(reply)}, chunk); resolve(undefined); },
+    data: async (_s, chunk) => {
+      await Bun.write(${JSON.stringify(`${reply}.part`)}, chunk);
+      await rename(${JSON.stringify(`${reply}.part`)}, ${JSON.stringify(reply)});
+      resolve(undefined);
+    },
     close: () => resolve(undefined),
   } });
 });
@@ -185,6 +193,8 @@ describe("binding", () => {
     await forger.go();
 
     await pollUntil(() => forwarded.some((e) => e.taskId === "task-a"), "the forger's event to be forwarded");
+    // Forwarding precedes the reply, which the sender then writes from its own process.
+    await pollUntil(() => Bun.file(sent.reply).exists(), "the forger's reply");
     expect(JSON.parse(await readFile(sent.reply, "utf8"))).toEqual({ ok: true });
     expect(forwardedFor("task-a")).toEqual([
       {
