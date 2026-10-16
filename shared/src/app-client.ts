@@ -90,9 +90,11 @@ export interface Machine {
   readonly lastSeen: number;
   readonly connected: boolean;
   /**
-   * The daemon's latest snapshot, while the relay holds one for its live socket
-   * and it indexes the register blob this build decrypted (`scan` agrees with
-   * that blob's `scannedAt`). Absent otherwise — never stale.
+   * The daemon's latest snapshot, when the relay holds one and it indexes the
+   * register blob this build decrypted (`scan` agrees with that blob's
+   * `scannedAt`). Live while `connected`; otherwise the one the relay kept when
+   * the socket went, which still counts for its accounts' quota but says
+   * nothing about pressure — read pressure through `liveStatus`.
    */
   readonly status?: MachineStatus;
   /** The register blob's `capabilities`, kept by identity; absent from a daemon that predates them. */
@@ -343,10 +345,10 @@ export class RelayClient {
    */
   #skippedEntries = 0;
   /**
-   * deviceId -> its latest `status`. Fed by the registry push (which carries one
-   * per live socket) and by `status` frames between pushes; rebuilt from each
-   * push's own entries, so a machine whose socket went — the relay drops the
-   * snapshot with it — loses it here on the same push that reports it offline.
+   * deviceId -> its latest `status`. Fed by the registry push (one per live
+   * socket, and the one kept for each machine whose socket went) and by
+   * `status` frames between pushes; rebuilt from each push's own entries, so a
+   * register — the relay clears the kept snapshot — drops it here too.
    */
   #statuses = new Map<string, StatusHit>();
   /**
@@ -914,7 +916,9 @@ export class RelayClient {
       // Otherwise not ours to read, like an info blob sealed with another key: steady state, not news.
     }
     // A snapshot that opened is the machine speaking — the same proof of life a
-    // reply gives, and fresher than any mark a timeout left.
+    // reply gives, and fresher than any mark a timeout left. A kept one clears
+    // the mark too, harmlessly: it only arrives on an entry the relay already
+    // lists as not connected.
     if (status !== null) this.#provenOffline.delete(deviceId);
     this.#statuses.set(deviceId, { iv: env.iv, status });
   }

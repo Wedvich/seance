@@ -4,6 +4,7 @@ import {
   APP_ID,
   importPsk,
   isRecord,
+  newestQuotaByAccount,
   seal,
   toBase64,
   type MachineInfo,
@@ -424,7 +425,7 @@ function machineOf(state: RelayState, deviceId: string): RelayState["machines"][
 }
 
 describe("status", () => {
-  test("a status lands on its machine, reaches a late app in its first push, and leaves with the socket", async () => {
+  test("a status lands on its machine, reaches a late app in its first push, and is kept when the socket goes", async () => {
     const deviceId = await newDeviceId();
     const exclaves = [{ id: "default", accountId: "org:acct", extraUsageEnabled: null, authOk: true, skills: [] }];
     const info = { ...machineInfo("Mac Studio"), exclaves };
@@ -451,7 +452,10 @@ describe("status", () => {
 
       daemon.close();
       const offline = await late.waitFor((s) => machineOf(s, deviceId)?.connected === false, "machine offline");
-      expect(machineOf(offline, deviceId)?.status).toBeUndefined();
+      // Kept for its accounts' quota; `connected: false` is what keeps it from
+      // reading as the asleep machine's pressure (`liveStatus`).
+      expect(machineOf(offline, deviceId)?.status).toEqual(snapshot);
+      expect(newestQuotaByAccount(offline.machines).get("org:acct")?.deviceId).toBe(deviceId);
     } finally {
       daemon.close();
       client.stop();

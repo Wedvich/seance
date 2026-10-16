@@ -47,9 +47,9 @@ describe("deriveMachines", () => {
     expect(card?.charts).toBe(true);
   });
 
-  // The relay still lists a slept Mac's socket while a timed-out request has marked it asleep:
-  // its 17-minute-old beat read as CPU 85% beside "last seen 17m ago".
-  test("an asleep card draws no pressure or sessions from its last status; its quota still counts", () => {
+  // The status the relay kept when a Mac slept, or a beat from a socket the relay still lists
+  // after a timed-out request marked it asleep: either read as CPU 85% beside "last seen 17m ago".
+  test("an asleep card draws no pressure or sessions from its last status; its quota still counts, with its age", () => {
     const status = {
       at: S - 17 * 60,
       scan: 1,
@@ -66,6 +66,7 @@ describe("deriveMachines", () => {
     expect(cards[0]?.gauges).toEqual([]);
     expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
+    expect(accounts[0]?.observed).toEndWith("18m ago on mac, asleep");
   });
 
   test("an account across machines takes the newest observation; unsigned exclaves group nowhere", () => {

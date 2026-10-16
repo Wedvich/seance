@@ -94,10 +94,11 @@ interface SocketAttachment {
   /** Present once the socket has registered. */
   readonly identity?: SocketIdentity;
   /**
-   * The daemon's latest `status`, kept here and never in storage: no write per
-   * sample, and it goes with the socket — a disconnected machine's snapshot is
-   * stale by definition. Bounded by `STATUS_MAX_CT_LENGTH` so it and the
-   * identity fit the attachment's 2 KiB together.
+   * The daemon's latest `status`, here rather than in storage: no write per
+   * sample. When the socket goes, `#leftBy` keeps it in the entry with the
+   * `lastSeen` put the relay makes anyway, for its accounts' quota — never as
+   * pressure (DESIGN.md, Presence & identity). Bounded by
+   * `STATUS_MAX_CT_LENGTH` so it and the identity fit the attachment's 2 KiB together.
    */
   readonly status?: SocketStatus;
 }
@@ -216,7 +217,7 @@ export class Hub implements DurableObject {
     const key = ENTRY_PREFIX + deviceId;
     const entry = await this.#ctx.storage.get<RegistryEntry>(key);
     // Stamped with the last heartbeat, not sweep time: the machine has been gone since then.
-    if (entry !== undefined) await this.#put(key, { ...entry, lastSeen: lastAlive });
+    if (entry !== undefined) await this.#put(key, this.#leftBy(ws, entry, lastAlive));
   }
 
   #roleOf(ws: WebSocket): Role {
@@ -511,9 +512,28 @@ export class Hub implements DurableObject {
     const key = ENTRY_PREFIX + deviceId;
     const entry = await this.#ctx.storage.get<RegistryEntry>(key);
     if (entry !== undefined) {
-      await this.#put(key, { ...entry, lastSeen: Date.now() });
+      await this.#put(key, this.#leftBy(ws, entry, Date.now()));
     }
     await this.#pushRegistry(undefined, [ws]);
+  }
+
+  /**
+   * The entry a departing socket leaves: its last `status` kept, or none — a
+   * register cleared any older one, since it indexes the blob that register
+   * replaced. Only the verified socket's own sealed env can get here, so it
+   * needs no signature. A superseded socket keeps nothing: its snapshot indexes
+   * the blob its successor's register replaced, and writing it back would undo
+   * that register's clear for as long as the successor's own close never runs
+   * (a relay restart drops sockets without one).
+   */
+  #leftBy(ws: WebSocket, entry: RegistryEntry, lastSeen: number): RegistryEntry {
+    const { status: _kept, ...rest } = entry;
+    const newest = this.#daemonsNewestFirst([]).find(
+      ({ attachment }) => attachment?.identity?.deviceId === entry.deviceId,
+    );
+    if (newest !== undefined && newest.ws !== ws) return { ...rest, lastSeen };
+    const status = (ws.deserializeAttachment() as SocketAttachment | null)?.status?.env;
+    return { ...rest, lastSeen, ...(status === undefined ? {} : { status }) };
   }
 
   /**
@@ -541,9 +561,9 @@ export class Hub implements DurableObject {
     // Spelled out rather than spread: this is the wire projection of an entry.
     for (const entry of stored.values()) {
       const socket = live.get(entry.deviceId);
-      // Only a live socket's: a snapshot from a machine that is gone would
-      // render as current pressure on a machine nothing can be sent to.
-      const status = socket?.status?.env;
+      // A live socket's, else the one its last socket left. `connected` is
+      // what tells readers which: a kept one is quota, never pressure.
+      const status = socket === undefined ? entry.status : socket.status?.env;
       views.push({
         deviceId: entry.deviceId,
         info: entry.info,

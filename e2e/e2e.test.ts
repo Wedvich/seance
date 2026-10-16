@@ -2,10 +2,18 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEntry, SpawnResponse } from "@seance/shared";
+import {
+  liveStatus,
+  newestQuotaByAccount,
+  type RegistryView,
+  type RelayToAppFrame,
+  type SessionEntry,
+  type SpawnResponse,
+} from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
+import { connectApp } from "../relay/test/harness.ts";
 import { deriveMachines } from "../pwa/src/machines-view.ts";
 import type { AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -120,6 +128,63 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
       expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
+      app.stop();
+    }
+  });
+
+  // The M2 exit for the kept status (docs/scheduler.md): an asleep machine's
+  // accounts keep their quota, its pressure is unknown, and the register that
+  // replaces the blob the status indexes takes the kept one away.
+  test("status: kept through a disconnect as quota, never pressure, and cleared by the next register", async () => {
+    const app = startApp(stack);
+    // A raw socket beside the app, to see the register's own push before the
+    // status the daemon sends right after it lands.
+    const raw = await connectApp(stack.relay);
+    const { deviceId } = stack;
+    const rawEntry = async (connected: boolean): Promise<RegistryView> => {
+      for (;;) {
+        const frame = await raw.waitFor<Extract<RelayToAppFrame, { t: "registry" }>>("registry", 10_000);
+        const entry = frame.entries.find((candidate) => candidate.deviceId === deviceId);
+        if (entry?.connected === connected) return entry;
+      }
+    };
+    let restored = false;
+    try {
+      await app.waitForApp(
+        (s) => ownMachine(s, stack.deviceId)?.status?.quota !== undefined,
+        "a status carrying quota",
+      );
+      stack.daemon.stop();
+      const asleep = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
+      const machine = ownMachine(asleep, stack.deviceId);
+      if (machine === null) throw new Error("unreachable");
+      expect(machine.status?.quota).toBeDefined();
+      expect(liveStatus(machine)).toBeUndefined();
+      expect(newestQuotaByAccount(asleep.relay.machines).get(E2E_ACCOUNT_ID)?.deviceId).toBe(stack.deviceId);
+      const view = deriveMachines(asleep.relay.machines, Date.now());
+      expect(view.cards.find((c) => c.deviceId === stack.deviceId)?.gauges).toEqual([]);
+      const account = view.accounts.find((a) => a.accountId === E2E_ACCOUNT_ID);
+      expect(account?.observed).toEndWith("on TestMac, asleep");
+      expect(account?.bars.map((bar) => [bar.label, bar.pct])).toEqual([["5h", 20]]);
+      // Drained to the close's push, so the next connected one is the register's.
+      expect((await rawEntry(false)).status).toBeDefined();
+
+      await stack.restartDaemon();
+      expect((await rawEntry(true)).status).toBeUndefined();
+      // Then the daemon's next status, live again.
+      await app.waitForApp((s) => {
+        const back = ownMachine(s, stack.deviceId);
+        return back !== null && back.connected && liveStatus(back) !== undefined;
+      }, "a live status after the register");
+      restored = true;
+    } finally {
+      if (!restored) {
+        await stack.restartDaemon();
+        await app
+          .waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine restored")
+          .catch(() => undefined);
+      }
+      raw.close();
       app.stop();
     }
   });

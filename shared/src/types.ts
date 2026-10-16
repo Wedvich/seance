@@ -66,9 +66,9 @@ export type DaemonFrame =
   /**
    * The daemon's current telemetry snapshot (`op: "status"`, sealed to APP_ID
    * like the register blob), every STATUS_INTERVAL_MS. The relay keeps only the
-   * latest, on the socket's attachment — never in storage — so it vanishes with
-   * the socket, which is right: a disconnected machine's snapshot is stale by
-   * definition. DESIGN.md, Presence & identity.
+   * latest, on the socket's attachment, and when the socket goes keeps that one
+   * in the registry entry until the next register — quota for the machine's
+   * accounts, never its pressure. DESIGN.md, Presence & identity.
    */
   | { readonly t: "status"; readonly env: Envelope };
 
@@ -134,6 +134,12 @@ export interface RegistryEntry {
   readonly info: Envelope;
   /** Written on register and on close — the only liveness events the DO observes. */
   readonly lastSeen: number;
+  /**
+   * The last `status` its socket sent, kept by the close or sweep that wrote
+   * `lastSeen`, and cleared by the next register: it indexes the blob that
+   * register replaces. Sealed `from` this `deviceId` by the verified socket.
+   */
+  readonly status?: Envelope;
 }
 
 /**
@@ -144,7 +150,10 @@ export interface RegistryEntry {
  */
 export type RegistryView = RegistryEntry & {
   readonly connected: boolean;
-  /** The daemon's latest `status` envelope, present only while its socket is open. */
+  /**
+   * The live socket's latest `status` while `connected`, else the one the
+   * entry kept. A kept one describes the machine's accounts, not its pressure.
+   */
   readonly status?: Envelope;
 };
 

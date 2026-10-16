@@ -146,16 +146,11 @@ version, env }]`, `store-put { key, expect, env, term? }` → `{ version }` or
   through `openAtRest` — exactly as the register blob and `status` already are — and never
   accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
   record being replayed as a request, or as a record of another kind.
-- **Last `status` kept (M2).** When a daemon socket closes or is swept, the relay already
-  writes the entry's `lastSeen`; the same put now keeps the attachment's last `status` env in
-  the entry, and the registry push carries it for an offline machine as for a live one. No
-  write the relay did not already make, no new op or signature: the env is the one the
-  verified socket sent, sealed `from` its own `deviceId`, so a token holder cannot plant one.
-  A `register` clears it — the kept status indexes the blob that register replaces (#102's
-  rule), and the daemon sends a fresh one right after. Readers take quota from it, never
-  pressure (Routing, _quota freshness_). This amends M1's "never in storage"
-  (`hub.ts`'s `SocketAttachment.status`): the relay now holds the last snapshot of a machine
-  that is gone, which is what an account's quota needs and what pressure must not use.
+- **Last `status` kept** (landed in M2, item 7; DESIGN.md _Presence & identity_). The close
+  or sweep put that writes an entry's `lastSeen` keeps the socket's last `status` with it, the
+  registry push carries it for an offline machine, and a `register` clears it. Readers take
+  quota from it, never pressure (Routing, _quota freshness_): `newestQuotaByAccount` folds it,
+  and pressure goes through `liveStatus`, which answers only while `connected`.
 - Envelopes `to: "scheduler"` route to the leader's socket; no leader → `undeliverable { code:
 "offline" }` to apps, dropped for daemon-origin events. `SCHEDULER_ID = "scheduler"` is
   reserved, refused by `register` like `"app"`/`"machines"`.
@@ -444,7 +439,7 @@ term } | null` in the registry push.
    URLs, and forwards to the leader sealed to `"scheduler"`.
 6. PWA — `auto` in the picker (greyed with no leader, or one whose registry entry does not
    open: "leader unverified"), `route-preview` and the decision view.
-7. Kept `status` — the relay keeps the last one in the entry on close and sweep and clears it
+7. Kept `status` (landed) — the relay keeps the last one in the entry on close and sweep and clears it
    on `register`; `newestQuotaByAccount` folds kept statuses' quota, pressure readers skip
    them, and the PWA's account cards get an asleep machine's reading with its age. Independent
    of 2–6, and lands before the library's quota filter is trusted on real fleets.

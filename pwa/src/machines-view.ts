@@ -1,6 +1,7 @@
 import {
   CAPABILITIES,
   effectivePct,
+  liveStatus,
   newestQuotaByAccount,
   type ExclaveInfo,
   type Machine,
@@ -118,10 +119,10 @@ function machineNote(machine: Machine): string | null {
 }
 
 function machineCard(machine: Machine, now: number): MachineCard {
-  // Not drawn for an asleep card: the relay can list a socket the app has
-  // already seen time out, and its last beat would read as current pressure
-  // beside "last seen". Its quota still counts — an observation carries its own stamp.
-  const status = machine.connected ? machine.status : undefined;
+  // Not drawn for an asleep card: its status is the one the relay kept, and its
+  // last beat would read as current pressure beside "last seen". Its quota
+  // still counts — an observation carries its own stamp.
+  const status = liveStatus(machine);
   const gauges = [
     status?.cpu === undefined ? null : gauge("CPU", status.cpu),
     status?.mem === undefined ? null : gauge("Memory", status.mem),
@@ -187,15 +188,17 @@ function historyHost(group: AccountGroup, newest: Machine | undefined): string |
 
 function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): string {
   if (quota === undefined || observer === undefined) {
-    return "No quota seen yet. It shows once a session has run while its machine is online.";
+    return "No quota seen yet. It shows once a session has run and its machine has reported.";
   }
-  return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${observer.name}`;
+  const where = observer.connected ? observer.name : `${observer.name}, asleep`;
+  return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${where}`;
 }
 
 /**
  * Grouped by account id across every machine; whose numbers show is
- * `newestQuotaByAccount`'s rule (DESIGN.md, PWA). A machine gone from the relay has no status, so
- * its exclaves still name the account but contribute no numbers. Exclaves that
+ * `newestQuotaByAccount`'s rule (DESIGN.md, PWA). An asleep machine's kept status counts like a
+ * live one, its age on the observed line; a machine with no status at all names the account
+ * but contributes no numbers. Exclaves that
  * aren't signed in have no account to group under and appear only on their card.
  */
 function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[] {

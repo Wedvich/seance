@@ -430,7 +430,7 @@ devices is checkable without comparing secrets.
 The Durable Object persists a machine registry:
 
 ```
-{ deviceId, info, lastSeen }
+{ deviceId, info, lastSeen, status? }
 ```
 
 - `deviceId`: the base64url SHA-256 of the daemon's ML-DSA-65 public key
@@ -504,10 +504,27 @@ The Durable Object persists a machine registry:
   socket's identity (`serializeAttachment`, 2 KiB for both), forwards it to
   every open app as `status { deviceId, envelope }`, and includes each live
   socket's in the `registry` push, so a freshly opened app renders pressure
-  from its first push. Never DO storage: no write per sample, and it goes with
-  the socket — a disconnected or swept machine's snapshot is stale by
-  definition, so the app loses it on the same push that reports the machine
-  offline. Bounded at `STATUS_MAX_CT_LENGTH` (1 KiB of ciphertext, checked in
+  from its first push. Never a write per sample. **The last one is kept** (added
+  2026-10-16, scheduler M2; M1 had it go with the socket): when a daemon socket
+  closes or is swept, the put that already writes the entry's `lastSeen` also
+  keeps that socket's last `status` envelope in the entry (`#leftBy` in
+  `relay/src/hub.ts`) — unless a newer socket for the id superseded it, whose
+  register already cleared the old blob's snapshot — and the registry push carries it for the offline machine
+  as for a live one. No new write, op or signature: the envelope is the one the
+  verified socket sent, sealed `from` its own id, so a bearer-token holder
+  cannot plant one. A `register` clears it, since it
+  indexes the blob that register replaces. Kept means quota, never pressure: an
+  observation carries its own `at` and describes an account other machines
+  share, so `newestQuotaByAccount` folds kept statuses like live ones and an
+  account last used on a laptop that has since slept keeps that reading; pressure
+  describes a machine now, so every pressure reader goes through `liveStatus`
+  (`shared/src/status-reader.ts`), which answers only for a `connected` machine
+  — a kept status reads as unknown pressure, whatever its age. `connected` is
+  the discriminator on the wire: a view carries the live socket's status while
+  connected and the entry's otherwise, so no extra field says which. Rejected:
+  keeping only the quota half (the relay is blind and cannot split a sealed
+  blob) and a separate per-account store (a new write, and an account record
+  is M4's). Bounded at `STATUS_MAX_CT_LENGTH` (1 KiB of ciphertext, checked in
   `relay/src/wire.ts`; the daemon trims its blob to fit, `daemon/src/status.ts`,
   per-model windows first) and floored per socket at `STATUS_MIN_INTERVAL_MS`
   like `register`'s rate limit; under the floor is dropped, not closed. A
@@ -546,10 +563,11 @@ The Durable Object persists a machine registry:
   call, never the client's: `isStatusStale` is true past three beats
   (`STATUS_STALE_MS`, 90s) or for a stamp further ahead than skew. The PWA
   shows a connected machine's snapshot with its age instead, and draws no
-  pressure or session counts on an asleep card: the app can hold a machine
-  asleep (a timed-out request) while the relay still lists its socket and last
-  beat, and that beat would read as current load beside "last seen". Its quota
-  still counts, since an observation carries its own stamp. `isQuotaTrimmed` says a trim happened, and
+  pressure or session counts on an asleep card (`liveStatus`): the status is
+  then the one the relay kept, or the app holds the machine asleep (a timed-out
+  request) while the relay still lists its socket, and either beat would read as
+  current load beside "last seen". Its quota still counts, since an observation
+  carries its own stamp. `isQuotaTrimmed` says a trim happened, and
   then an exclave without an observation is unknown, not unobserved.
   **Encoding** (`MachineStatus` in `shared/src/types.ts`): the blob shares a
   2 KiB attachment and base64 costs a third, so every number is an integer
@@ -626,25 +644,25 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                                                                | Handled in                                                                                                                                         |
-| ----------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                  |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                    |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                  |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                   |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                    |
-| `registry`                          | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                         |
-| `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                         |
-| `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                            |
-| `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                                                                |
-| `"ping"` / `"pong"`                 | both socket legs                                                                         | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                    |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                   | same file — both ends share it, or nothing decrypts                                                                                                |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                              |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                      |
-| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                             |
-| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest kept on the socket attachment, never stored                                     |
-| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                             |
-| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed          | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`) |
+| Frame / op                          | Sent from                                                                                | Handled in                                                                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                     |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                       |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                     |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                      |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                       |
+| `registry`                          | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                            |
+| `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                            |
+| `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                               |
+| `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                                                                   |
+| `"ping"` / `"pong"`                 | both socket legs                                                                         | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                       |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                   | same file — both ends share it, or nothing decrypts                                                                                                   |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                 |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                         |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                |
+| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register |
+| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                |
+| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed          | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)    |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1918,7 +1936,9 @@ Models offered: `fable`/`opus`/`sonnet`; efforts: all five the CLI accepts.
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, named by the
   email any of its exclaves reports (the short account id from a daemon that predates it), newest
-  observation wins, since every daemon hosting one of its exclaves reports it. A window whose `resets_at` has passed shows 0% and
+  observation wins, since every daemon hosting one of its exclaves reports it — an asleep
+  machine's included, from the status the relay kept, with "asleep" and its age on the
+  observed line. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler

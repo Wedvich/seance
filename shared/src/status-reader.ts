@@ -1,3 +1,4 @@
+import type { Machine } from "./app-client.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation } from "./types.ts";
 
@@ -24,6 +25,16 @@ const MAX_PCT = 100;
 export function isStatusStale(status: MachineStatus, nowMs: number): boolean {
   const ageMs = nowMs - status.at * 1000;
   return ageMs > STATUS_STALE_MS || ageMs < -STATUS_CLOCK_SKEW_MS;
+}
+
+/**
+ * The status a pressure reader may use: only a connected machine's. A machine
+ * whose socket went keeps its last status for its accounts' quota
+ * (`newestQuotaByAccount`), but its pressure is unknown however recent that
+ * status is — the machine is gone. Age is the caller's next check (`isStatusStale`).
+ */
+export function liveStatus(machine: Pick<Machine, "connected" | "status">): MachineStatus | undefined {
+  return machine.connected ? machine.status : undefined;
 }
 
 /**
