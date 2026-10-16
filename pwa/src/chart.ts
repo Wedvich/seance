@@ -12,6 +12,8 @@ export interface ChartLine {
   readonly label: string;
   /** SVG path data in the chart's own units; empty when nothing falls in the window. */
   readonly d: string;
+  /** Where a gauge's line breaks, a straight run across each gap, drawn dotted: nothing was measured there. */
+  readonly gaps: string;
 }
 
 const LABELS: Readonly<Record<string, string>> = {
@@ -79,23 +81,34 @@ export function chartLines(
   const x = (ts: number): number => ((ts - window.from) / span) * size.width;
   const y = (value: number): number => size.height - (Math.min(100, Math.max(0, value)) / 100) * size.height;
   // Missing ticks (asleep, daemon down) break a gauge's line rather than
-  // bridging a gap nobody measured; half a step of slack absorbs raw-tier jitter,
-  // so one missed tick (two steps apart) already breaks it.
+  // drawing a gap nobody measured as a measurement; half a step of slack absorbs
+  // raw-tier jitter, so one missed tick (two steps apart) already breaks it.
   const gap = window.step * 1.5;
 
   return series.map((entry) => {
     const held = HELD.has(entry.metric);
     const parts: string[] = [];
-    let previous: readonly [number, number] | null = null;
-    for (const point of entry.points) {
-      const [ts, value] = point;
+    const gaps: string[] = [];
+    let previous: { readonly ts: number; readonly px: string; readonly py: string } | null = null;
+    // A run of one point has no length to stroke; `h0` lets the round cap paint it as a dot,
+    // which is what a machine awake for one tick between sleeps leaves.
+    let runLength = 0;
+    for (const [ts, value] of entry.points) {
       if (ts < window.from || ts > window.to) continue;
       const px = format(x(ts));
       const py = format(y(value));
-      if (previous === null || (!held && ts - previous[0] > gap)) parts.push(`M${px} ${py}`);
-      else parts.push(held ? `H${px}V${py}` : `L${px} ${py}`);
-      previous = point;
+      if (previous === null || (!held && ts - previous.ts > gap)) {
+        if (runLength === 1) parts.push("h0");
+        if (previous !== null) gaps.push(`M${previous.px} ${previous.py}L${px} ${py}`);
+        parts.push(`M${px} ${py}`);
+        runLength = 1;
+      } else {
+        parts.push(held ? `H${px}V${py}` : `L${px} ${py}`);
+        runLength += 1;
+      }
+      previous = { ts, px, py };
     }
-    return { key: seriesKey(entry), label: seriesLabel(entry), d: parts.join("") };
+    if (runLength === 1) parts.push("h0");
+    return { key: seriesKey(entry), label: seriesLabel(entry), d: parts.join(""), gaps: gaps.join("") };
   });
 }

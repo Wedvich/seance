@@ -21,13 +21,29 @@ import type { MetricsStore, Sample } from "./metrics-store.ts";
  * Every sample also lands in the metrics store under `METRIC_NAMES`.
  *
  * A field the host can't answer is absent, never a guess: the first tick has
- * no cpu or I/O delta, macOS has no exec-free I/O counters, and a tmux outage
- * drops `sess` for the tick. A collector that fails drops its field for the
+ * no cpu or I/O delta, a cpu delta too short or spanning a sleep is no reading,
+ * macOS has no exec-free I/O counters, and a tmux outage drops `sess` for the
+ * tick. A collector that fails drops its field for the
  * tick, never repeating its last average.
  */
 export type Snapshot = MachineStatus;
 
 export const SMOOTHING_MS = 120_000;
+
+/**
+ * A cpu delta shorter than this is not a reading: the tick a register forces
+ * can land a second after the last one, and on a laptop just woken that second
+ * is all wake-up work. The baseline stays, so the next tick measures across both.
+ */
+export const MIN_CPU_WINDOW_MS = 5_000;
+
+/**
+ * Neither macOS nor Linux counts suspended time, so across a sleep the delta
+ * holds only the seconds awake: measured at 38–94% busy on a Mac whose steady
+ * load was ~20%. A delta covering less than this share of the wall time since
+ * its baseline slept through; it is dropped and the baseline restarts.
+ */
+const MIN_COUNTED_SHARE = 0.5;
 
 /**
  * How far past now a cached `fetchedAtMs` may sit. Readers take the newest
@@ -48,13 +64,19 @@ export interface Registered {
 
 /** Cumulative counters and totals read off the host; the OS is the one boundary a test replaces. */
 export interface HostProbe {
-  /** Jiffies summed over cores, cumulative since boot. */
-  readonly cpu: () => { readonly busy: number; readonly idle: number } | null;
+  /** Milliseconds summed over `cores`, cumulative since boot. */
+  readonly cpu: () => CpuTimes | null;
   readonly memory: () => Promise<{ readonly total: number; readonly available: number } | null>;
   /** Bytes; one entry per path that answered. */
   readonly disks: (paths: readonly string[]) => Promise<readonly { readonly total: number; readonly free: number }[]>;
   /** Cumulative bytes since boot, or null where the host has no exec-free counter. */
   readonly diskIo: () => Promise<{ readonly read: number; readonly write: number } | null>;
+}
+
+export interface CpuTimes {
+  readonly busy: number;
+  readonly idle: number;
+  readonly cores: number;
 }
 
 export interface TelemetrySources {
@@ -82,9 +104,10 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
   const probe = sources.probe ?? hostProbe;
   let previous: {
     readonly atMs: number;
-    readonly cpu: ReturnType<HostProbe["cpu"]>;
     readonly io: Awaited<ReturnType<HostProbe["diskIo"]>>;
   } | null = null;
+  // Apart from `previous`: a short delta keeps its baseline rather than moving it.
+  let cpuBase: CpuBase | null = null;
   // Each average remembers when it last took a reading, so the weight after a
   // failed collector reflects the whole gap, not one tick.
   type Average = { readonly value: number; readonly atMs: number } | null;
@@ -121,9 +144,10 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
       return next;
     };
 
-    const cpuNow = cpuPercent(previous?.cpu ?? null, cpu);
+    const cpuNow = cpuReading(cpuBase, cpu, nowMs);
+    cpuBase = cpuNow.base;
     const worst = worstDisk(disks);
-    const cpuPct = smooth("cpu", cpuNow);
+    const cpuPct = smooth("cpu", cpuNow.pct);
     const memPct = smooth(
       "mem",
       memory === null || memory.total <= 0 ? null : pct(1 - memory.available / memory.total),
@@ -132,7 +156,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
     const freeMib = worst === null ? null : worst.free / 2 ** 20;
     const rates = ioRates(previous?.io ?? null, io, dtMs);
     const sess = sessions === null ? null : countSessions(sessions, scan);
-    previous = { atMs: nowMs, cpu, io };
+    previous = { atMs: nowMs, io };
 
     const at = Math.floor(nowMs / 1000);
     const observations = quota.filter((q): q is QuotaObservation => q !== null);
@@ -213,11 +237,28 @@ function pct(fraction: number): number {
   return Math.min(100, Math.max(0, fraction * 100));
 }
 
-function cpuPercent(prev: ReturnType<HostProbe["cpu"]>, cur: ReturnType<HostProbe["cpu"]>): number | null {
-  if (prev === null || cur === null) return null;
-  const busy = cur.busy - prev.busy;
-  const total = busy + (cur.idle - prev.idle);
-  return total <= 0 ? null : pct(busy / total);
+interface CpuBase {
+  readonly atMs: number;
+  readonly times: CpuTimes;
+}
+
+/** A failed read keeps the baseline too, so the next tick still has a delta. */
+function cpuReading(
+  base: CpuBase | null,
+  cur: CpuTimes | null,
+  nowMs: number,
+): { readonly pct: number | null; readonly base: CpuBase | null } {
+  if (cur === null) return { pct: null, base };
+  const next = { atMs: nowMs, times: cur };
+  if (base === null) return { pct: null, base: next };
+  const wallMs = nowMs - base.atMs;
+  // A clock stepped back would otherwise hold the baseline in the future, reading nothing until it caught up.
+  if (wallMs < 0) return { pct: null, base: next };
+  if (wallMs < MIN_CPU_WINDOW_MS) return { pct: null, base };
+  const busy = cur.busy - base.times.busy;
+  const total = busy + (cur.idle - base.times.idle);
+  if (total <= 0 || total / cur.cores < wallMs * MIN_COUNTED_SHARE) return { pct: null, base: next };
+  return { pct: pct(busy / total), base: next };
 }
 
 function worstDisk(
@@ -352,14 +393,15 @@ function windowOf(value: unknown): { readonly pct?: number; readonly resetsAt?: 
 
 // --- host probe -------------------------------------------------------------
 
-function cpuTimes(): { readonly busy: number; readonly idle: number } | null {
+function cpuTimes(): CpuTimes | null {
   let busy = 0;
   let idle = 0;
-  for (const core of cpus()) {
+  const cores = cpus();
+  for (const core of cores) {
     busy += core.times.user + core.times.nice + core.times.sys + core.times.irq;
     idle += core.times.idle;
   }
-  return busy + idle > 0 ? { busy, idle } : null;
+  return busy + idle > 0 ? { busy, idle, cores: cores.length } : null;
 }
 
 /** `MemAvailable` is the kernel's own estimate of what a new process can take without swapping. */

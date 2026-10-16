@@ -86,8 +86,8 @@ function fakeProbe(): HostProbe & { readonly calls: { n: number } } {
     calls,
     cpu: () => {
       calls.n += 1;
-      // Each call: 100 more busy, 300 more idle → 25% busy per interval.
-      return { busy: 100 * calls.n, idle: 300 * calls.n };
+      // Each call: one 30s tick of one core, 25% busy.
+      return { busy: 7_500 * calls.n, idle: 22_500 * calls.n, cores: 1 };
     },
     memory: async () => ({ total: 16 * GiB, available: 4 * GiB }),
     disks: async (paths) => paths.map((_, i) => ({ total: 100 * GiB, free: (i === 0 ? 50 : 10) * GiB })),
@@ -275,6 +275,42 @@ describe("createTelemetry", () => {
     expect([first.scan, first.sess, first.quota?.map((q) => q.x)]).toEqual([SCAN, [0, 1], [1]]);
     const second = await next;
     expect([second.scan, second.sess, second.quota?.map((q) => q.x)]).toEqual([SCAN + 1, [1, 0], [0]]);
+    store.close();
+  });
+
+  test("a cpu delta across a sleep or under MIN_CPU_WINDOW_MS is no reading; the next one starts fresh", async () => {
+    const home = await makeHome();
+    const store = MetricsStore.memory();
+    const counters = { busy: 0, idle: 0 };
+    // Two cores, so counted time runs at twice the wall clock while awake.
+    const awake = (ms: number, busyShare: number): void => {
+      counters.busy += 2 * ms * busyShare;
+      counters.idle += 2 * ms * (1 - busyShare);
+    };
+    const telemetry = createTelemetry(store, {
+      machine: "mac",
+      diskPaths: [],
+      registered: registeredOf(home),
+      sessions: async () => [],
+      probe: { ...fakeProbe(), cpu: () => ({ ...counters, cores: 2 }) },
+    });
+    await telemetry.tick(T0);
+    awake(30_000, 0.2);
+    expect((await telemetry.tick(T0 + 30_000)).cpu).toBe(20);
+
+    // Eighteen minutes asleep, two of its seconds awake and busy: what a dark wake leaves.
+    const woke = T0 + 30_000 + 18 * 60_000;
+    awake(2_000, 0.95);
+    expect((await telemetry.tick(woke)).cpu).toBeUndefined();
+    // The tick a register forces a second later is too short to read; its baseline stays.
+    awake(1_000, 0.9);
+    expect((await telemetry.tick(woke + 1_000)).cpu).toBeUndefined();
+    awake(30_000, 0.2);
+    // Measured across both (13.8s busy of 62s counted), not eased toward the pre-sleep average.
+    expect((await telemetry.tick(woke + 31_000)).cpu).toBe(Math.round((100 * 13_800) / 62_000));
+
+    const cpu = store.query({ from: 0, to: woke / 1000 + 31, step: 30 }).find((s) => s.metric === METRIC_NAMES.cpu);
+    expect(cpu?.points.map(([ts]) => ts)).toEqual([T0 / 1000 + 30, woke / 1000 + 31]);
     store.close();
   });
 
