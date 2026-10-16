@@ -459,6 +459,12 @@ without the PSK reads "leader unverified" and is sent nothing (e2e).
    **Removes M2's `submit` op** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS` in
    `shared/src/types.ts`; the `submit` case in `leader.ts`): the app's `store-put` at `expect: 0`
    replaces it, and the PWA's `auto` moves to that in item 6.
+   **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
+   task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
+   `version_conflict` there means the first put landed — the client reads it as queued, never as
+   a failure, and never mints a second id for the same submission. That is why M2's `submit`
+   got no interim fix (a client-chosen id on `submit` would be deleted by this item days later);
+   until then a lost `submit` reply stays "may have queued", with no retry.
 2. The at-rest `task` op and version binding — sealed body carries the version its put
    produces; readers open without the `ReplayGuard` and reject a mismatch.
 3. `QueueStore` adapter on those ops; takeover reconciliation against `sessions`.
@@ -687,6 +693,19 @@ same PR, with the reason.
   cover.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
+- **Leader churn is mostly deploys** (looked at 2026-10-16, M2's gap 2). Term 31 within ~6h of
+  leadership landing (13:57Z). The term bumps on every leader change, every new socket of the
+  leader, and every move to or from no leader, so a relay deploy — which drops every socket —
+  costs about two terms, and each merge's self-update restarts every daemon, the leader among
+  them. That day had seven relay deploys after 13:57Z (CI deploys the relay on any `shared/`
+  change, which most M2 PRs touched), and the MacBook's socket also dropped on sleep and network
+  changes (`pong deadline missed`, close 1006), handing the role to Thad or WSL by design
+  (stickiness holds only across a reconnect the relay sees before the old close). No nomination
+  or socket bug found. It matters from M3: every change is a takeover — a full store list, plus
+  one `sessions` read per machine with an in-flight task — so churn costs reads, never tasks.
+  Revisit if terms keep climbing on a quiet day: the relay logs every change as
+  `scheduler term=<n> leader=<id|none>`, kept by Workers observability, so a day's history is in
+  the dashboard without `wrangler tail`.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
   and can't dedupe a re-dispatch), while direct spawns to it keep working. Self-update makes
