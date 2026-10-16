@@ -694,18 +694,26 @@ describe("scheduler leadership ↔ real daemons", () => {
   test("real daemons are nominated, a stopped leader hands over under a higher term, and a returning one follows", async () => {
     const watch = watchLeader();
     const second = await stack.startSecondDaemon({ name: "LeaderBox" });
+    let down = false;
     try {
       // The suite's own daemon has been connected longest.
       await pollUntil(() => watch.current()?.deviceId === stack.deviceId, "the suite's daemon to lead");
       const term = watch.current()?.term ?? 0;
 
-      await stack.restartDaemon();
+      // Stopped and kept down until the handover shows, not restarted outright:
+      // a redial that registers before the relay has processed its old socket's
+      // close finds itself still a candidate, and a current leader keeps the
+      // role across its own reconnect — on a fast runner, every time.
+      stack.daemon.stop();
+      down = true;
       await pollUntil(
         () => watch.current()?.deviceId === second.deviceId && (watch.current()?.term ?? 0) > term,
         "the second daemon to take over",
         10_000,
       );
       const handedOver = watch.current()?.term ?? 0;
+      await stack.restartDaemon();
+      down = false;
       // The first daemon is back, and connected later: it follows.
       await pollUntil(() => watch.connected(stack.deviceId), "the restarted daemon to reconnect", 10_000);
       expect(watch.current()).toEqual({ deviceId: second.deviceId, term: handedOver });
@@ -714,6 +722,8 @@ describe("scheduler leadership ↔ real daemons", () => {
         "the second daemon to log its lead",
       );
     } finally {
+      // The suites after this one need the stack's own daemon up.
+      if (down) await stack.restartDaemon();
       await second.stop();
       watch.close();
     }
