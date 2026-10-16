@@ -310,7 +310,8 @@ is filtered for new work:
    `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
    time-to-reset; `machine_pressure` = max(cpu, mem, host) for LXCs — disk is the filter's
    floor, never a score;
-   `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`.
+   `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`; plus a
+   fixed penalty on any account signed into a `default` exclave (_Settled defaults_ 8).
 3. _Stickiness_: lineage owner bonus; only matters for continuations.
 4. _Reserve_ (one store write) then dispatch with `taskId`; reservation TTL 120s; spawn failure
    or `task_running` from a stale read both resolve the reservation without a second spawn.
@@ -593,7 +594,9 @@ same PR, with the reason.
    tasks. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
    the scale of an account near 70%. First guesses, to tune from decision records; nothing
-   observed yet argues for them.
+   observed yet argues for them. Default-account penalty 1 (2026-10-16): the owner's phone
+   is signed into the `default` account for chat and Cowork, so its quota is worth
+   preserving; at 1 an empty default loses to another account up to ~50%, then wins.
 9. **An unreported `free` is not under the disk floor.** The floor guards a disk known to
    be full; read as unknown-therefore-filtered, a host with no statfs answer would never
    get work. Unlike quota, nothing about a missing disk reading makes it the risky choice.

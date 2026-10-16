@@ -477,9 +477,11 @@ function parseReason(value: unknown): Reason | null {
 function parseScore(value: unknown): Score | null {
   if (!isRecord(value) || !isRecord(value["components"])) return null;
   const { accountPressure, machinePressure, dependencyDistance, queuePressure } = value["components"];
-  const { sticky, total } = value;
+  const { sticky, preserve, total } = value;
   const numbers = [accountPressure, machinePressure, dependencyDistance, queuePressure, sticky, total];
   if (!numbers.every(isFiniteNumber)) return null;
+  // A record from a leader predating the penalty carries none — it applied none.
+  if (preserve !== undefined && !isFiniteNumber(preserve)) return null;
   return {
     components: {
       accountPressure: Number(accountPressure),
@@ -488,6 +490,7 @@ function parseScore(value: unknown): Score | null {
       queuePressure: Number(queuePressure),
     },
     sticky: Number(sticky),
+    preserve: preserve === undefined ? 0 : Number(preserve),
     total: Number(total),
   };
 }

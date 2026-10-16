@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isRecord, type ExclaveInfo, type RepoEntry } from "@seance/shared";
+import { DEFAULT_EXCLAVE, isRecord, type ExclaveInfo, type RepoEntry } from "@seance/shared";
 import { canonical } from "./gitdir.ts";
 
 /**
@@ -12,7 +12,7 @@ import { canonical } from "./gitdir.ts";
  * daemon only reads it — and this regex is the agreement between them.
  */
 export const EXCLAVE_NAME = /^[a-z0-9][a-z0-9-]*$/u;
-export const DEFAULT_EXCLAVE = "default";
+export { DEFAULT_EXCLAVE };
 
 export interface Exclave {
   readonly id: string;

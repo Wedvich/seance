@@ -3031,7 +3031,13 @@ through the leader's `submit` op (Wire protocol, Layer 2).
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
   0.5 from `TaskSpec.base` (absent until M3's deps fill it); `queuePressure` the
   in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
-  `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
+  `TaskSpec.lineage` owner's total, never overrides a filter. An account signed into any
+  machine's `default` exclave — keyed by account, so it pays in a named exclave too — gets a
+  fixed penalty added (`Score.preserve`, 1 by default): the owner's phone uses that account
+  for chat and Cowork, so fleet work prefers the others while they have headroom. A constant,
+  not a gate on "every account under 50%", so the preference fades as the others fill
+  (account pressure is 1 at 50%) instead of flipping fleet-wide when one account crosses a
+  line; a record from a leader predating it parses with `preserve: 0`. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
   the same account; the filter additionally treats a window resetting within 15 min as
   empty. An exclave with extra usage on is scored past the line and its candidate
