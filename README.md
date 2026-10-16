@@ -252,7 +252,7 @@ the imported copy. `seanced raycast uninstall` removes the import and the build
 artifacts; Raycast keeps listing the extension until you also remove it in
 **Manage Extensions** (⌘⇧E), which no command can do for you.
 
-### 8. Optional: keep tmux window names in step with `/rename`
+### 8. Optional: Claude Code mods — `/rename` and session reports
 
 ```sh
 seanced mod install    # installs this checkout's Claude Code mods (user scope)
@@ -269,6 +269,14 @@ place from the checkout, so a `git pull` reaches new sessions with nothing re-ru
 (running ones on `/reload-plugins`). `seanced mod uninstall` removes it;
 `seanced doctor` reports whether it is installed from this checkout. Like
 `mcp install`, it is per Claude config directory.
+
+The same command installs **session-events**. It tells this machine's daemon what
+each session is doing (busy, idle, waiting on you, ended), the PR it opened, and the
+account's rate limits as the session last saw them. That keeps each account's quota
+on the Machines screen fresh between Claude Code's own cache writes, and it is what
+the scheduler reads. It runs `seanced session-event`, so it needs `seanced` on PATH
+(`seanced link`). Without that it does nothing, silently. A session started outside
+tmux reports nothing.
 
 ## Usage
 

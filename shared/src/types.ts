@@ -235,13 +235,15 @@ export type OpName =
   | "machine-info"
   | "update-available"
   | "status"
-  | "metrics";
+  | "metrics"
+  | "session-event";
 
 /**
- * Ops that expect a response; `machine-info` and `status` are stored blobs and
- * `update-available` a fire-and-forget broadcast — none correlates a reply.
+ * Ops that expect a response; `machine-info` and `status` are stored blobs,
+ * `update-available` a fire-and-forget broadcast and `session-event` a
+ * fire-and-forget report to the scheduler — none correlates a reply.
  */
-export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "status">;
+export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "status" | "session-event">;
 
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
@@ -759,6 +761,38 @@ export type DespawnResponse =
 
 export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];
+  readonly at: number;
+  /**
+   * Task ids of sessions this daemon saw end recently and runs no live pane
+   * for: what tells a scheduler whose spawn reply and `ended` event were both
+   * lost that the task ran, rather than that it never started. In-memory, so a
+   * daemon restart forgets it. Absent from older daemons; a reader that
+   * predates it ignores it.
+   */
+  readonly ended?: readonly string[];
+}
+
+/** What a session is doing, as `session-event` reports it (docs/scheduler.md). */
+export const SESSION_STATES = ["busy", "idle", "needs-input", "ended"] as const;
+
+export type SessionState = (typeof SESSION_STATES)[number];
+
+/**
+ * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
+ * fire-and-forget. Every field is the daemon's own, never what the session
+ * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
+ * path, `prUrl` only once it parsed as `https:` (DESIGN.md, "Session events").
+ * Sent only for sessions that carry a task id.
+ */
+export interface SessionEvent {
+  /** `SessionEntry.id` — the pane. */
+  readonly session: string;
+  readonly taskId: string;
+  readonly exclave: string;
+  readonly state: SessionState;
+  /** The newest pull request URL the session reported, `https:` only. */
+  readonly prUrl?: string;
+  /** Observed at by the daemon, ms. */
   readonly at: number;
 }
 

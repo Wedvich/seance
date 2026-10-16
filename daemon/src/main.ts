@@ -20,6 +20,7 @@ import {
 } from "./cli.ts";
 import { log } from "./log.ts";
 import { startPowerLoop } from "./power.ts";
+import { cmdSessionEvent } from "./session-event-cli.ts";
 import { startedBySupervisor } from "./service.ts";
 import { startSupervisor } from "./supervise.ts";
 
@@ -45,6 +46,7 @@ usage: seanced [command]
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
+  session-event  read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)
   raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
   help        this text
 `;
@@ -123,6 +125,9 @@ try {
       break;
     case "raycast":
       await cmdRaycast(rest);
+      break;
+    case "session-event":
+      await cmdSessionEvent();
       break;
     case "help":
     case "--help":

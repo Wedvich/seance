@@ -16,8 +16,9 @@ import type { MetricsStore, Sample } from "./metrics-store.ts";
  * What a `status` tick measures (DESIGN.md, "Telemetry"): cpu, memory and disk
  * pressure as whole percent, each smoothed over ~SMOOTHING_MS daemon-side so no
  * reader keeps a window of its own; disk free and I/O rates; running sessions
- * per exclave; and the newest quota observation per exclave, which in M1 is
- * only what Claude Code itself cached in each exclave's `.claude.json`.
+ * per exclave; and the newest quota observation per exclave — what Claude Code
+ * cached in each exclave's `.claude.json`, or a running session's own
+ * `rate_limits` report (`session-events.ts`) when that is newer.
  * Every sample also lands in the metrics store under `METRIC_NAMES`.
  *
  * A field the host can't answer is absent, never a guess: the first tick has
@@ -86,6 +87,8 @@ export interface TelemetrySources {
   /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
+  /** The newest session-reported quota for an exclave id (`SessionQuota.get`); absent, the cache is the only source. */
+  readonly sessionQuota?: (exclave: string) => Omit<QuotaObservation, "x"> | undefined;
   readonly probe?: HostProbe;
 }
 
@@ -159,7 +162,13 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
     previous = { atMs: nowMs, io };
 
     const at = Math.floor(nowMs / 1000);
-    const observations = quota.filter((q): q is QuotaObservation => q !== null);
+    const reported = scan.exclaves.map((exclave, x) => {
+      const observation = sources.sessionQuota?.(exclave.id);
+      return observation === undefined ? null : { ...observation, x };
+    });
+    const observations = scan.exclaves
+      .map((_, x) => newestQuota(quota[x] ?? null, reported[x] ?? null))
+      .filter((q): q is QuotaObservation => q !== null);
     const snapshot: Snapshot = {
       at,
       scan: registered.scan,
@@ -189,7 +198,10 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
       const exclave = scan.exclaves[x];
       if (exclave !== undefined) gauge(METRIC_NAMES.sess, count, { machine, exclave: exclave.id });
     });
-    for (const q of observations) {
+    // Each source at its own stamp, not the merged one: the cache's per-model
+    // windows must not land in the history at a session report's time.
+    const stored = [...quota, ...reported].filter((q): q is QuotaObservation => q !== null);
+    for (const q of stored) {
       const exclave = scan.exclaves[q.x];
       if (exclave === undefined) continue;
       const account = scan.info[q.x]?.accountId ?? null;
@@ -223,6 +235,33 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
       return current.snapshot;
     },
     latest: () => latest,
+  };
+}
+
+/**
+ * One exclave's observation for the status: the newer of the cache and a
+ * session's report. A report carries no per-model windows, and may lack a
+ * window the cache has, so the cache fills what the report leaves out, under
+ * the report's stamp — safe because a quota reading is a lower bound (use only
+ * raises it until reset, and a passed reset reads 0% whatever its age), so an
+ * older window never understates the account.
+ */
+export function newestQuota(
+  cached: QuotaObservation | null,
+  reported: QuotaObservation | null,
+): QuotaObservation | null {
+  if (reported === null || (cached !== null && cached.at > reported.at)) return cached;
+  if (cached === null) return reported;
+  // Window and its reset travel as a pair: a report's `h` never takes the cache's `hr`.
+  return {
+    ...reported,
+    ...(reported.h === undefined && cached.h !== undefined
+      ? { h: cached.h, ...(cached.hr === undefined ? {} : { hr: cached.hr }) }
+      : {}),
+    ...(reported.d === undefined && cached.d !== undefined
+      ? { d: cached.d, ...(cached.dr === undefined ? {} : { dr: cached.dr }) }
+      : {}),
+    ...(cached.w === undefined ? {} : { w: cached.w }),
   };
 }
 

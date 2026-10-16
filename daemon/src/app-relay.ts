@@ -3,6 +3,7 @@ import {
   RelayClient,
   REGISTRY_SETTLE_MS,
   type ErrorResponse,
+  type SchedulerEventHandler,
   type RelayState,
   type RequestOp,
 } from "@seance/shared";
@@ -212,7 +213,7 @@ export function appRelayClient(
   config: Pick<Config, "relayUrl" | "bearerToken">,
   key: CryptoKey,
   log: (line: string) => void,
-  scheduler?: { readonly term: number },
+  scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler },
 ): RelayClient {
   return new RelayClient({
     url: appRelayUrl(config.relayUrl),

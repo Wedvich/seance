@@ -8,6 +8,8 @@ import type { Check } from "./check.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
 import { runDir, socketPath } from "./paths.ts";
+import { peerPid, socketFd } from "./peer.ts";
+import { isSessionEventFrameKind, type SessionEventReply } from "./session-events.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
@@ -35,6 +37,11 @@ import { runDir, socketPath } from "./paths.ts";
  * daemons: anywhere else the peer can read the key itself, so `run.ts` passes
  * no broker. DESIGN.md's "Fleet broker" records it. Broker frames never reach
  * the `Plain` handler below, and `Plain` ops never reach the broker.
+ *
+ * The third frame kind is `session-event` (`session-events.ts`): ingest-only
+ * reports from the session-events mod, bound to a pane by the peer's
+ * kernel-reported pid, never by what the frame says. It can store and forward,
+ * nothing else — DESIGN.md's "Session events" records the widening.
  */
 
 /**
@@ -64,6 +71,8 @@ const EMPTY = Buffer.alloc(0);
 interface Conn {
   inbound: Buffer;
   outbound: Buffer;
+  /** The connecting process as the kernel recorded it at connect(2); null where the host cannot say. */
+  readonly peer: number | null;
 }
 
 export interface LocalSocketOpts {
@@ -75,6 +84,11 @@ export interface LocalSocketOpts {
    * `broker_disabled` rather than dropped, so a peer learns why.
    */
   readonly broker?: (raw: unknown) => Promise<BrokerReply>;
+  /**
+   * The session-event ingest (`createSessionEvents(...).handle`). Absent,
+   * such frames are answered `unsupported`.
+   */
+  readonly sessionEvents?: (raw: unknown, peer: number | null) => Promise<SessionEventReply>;
   readonly path?: string;
 }
 
@@ -168,11 +182,28 @@ async function dispatchBroker(
   sendLine(sock, conn, line);
 }
 
+/** Always answers, so the mod's sender can wait for the reply — and stay alive while its pid is walked. */
+async function dispatchSessionEvent(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  ingest: LocalSocketOpts["sessionEvents"],
+): Promise<void> {
+  let reply: SessionEventReply;
+  try {
+    reply = ingest === undefined ? { ok: false, code: "unsupported" } : await ingest(raw, conn.peer);
+  } catch (err) {
+    log.error(`local socket: session-event ingest crashed: ${String(err)}`);
+    reply = { ok: false, code: "invalid" };
+  }
+  sendLine(sock, conn, JSON.stringify(reply));
+}
+
 async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents">,
 ): Promise<void> {
   let raw: unknown;
   try {
@@ -186,6 +217,11 @@ async function dispatch(
   // handed to the op handler, whatever else it carries.
   if (isBrokerFrame(raw)) {
     await dispatchBroker(sock, conn, raw, opts.broker);
+    return;
+  }
+  // Likewise exclusive: an event never reaches the op handler, and carries no `op` to try.
+  if (isSessionEventFrameKind(raw)) {
+    await dispatchSessionEvent(sock, conn, raw, opts.sessionEvents);
     return;
   }
   if (!isPlain(raw)) {
@@ -249,7 +285,8 @@ export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSock
   const conns = new Map<Socket<undefined>, Conn>();
   const handlers = {
     open: (sock: Socket<undefined>): void => {
-      conns.set(sock, { inbound: EMPTY, outbound: EMPTY });
+      // Asked at once, while the fd is certainly open; only an event uses it.
+      conns.set(sock, { inbound: EMPTY, outbound: EMPTY, peer: peerPid(socketFd(sock)) });
     },
     close: (sock: Socket<undefined>): void => {
       conns.delete(sock);

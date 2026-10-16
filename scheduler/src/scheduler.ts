@@ -1,3 +1,4 @@
+import type { SessionState } from "@seance/shared";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { UNREACHABLE, type Fleet, type QueueStore, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
 import { route, type Decision } from "./route.ts";
@@ -14,8 +15,14 @@ import {
 /** The `client` a scheduler spawn audits as: `origin=relay client=scheduler` (Settled defaults 3). */
 export const SCHEDULER_CLIENT = "scheduler";
 
-/** What `session-event` reports about a session (M2 item 5); the daemon has already bound it to a task. */
-export type SessionState = "busy" | "idle" | "needs-input" | "ended";
+/**
+ * Who reported a session event: the machine that sealed it (the envelope's
+ * AAD-bound `from`) and the pane its daemon bound the event to.
+ */
+export interface SessionSource {
+  readonly deviceId: string;
+  readonly pane: string;
+}
 
 export interface SchedulerOptions {
   readonly store: QueueStore;
@@ -157,11 +164,28 @@ export class Scheduler {
     return this.#ticking;
   }
 
-  async onSession(taskId: string, state: SessionState): Promise<void> {
+  /**
+   * A session's state, from a `session-event`. For a reserved task it is proof
+   * the spawn landed — the reply may be lost — so it resolves the reservation:
+   * the assignment is the reservation's target plus the reporting pane. `from`
+   * is checked against where the task was placed, so a machine can move only
+   * the tasks it was given; without `from` (a host that cannot say) a reserved
+   * task is left to its verdict or its TTL.
+   */
+  async onSession(taskId: string, state: SessionState, from?: SessionSource): Promise<void> {
     const task = this.task(taskId);
     if (task === undefined) return;
     const to: TaskState = state === "ended" ? "done" : state === "needs-input" ? "needs-input" : "running";
-    if (task.state === to || (task.state !== "running" && task.state !== "needs-input")) return;
+    if (task.state === to) return;
+    if (task.state === "reserved") {
+      const at = task.reservation;
+      if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return;
+      const assignment: Assignment = { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone, pane: from.pane };
+      await this.#write(task, advance(task, to, { assignment }));
+      return;
+    }
+    if (task.state !== "running" && task.state !== "needs-input") return;
+    if (from !== undefined && task.assignment !== undefined && from.deviceId !== task.assignment.deviceId) return;
     await this.#write(task, advance(task, to));
   }
 
@@ -256,8 +280,11 @@ export class Scheduler {
   }
 
   /**
-   * A session carrying the task id is the spawn that landed. With none, the
-   * reservation stands until its TTL and is released past it. An unanswered
+   * A session carrying the task id is the spawn that landed. A task id in the
+   * reply's `ended` is one that landed and already finished: done, never
+   * re-routed — its reply and its `ended` event were both lost, and its session
+   * is gone, so `task_running` could not catch a second spawn. With neither,
+   * the reservation stands until its TTL and is released past it. An unanswered
    * check keeps waiting while the machine is connected and releases an expired
    * one once it is not — the daemon's `task_running` is the backstop for a
    * machine that comes back still running it.
@@ -273,6 +300,11 @@ export class Scheduler {
     }
     const session = reply.sessions.find((s) => s.taskId === id);
     if (session === undefined) {
+      if (reply.ended?.includes(id) === true) {
+        const target: Assignment = { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone };
+        await this.#write(current, advance(current, "done", { assignment: target }));
+        return;
+      }
       if (expired) await this.#write(current, advance(current, "ready"));
       return;
     }

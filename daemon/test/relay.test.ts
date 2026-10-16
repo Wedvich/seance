@@ -11,10 +11,13 @@ import {
   open,
   parseMachineStatus,
   parseMetricsReply,
+  parseSessionEvent,
+  SCHEDULER_ID,
   seal,
   STATUS_MAX_CT_LENGTH,
   toBase64,
   verifyRegister,
+  type Envelope,
   type MachineInfo,
   type Plain,
   type RescanResponse,
@@ -395,6 +398,44 @@ describe("daemon ↔ relay integration", () => {
       expect(await client.sendStatus({ at: 2, scan: 2 })).toBe(true);
       // The first in the queue is the second sent: the stale one never left.
       expect(parseMachineStatus((await open(appKey, await relay.statuses.next())).payload)?.scan).toBe(2);
+    } finally {
+      client.stop();
+      relay.stop();
+    }
+  });
+
+  test("a session event leaves sealed to the scheduler as `session-event`, from this machine", async () => {
+    const relay = startTestRelay(TOKEN);
+    const identity = await identityFromSeed(generateIdentitySeed());
+    // The relay routes `to: "scheduler"` to the leader; here that is this daemon, so the leg's hand-off sees it.
+    const routed: Envelope[] = [];
+    const client = new RelayClient({
+      url: relay.url,
+      bearerToken: TOKEN,
+      identity,
+      key: appKey,
+      buildInfo: () =>
+        seal(
+          appKey,
+          { to: APP_ID, from: identity.deviceId },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
+        ),
+      handle: () => Promise.resolve(null),
+      onScheduler: (env) => void routed.push(env),
+    });
+    client.start();
+    try {
+      await relay.registers.next();
+      relay.lead(identity.deviceId, 1);
+      const event = { session: "%3", taskId: "t1", exclave: "default", state: "ended" as const, at: 5 };
+      expect(await client.sendToScheduler(event)).toBe(true);
+      await pollUntil(() => routed.length === 1, "the event to come back routed to the leader");
+      const [env] = routed;
+      if (env === undefined) throw new Error("nothing routed");
+      expect({ to: env.to, from: env.from }).toEqual({ to: SCHEDULER_ID, from: identity.deviceId });
+      const plain = await open(appKey, env);
+      expect(plain.op).toBe("session-event");
+      expect(parseSessionEvent(plain.payload)).toEqual(event);
     } finally {
       client.stop();
       relay.stop();

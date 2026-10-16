@@ -57,7 +57,15 @@ export interface TaskSpawnRequest extends SpawnRequest {
 export type TaskSpawnReply = SpawnResponse | ErrorResponse | Unreachable;
 
 export type TaskSessionsReply =
-  | { readonly ok: true; readonly sessions: readonly SessionEntry[] }
+  | {
+      readonly ok: true;
+      readonly sessions: readonly SessionEntry[];
+      /**
+       * `SessionsResponse.ended`: task ids whose sessions ran here and ended
+       * recently. Absent from older daemons, and when none ended.
+       */
+      readonly ended?: readonly string[];
+    }
   | ErrorResponse
   | Unreachable;
 

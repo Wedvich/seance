@@ -171,6 +171,81 @@ describe("session state", () => {
   });
 });
 
+/**
+ * The double spawn item 5 closes: a spawn lands, its reply is lost, and the
+ * session ends inside the reservation TTL. Neither the session event nor the
+ * `sessions` check may then read the task as never started.
+ */
+describe("a reply lost, then the session ends", () => {
+  function lostReply() {
+    const ctx = setup();
+    ctx.fleet.scripts.set("a", (request) => {
+      ctx.fleet.start("a", request);
+      return unreachable;
+    });
+    return ctx;
+  }
+
+  test("the ended event resolves the reservation as done; the TTL check then spawns nothing", async () => {
+    const { fleet, clock, scheduler } = lostReply();
+    const task = await scheduler.submit(spec());
+    await scheduler.tick();
+    expect(scheduler.task(task.id)?.state).toBe("reserved");
+
+    fleet.end("a", task.id);
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    expect(scheduler.task(task.id)).toMatchObject({
+      state: "done",
+      assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" },
+    });
+
+    clock.now += 120_000;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(fleet.spawns).toHaveLength(1);
+    expect(scheduler.task(task.id)?.state).toBe("done");
+  });
+
+  test("the ended event lost too: past the TTL the daemon's `ended` says the task ran, and it is done", async () => {
+    const { fleet, clock, scheduler } = lostReply();
+    const task = await scheduler.submit(spec());
+    await scheduler.tick();
+    fleet.end("a", task.id);
+
+    clock.now += 120_000;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(fleet.sessionCalls).toEqual(["a"]);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "done", assignment: { deviceId: "a", clone: "app" } });
+    await scheduler.tick();
+    expect(fleet.spawns).toHaveLength(1);
+  });
+
+  test("busy and needs-input resolve a reservation too, with the reporting pane", async () => {
+    const { scheduler } = lostReply();
+    const first = await scheduler.submit(spec());
+    const second = await scheduler.submit(spec());
+    await scheduler.tick();
+    await scheduler.onSession(first.id, "busy", { deviceId: "a", pane: "%1" });
+    await scheduler.onSession(second.id, "needs-input", { deviceId: "a", pane: "%2" });
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { pane: "%1" } });
+    expect(scheduler.task(second.id)).toMatchObject({ state: "needs-input", assignment: { pane: "%2" } });
+  });
+
+  test("an event from a machine the task was not placed on, or with no source, moves nothing", async () => {
+    const { scheduler } = lostReply();
+    const task = await scheduler.submit(spec());
+    await scheduler.tick();
+    await scheduler.onSession(task.id, "ended", { deviceId: "b", pane: "%1" });
+    await scheduler.onSession(task.id, "ended");
+    expect(scheduler.task(task.id)?.state).toBe("reserved");
+
+    await scheduler.onSession(task.id, "busy", { deviceId: "a", pane: "%1" });
+    await scheduler.onSession(task.id, "ended", { deviceId: "b", pane: "%9" });
+    expect(scheduler.task(task.id)?.state).toBe("running");
+  });
+});
+
 describe("cancel", () => {
   test("a ready task is cancelled; a running one is despawned first; a finished one is refused", async () => {
     const { fleet, scheduler } = setup(new FakeFleet([machine("a", { connected: false })]));

@@ -29,10 +29,12 @@ import { createLeader, type Leader, type LeaderOpts } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
+import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
+import { createSessionEvents, EndedTasks, listPanePids, reportEnded, SessionQuota } from "./session-events.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
@@ -236,6 +238,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     return MetricsStore.memory();
   });
 
+  // Session events (the session-events mod): quota reports fold into telemetry,
+  // ended tasks into the `sessions` reply, and task sessions' states go to the
+  // leader. Built before the handler context, which reads the two stores.
+  const sessionQuota = new SessionQuota();
+  const endedTasks = new EndedTasks();
+
   // One context, a handler per inbound surface. The relay leg and the local op
   // socket share the backend, the repo set and the audit sink, and differ only
   // in the origin they are tagged with — which is what keeps "every spawn path
@@ -246,6 +254,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     rescan,
     auditSink: daemonSink,
     metrics: (request) => metrics.query(request),
+    endedTasks: () => reportEnded(endedTasks),
+    taskLaunched: (taskId) => endedTasks.launched(taskId),
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {
@@ -261,6 +271,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     diskPaths: config.repoRoots,
     registered: () => registered,
     sessions: () => handlerCtx.backend.sessions(state.repos),
+    sessionQuota: (exclave) => sessionQuota.get(exclave),
   });
   const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
   let telemetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -305,7 +316,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // is built per term over the key imported above, never the broker's.
   const leader = createLeader({
     selfDeviceId: state.deviceId,
-    createRelay: (term) => appRelayClient(config, key, (line) => log.info(line), { term }),
+    createRelay: (term, onEvent) => appRelayClient(config, key, (line) => log.info(line), { term, onEvent }),
     local: createLocalOps(handlerCtx, "leader"),
     ...opts.leader,
   });
@@ -397,10 +408,33 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ? createBroker({ selfDeviceId: state.deviceId, relay: brokerRelay(config, key), auditSink: daemonSink })
       : null;
 
+  // Where the kernel cannot name a socket's peer, an event's pane is its own
+  // claim — said once, since it changes what an event can be trusted to mean.
+  if (!peerPidSupported()) {
+    log.warn("local socket: this host reports no peer pid — session events are bound by the pane they name");
+  }
+  const sessionEvents = createSessionEvents({
+    panes: listPanePids,
+    exclaves: () => exclaveScan.exclaves,
+    // The leader reaches itself in process, never by a relay round trip. A
+    // daemon that just lost the role still sends to "scheduler", which the
+    // relay routes to whoever leads now.
+    forward: (event) => {
+      if (leader.term() !== null) {
+        void leader.onSession(event.taskId, event.state, { deviceId: state.deviceId, pane: event.session });
+        return;
+      }
+      void client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
+    },
+    quota: sessionQuota,
+    ended: endedTasks,
+  });
+
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
   const local = await startLocalSocket({
     handle: createHandler(handlerCtx, "local"),
+    sessionEvents: sessionEvents.handle,
     ...(broker === null ? {} : { broker: broker.handle }),
   });
 
@@ -458,6 +492,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       broker?.stop();
       // Its leg, timer and loop go with the handle too, before the client it hears terms on.
       leader.stop();
+      sessionEvents.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

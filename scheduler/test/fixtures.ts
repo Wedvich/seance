@@ -79,6 +79,8 @@ export class FakeFleet implements Fleet {
   readonly sessionCalls: string[] = [];
   readonly scripts = new Map<string, SpawnScript>();
   readonly running = new Map<string, SessionEntry[]>();
+  /** Task ids each daemon would report in `sessions`' `ended`. */
+  readonly ended = new Map<string, string[]>();
   sessionsReply: ((deviceId: string) => TaskSessionsReply) | null = null;
   #pane = 0;
 
@@ -118,10 +120,20 @@ export class FakeFleet implements Fleet {
     return { ok: true, window: entry.window, path: entry.path, sessions };
   }
 
+  /** What a daemon does when a task's session exits: the pane goes, and the task id joins `ended`. */
+  end(deviceId: string, taskId: string): void {
+    this.running.set(
+      deviceId,
+      (this.running.get(deviceId) ?? []).filter((s) => s.taskId !== taskId),
+    );
+    this.ended.set(deviceId, [...(this.ended.get(deviceId) ?? []), taskId]);
+  }
+
   async sessions(deviceId: string): Promise<TaskSessionsReply> {
     this.sessionCalls.push(deviceId);
     if (this.sessionsReply !== null) return this.sessionsReply(deviceId);
-    return { ok: true, sessions: this.running.get(deviceId) ?? [] };
+    const ended = this.ended.get(deviceId);
+    return { ok: true, sessions: this.running.get(deviceId) ?? [], ...(ended === undefined ? {} : { ended }) };
   }
 
   async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {

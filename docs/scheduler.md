@@ -31,7 +31,7 @@ stay as they are; the table says which word each one means.
 | Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob, and as the blob's `MachineInfo.exclaves` list (account, auth, skills); a repo's location decides its config dir, so `spawn` is unchanged                                                                                                         |
 | Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                                                                                                                                      |
 | Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                                                                                                                                           |
-| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                                                                                                                                   |
+| Quota telemetry   | Layered: session-reported `rate_limits` (the mod's `session.measure` tap, landed M2) → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                                                                                      |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                                                                                                                                |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
 | Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                                                               |
@@ -161,15 +161,17 @@ already take the newest observation per account, whichever daemon reported it.
 **Daemon → scheduler (fire-and-forget, sealed to `"scheduler"`)** — events only, the things
 that must arrive when they happen rather than when someone asks:
 
-| Op              | Cadence                      | Payload (sketch)                                                                              |
-| --------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `session-event` | on event, coalesced ≤1/5s    | session id, task id, exclave, state (`busy`/`idle`/`needs-input`/`ended`), PR URL seen, skill |
-| `branch-state`  | on change, for task branches | repo, branch, `pushed`, `merged` (reap-git's rules)                                           |
+| Op              | Cadence                      | Payload (sketch)                                                                               |
+| --------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `session-event` | on event, coalesced ≤1/5s    | `SessionEvent`: session (pane), task id, exclave, state, `https:` PR URL, `at` — landed (M2 5) |
+| `branch-state`  | on change, for task branches | repo, branch, `pushed`, `merged` (reap-git's rules)                                            |
 
 A leader change loses nothing here: every event is also reflected in the daemon's `sessions`
-reply, which the new leader reconciles against on takeover (below). The session and task ids
-in a `session-event` are the daemon's own, from its pane map, never copied from what the mod
-sent (Daemon changes, local socket).
+reply — a running session as itself, an ended task in its `ended` list — which the new leader
+reconciles against on takeover (below). The session and task ids in a `session-event` are the
+daemon's own, from its pane map, never copied from what the mod sent (DESIGN.md, Local op
+socket, "Session events"). The plan's `skill` field was left out: nothing reads it before M4's
+skill filter.
 
 **Scheduler → daemon**: existing `spawn`/`sessions`/`despawn`, addressed from `"scheduler"` by
 the leader's app-role leg (landed with item 3). The target daemon needed no change — it replies
@@ -222,23 +224,9 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
   share): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
-- Local socket: `session-event` as its own frame kind, never a `Plain` or an `OpName` — the
-  precedent the fleet broker set (DESIGN.md "Fleet broker"), so it can't arrive from the relay
-  and no op can be smuggled in as one. Ingest-only: the handler may store and forward, may not
-  spawn, despawn, or exec. DESIGN.md "Local op socket" + threat model updated.
-  **Every field of an event is untrusted.** The socket checks only the OS user (the 0700 run
-  directory), and every spawned session is that user, so any session — or anything it runs —
-  can write an event naming any session or task. The daemon binds an event to a pane itself,
-  from the connecting peer's pid walked up to a pane's `pane_pid`, and takes session and task
-  from its own pane map (the `taskId` it recorded at spawn), never from ids in the event.
-  Whether Bun surfaces a unix socket's peer pid is unverified; without it the pane is the
-  event's claim, and what remains — one same-uid process mislabelling another session's state
-  on its own machine — is the residual the threat model records. A PR URL is kept only if it
-  parses as an `https:` URL, checked before it can become an `href` in the PWA or text in a
-  Web Push.
-- `claude-mods/session-events`: hooks (`SessionStart`, `Stop`, `Notification`,
-  `UserPromptSubmit`, `SessionEnd`, `PostToolUse` matching PR-create output) + statusline tap
-  for `rate_limits` → local socket. This is also the phase-2 bus.
+- Local socket `session-event` and `claude-mods/session-events` — **landed (M2 item 5)**;
+  DESIGN.md Local op socket, "Session events", is the record (frame kind, peer-pid binding,
+  residual, quota tap, `ended`). The mod is also the phase-2 bus.
 - **`leader.ts` — the scheduler role. Landed 2026-10-16 (M2 item 3); DESIGN.md _Scheduler_,
   "The leader", is the record**: a term per `lead`, its own persistent leg sent as the
   scheduler, the `Fleet` over it with this machine reached in process (origin `leader`),
@@ -431,9 +419,37 @@ term } | null` in the registry push.
    **Landed 2026-10-16** — DESIGN.md _Daemon_, "Task ids", is the record: a tmux pane option,
    so it survives a daemon restart, and `taskIdOfPane` in `daemon/src/sessions.ts` is item 5's
    pane → task lookup.
-5. `session-event` on the local socket + `claude-mods/session-events`; the daemon binds each
-   event to a pane and takes session and task from its own pane map, keeps only `https:` PR
-   URLs, and forwards to the leader sealed to `"scheduler"`.
+5. **Landed 2026-10-16 — DESIGN.md Local op socket, "Session events", is the record.**
+   `session-event` on the local socket + `claude-mods/session-events`. The daemon binds each
+   event to a pane by the peer's kernel-reported pid (`SO_PEERCRED` / `LOCAL_PEERPID` through
+   `bun:ffi`; Bun has no API for it) and takes session and task from its own pane map. It
+   keeps only `https:` PR URLs, coalesces to ≤1 per session per 5s, and forwards to the
+   leader sealed to `"scheduler"`. The `branch-state` op is M3's. Two additions the plan did
+   not name:
+   - **The `rate_limits` tap.** Until it (or M4's OAuth poll) existed, quota came only from
+     `cachedUsageUtilization`, which Claude Code writes irregularly: on one Mac the caches
+     were 7h, 23h and 11 days old, and one exclave had none. Settled default 7 relies on
+     each session's own report to correct a stale reading, and this tap delivers it. The
+     mod hooks `session.measure` (the status line's `rateLimits`, pushed after each turn and
+     whenever a window moves a point). Each report becomes a `session` quota observation for
+     the pane's exclave, stored beside the cache under the same metric names, so it rides
+     `status` and readers' newest-observation fold picks it up. Built as an engine hook
+     rather than the planned wrapper around each exclave's `statusLine` command (decided
+     with the owner, 2026-10-16). It touches no user setting, so there is nothing to restore
+     on uninstall, and it sits in no status line's path. Its cadence is better than the
+     status line's.
+   - **Closing the double spawn.** A spawn lands, its reply is lost, the session ends inside
+     the 120s TTL, and `onSession` ignored the `ended` event for a `reserved` task. The TTL
+     check then found no session, released the task, and it ran twice, with `task_running`
+     blind because the first session was gone. Fixed twice over. (a) Any session event for a
+     reserved task resolves it (`busy`/`idle` → `running`, `needs-input` → `needs-input`,
+     `ended` → `done`) through new `reserved` edges. These are one write, never a two-step
+     through `running`. The event counts only from the machine the task was reserved on.
+     (b) The daemon remembers recently ended task ids (from `ended` events, and from every
+     task it launched whose pane is gone). It keeps them 30 min, at most 128 per source, and
+     reports them as `SessionsResponse.ended`, so the TTL check resolves ran-and-ended as
+     `done`. In memory only: a restart inside the TTL forgets them, and such a task is
+     routed again.
 6. PWA — `auto` in the picker (greyed with no leader, or one whose registry entry does not
    open: "leader unverified"), `route-preview` and the decision view.
 7. Kept `status` (landed) — the relay keeps the last one in the entry on close and sweep and clears it
@@ -450,7 +466,10 @@ term } | null` in the registry push.
 - A demoted leader's write or dispatch is refused `not_leader` (relay).
 - A second `spawn` with a `taskId` the daemon already runs is refused `task_running` with the
   existing pane (daemon).
-- A `session-event` from the mod reaches the leader's state (daemon + e2e).
+- A `session-event` from the mod reaches the leader's state (daemon + e2e). _Landed with item 5:
+  `daemon/test/leader.test.ts` (another machine's event moves only a task placed on it) and
+  `e2e/e2e.test.ts` (the CLI in a pane on machine B, through the real DO, resolves the leader's
+  reservation as `done`)._
 - A daemon without `roles` is never nominated; one without `taskId` in `capabilities` is never
   reserved against (relay, scheduler).
 - Nomination, re-nomination and the `deviceId` tie reproduce over plain inputs in
@@ -461,6 +480,8 @@ term } | null` in the registry push.
   it (e2e).
 - A `session-event` naming another session or task moves only the state the daemon's own pane
   map attributes to the sender; a non-`https:` PR URL never reaches the PWA or a push (daemon).
+  _Landed with item 5 (`daemon/test/session-events.test.ts`), with the rate-limit report
+  reaching `status` and both double-spawn paths (`scheduler/test/scheduler.test.ts`)._
 - The leader's app-role leg stays up through more than `LazyRelay`'s idle window with no
   calls, and nothing of it survives `follow` (daemon).
 - An account with no observation in any live or kept status, or trimmed out of a status that
@@ -640,7 +661,7 @@ same PR, with the reason.
    fleet (the owner, 2026-10-16); the rare cloud session is a blip the next session report or
    OAuth poll overwrites. A cap would fail every time a machine sleeps past it, and on the
    account with the most headroom; no cap fails only on unseen use, for one dispatch, until the
-   session's own `rate_limits` report corrects it. Revisit with a 7d-only cap (~24h) if
+   session's own `rate_limits` report (the session-events mod, M2 item 5) corrects it. Revisit with a 7d-only cap (~24h) if
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
@@ -704,8 +725,10 @@ same PR, with the reason.
   unpadded, so the relay bounds prompt length — the same concession as live frames.
 - **OAuth usage endpoint** is unofficial; reading tokens per config dir differs by platform
   (macOS keychain entry naming per config dir is unverified). Session reports are the floor.
-- **Statusline `rate_limits` cadence**: only refreshed when the statusline renders; an idle
-  session reports nothing new.
+- **Session `rate_limits` cadence** (was: statusline cadence). The tap is `session.measure`,
+  not the statusline, so it reports after each turn and when a window moves a point, rendered
+  or not. An idle session still reports nothing new, which the reset floor and M4's OAuth poll
+  cover.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats

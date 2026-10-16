@@ -25,11 +25,17 @@ interface Shard {
   readonly parallel?: boolean;
   /**
    * Claude Code mods import `claude-code/testing`, which only `claude plugin test`
-   * provides — one plugin folder per path. Its summary is bun's format, so the
-   * tally below reads it unchanged.
+   * provides. It takes exactly one plugin folder and ignores any after it, so a
+   * mod shard has one path — one shard per mod. Its summary is bun's format, so
+   * the tally below reads it unchanged.
    */
   readonly runner?: "claude-plugin";
 }
+
+/** One shard each: `claude plugin test` runs one folder per call. */
+const MOD_FOLDERS = ["claude-mods/tmux-rename", "claude-mods/session-events"] as const;
+
+const modShard = (folder: string): Shard => ({ name: folder, paths: [folder], runner: "claude-plugin" });
 
 // Slowest first, so the short shards fill in behind the critical path.
 const SHARDS: readonly Shard[] = [
@@ -49,7 +55,7 @@ const SHARDS: readonly Shard[] = [
   { name: "raycast", paths: ["raycast/"] },
   { name: "scheduler", paths: ["scheduler/"] },
   { name: "scripts", paths: ["scripts/"] },
-  { name: "claude-mods", paths: ["claude-mods/tmux-rename"], runner: "claude-plugin" },
+  ...MOD_FOLDERS.map(modShard),
 ];
 
 // `bun run test <path>` narrows to one bun shard (plus one for mods), so a single file still runs with
@@ -58,9 +64,8 @@ const filters = process.argv.slice(2);
 // A filter overlapping a mod's folder (`claude-mods/`, the folder, a file inside it)
 // goes to `claude plugin test` as that folder: bun can't import the mods' tests,
 // and `claude plugin test` takes only plugin folders.
-const modFolders = SHARDS.filter((shard) => shard.runner === "claude-plugin").flatMap((shard) => shard.paths);
 const modsUnder = (filter: string): string[] =>
-  modFolders.filter((folder) => filter.startsWith(folder) || folder.startsWith(filter));
+  MOD_FOLDERS.filter((folder) => filter.startsWith(folder) || folder.startsWith(filter));
 const bunFilters = filters.filter((f) => modsUnder(f).length === 0);
 const modFilters = filters.filter((f) => modsUnder(f).length > 0);
 const shards: readonly Shard[] =
@@ -68,15 +73,7 @@ const shards: readonly Shard[] =
     ? SHARDS
     : [
         ...(bunFilters.length === 0 ? [] : [{ name: bunFilters.join(" "), paths: bunFilters }]),
-        ...(modFilters.length === 0
-          ? []
-          : [
-              {
-                name: modFilters.join(" "),
-                paths: [...new Set(modFilters.flatMap(modsUnder))],
-                runner: "claude-plugin" as const,
-              },
-            ]),
+        ...[...new Set(modFilters.flatMap(modsUnder))].map(modShard),
       ];
 
 /**
