@@ -44,11 +44,11 @@ including what this deliberately does not defend against.
 
 ## How it fits together
 
-| Component | Where it runs                                                            | What it does                                                                                                                                    |
-| --------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery)                                                    |
-| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session; `seanced mcp` serves the same reach to a local Claude Code |
-| `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions                                                    |
+| Component | Where it runs                                                            | What it does                                                                                                                                                                                            |
+| --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery)                                                                                                            |
+| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session, reports load and quota every 30s and keeps its history; `seanced mcp` serves the same reach to a local Claude Code |
+| `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions; a Machines screen with load, quota and history                                                            |
 
 See [DESIGN.md](DESIGN.md) for the full architecture and every decision with
 its rationale.
@@ -159,7 +159,8 @@ Edit `~/.config/seance/config.json`:
   `init` creates 0600. On systemd ≥ 256 the sealed blob is instead sealed once as root
   and delivered to the unit by PID 1, which `psk-import` can't do — docs/psk.md has
   that runbook.
-- `repoRoots` — directories to scan for repos
+- `repoRoots` — directories to scan for repos. Only these are scanned, so if you use
+  exclaves (below) the roots must cover their trees for the clones there to appear.
 - `machineTag` — optional short tag naming this box, suffixed onto the session name
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
@@ -167,6 +168,13 @@ Edit `~/.config/seance/config.json`:
 - `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
+
+Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
+Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;
+`default` (`~`, `~/.claude`) is implied and never listed. A clone's location decides which
+account a spawn there runs under. From each exclave's `.claude.json` the daemon reads the
+account ids and Claude Code's cached usage figures — never a token or the email — and
+reports them, sealed, alongside load.
 
 A running daemon watches this file and reloads within a second of a save, so
 edits need no restart — including ones made by a Claude Code session on the
@@ -283,6 +291,11 @@ daemon connects again. `seanced uninstall` deletes it for you on the way out; un
 `--system` it can't (as root it would read the wrong user's config) and says so.
 
 There is no title field: the daemon names the tmux window after the prompt.
+
+**Settings → Machines** shows every machine with its exclaves and accounts, current
+CPU and memory pressure, the newest quota reading per account, and history
+charts drawn from each daemon's own store — an asleep machine's history waits until
+it wakes.
 
 <p align="center">
   <img src="docs/images/machine-sheet.png" width="260"

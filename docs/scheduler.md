@@ -25,30 +25,30 @@ stay as they are; the table says which word each one means.
 
 ## Decisions (from the interview, placement revised 2026-10-15)
 
-| Topic             | Decision                                                                                                                                                                                                                                                                     |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite |
-| Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob; a repo's location decides its config dir, so `spawn` is unchanged                                                                 |
-| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                       |
-| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                            |
-| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                    |
-| Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                 |
-| Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                             |
-| Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                |
-| Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                           |
-| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                      |
-| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                |
-| Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                              |
-| Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                         |
-| Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                          |
-| Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader. History stays on each daemon behind a `metrics` op. Neither the relay nor the scheduler stores telemetry       |
-| At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                              |
-| Skills            | Hard filter when declared or prompt starts with `/name`; otherwise informational (+ PWA autocomplete)                                                                                                                                                                        |
-| Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                      |
-| Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                        |
-| Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                       |
-| AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                      |
-| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                               |
+| Topic             | Decision                                                                                                                                                                                                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Placement         | **Queue lives in the relay's DO as sealed blobs; the loop runs on a relay-nominated daemon.** No standalone process, no new PSK holder. `scheduler/` is a pure library the daemon hosts behind two adapter interfaces, so it can move to a fixed box later without a rewrite        |
+| Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob, and as the blob's `MachineInfo.exclaves` list (account, auth, skills); a repo's location decides its config dir, so `spawn` is unchanged |
+| Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                              |
+| Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                                   |
+| Quota telemetry   | Layered: session-reported `rate_limits` → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                           |
+| Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                        |
+| Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                    |
+| Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                       |
+| Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                  |
+| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                             |
+| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                       |
+| Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                     |
+| Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                |
+| Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                                 |
+| Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader. History stays on each daemon behind a `metrics` op. Neither the relay nor the scheduler stores telemetry              |
+| At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                                     |
+| Skills            | Hard filter when declared or prompt starts with `/name`; otherwise informational (+ PWA autocomplete)                                                                                                                                                                               |
+| Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                             |
+| Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                               |
+| Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                              |
+| AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                             |
+| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                                      |
 
 ### Why the relay holds the queue and a daemon runs it
 
@@ -149,7 +149,7 @@ A leader change loses nothing here: every event is also reflected in the daemon'
 reply, which the new leader reconciles against on takeover (below).
 
 **Scheduler → daemon**: existing `spawn`/`sessions`/`despawn`, addressed from `"scheduler"` by
-the leader's app-role leg. Daemon replies to `env.from` already (`relay-client.ts:239`), so no
+the leader's app-role leg. Daemon replies to `env.from` already (`#onEnvelope` seals through `#sealReply` in `relay-client.ts`), so no
 reply-path change.
 
 **`SpawnRequest` gains two optional fields**, both ignored harmlessly by old daemons except
@@ -173,7 +173,7 @@ the same op:
 Audit: scheduler spawns reach the target through the relay, so they audit as `origin=relay
 client=scheduler`; task ↔ session correlation is `taskId`.
 
-**App → scheduler ops** (request/response, PWA via `AppClient`, routed to the leader):
+**App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
 `queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
 "reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `enqueue` is _not_ a
 leader op: the app seals the task and `queue-put`s it at `expect: 0`, so queuing works with
@@ -184,7 +184,7 @@ no leader and the next one picks it up. Scheduler → app: `queue-changed` push 
 (DESIGN.md _Daemon_, "Exclaves" and "Repo discovery"). `origin` is the scheduler's repo key.
 What remains is new `capabilities` values — `"taskId"` (M2), `"baseBranch"` (M4) — so the
 scheduler never relies on a field an old daemon would drop. (`roles` is the plaintext sibling:
-what the _relay_ must read; `capabilities` is sealed, what only the leader reads.)
+what the _relay_ must read; `capabilities` is sealed, read by apps today — they gate `metrics` on it — and by the leader to gate `taskId`.)
 
 ## Daemon changes
 
@@ -327,13 +327,17 @@ From the PWA, every machine with its exclaves and accounts, current pressure, th
 observation per account, and history charts — without a scheduler. Landed as #71 (schema), #72
 (exclaves), #73 (telemetry), #74 (`status`), #75 (`metrics`) and #77 (PWA), with fixes after.
 Recorded in DESIGN.md _Presence & identity_, _Wire protocol_, _Daemon_ and _PWA_. Every exit
-criterion has a test, though "pressure for every connected machine" is only exercised with one.
+criterion has a test — pressure from the first registry push, a `status` gone with its socket,
+the size and rate floors, a stray `~/.exclaves` line costing one exclave, an old daemon with no
+`exclaves` still rendering, and `status` through the real DO — though "pressure for every
+connected machine" is only exercised with one.
 
 **Gaps, until later milestones close them.** No scheduler: you pick the exclave by hand and read
 the pressure yourself. Quota comes only from Claude Code's own cached utilization per config dir
 (session reports are M2, the OAuth poll M4), so an exclave shows whatever its last Claude
 session left, with its observed-at — and nothing at all until one has run there. Proxmox node
-view absent (M4); LXCs report their cgroup view.
+view absent (M4); an LXC reports what `/proc` shows inside the container, with no cgroup or PSI
+read yet.
 
 ### M2 — routing and leadership
 
@@ -344,8 +348,7 @@ queue yet.
 **Lands, in order.**
 
 1. `scheduler/` library + in-memory fakes of `QueueStore` and `Fleet`; filter / score /
-   sticky / reserve / record over fixtures. No wire change — depends only on M1's schema, so
-   it can start before M1 finishes. Includes the layering test: nothing in `scheduler/`
+   sticky / reserve / record over fixtures. No wire change — depends only on M1's schema. Includes the layering test: nothing in `scheduler/`
    imports `daemon/`, and nothing in `daemon/` imports `scheduler/` except `leader.ts`.
 2. Relay leadership — `roles` on `register`, `scheduler:term`, `lead`/`follow`,
    re-nomination on close and sweep, `not_leader` on a stale term, `scheduler: { deviceId,
