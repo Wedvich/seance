@@ -1,6 +1,6 @@
 import {
   APP_ID,
-  METRICS_CAPABILITY,
+  CAPABILITIES,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
@@ -9,6 +9,7 @@ import {
   TOKEN_PARAM,
   type AppFrame,
   type Envelope,
+  type ErrorResponse,
   type ExclaveInfo,
   type MachineInfo,
   type MachineStatus,
@@ -480,7 +481,7 @@ export class RelayClient {
    */
   async metrics(deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
     const machine = this.#state.machines.find((m) => m.deviceId === deviceId);
-    if (machine !== undefined && machine.capabilities?.includes(METRICS_CAPABILITY) !== true) {
+    if (machine !== undefined && machine.capabilities?.includes(CAPABILITIES.metrics) !== true) {
       throw new RequestFailure("unsupported", `${quote(machine.name)} runs a daemon that predates the metrics op`);
     }
     const parsed = parseMetricsReply(await this.request<unknown>(deviceId, "metrics", request));
@@ -529,7 +530,12 @@ export class RelayClient {
     this.#connect();
   }
 
-  async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T> {
+  /**
+   * One op to one machine. `T` is the op's own reply; any op can instead answer
+   * with an `ErrorResponse` (a crashed handler, an oversized reply), so callers
+   * check before reading fields. Throws `RequestFailure` when nothing answered.
+   */
+  async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T | ErrorResponse> {
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       throw new RequestFailure("disconnected", "no socket to the relay");
@@ -543,7 +549,7 @@ export class RelayClient {
       throw new RequestFailure("disconnected", "the relay socket closed while the request was being sealed");
     }
 
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<T | ErrorResponse>((resolve, reject) => {
       const limit = this.#timeoutFor(op);
       const sentAt = Date.now();
       const timer = setTimeout(() => {
@@ -563,7 +569,7 @@ export class RelayClient {
         timer,
         settle: (result) => {
           this.#discard(id);
-          if (result.ok) resolve(result.payload as T);
+          if (result.ok) resolve(result.payload as T | ErrorResponse);
           else reject(result.error);
         },
       });

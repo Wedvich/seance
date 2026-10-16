@@ -82,6 +82,7 @@ describe("the broker runs only where the key is service-delivered", () => {
         expect(err).toMatchObject({ code: "broker_disabled" });
         // The local op path is untouched by the refusal.
         const reply = await localRequest<SessionsResponse>("sessions", {}, { path });
+        if ("ok" in reply) throw new Error(reply.message);
         expect(Array.isArray(reply.sessions)).toBe(true);
         expect(relay.connectionCount()).toBe(1);
         expect(relay.rejectedCount()).toBe(0);

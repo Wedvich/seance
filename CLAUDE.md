@@ -102,7 +102,9 @@ green:
 - A PostToolUse hook (`.claude/settings.json`) runs oxfmt on every file you write — don't add
   manual formatting steps.
 - Errors that cross the wire are structured codes (`SPAWN_ERROR_CODES` in `shared/src/types.ts`),
-  not free-text throws.
+  not free-text throws. Any op can also answer with an `ErrorResponse` (`TRANSPORT_ERROR_CODES`:
+  a crashed handler, an oversized reply), so an op's code list spreads those, and every `request<T>`
+  resolves to `T | ErrorResponse` — narrow it (`"ok" in reply`, or `reply.ok`) before reading a field.
 - Comments state rationale and constraints, not narration — match that density and style.
 - Never persist `process.execPath`. It's the realpath'd binary (on Homebrew,
   `…/Cellar/bun/1.3.14/bin/bun`), so anything recording it — launchd plist, systemd unit, the Claude
@@ -119,8 +121,10 @@ green:
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
-  so only the AAD-bound `from` says which machine an entry describes), and a `register` moves a
-  route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
+  so only the AAD-bound `from` says which machine an entry describes), every blob opened outside
+  the replay guard (`machine-info`, `status`) goes through `openAtRest` in `shared/src/crypto.ts`,
+  which refuses one whose `op` isn't the slot's — shape alone does not say which blob it is —
+  and a `register` moves a route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
   through `shared/src/identity.ts`; the seed never leaves `state.json`). Don't let changes drift
   from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at

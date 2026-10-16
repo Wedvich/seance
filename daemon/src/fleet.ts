@@ -1,4 +1,4 @@
-import type { Machine } from "@seance/shared";
+import type { ErrorResponse, Machine } from "@seance/shared";
 import type { LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
@@ -24,7 +24,8 @@ import type { Check } from "./check.ts";
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
 export interface FleetLease {
   readonly machines: readonly Machine[];
-  readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T>;
+  /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
+  readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T | ErrorResponse>;
   /** Ends the call; the direct transport's idle clock starts from here. */
   readonly release: () => void;
 }
@@ -41,7 +42,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
       const client = await relay.acquire();
       return {
         machines: client.getState().machines,
-        request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T> =>
+        request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
           client.request<T>(deviceId, op, payload),
         release: (): void => relay.release(),
       };
@@ -60,7 +61,7 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
   return {
     open: async (): Promise<FleetLease> => ({
       machines: await brokerMachines(opts),
-      request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T> =>
+      request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
         brokerRequest<T>(deviceId, op, payload, opts),
       release: (): void => {},
     }),

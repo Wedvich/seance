@@ -120,7 +120,7 @@ describe("the fleet broker on the local op socket", () => {
         { path: sockPath },
       ),
     ]);
-    expect(a.op).toBe("sessions");
+    expect(a).toMatchObject({ op: "sessions" });
     expect(b).toMatchObject({ op: "spawn", payload: { repo: "seance", mode: "here", client: "mcp" } });
     // Broker frames never reach the op handler — nothing here touched this box's tmux.
     expect(handled).toHaveLength(0);
@@ -130,6 +130,7 @@ describe("the fleet broker on the local op socket", () => {
   test("the plain local ops still reach the handler, untouched by the broker", async () => {
     handled.length = 0;
     const reply = await localRequest<SessionsResponse>("sessions", {}, { path: sockPath });
+    if ("ok" in reply) throw new Error(reply.message);
     expect(reply.at).toBe(7);
     expect(handled.map((plain) => plain.op)).toEqual(["sessions"]);
   });

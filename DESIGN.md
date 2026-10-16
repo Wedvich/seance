@@ -823,10 +823,15 @@ send error that caused it.
   not per handler, because `metrics`, `sessions` and `rescan` all grow with
   data. Rejected: a per-handler check against a predicted sealed length (each
   op re-states the envelope arithmetic, and every reply is encoded twice).
+  It and a crashed handler's `internal_error` are `TRANSPORT_ERROR_CODES`:
+  any op can answer with that `ErrorResponse`, so every op's own code list
+  spreads them, and the app-role `request<T>` resolves to `T | ErrorResponse`
+  — a caller reads no field before checking, which the compiler enforces.
   Known edge, accepted: a `spawn` or `despawn` success embeds the session list
   (~200 B per entry), so past ~240 live sessions on one machine a spawn that
-  happened would read as `too_large`. Machines run 10–20; trimming the list or
-  a "may have run" verdict would be a wire change for a case nothing reaches.
+  happened would read as `too_large`. Machines run 10–20; trimming the list
+  would be a wire change for a case nothing reaches, so the PWA and MCP word
+  a spawn's `too_large` as "may be running" rather than as a failure.
 
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 

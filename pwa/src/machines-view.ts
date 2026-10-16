@@ -1,4 +1,4 @@
-import { METRICS_CAPABILITY, type ExclaveInfo, type Machine, type QuotaObservation } from "@seance/shared";
+import { CAPABILITIES, type ExclaveInfo, type Machine, type QuotaObservation } from "@seance/shared";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -145,7 +145,7 @@ interface AccountGroup {
 }
 
 function servesMetrics(machine: Machine): boolean {
-  return machine.connected && machine.capabilities?.includes(METRICS_CAPABILITY) === true;
+  return machine.connected && machine.capabilities?.includes(CAPABILITIES.metrics) === true;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { RequestFailure, type Machine } from "@seance/shared";
+import { RequestFailure, type ErrorResponse, type Machine } from "@seance/shared";
 import {
   BROKER_VERSION,
   brokerDeadlineMs,
@@ -123,7 +123,7 @@ export async function brokerRequest<T>(
   op: BrokerOp,
   payload: unknown,
   opts: BrokerCallOpts = {},
-): Promise<T> {
+): Promise<T | ErrorResponse> {
   const frame: BrokerRequest = {
     v: BROKER_VERSION,
     kind: "broker",
@@ -136,7 +136,7 @@ export async function brokerRequest<T>(
   try {
     // The reply's data is the target daemon's own response payload, typed by
     // the op exactly as the app-role client's `request<T>` types it.
-    return (await call(frame, op, opts)) as T;
+    return (await call(frame, op, opts)) as T | ErrorResponse;
   } catch (err) {
     if (op !== "sessions" && err instanceof BrokerError && UNCERTAIN.has(err.code)) {
       throw new BrokerError(err.code, `${err.message}${MAY_HAVE_LANDED}`);

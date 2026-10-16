@@ -194,6 +194,10 @@ export function failureBody(code: string, repo: string, machine: string): string
       return `Couldn't work out ${repo}'s default branch, so there was nothing to branch from.`;
     case "internal_error":
       return "The daemon hit an error before the session started.";
+    case "too_large":
+      // The transport's verdict on the reply, not the spawn: a success embeds the
+      // session list, so this one may well be running.
+      return "The daemon's answer was too large to send back, so the session may be running. Check the machine before trying again.";
   }
 }
 
