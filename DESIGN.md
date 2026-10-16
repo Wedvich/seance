@@ -817,9 +817,19 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
-- `metrics { from, to, step, names? }` → `{ series }` or `{ ok: false, code, message }`
+- `metrics { from, to, step, names?, labels? }` → `{ series }` or `{ ok: false, code, message }`
   — history from the daemon's local store (Telemetry, under Daemon), Prometheus
   series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
+  `labels` is Prometheus's `=`: a series is kept only if it meets every
+  matcher, and a label it lacks reads as `""`. Both filters share one bound:
+  at most `METRICS_MAX_FILTERS` names or matchers, each name and value
+  non-empty (a label value may be `""`) and at most
+  `METRICS_MAX_FILTER_LENGTH`. The store filters labels after its fixed SQL, so the
+  statement never grows with a request. An account chart sends `{ account }`,
+  because otherwise a machine's reply carries every exclave's quota series, and
+  at 30 days hourly that is ~17 KB sealed per series. A daemon that predates
+  `labels` ignores it and returns everything, and the app's `accountSeries`
+  still narrows the reply.
   Advertised as `"metrics"` in the register blob's `capabilities`, and
   `RelayClient.metrics` refuses a machine without it: a daemon that predates
   the op drops it unanswered, and the timeout would mark a live machine
@@ -1270,6 +1280,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
   nothing else — metric, label set, timestamp, number — in three tiers sharing
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
+  Each tier is keyed `(ts, series)`, because every rollup, prune and query is a
+  time range — keyed series-first, each rollup was a full scan plus a sort, ~3 ms
+  and ~150 KiB of WAL a tick. The key is gated on `PRAGMA user_version`: a store
+  below it has its tiers dropped and recreated rather than migrated (their
+  history began 2026-10-15), since `IF NOT EXISTS` would keep the old key.
   Each write re-rolls every bucket from its oldest new sample onward, across
   all series, from the tier below,
   so a quota observation stamped hours back still lands in its own hour, and the

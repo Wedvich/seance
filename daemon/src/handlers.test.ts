@@ -274,6 +274,29 @@ describe("metrics answers from the store, within one envelope", () => {
     store.close();
   });
 
+  test("labels narrow the reply to one account's series, so other exclaves' quota stays off the wire", async () => {
+    const quota = (exclave: string, account: string): Sample => ({
+      metric: METRIC_NAMES.h,
+      labels: { machine: "mac", exclave, account },
+      ts: NOW,
+      value: 40,
+    });
+    const store = storeWith([quota("default", "acct-a"), quota("work", "acct-b"), quota("side", "acct-a")]);
+    const reply = await metricsReply(store, {
+      from: NOW,
+      to: NOW,
+      step: 30,
+      names: [METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w],
+      labels: { account: "acct-a" },
+    });
+    if (!("series" in reply)) throw new Error("expected series");
+    expect(reply.series.map((s) => s.labels)).toEqual([
+      { account: "acct-a", exclave: "default", machine: "mac" },
+      { account: "acct-a", exclave: "side", machine: "mac" },
+    ]);
+    store.close();
+  });
+
   test("a malformed or over-long range is refused with a code, before the store is read", async () => {
     let reads = 0;
     const handler = createHandler({
@@ -283,7 +306,12 @@ describe("metrics answers from the store, within one envelope", () => {
         return [];
       },
     });
-    for (const payload of [{ from: NOW, to: NOW - 1, step: 30 }, { from: 0, to: NOW, step: 30 }, { step: 30 }]) {
+    for (const payload of [
+      { from: NOW, to: NOW - 1, step: 30 },
+      { from: 0, to: NOW, step: 30 },
+      { step: 30 },
+      { from: NOW, to: NOW, step: 30, labels: { account: 1 } },
+    ]) {
       const plain = await handler(request("metrics", payload));
       expect(parseMetricsReply(plain?.payload)).toMatchObject({ ok: false, code: "invalid_request" });
     }

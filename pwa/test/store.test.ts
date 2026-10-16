@@ -1,6 +1,6 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { RelayClient } from "@seance/shared";
+import { RelayClient, type MetricsReply, type MetricsRequest, type MetricsSeries } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
@@ -222,6 +222,33 @@ describe("layers and history", () => {
     await answered;
 
     expect(store.getState().history).toBeNull();
+  });
+
+  test("an account chart asks for its account's series, and still narrows a reply that ignored the ask", async () => {
+    fake = fakeHistory();
+    const seen: MetricsRequest[] = [];
+    // A daemon that predates `labels`: every exclave's quota comes back whatever was asked.
+    const client = new (class extends RelayClient {
+      override async metrics(_deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
+        seen.push(request);
+        const quota = (account: string, value: number): MetricsSeries => ({
+          metric: "quota_5h_pct",
+          labels: { machine: "mac", exclave: account, account },
+          points: [[request.to, value]],
+        });
+        return { series: [quota("acct-a", 40), quota("acct-b", 90)] };
+      }
+    })({ url: "ws://127.0.0.1:1/app", token: "unused", key });
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: "acct-a", deviceId: "dev-1" }, "30d");
+    expect(seen[0]?.labels).toEqual({ account: "acct-a" });
+    const result = store.getState().history?.result;
+    expect(result?.kind === "ok" ? result.series.map((s) => s.points[0]?.[1]) : result).toEqual([40]);
+
+    // A machine chart is the daemon's own load: no matcher.
+    await store.showHistory({ kind: "machine", deviceId: "dev-1" }, "6h");
+    expect(seen[1]?.labels).toBeUndefined();
   });
 
   test("a sheet already open is replaced without a second entry", () => {

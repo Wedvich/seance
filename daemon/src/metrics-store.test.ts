@@ -1,8 +1,9 @@
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { M5_KEEP_S, MetricsStore, RAW_KEEP_S } from "./metrics-store.ts";
+import { M5_KEEP_S, MetricsStore, RAW_KEEP_S, type Sample } from "./metrics-store.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -52,6 +53,48 @@ describe("MetricsStore", () => {
     expect(names(["mem_pct", "cpu_pct"])).toEqual(["cpu_pct", "mem_pct"]);
     expect(names(["not_yet_a_metric"])).toEqual([]);
     expect(store.query({ from: NOW, to: NOW, step: 30 })).toHaveLength(3);
+    store.close();
+  });
+
+  test("labels keep the series meeting every matcher, and a label a series lacks matches only empty", () => {
+    const store = MetricsStore.memory();
+    const quota = (exclave: string, account: string, model?: string): Sample => ({
+      metric: model === undefined ? "quota_7d_pct" : "quota_7d_model_pct",
+      labels: { machine: "mac", exclave, account, ...(model === undefined ? {} : { model }) },
+      ts: NOW,
+      value: 50,
+    });
+    store.write(
+      [
+        quota("default", "a"),
+        quota("default", "a", "Opus"),
+        quota("work", "b"),
+        quota("other", "a"),
+        { metric: "cpu_pct", labels: machine, ts: NOW, value: 10 },
+      ],
+      NOW,
+    );
+    const matched = (labels: Readonly<Record<string, string>>): readonly string[] =>
+      store
+        .query({ from: NOW, to: NOW, step: 30, labels })
+        .map((s) => [s.metric, s.labels["exclave"], s.labels["model"]].filter(Boolean).join("/"));
+    expect(matched({ account: "a" })).toEqual([
+      "quota_7d_pct/default",
+      "quota_7d_model_pct/default/Opus",
+      "quota_7d_pct/other",
+    ]);
+    expect(matched({ account: "a", exclave: "default" })).toEqual([
+      "quota_7d_pct/default",
+      "quota_7d_model_pct/default/Opus",
+    ]);
+    expect(matched({ account: "a", model: "" })).toEqual(["quota_7d_pct/default", "quota_7d_pct/other"]);
+    expect(matched({ account: "c" })).toEqual([]);
+    // Inherited properties are not labels.
+    expect(matched({ constructor: "" })).toHaveLength(5);
+    // Combined with names, both apply; the points of a matched series are all there.
+    expect(store.query({ from: NOW, to: NOW, step: 30, names: ["quota_7d_pct"], labels: { account: "b" } })).toEqual([
+      { metric: "quota_7d_pct", labels: { account: "b", exclave: "work", machine: "mac" }, points: [[NOW, 50]] },
+    ]);
     store.close();
   });
 
@@ -167,5 +210,41 @@ describe("MetricsStore", () => {
     const again = await MetricsStore.open(path);
     expect(again.query({ from: NOW, to: NOW, step: 30 })[0]?.points).toEqual([[NOW, 1]]);
     again.close();
+  });
+
+  test("a store from before the time-first key is rebuilt on open, and then writes and reads", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-metrics-"));
+    cleanups.push(dir);
+    const path = join(dir, "metrics.sqlite");
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE series (id INTEGER PRIMARY KEY, metric TEXT NOT NULL, labels TEXT NOT NULL, UNIQUE (metric, labels));
+      ${["raw", "m5", "h1"]
+        .map(
+          (tier) => `
+      CREATE TABLE ${tier} (series INTEGER NOT NULL REFERENCES series(id), ts INTEGER NOT NULL, value REAL NOT NULL,
+        PRIMARY KEY (series, ts)) WITHOUT ROWID;
+      CREATE INDEX ${tier}_ts ON ${tier} (ts);`,
+        )
+        .join("")}
+      INSERT INTO series (id, metric, labels) VALUES (1, 'cpu_pct', '{"machine":"mac"}');
+      INSERT INTO raw VALUES (1, ${NOW - 30}, 7);`);
+    old.close();
+
+    const store = await MetricsStore.open(path);
+    store.write([{ metric: "cpu_pct", labels: machine, ts: NOW, value: 1 }], NOW);
+    expect(store.query({ from: 0, to: NOW, step: 30 })).toEqual([
+      { metric: "cpu_pct", labels: machine, points: [[NOW, 1]] },
+    ]);
+    store.close();
+
+    const db = new Database(path, { readonly: true });
+    for (const tier of ["raw", "m5", "h1"]) {
+      const pk = db.query<{ name: string }, []>(`PRAGMA index_list(${tier})`).all();
+      expect(pk.map((index) => index.name)).toEqual([`sqlite_autoindex_${tier}_1`]);
+      const columns = db.query<{ name: string }, []>(`PRAGMA index_info(sqlite_autoindex_${tier}_1)`).all();
+      expect(columns.map((column) => column.name)).toEqual(["ts", "series"]);
+    }
+    db.close();
   });
 });
