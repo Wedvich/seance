@@ -32,8 +32,8 @@ export interface RelayClientOpts {
   /** Op dispatch; a returned Plain is sealed and sent back to the requester. */
   readonly handle: (plain: Plain) => Promise<Plain | null>;
   readonly onConnect?: () => void;
-  /** After every register frame leaves — connect and re-register alike. */
-  readonly onRegister?: () => void;
+  /** After every register frame leaves — connect and re-register alike — with the blob it carried. */
+  readonly onRegister?: (info: Envelope) => void;
   readonly onDisconnect?: () => void;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
@@ -150,7 +150,7 @@ export class RelayClient {
     if (ws === null) return;
     ws.send(JSON.stringify(frame));
     this.#registered = true;
-    this.#opts.onRegister?.();
+    this.#opts.onRegister?.(info);
   }
 
   #dial(): void {

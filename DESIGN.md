@@ -1293,7 +1293,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   per exclave — in M1 only what Claude Code itself cached in each exclave's
   `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
-  is not cached; source `cache`, stamped at its fetch time). The three pressure
+  is not cached; source `cache`, stamped at its fetch time, capped a minute past
+  now so one far-future stamp can't stay "newest" for an account). The three pressure
   numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
   laptop back from sleep resets to its first reading instead of trusting a stale
   average, and no reader keeps a window of its own. Collectors are exec-free
@@ -1304,7 +1305,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
   A field the host can't answer is absent — the first tick has no cpu or I/O
   delta, macOS has no exec-free I/O counter, a tmux outage drops `sess` for the
-  tick — never a guess. Rejected for macOS: free + inactive + speculative pages
+  tick — never a guess: a failed collector drops its field and stores no
+  sample rather than repeating its average, and the next reading eases from
+  that average over the whole gap since the last good one. Rejected for macOS:
+  free + inactive + speculative pages
   from `vm_stat` — file cache and the compressor hold most of an idle Mac's RAM,
   so it read ~70% used on a 48 GB Mac the kernel rated at normal pressure, and
   `machine_pressure` would have steered work away from it. Every sample also
@@ -1326,7 +1330,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   and a rollup never re-averages a bucket the prune horizon has cut into. The
   config file is re-parsed only when its stat changes. Each sample goes out as the
   `status` frame (Presence & identity), stamped with the `scannedAt` of the
-  blob last handed to a register — `state.scannedAt` moves on every hourly
+  blob last registered — `state.scannedAt` moves on every hourly
   rescan while a re-register happens only on a changed set, and a reader drops
   a status whose stamp disagrees with the blob it holds — and trimmed to the
   relay's bound when a machine's exclaves outgrow it (`daemon/src/status.ts`:
@@ -1335,7 +1339,12 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   is logged once) and then padded to one sealed length. Sent after
   each register too, re-arming the beat so the next lands past the relay's
   floor: the register just changed the blob a status indexes, and the registry
-  push an app got carries no snapshot until this one. History is the
+  push an app got carries no snapshot until this one. The stamp and the
+  exclave list it indexes are one value (`Registered`, `telemetry.ts`),
+  committed by `run.ts` once the register frame has left and read once as a
+  tick starts, so a register mid-tick can't pair one scan's indexes with
+  another's stamp; a tick asked for after a register waits out the one in
+  flight rather than sharing it. History is the
   `metrics` op's. Nothing routes from this store — the scheduler reads only the
   latest `status` — so a Prometheus + Grafana stack later is one more consumer
   (an exposition endpoint, or remote write, since daemons dial out and laptops
