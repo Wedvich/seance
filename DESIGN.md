@@ -295,7 +295,11 @@ Séance's noise is cover for a real intruder.
    leader whose entry does not open as no leader, and what the squatter would
    be sent is sealed under the PSK. What it holds is the term, so it can keep
    `auto` unavailable until its socket goes — a visible stall, not a silent
-   one. M3's term-fenced store would let it delete the queue, so a relay-side
+   one. Built in M2 item 6: the PWA greys `auto` as "leader unverified" and the
+   app-role client refuses to send to such a leader at all. Daemons cannot
+   make the check — they never see the registry — but all they send the
+   scheduler is fire-and-forget `session-event`s, sealed under the PSK, so a
+   squatter learns their timing and nothing else. M3's term-fenced store would let it delete the queue, so a relay-side
    gate lands before it (Scheduler, "Leadership").
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
@@ -975,7 +979,8 @@ together (re-sends registry data on every poll, useless offline).
 
 The scheduler (docs/scheduler.md is the plan; this section takes over each part as it lands) runs
 on one daemon at a time, the one the relay nominates. Nothing else about that daemon changes: it
-is an ordinary daemon with extra legs.
+is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's `auto` — is complete
+(2026-10-16); what it leaves for M3 and M4 is docs/scheduler.md's M2 "Gaps".
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 

@@ -1,11 +1,12 @@
 # Séance scheduler — plan
 
-**Status: plan, M1 done, M2 in progress (items marked **Landed** under M2 are built).** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1 and M2 done.** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists. M1 (visibility: exclaves, telemetry, the `status` frame, the
-`metrics` op, the PWA's Machines screen) folded in on 2026-10-15, and its plan text is gone from
-here — DESIGN.md is the record for anything M1 built.
+`metrics` op, the PWA's Machines screen) folded in on 2026-10-15, and M2 (routing, leadership,
+`auto`) on 2026-10-16; their plan text is gone from here — DESIGN.md is the record for anything
+either built.
 
 ## Glossary
 
@@ -98,16 +99,9 @@ table gains rows.
 
 **Relay (`hub.ts`, `wire.ts`, `index.ts`)**
 
-- **Leadership — landed 2026-10-16 (M2 item 2); DESIGN.md _Scheduler_, "Leadership", is the
-  record.** Signed `roles` on `register` (v2 domain tag; v1 registers roleless), nomination in
-  the pure `relay/src/leadership.ts` called from `hub.ts`'s register, close and sweep paths,
-  `scheduler:term` in DO storage, `lead`/`follow`, and the term fence. Decided while building
-  it, beyond what this plan said: a current leader keeps the role across its own reconnect
-  (the term still bumps, since its socket changed); `not_leader` is an `undeliverable` code,
-  answered by `iv` to an app-leg `msg` sent `from: "scheduler"` whose `term` is stale or
-  missing; and a daemon whose v2 register is refused alternates to v1, so one that updated ahead
-  of its relay is not locked out. Every leader write in M3 carries its term through the same
-  check.
+- **Leadership** (M2; DESIGN.md _Scheduler_, "Leadership", is the record): signed `roles`,
+  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow` and the term fence.
+  Every leader write in M3 carries its term through the same check.
 - **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
 version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (what a
   `version_conflict` refreshes from, so a lost race costs one read, not the whole queue
@@ -139,15 +133,8 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   through `openAtRest` — exactly as the register blob and `status` already are — and never
   accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
   record being replayed as a request, or as a record of another kind.
-- **Last `status` kept** (landed in M2, item 7; DESIGN.md _Presence & identity_). The close
-  or sweep put that writes an entry's `lastSeen` keeps the socket's last `status` with it, the
-  registry push carries it for an offline machine, and a `register` clears it. Readers take
-  quota from it, never pressure (Routing, _quota freshness_): `newestQuotaByAccount` folds it,
-  and pressure goes through `liveStatus`, which answers only while `connected`.
-- Envelopes `to: "scheduler"`, the reserved `SCHEDULER_ID`, and the registry push's
-  `scheduler: { deviceId, term } | null` landed with leadership (above). The push's field is
-  null unless the recorded leader is connected; the app-role client reads it since item 6,
-  checked against the entries that opened (`RelayState.scheduler`).
+- **Last `status` kept**, `to: "scheduler"` envelopes and the registry push's `scheduler` (M2;
+  DESIGN.md _Presence & identity_ and _Scheduler_).
 - **`status { env }`** (daemon→relay, landed in M1; DESIGN.md _Presence & identity_): the
   leader's app-role leg receives it like any app, from the registry push and as it arrives, so
   the routing loop reads the same snapshot the PWA renders.
@@ -229,15 +216,11 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
   share): OAuth usage poll per exclave when the newest session report is older than
   `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
-- Local socket `session-event` and `claude-mods/session-events` — **landed (M2 item 5)**;
-  DESIGN.md Local op socket, "Session events", is the record (frame kind, peer-pid binding,
-  residual, quota tap, `ended`). The mod is also the phase-2 bus.
-- **`leader.ts` — the scheduler role. Landed 2026-10-16 (M2 item 3); DESIGN.md _Scheduler_,
-  "The leader", is the record**: a term per `lead`, its own persistent leg sent as the
-  scheduler, the `Fleet` over it with this machine reached in process (origin `leader`),
-  takeover before dispatch, and nothing of a term outliving `follow`, socket loss or
-  `not_leader`. `QueueStore` is still the library's in-memory one, fenced by the term; M3 swaps
-  in the relay's `store-*` ops behind the same interface.
+- Local socket `session-event` and `claude-mods/session-events` (M2; DESIGN.md Local op socket,
+  "Session events"). The mod is also the phase-2 bus.
+- **`leader.ts`, the scheduler role** (M2; DESIGN.md _Scheduler_, "The leader"). `QueueStore` is
+  still the library's in-memory one, fenced by the term; M3 swaps in the relay's `store-*` ops
+  behind the same interface.
 
 ## Scheduler (`scheduler/`)
 
@@ -409,121 +392,40 @@ session left, with its observed-at — and nothing at all until one has run ther
 view absent (M4); an LXC reports what `/proc` shows inside the container, with no cgroup or PSI
 read yet.
 
-### M2 — routing and leadership
+### M2 — routing and leadership (done 2026-10-16)
 
-**Goal.** A PWA spawn with `auto` lands on the machine and exclave the scheduler chose, with
-the decision explained, and the role survives the leading machine going away. No durable
-queue yet.
+A PWA spawn on `auto` lands on the machine and exclave the scheduler chose, with the decision
+explained, and the role survives the leading machine going away. Landed as #115 (the library),
+#114 (leadership), #112 (`taskId`), #117 (`leader.ts`), #118 (session events and the mod), #113
+(the kept `status`) and item 6 as a stack of three: the leader answering `queue` and
+`route-preview`, M2's temporary `submit`, and the PWA's `auto`, with item 3's two gaps closed
+along the way (a term the daemon ends itself goes back to the relay; a task on a machine that
+stops answering becomes `lost`). Recorded in DESIGN.md _Scheduler_ (leadership, the leader,
+requests, the library, `lost`), _Wire protocol_ (Layer 2's scheduler ops, the frame table),
+_Local op socket_ ("Session events"), _Presence & identity_ (the kept `status`), _Daemon_ ("Task
+ids"), _PWA_ (`auto`) and _Threat model_ (signed `roles`, leader capture and the reader check).
+Every exit criterion has a test: two real daemons and an `auto` spawn landing where its record
+says, with the other machine's rejection in it, and a bearer-token holder's squatting socket read
+as "leader unverified" with nothing sent to it (e2e); a stopped leader replaced within one sweep
+under a higher term, with `auto` greying and returning (relay + e2e); `not_leader` for a demoted
+leader's dispatch and an unsigned `roles` never nominated (relay); `task_running` for a duplicate
+task id (daemon + e2e); a session event reaching the leader's state, bound to the sender's own
+pane (daemon + e2e); the leader's leg outliving `LazyRelay`'s idle window and nothing of it
+surviving `follow` (daemon); and every filter reason, score component, stickiness case and
+`quota unknown` rule over fixtures, with the layering test (scheduler).
 
-**Lands, in order.**
-
-1. **Landed 2026-10-16 — recorded in DESIGN.md _Scheduler_.** `scheduler/` library + in-memory
-   fakes of `QueueStore` and `Fleet`; filter / score / sticky / reserve / record over fixtures,
-   and the layering test. No wire change of its own: it reads item 4's `CAPABILITIES.taskId`,
-   `task_running` and `SessionEntry.taskId`, and item 7's `liveStatus`. Not built, as M4's: the
-   skill and stacked-base filters.
-2. **(Landed 2026-10-16.)** Relay leadership — `roles` on `register`, inside the signed message (v2 domain tag);
-   nomination as the pure `relay/src/leadership.ts`, called from `hub.ts` on connect, close and
-   sweep; `scheduler:term`, `lead`/`follow`,
-   `not_leader` on a stale term, `scheduler: { deviceId,
-term } | null` in the registry push.
-3. **Landed 2026-10-16 — DESIGN.md _Scheduler_, "The leader", is the record.** `leader.ts` —
-   the leader's own persistent app-role `RelayClient` (not `LazyRelay`) and the `Fleet` adapter
-   over it, lifecycle on `lead` / `follow` / socket loss / `not_leader`, leaking nothing on
-   demotion. `QueueStore` is the in-memory one for this milestone. Decided while building it:
-   replies to the leader arrive on its daemon socket and are handed to the leg; the leader's
-   own machine is reached in process under the new audit origin `leader`; the store outlives
-   terms and a wrapper refuses writes from an ended one.
-4. `taskId` on `spawn`, `task_running`, `taskId` in `sessions`; advertised in `capabilities`.
-   **Landed 2026-10-16** — DESIGN.md _Daemon_, "Task ids", is the record: a tmux pane option,
-   so it survives a daemon restart, and `taskIdOfPane` in `daemon/src/sessions.ts` is item 5's
-   pane → task lookup.
-5. **Landed 2026-10-16 — DESIGN.md Local op socket, "Session events", is the record.**
-   `session-event` on the local socket + `claude-mods/session-events`. The daemon binds each
-   event to a pane by the peer's kernel-reported pid (`SO_PEERCRED` / `LOCAL_PEERPID` through
-   `bun:ffi`; Bun has no API for it) and takes session and task from its own pane map. It
-   keeps only `https:` PR URLs, coalesces to ≤1 per session per 5s, and forwards to the
-   leader sealed to `"scheduler"`. The `branch-state` op is M3's. Two additions the plan did
-   not name:
-   - **The `rate_limits` tap.** Until it (or M4's OAuth poll) existed, quota came only from
-     `cachedUsageUtilization`, which Claude Code writes irregularly: on one Mac the caches
-     were 7h, 23h and 11 days old, and one exclave had none. Settled default 7 relies on
-     each session's own report to correct a stale reading, and this tap delivers it. The
-     mod hooks `session.measure` (the status line's `rateLimits`, pushed after each turn and
-     whenever a window moves a point). Each report becomes a `session` quota observation for
-     the pane's exclave, stored beside the cache under the same metric names, so it rides
-     `status` and readers' newest-observation fold picks it up. Built as an engine hook
-     rather than the planned wrapper around each exclave's `statusLine` command (decided
-     with the owner, 2026-10-16). It touches no user setting, so there is nothing to restore
-     on uninstall, and it sits in no status line's path. Its cadence is better than the
-     status line's.
-   - **Closing the double spawn.** A spawn lands, its reply is lost, the session ends inside
-     the 120s TTL, and `onSession` ignored the `ended` event for a `reserved` task. The TTL
-     check then found no session, released the task, and it ran twice, with `task_running`
-     blind because the first session was gone. Fixed twice over. (a) Any session event for a
-     reserved task resolves it (`busy`/`idle` → `running`, `needs-input` → `needs-input`,
-     `ended` → `done`) through new `reserved` edges. These are one write, never a two-step
-     through `running`. The event counts only from the machine the task was reserved on.
-     (b) The daemon remembers recently ended task ids (from `ended` events, and from every
-     task it launched whose pane is gone). It keeps them 30 min, at most 128 per source, and
-     reports them as `SessionsResponse.ended`, so the TTL check resolves ran-and-ended as
-     `done`. In memory only: a restart inside the TTL forgets them, and such a task is
-     routed again.
-6. PWA — `auto` in the picker (greyed with no leader, or one whose registry entry does not
-   open: "leader unverified"), `route-preview` and the decision view.
-7. Kept `status` (landed) — the relay keeps the last one in the entry on close and sweep and clears it
-   on `register`; `newestQuotaByAccount` folds kept statuses' quota, pressure readers skip
-   them, and the PWA's account cards get an asleep machine's reading with its age. Independent
-   of 2–6, and lands before the library's quota filter is trusted on real fleets.
-
-**Exit.**
-
-- Two daemons up: an `auto` spawn lands on the one whose decision record says so, and the
-  record names why the other was rejected or scored lower (e2e).
-- Kill the leader's daemon: a new leader is nominated within one sweep, `auto` greys and
-  returns, the term increased (relay + e2e).
-- A demoted leader's write or dispatch is refused `not_leader` (relay).
-- A second `spawn` with a `taskId` the daemon already runs is refused `task_running` with the
-  existing pane (daemon).
-- A `session-event` from the mod reaches the leader's state (daemon + e2e). _Landed with item 5:
-  `daemon/test/leader.test.ts` (another machine's event moves only a task placed on it) and
-  `e2e/e2e.test.ts` (the CLI in a pane on machine B, through the real DO, resolves the leader's
-  reservation as `done`)._
-- A daemon without `roles` is never nominated; one without `taskId` in `capabilities` is never
-  reserved against (relay, scheduler).
-- Nomination, re-nomination and the `deviceId` tie reproduce over plain inputs in
-  `leadership.ts`'s own suite, without workerd (relay).
-- A register whose `roles` the signature does not cover is never nominated (relay). A
-  bearer-token holder's daemon socket with signed `roles` and no PSK, connected first, is
-  nominated, and the PWA reads it as "leader unverified": `auto` greys and nothing is sent to
-  it (e2e).
-- A `session-event` naming another session or task moves only the state the daemon's own pane
-  map attributes to the sender; a non-`https:` PR URL never reaches the PWA or a push (daemon).
-  _Landed with item 5 (`daemon/test/session-events.test.ts`), with the rate-limit report
-  reaching `status` and both double-spawn paths (`scheduler/test/scheduler.test.ts`)._
-- The leader's app-role leg stays up through more than `LazyRelay`'s idle window with no
-  calls, and nothing of it survives `follow` (daemon).
-- An account with no observation in any live or kept status, or trimmed out of a status that
-  hosts it with nothing newer elsewhere, is filtered `quota unknown` and never scored as 0%
-  (scheduler).
-- A daemon disconnects: its accounts' quota stays in the fold from the kept status, its
-  pressure reads unknown and the machine is filtered; it re-registers with a new blob and the
-  kept status is gone until its next `status` (relay + e2e).
-- Library suite: every filter reason, every score component and stickiness reproduce the
-  fixture decisions; the layering test fails on either forbidden import (scheduler).
-
-**Gaps.** The queue is in-memory on the leader: a leader change forgets `auto` spawns not yet
-dispatched (sessions already running are ordinary sessions and survive). No deps, no batches,
-no caps beyond the global max, no pause, no alerts. An account nothing has observed yet — an
-exclave before its first session — is `quota unknown` and gets no `auto` work until a direct
-spawn or a session report gives it a reading; M4's OAuth poll closes this.
-
-**Record.** DESIGN.md gains a _Scheduler_ section (leadership and term, nomination in
-`leadership.ts`, library and adapters, `taskId` idempotency, quota unknown), _Local op socket_
-(the `session-event` frame kind), _Threat model_ (plaintext but signed `roles`, the
-unverified-leader check and the capture it leaves open until M3, term fencing, the mod as an ingest-only path whose every field is
-untrusted), _Wire protocol_ rows, _Presence & identity_ (the kept `status`, replacing "never in
-storage").
+**Gaps, until later milestones close them.** The queue is in memory on the leader: a leader
+change forgets `auto` tasks not yet dispatched (sessions already running are ordinary sessions and
+survive), and `submit` is the only way in until M3's `store-put` replaces it. No deps, no batches,
+no caps beyond the global max, no pause, no alerts; the PWA polls `queue` for a task's progress
+instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
+gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
+A `submit` whose reply is lost cannot be reconciled — the verdict says it may have queued and
+offers no retry. A `lost` task waits for its own machine indefinitely and cannot be cancelled.
+Leader capture is visible, not prevented: a squatter's term holds `auto` unavailable until its
+socket goes, and M3's gate (Risks, _Leader capture_) closes it. One edge stays as item 1 left it:
+a _reserved_ task whose machine disconnects before answering is released to `ready` once its TTL
+passes, and may be routed elsewhere; `task_running` guards only a re-dispatch to the same machine.
 
 ### M3 — durable queue
 
