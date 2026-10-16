@@ -48,7 +48,7 @@ describe("form persistence", () => {
   // A model or effort dropped from the offered list would otherwise come back as
   // an unselectable value the daemon then rejects.
   test("falls back on a model or effort this build no longer offers", () => {
-    store.set("seance:form", JSON.stringify({ ...DEFAULT_FORM, model: "haiku", effort: "ludicrous" }));
+    store.set("seance:form", JSON.stringify({ ...DEFAULT_FORM, model: "gpt-4", effort: "ludicrous" }));
     const form = readForm();
     expect(form.model).toBe(DEFAULT_FORM.model);
     expect(form.effort).toBe(DEFAULT_FORM.effort);
