@@ -359,9 +359,7 @@ one, or to nothing.
 
 An old reading is a _lower bound_: use since — on another machine the fleet would see, or on
 claude.ai, which it would not — only raises it. v1 routes on it as observed and the decision
-record shows its age. **Open, owner to confirm before M2's library lands:** no age cap beyond
-the reset rule. If use outside the fleet makes that bite, the fix is a cap (an observation
-older than N is `quota unknown`), not a guess at the drift.
+record shows its age. No age cap beyond the reset rule (_Settled defaults_ 7).
 
 **Missing quota is unknown, never 0%.** An account is scored only on a reading it actually has.
 It is filtered `quota unknown` when no status, live or kept, carries an observation for it, or
@@ -617,6 +615,14 @@ same PR, with the reason.
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
    it. The same series feeds M4's health alert, and the PWA shows no disk numbers.
+7. **No age cap on a quota reading** beyond the reset rule. The 5h window bounds itself — a
+   reading older than 5h is past its reset and reads 0% — so only the 7d window can drift, and
+   only through use the fleet does not see. Fleet accounts are used almost only inside the
+   fleet (the owner, 2026-10-16); the rare cloud session is a blip the next session report or
+   OAuth poll overwrites. A cap would fail every time a machine sleeps past it, and on the
+   account with the most headroom; no cap fails only on unseen use, for one dispatch, until the
+   session's own `rate_limits` report corrects it. Revisit with a 7d-only cap (~24h) if
+   out-of-fleet use becomes routine.
 
 ## Risks / unknowns
 
