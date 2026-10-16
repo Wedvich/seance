@@ -102,6 +102,11 @@ interface SocketAttachment {
   readonly status?: SocketStatus;
 }
 
+interface DaemonSocket {
+  readonly ws: WebSocket;
+  readonly attachment: SocketAttachment | null;
+}
+
 interface SocketStatus {
   readonly env: Envelope;
   /** Accept time, ms — the per-socket floor below counts from it. */
@@ -218,12 +223,6 @@ export class Hub implements DurableObject {
     return this.#ctx.getTags(ws).includes("daemon") ? "daemon" : "app";
   }
 
-  /** Accept time, for ordering two sockets that share a deviceId across a reconnect. */
-  #connectedAtOf(ws: WebSocket): number {
-    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    return attachment?.connectedAt ?? 0;
-  }
-
   #deviceIdOf(ws: WebSocket): string | null {
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     return attachment?.identity?.deviceId ?? null;
@@ -280,14 +279,16 @@ export class Hub implements DurableObject {
     ws.serializeAttachment({ ...attachment, status: { env, at: now } } satisfies SocketAttachment);
     const frame: RelayToAppFrame = { t: "status", deviceId, env };
     const text = JSON.stringify(frame);
-    let fanned = 0;
     const failures: string[] = [];
     for (const app of this.#ctx.getWebSockets("app")) {
       const err = trySend(app, text);
-      if (err === null) fanned += 1;
-      else failures.push(err);
+      if (err !== null) failures.push(err);
     }
-    wireLog("status", env, ` apps=${fanned}${failSuffix(failures)}`);
+    // No line per accepted beat: with an app count on it, every 30s per
+    // machine, the logs would be a timeline of when an app was open — the
+    // activity record the blind relay exists not to keep (DESIGN.md, threat
+    // model item 3). Failures alone carry no such clock.
+    if (failures.length > 0) wireLog("status", env, failSuffix(failures));
   }
 
   async #onAppMessage(ws: WebSocket, text: string): Promise<void> {
@@ -471,12 +472,9 @@ export class Hub implements DurableObject {
     // deviceId — `superseded` closes the loser, but it stays listed until its
     // close handler runs — and picking the first match can pick the dead one
     // while the live socket sits behind it.
-    const targets = this.#ctx
-      .getWebSockets("daemon")
-      .filter((ws) => this.#deviceIdOf(ws) === env.to)
-      .toSorted((a, b) => this.#connectedAtOf(b) - this.#connectedAtOf(a));
+    const targets = this.#daemonsNewestFirst([]).filter(({ attachment }) => attachment?.identity?.deviceId === env.to);
     const text = JSON.stringify({ t: "msg", env } satisfies RelayToDaemonFrame);
-    for (const target of targets) {
+    for (const { ws: target } of targets) {
       // A failure falls through to the next candidate and, past the last, to
       // the notice below — throwing here would strand the app, which is waiting
       // for one or the other. Logged with the error because that fallthrough
@@ -565,16 +563,25 @@ export class Hub implements DurableObject {
    */
   #liveSockets(exclude: readonly WebSocket[]): ReadonlyMap<string, SocketAttachment> {
     const live = new Map<string, SocketAttachment>();
-    const sockets = this.#ctx
-      .getWebSockets("daemon")
-      .filter((ws) => !exclude.includes(ws))
-      .toSorted((a, b) => this.#connectedAtOf(b) - this.#connectedAtOf(a));
-    for (const ws of sockets) {
-      const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    for (const { attachment } of this.#daemonsNewestFirst(exclude)) {
       if (attachment === null || attachment.identity === undefined) continue;
       const { deviceId } = attachment.identity;
       if (!live.has(deviceId)) live.set(deviceId, attachment);
     }
     return live;
+  }
+
+  /**
+   * Daemon sockets by accept time, newest first — the order that breaks a tie
+   * between two sockets on one deviceId across a reconnect. Each attachment is
+   * deserialized once, up front: it carries the ~1 KiB `status`, and a sort
+   * comparator would decode it on every comparison.
+   */
+  #daemonsNewestFirst(exclude: readonly WebSocket[]): readonly DaemonSocket[] {
+    return this.#ctx
+      .getWebSockets("daemon")
+      .filter((ws) => !exclude.includes(ws))
+      .map((ws) => ({ ws, attachment: ws.deserializeAttachment() as SocketAttachment | null }))
+      .toSorted((a, b) => (b.attachment?.connectedAt ?? 0) - (a.attachment?.connectedAt ?? 0));
   }
 }
