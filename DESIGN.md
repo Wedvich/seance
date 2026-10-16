@@ -1037,7 +1037,9 @@ infinity`, which both boots the distro after a Windows restart (nothing
   screen, WSL cannot run and the machine shows offline — same class as a
   LaunchAgent, which is also per-login. Update = `git pull` +
   `seanced restart` (`launchctl kickstart -k` / `systemctl --user
-restart`). Rejected: daemon-inside-tmux (reboot silently takes
+restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
+  let `Restart=always` relaunch it — no sudoers or polkit rule to provision).
+  Rejected: daemon-inside-tmux (reboot silently takes
   the machine offline — recreates the god-session fragility), the logon
   task running the daemon directly through `wsl.exe` (scheduled tasks
   don't supervise — no restart-on-crash), `[boot] command =` in wsl.conf
