@@ -1,7 +1,7 @@
 import {
   METRICS_ERROR_CODES,
-  METRICS_MAX_LABEL_LENGTH,
-  METRICS_MAX_LABELS,
+  METRICS_MAX_FILTER_LENGTH,
+  METRICS_MAX_FILTERS,
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
@@ -237,20 +237,25 @@ export function isMetricsRequest(value: unknown): value is MetricsRequest {
   if (!isUint(from) || !isUint(to) || from > to) return false;
   const known = METRICS_STEPS.find((s) => s === step);
   if (known === undefined || (to - from) / known + 1 > METRICS_MAX_POINTS) return false;
-  if (names !== undefined && !(isStringArray(names) && names.length > 0)) return false;
+  if (names !== undefined && !isMetricNames(names)) return false;
   return labels === undefined || isLabelMatchers(labels);
+}
+
+function isMetricNames(value: unknown): boolean {
+  if (!isStringArray(value) || value.length === 0 || value.length > METRICS_MAX_FILTERS) return false;
+  return value.every((name) => name !== "" && name.length <= METRICS_MAX_FILTER_LENGTH);
 }
 
 function isLabelMatchers(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
-  if (entries.length === 0 || entries.length > METRICS_MAX_LABELS) return false;
+  if (entries.length === 0 || entries.length > METRICS_MAX_FILTERS) return false;
   return entries.every(
     ([name, wanted]) =>
       name !== "" &&
-      name.length <= METRICS_MAX_LABEL_LENGTH &&
+      name.length <= METRICS_MAX_FILTER_LENGTH &&
       typeof wanted === "string" &&
-      wanted.length <= METRICS_MAX_LABEL_LENGTH,
+      wanted.length <= METRICS_MAX_FILTER_LENGTH,
   );
 }
 

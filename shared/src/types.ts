@@ -465,9 +465,12 @@ export interface MetricsRequest {
   readonly labels?: Readonly<Record<string, string>>;
 }
 
-/** Bounds on `MetricsRequest.labels`: each one costs a comparison per series read. */
-export const METRICS_MAX_LABELS = 8;
-export const METRICS_MAX_LABEL_LENGTH = 128;
+/**
+ * Bounds on `MetricsRequest.names` (entries, each name) and `.labels`
+ * (matchers, each name and value): every entry costs a comparison per series read.
+ */
+export const METRICS_MAX_FILTERS = 8;
+export const METRICS_MAX_FILTER_LENGTH = 128;
 
 /** Prometheus's data model and nothing else, so an external metrics stack is a consumer, not a redesign. */
 export interface MetricsSeries {

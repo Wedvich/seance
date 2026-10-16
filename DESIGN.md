@@ -819,9 +819,10 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   — history from the daemon's local store (Telemetry, under Daemon), Prometheus
   series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
   `labels` is Prometheus's `=`: a series is kept only if it meets every
-  matcher, and a label it lacks reads as `""`. There are at most
-  `METRICS_MAX_LABELS` matchers, each name and value at most
-  `METRICS_MAX_LABEL_LENGTH`. The store filters after its fixed SQL, so the
+  matcher, and a label it lacks reads as `""`. Both filters share one bound:
+  at most `METRICS_MAX_FILTERS` names or matchers, each name and value
+  non-empty (a label value may be `""`) and at most
+  `METRICS_MAX_FILTER_LENGTH`. The store filters labels after its fixed SQL, so the
   statement never grows with a request. An account chart sends `{ account }`,
   because otherwise a machine's reply carries every exclave's quota series, and
   at 30 days hourly that is ~17 KB sealed per series. A daemon that predates
