@@ -9,6 +9,7 @@ import {
   type SessionState,
 } from "@seance/shared";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
+import { LaunchLedger } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import { ancestorIn } from "./peer.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -193,80 +194,105 @@ export function quotaFromRateLimits(
 }
 
 /**
- * At least the reservation TTL (120s, `scheduler/src/config.ts`) with room for
- * a check that waited out an unreachable machine. The cap bounds memory however
- * fast tasks churn, and keeps the reply's `ended` far inside one envelope —
- * sixteen times the scheduler's global in-flight max.
+ * How long an `ended` event is remembered: at least the reservation TTL (120s,
+ * `scheduler/src/config.ts`) with room for a check that waited out an
+ * unreachable machine. The launches themselves are the ledger's, which outlives
+ * restarts; an event adds only a task some other path tagged. The cap bounds
+ * memory however fast tasks churn and, with `LEDGER_MAX`, keeps the reply's
+ * `ended` far inside one envelope.
  */
 export const ENDED_TTL_MS = 30 * 60_000;
 export const ENDED_MAX = 128;
 
+/** What `EndedTasks.launch` hands back: told whether the spawn launched, and only then is the launch over. */
+export type SettleLaunch = (launched: boolean) => Promise<void>;
+
 /**
- * Task ids whose sessions ended here recently — the `sessions` reply's `ended`,
- * the backstop for a scheduler that lost both a spawn's reply and the session's
- * `ended` event (docs/scheduler.md, M2 item 5). Two inputs: an `ended` event,
- * and every task this daemon launched, which counts as ended once no live pane
- * carries it — so a lost event, a session the mod never saw, or a crash that
- * fired no SessionEnd all still read as ran-and-ended. In memory only: a daemon
- * restart within the window forgets both.
+ * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
+ * scheduler that lost both a spawn's reply and the session's `ended` event, and
+ * the proof that lets it re-dispatch one that never landed (DESIGN.md,
+ * "Session events"). Two inputs: every task this daemon launches, recorded in
+ * the durable `LaunchLedger` before the spawn runs, and `ended` events, kept in
+ * memory. A task in either that no session in the reply carries is listed — so
+ * a lost event, a session the mod never saw, a crash that fired no SessionEnd,
+ * and a pane stuck before it registered all read as ran-and-ended, never as
+ * never-started.
  */
 export class EndedTasks {
   readonly #ended = new Map<string, number>();
-  readonly #launched = new Map<string, number>();
+  readonly #ledger: LaunchLedger;
+  readonly #inFlight = new Set<Promise<void>>();
   readonly #now: () => number;
 
-  constructor(now: () => number = Date.now) {
+  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now) {
+    this.#ledger = ledger;
     this.#now = now;
   }
 
-  launched(taskId: string): void {
-    this.#put(this.#launched, taskId);
+  /**
+   * Before a spawn with a task id runs. Resolves once the id is on disk, and
+   * throws when it cannot be — the spawn must then not run. The launch counts
+   * as in flight, holding every `sessions` reply back (`settled`), until the
+   * returned function is told how it went; one that never launched leaves the
+   * ledger again, unless an earlier launch put it there.
+   */
+  async launch(taskId: string): Promise<SettleLaunch> {
+    const over = Promise.withResolvers<void>();
+    this.#inFlight.add(over.promise);
+    const finish = (): void => {
+      this.#inFlight.delete(over.promise);
+      over.resolve();
+    };
+    let fresh: boolean;
+    try {
+      fresh = await this.#ledger.record(taskId);
+    } catch (err) {
+      finish();
+      throw err;
+    }
+    return async (launched) => {
+      try {
+        if (!launched && fresh) await this.#ledger.retract(taskId);
+      } finally {
+        finish();
+      }
+    };
   }
 
   ended(taskId: string): void {
-    this.#put(this.#ended, taskId);
+    this.#ended.delete(taskId); // re-insert, so insertion order stays age order
+    this.#ended.set(taskId, this.#now());
+    this.#prune();
   }
 
-  /** Nothing remembered once what has aged out is dropped — then a `sessions` reply need not list panes. */
-  isEmpty(): boolean {
-    this.#prune(this.#ended);
-    this.#prune(this.#launched);
-    return this.#ended.size === 0 && this.#launched.size === 0;
+  /**
+   * Resolves once no launch is in flight. A reply listed mid-spawn would show
+   * the task in neither `sessions` nor `ended` — the shape that proves a spawn
+   * never landed — so the reply waits the few seconds a spawn takes instead.
+   */
+  async settled(): Promise<void> {
+    // oxlint-disable-next-line no-await-in-loop -- a launch begun while waiting is waited for too
+    while (this.#inFlight.size > 0) await Promise.all(this.#inFlight);
   }
 
-  /** `live`: task ids some live pane carries now — a live session is running, never ended. */
-  report(live: ReadonlySet<string>): readonly string[] {
-    this.#prune(this.#ended);
-    this.#prune(this.#launched);
+  /**
+   * `carried`: the task ids of the sessions the same reply lists. Every task
+   * this daemon launched since `ledgerSince` is in exactly one of the two.
+   */
+  report(carried: ReadonlySet<string>): { readonly ended: readonly string[]; readonly ledgerSince: number } {
+    this.#prune();
     const out = new Set<string>();
-    for (const id of [...this.#ended.keys(), ...this.#launched.keys()]) if (!live.has(id)) out.add(id);
-    return [...out];
+    for (const id of [...this.#ended.keys(), ...this.#ledger.ids()]) if (!carried.has(id)) out.add(id);
+    return { ended: [...out], ledgerSince: this.#ledger.since() };
   }
 
-  #put(map: Map<string, number>, taskId: string): void {
-    map.delete(taskId); // re-insert, so insertion order stays age order
-    map.set(taskId, this.#now());
-    this.#prune(map);
-  }
-
-  #prune(map: Map<string, number>): void {
+  #prune(): void {
     const cutoff = this.#now() - ENDED_TTL_MS;
-    for (const [id, at] of map) {
-      if (at >= cutoff && map.size <= ENDED_MAX) break;
-      map.delete(id);
+    for (const [id, at] of this.#ended) {
+      if (at >= cutoff && this.#ended.size <= ENDED_MAX) break;
+      this.#ended.delete(id);
     }
   }
-}
-
-/** `EndedTasks.report` against the panes alive now — every pane, registered or not, as `task_running` counts them. */
-export async function reportEnded(
-  ended: EndedTasks,
-  panes: () => Promise<readonly BoundPane[]> = listPanePids,
-): Promise<readonly string[]> {
-  if (ended.isEmpty()) return [];
-  const live = new Set<string>();
-  for (const pane of await panes()) if (!pane.dead && pane.taskId !== null) live.add(pane.taskId);
-  return ended.report(live);
 }
 
 /** At most one event per session per this window (docs/scheduler.md, "Daemon → scheduler"). */

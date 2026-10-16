@@ -171,4 +171,15 @@ describe("taskHeadline", () => {
       "Lost on Mac · default — its machine went away 20m ago.",
     );
   });
+
+  test("a cancel that could not reach its machine, and a spawn never confirmed, say what may still run", () => {
+    expect(taskHeadline(task({ state: "cancelled", assignment: at, leftRunning: true }), machines, NOW)).toBe(
+      "Cancelled — its session may still be running on Mac · default.",
+    );
+    expect(taskHeadline(task({ state: "cancelled", assignment: at }), machines, NOW)).toBe("Cancelled.");
+    const unconfirmed = { code: "dispatch_unconfirmed", message: "never confirmed" };
+    expect(taskHeadline(task({ state: "failed", assignment: at, failure: unconfirmed }), machines, NOW)).toBe(
+      "Never confirmed on Mac · default — it may have started there.",
+    );
+  });
 });

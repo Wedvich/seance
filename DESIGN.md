@@ -911,7 +911,8 @@ send error that caused it.
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows, each `{ id?, window, repo, path,
-taskId? }`. The one live pull — session state is inherently fresh-only.
+taskId? }`, plus `ended?` and `ledgerSince?` for the scheduler (Local op socket,
+  "Session events"). The one live pull — session state is inherently fresh-only.
 - `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
   rides only on `task_running`: the `SessionEntry.id` already running the
@@ -1096,8 +1097,9 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
 - **Takeover before any dispatch.** The term waits for its leg's first authoritative registry, then
   `Scheduler.takeover()` loads the store and asks `sessions` of each machine holding an in-flight
   task, once per machine: a reservation whose session exists is `running`, one with none waits out
-  its TTL, a running task whose session is gone is `done` (it ended while nobody led), and an
-  unanswered machine leaves its tasks as they were. A takeover that throws is retried every tick
+  its TTL, a running task whose session is gone is `done` (it ended while nobody led), a `lost`
+  reservation settles as its TTL check would have, and an unanswered machine leaves its tasks as
+  they were. A takeover that throws is retried every tick
   interval rather than left as a term that holds the role and runs nothing. Only then do the first tick and the timer run;
   after it, every change to the leg's machine list ticks, and ticks coalesce in the library.
 - **The term rides every write and dispatch.** Dispatches carry it on the frame, where the relay
@@ -1156,8 +1158,9 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   asks for the role again. No timer: the token whose rejection caused it is the daemon socket's
   too, and a redial is where that token is proven again — a timed retry on a socket that still
   holds its old authorization would only flap the role and push the registry each time.
-- **A task on a machine that never answers again** becomes `lost` after 15 minutes absent, and
-  is never dispatched again on that evidence alone (_Scheduler_ (`scheduler/`), "`lost`").
+- **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
+  once running, at its TTL while still reserved — and is never dispatched again on that evidence
+  alone (_Scheduler_ (`scheduler/`), "`lost`").
 
 ## Daemon (`seanced`, Bun)
 
@@ -2732,18 +2735,35 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   every exclave and owe an exact restore on uninstall. It would also put a process
   in the status line's path, and it would still report only when the status line
   happened to render (docs/scheduler.md, Risks).
-- **`sessions` carries `ended`, the double-spawn backstop.** Suppose a spawn lands,
-  its reply is lost, and the session ends inside the 120 s reservation, with its
-  `ended` event lost too. The TTL check would then find no session with the task id
-  and route it again. So the daemon remembers task ids from two sources: an `ended`
-  event, and every task its spawns launched. It reports in `SessionsResponse.ended`
-  those that no live pane carries now. The launched half also covers a session the
-  mod never saw, and a crash that fired no SessionEnd. Kept 30 min (past the TTL and
-  a check that waited out an unreachable machine), capped at 128 per source, so the
-  field stays far inside one envelope. In memory only: a daemon restart inside that
-  window forgets it. Then a task whose reply and event were both lost, and whose
-  session ended before the restart, is routed again once the TTL lapses. Old readers
-  ignore the field.
+- **`sessions` carries `ended` and `ledgerSince`, the double-spawn backstop and its
+  proof.** Suppose a spawn lands, its reply is lost, and the session ends inside the
+  120 s reservation, with its `ended` event lost too. The TTL check would then find no
+  session with the task id and route it again. So the daemon remembers task ids from
+  two sources and reports in `SessionsResponse.ended` those no session in the same
+  reply carries: `ended` events (in memory, 30 min, capped at 128), and every task it
+  launched, from a **launch ledger** (`daemon/src/launch-ledger.ts`, added 2026-10-16).
+  The ledger is a small file in `stateDir()` (`launched.json`: task id and launch time,
+  never prompt text), written temp-fsync-rename **before** the spawn runs; a spawn whose
+  id cannot be recorded is refused `launch_error`, since launched unrecorded a lost reply
+  could later read as proof it never ran. A spawn refused for any reason but
+  `task_running` launched nothing and leaves the ledger again. It survives restarts, so
+  `ended` does too, and it is what makes `ledgerSince` a proof: from that time (this
+  daemon's clock) every task launched here is in `sessions` or in `ended`, so a task in
+  neither, reserved after it, never landed (_Scheduler_, "Reserve, then dispatch").
+  Three rules keep that true. `ended` is reckoned against the reply's own `sessions`, not
+  a second tmux read a session could end between — which also lists a tagged pane still
+  on a startup dialog, which `sessions` does not, as ended: `done` is a wrong label, a
+  re-dispatch would be a twin. A `sessions` reply waits for any launch in flight. And the
+  ledger is bounded with `since` moving past each entry it drops: at most 128 entries
+  (eviction comes only from this machine's own launches, while the task awaiting proof
+  is one whose machine was away, so the count outlasts any absence and the reply stays a
+  few KiB) and a week of age (a laptop shut for one). A fresh install starts `since` at
+  the file's creation; a missing or corrupt file is a fresh one, never a crash. One
+  ledger per file per process (`run.ts`), so a config reload's overlapping daemon cannot
+  overwrite the other's launches. Not the `@seance-task` record, which "Task ids"
+  rejected keeping in a file: that one must die with its pane; this is history, read only
+  to say what ran. Old readers ignore both fields; a reply from an older daemon carries
+  no `ledgerSince` and proves nothing.
 
 Untested by hand: the macOS peer-pid call itself (documented constant; CI's macOS
 leg covers it) and a real Claude Code session driving the mod end to end. The mod's
@@ -3084,8 +3104,19 @@ through the leader's `submit` op (Wire protocol, Layer 2).
   spawn ran) → stays reserved. Past the 120s TTL the machine's `sessions` decide: a
   session carrying the task id is the spawn that landed; the task id in the reply's
   `ended` is one that landed and already finished, so `done`; neither releases the task to
-  `ready`; an unanswered check waits while the machine is connected and releases once it
-  is not, the daemon's `task_running` being the backstop. A session event resolves a
+  `ready` **only on the machine's proof** — its `ledgerSince` at least the replay window
+  (60s) before the reservation was made (`reservedAt`), the window standing in for clock
+  skew, since a daemon further behind refuses this leader's every envelope as from the
+  future. Without proof (a daemon with no ledger, or one pruned past the reservation) the
+  task is `failed` `dispatch_unconfirmed`: terminal, because a re-dispatch could be a twin
+  on another machine, where `task_running` cannot see it. An unanswered check waits while
+  the machine is connected, and once it is not the task is `lost` on that machine (below),
+  never `ready`. **Why the TTL check cannot race a late spawn:** a daemon drops a request
+  envelope stamped more than 60s before its own clock (`ReplayGuard`,
+  `shared/src/crypto.ts`; `daemon/src/relay-client.ts` checks every inbound request), and
+  the dispatch is sealed just after the reservation is written, so a spawn that ever runs
+  has begun — and been recorded, write-ahead — by about the 60s mark, half the 120s TTL;
+  a `sessions` reply then waits out any launch still in flight. A session event resolves a
   reservation before any of that. It is proof the spawn landed even when the reply
   never came: `busy`/`idle` → `running`, `needs-input` → `needs-input`, `ended` →
   `done`. The assignment is the reservation's target plus the reporting pane. The
@@ -3096,9 +3127,10 @@ through the leader's `submit` op (Wire protocol, Layer 2).
   already (Local op socket, "Session events"). The spawn audits as
   `client=scheduler`. Ticks coalesce: one asked for mid-pass runs once after it.
 - **Takeover** (`takeover()`) is `load()` plus one `sessions` read per machine with an
-  in-flight task, settled before the host's first tick: a reservation as the TTL check
-  settles one, except that a session carrying its id counts at any age; a running task
-  with no session left is `done`; an unanswered machine changes nothing.
+  in-flight or `lost` task, settled before the host's first tick: a reservation as the TTL
+  check settles one, except that a session carrying its id counts at any age; a running task
+  with no session left is `done`; a `lost` task as below; an unanswered machine changes
+  nothing.
 - **States are M2's slice** (`task.ts`): `ready → reserved → running ⇄ needs-input →
 done`, `failed`/`cancelled` off-path, one transition table, an illegal move a thrown
   bug. `reserved` also reaches `needs-input` and `done` directly. The alternative was
@@ -3106,24 +3138,34 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   transition, so it costs one store write, and a `running` written first would record
   a state nobody observed. A session that ends is `done` until M3's done detection; a reserved task refuses
   `cancel` (`dispatching`) rather than racing its spawn.
-- **`lost`: a placed task whose machine stopped answering** (M2 item 3's gap B, closed in item
-  6). A `running` or `needs-input` task whose machine has been absent — not connected, or gone
-  from the registry — for `lostAfterMs` (15 min, Settled defaults 10) moves to `lost`, with
-  `absentSince` on the record. The rule it keeps: **never dispatched again without proof it is
-  not running.** A machine that sleeps keeps its tmux session, so re-routing would leave a twin
-  on wake, and `task_running` cannot catch a twin placed on another machine. So `lost` has no
-  edge to `ready`; only its own machine moves it: once connected, its `sessions` reply decides —
-  a session carrying the task id is `running` again, on the pane listed now; none is `done`,
-  whether or not `ended` still remembers it, as takeover settles a running task whose session is
-  gone — or a `session-event` sealed by that machine does, as for any placed task. An unanswered
-  check keeps it `lost`. The absence clock is the scheduler's own, in memory, started the first
+- **`lost`: a task whose machine stopped answering for it** (M2 item 3's gap B, closed in item
+  6; the reservation half added 2026-10-16). A `running` or `needs-input` task whose machine has
+  been absent — not connected, or gone from the registry — for `lostAfterMs` (15 min, Settled
+  defaults 10) moves to `lost`, with `absentSince` on the record. So does a `reserved` one whose
+  TTL passes with its `sessions` check unanswered and its machine not connected: it keeps the
+  reservation's target as its assignment, with no pane, and `reservedAt`, which marks it as never
+  confirmed. The rule it keeps: **never dispatched again without proof it is not running.** A
+  machine that sleeps keeps its tmux session, so re-routing would leave a twin on wake, and
+  `task_running` cannot catch a twin placed on another machine. Only its own machine moves it:
+  once connected, its `sessions` reply decides — a session carrying the task id is `running`
+  again, on the pane listed now — or a `session-event` sealed by that machine does, as for any
+  placed task (the event names the pane a never-confirmed task lacks). With no session, a task
+  that ran is `done`, whether or not `ended` still remembers it, as takeover settles a running
+  task whose session is gone; a never-confirmed one settles as its reservation would have —
+  `done` if `ended` lists it, `ready` on the ledger's proof, `failed` `dispatch_unconfirmed`
+  without. `lost → ready` exists for that task alone, and `advance` throws for any other. An
+  unanswered check keeps it `lost`. The absence clock is the scheduler's own, in memory, started the first
   pass that sees the machine away, not `Machine.lastSeen`: a request timeout's offline mark can
   make a machine read disconnected beside a `lastSeen` hours old, which would lose its tasks at
   once. A new leader restarts the clock, which can only delay `lost`. It is held, not terminal,
   and holds no slot (`IN_FLIGHT` leaves it out), so a forgotten machine cannot pin the global cap.
-  `cancel` refuses it (`unreachable`): the machine cannot be asked to end the session, and a
-  cancel that left it running would be a lie. Takeover settles `lost` tasks with the running
-  ones.
+  `cancel` takes it (gap 4, 2026-10-16): with its machine connected it is despawned as a
+  running task is, its pane read from `sessions` when the record has none; with its machine
+  away nothing can be despawned, so it is `cancelled` as it stands with `leftRunning` on the
+  record, and the PWA says the session may still be running there. Cancelled is terminal: a
+  later event or `sessions` reply for it changes nothing. The earlier refusal (`unreachable`)
+  left a task the owner had given up on holding its place indefinitely, to protect a session
+  the cancel could not reach anyway. Takeover settles `lost` tasks with the running ones.
 
 ## Accepted trade-offs
 

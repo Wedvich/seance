@@ -777,13 +777,22 @@ export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];
   readonly at: number;
   /**
-   * Task ids of sessions this daemon saw end recently and runs no live pane
-   * for: what tells a scheduler whose spawn reply and `ended` event were both
-   * lost that the task ran, rather than that it never started. In-memory, so a
-   * daemon restart forgets it. Absent from older daemons; a reader that
-   * predates it ignores it.
+   * Task ids this daemon launched, or saw end, that no live pane carries now:
+   * what tells a scheduler whose spawn reply and `ended` event were both lost
+   * that the task ran, rather than that it never started. Absent from older
+   * daemons, and when there are none; a reader that predates it ignores it.
    */
   readonly ended?: readonly string[];
+  /**
+   * Ms epoch, this daemon's clock: from here on `ended` is complete — every
+   * task launched here at or after it that no live pane carries is listed. The
+   * launches are recorded write-ahead in a file that survives restarts, so a
+   * reservation made after it and found in neither list is proof its spawn
+   * never landed. The ledger's creation time on a fresh install; it moves
+   * forward as old launches are evicted. Absent from older daemons, which can
+   * prove nothing (DESIGN.md, "Session events").
+   */
+  readonly ledgerSince?: number;
 }
 
 /** What a session is doing, as `session-event` reports it (docs/scheduler.md). */
@@ -831,8 +840,10 @@ export interface ErrorResponse {
 /**
  * The scheduler's task states (docs/scheduler.md, "Task states"): M2's slice.
  * `scheduler/src/task.ts` holds the one transition table over them. `lost` is
- * a running task whose machine has been absent past `lostAfterMs`: held, never
- * dispatched again, until that machine's own `sessions` says what became of it.
+ * a task whose machine stopped answering for it — a running one absent past
+ * `lostAfterMs`, or a reservation whose spawn was never confirmed and whose
+ * machine was gone at its TTL: held, never dispatched again without proof,
+ * until that machine's own `sessions` says what became of it.
  */
 export const TASK_STATES = [
   "ready",
@@ -970,10 +981,34 @@ export interface Task {
   readonly assignment?: Assignment;
   /** The routing decision that placed it — written with the reservation, never per tick. */
   readonly decision?: Decision;
+  /** A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code minted later still parses. */
   readonly failure?: { readonly code: string; readonly message: string };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
+  /**
+   * When its reservation was made, ms, the leader's clock. Kept past `reserved`
+   * only into `lost`, where its presence marks a spawn never confirmed — the one
+   * `lost` that may return to `ready`, and only on its machine's ledger proof
+   * (`SessionsResponse.ledgerSince`).
+   */
+  readonly reservedAt?: number;
+  /**
+   * With `cancelled`: its machine was unreachable at the cancel, so nothing was
+   * despawned there — whatever session it had may still be running.
+   */
+  readonly leftRunning?: true;
 }
+
+/**
+ * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
+ * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
+ * later, could neither show the session nor prove it never started (an older
+ * daemon, or a ledger pruned past the reservation). Terminal: re-dispatching
+ * could start a twin.
+ */
+export const TASK_FAILURE_CODES = ["dispatch_unconfirmed"] as const;
+
+export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
 
 /**
  * `not_leader`: the daemon the relay routed the request to runs no term — it

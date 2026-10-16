@@ -252,23 +252,28 @@ concurrency slot (session ended) but keeps `after: merged` dependents blocked. M
 slice below (`scheduler/src/task.ts` is the copy that runs; M3 adds `queued`, `blocked` and
 `awaiting-merge`):
 
-| From                          | To                                                               | On                                                                                                |
-| ----------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `ready`                       | `reserved`, `cancelled`                                          | routed and reserved; cancel                                                                       |
-| `reserved`                    | `running`, `needs-input`, `done`, `ready`, `failed`, `cancelled` | verdict or session event; TTL with no session → `ready`; daemon refusal                           |
-| `running`                     | `needs-input`, `lost`, `done`, `failed`, `cancelled`             | session event; machine absent past `lostAfterMs` → `lost`                                         |
-| `needs-input`                 | `running`, `lost`, `done`, `failed`, `cancelled`                 | as `running`                                                                                      |
-| `lost`                        | `running`, `needs-input`, `done`                                 | its own machine only: `sessions` (session there → `running`, none → `done`) or an event it sealed |
-| `done`, `failed`, `cancelled` | —                                                                | terminal                                                                                          |
+| From                          | To                                                                       | On                                                                                                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ready`                       | `reserved`, `cancelled`                                                  | routed and reserved; cancel                                                                                                                                                          |
+| `reserved`                    | `running`, `needs-input`, `done`, `ready`, `lost`, `failed`, `cancelled` | verdict or session event; past the TTL: no session and the ledger's proof → `ready`, no proof → `failed`, check unanswered with the machine gone → `lost`; daemon refusal → `failed` |
+| `running`                     | `needs-input`, `lost`, `done`, `failed`, `cancelled`                     | session event; machine absent past `lostAfterMs` → `lost`                                                                                                                            |
+| `needs-input`                 | `running`, `lost`, `done`, `failed`, `cancelled`                         | as `running`                                                                                                                                                                         |
+| `lost`                        | `running`, `needs-input`, `done`, `ready`, `failed`, `cancelled`         | its own machine: `sessions` or an event it sealed (below); cancel                                                                                                                    |
+| `done`, `failed`, `cancelled` | —                                                                        | terminal                                                                                                                                                                             |
 
-`lost` (M2 item 3's gap B, closed in item 6; DESIGN.md _Scheduler_, "`lost`"): never `ready`
-again, because a machine that only sleeps keeps its session and a re-dispatch would be its twin.
+`lost` (M2 item 3's gap B, closed in item 6; DESIGN.md _Scheduler_, "`lost`"): held until its own
+machine answers, because a machine that only sleeps keeps its session and a re-dispatch would be
+its twin. A session there → `running`. With none, a task that ran → `done`; one lost from
+`reserved` (never confirmed) settles as its reservation would have — `done` if `ended` lists it,
+`ready` only on the machine's ledger proof (`SessionsResponse.ledgerSince`), `failed`
+`dispatch_unconfirmed` without. `cancel` despawns it when its machine is connected and otherwise
+cancels it as it stands, marked `leftRunning` (2026-10-16).
 
 **Takeover** (on `lead`): list the store, open every body (skip and report non-decrypting or
 version-mismatched ones, as the PWA skips registry entries), then for each `reserved` or
 `running` task ask `sessions` on its machine: a session carrying the `taskId` → `running` with
 that pane; none and the reservation is unexpired → keep waiting; none and expired → release
-and re-route. Only then does the loop start dispatching. The reconcile landed with item 3 as
+and re-route on the machine's ledger proof, `failed` without it. Only then does the loop start dispatching. The reconcile landed with item 3 as
 `Scheduler.takeover()` (DESIGN.md _Scheduler_), which also settles a `running` task whose
 session is gone as `done`; opening and version-checking bodies is M3's store adapter.
 
@@ -422,12 +427,13 @@ no caps beyond the global max, no pause, no alerts; the PWA polls `queue` for a 
 instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
 A `submit` whose reply is lost cannot be reconciled — the verdict says it may have queued and
-offers no retry. A `lost` task waits for its own machine indefinitely and cannot be cancelled.
+offers no retry. A `lost` task waits for its own machine indefinitely unless cancelled.
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
-`SCHEDULER_LEADERS` allowlist. One edge stays as item 1 left it:
-a _reserved_ task whose machine disconnects before answering is released to `ready` once its TTL
-passes, and may be routed elsewhere; `task_running` guards only a re-dispatch to the same machine.
+`SCHEDULER_LEADERS` allowlist. (Closed 2026-10-16: a reserved task whose machine disconnected
+before answering is now `lost`, not released, and goes back to `ready` only on that machine's
+launch-ledger proof; a `lost` task can be cancelled. DESIGN.md _Scheduler_, "`lost`", and _Local
+op socket_, "Session events".)
 
 ### M3 — durable queue
 
@@ -453,6 +459,12 @@ without the PSK reads "leader unverified" and is sent nothing (e2e).
    **Removes M2's `submit` op** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS` in
    `shared/src/types.ts`; the `submit` case in `leader.ts`): the app's `store-put` at `expect: 0`
    replaces it, and the PWA's `auto` moves to that in item 6.
+   **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
+   task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
+   `version_conflict` there means the first put landed — the client reads it as queued, never as
+   a failure, and never mints a second id for the same submission. That is why M2's `submit`
+   got no interim fix (a client-chosen id on `submit` would be deleted by this item days later);
+   until then a lost `submit` reply stays "may have queued", with no retry.
 2. The at-rest `task` op and version binding — sealed body carries the version its put
    produces; readers open without the `ReplayGuard` and reject a mismatch.
 3. `QueueStore` adapter on those ops; takeover reconciliation against `sessions`.
@@ -681,6 +693,19 @@ same PR, with the reason.
   cover.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
+- **Leader churn is mostly deploys** (looked at 2026-10-16, M2's gap 2). Term 31 within ~6h of
+  leadership landing (13:57Z). The term bumps on every leader change, every new socket of the
+  leader, and every move to or from no leader, so a relay deploy — which drops every socket —
+  costs about two terms, and each merge's self-update restarts every daemon, the leader among
+  them. That day had seven relay deploys after 13:57Z (CI deploys the relay on any `shared/`
+  change, which most M2 PRs touched), and the MacBook's socket also dropped on sleep and network
+  changes (`pong deadline missed`, close 1006), handing the role to Thad or WSL by design
+  (stickiness holds only across a reconnect the relay sees before the old close). No nomination
+  or socket bug found. It matters from M3: every change is a takeover — a full store list, plus
+  one `sessions` read per machine with an in-flight task — so churn costs reads, never tasks.
+  Revisit if terms keep climbing on a quiet day: the relay logs every change as
+  `scheduler term=<n> leader=<id|none>`, kept by Workers observability, so a day's history is in
+  the dashboard without `wrangler tail`.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
   and can't dedupe a re-dispatch), while direct spawns to it keep working. Self-update makes

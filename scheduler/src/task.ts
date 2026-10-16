@@ -15,18 +15,23 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * observed transition, so one store write — a `running` written first would
  * record a state no one observed, at the cost of a second write.
  *
- * `lost` is held, not terminal, and has no edge back to `ready`: its session
- * may still be alive on a machine that is only asleep, and a second dispatch
- * would be its twin. Only that machine's answer moves it — a session carrying
- * the task id (`running`), an event from it, or no such session (`done`, as
- * takeover settles a running task whose session is gone).
+ * `lost` is held, not terminal: its session may still be alive on a machine
+ * that is only asleep, and a second dispatch would be its twin. Only that
+ * machine's answer moves it — a session carrying the task id (`running`), an
+ * event from it, or no such session — or a cancel, which cannot reach a
+ * machine that is gone and so leaves its session as it is. A task lost from
+ * `running` with no session is `done`, as takeover settles a running task whose
+ * session is gone. One lost from `reserved` (`reservedAt` kept) never had its
+ * spawn confirmed: with no session it is `ready` again only when the machine's
+ * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
+ * is legal for that task alone, and `advance` refuses it for any other.
  */
 export const TRANSITIONS = {
   ready: ["reserved", "cancelled"],
-  reserved: ["running", "needs-input", "done", "ready", "failed", "cancelled"],
+  reserved: ["running", "needs-input", "done", "ready", "lost", "failed", "cancelled"],
   running: ["needs-input", "lost", "done", "failed", "cancelled"],
   "needs-input": ["running", "lost", "done", "failed", "cancelled"],
-  lost: ["running", "needs-input", "done"],
+  lost: ["running", "needs-input", "done", "ready", "failed", "cancelled"],
   done: [],
   failed: [],
   cancelled: [],
@@ -46,18 +51,29 @@ export function canTransition(from: TaskState, to: TaskState): boolean {
   return allowed.includes(to);
 }
 
+/** A task lost from `reserved`: its spawn was never confirmed, so ledger proof may release it. */
+export function isUnconfirmed(task: Task): boolean {
+  return task.state === "lost" && task.reservedAt !== undefined;
+}
+
 /**
  * The one way a task changes state. An illegal move is a scheduler bug, not
  * an input error, so it throws rather than returning a code. Leaving
  * `reserved` drops the reservation; returning to `ready` drops the assignment;
- * leaving `lost` drops when its machine went absent.
+ * leaving `lost` drops when its machine went absent; `reservedAt` survives only
+ * from `reserved` into `lost`.
  */
 export function advance(task: Task, to: TaskState, fields: Partial<Omit<Task, "id" | "spec" | "state">> = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
-  const { reservation, assignment, absentSince: _absent, ...rest } = task;
+  if (task.state === "lost" && to === "ready" && !isUnconfirmed(task)) {
+    throw new Error(`task ${task.id}: a lost task that ran never returns to ready`);
+  }
+  const { reservation, assignment, absentSince: _absent, reservedAt, ...rest } = task;
+  const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
   return {
     ...rest,
     ...(to === "reserved" && reservation !== undefined ? { reservation } : {}),
+    ...(keepsReservedAt && reservedAt !== undefined ? { reservedAt } : {}),
     ...(to !== "ready" && assignment !== undefined ? { assignment } : {}),
     ...fields,
     state: to,

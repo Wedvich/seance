@@ -26,13 +26,17 @@ function queuedBody(task: Task): string {
     case "needs-input":
       return "Open Claude on your phone and continue the session from there.";
     case "lost":
-      return "Its machine stopped answering, so the scheduler will not start it anywhere else — the session may still be alive there. It settles once that machine is back.";
+      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back.";
     case "done":
       return "The session ended.";
     case "failed":
-      return "The machine refused the spawn. Nothing is running.";
+      return task.failure?.code === "dispatch_unconfirmed"
+        ? "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another."
+        : "The machine refused the spawn. Nothing is running.";
     case "cancelled":
-      return "Nothing is running.";
+      return task.leftRunning === true
+        ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."
+        : "Nothing is running.";
   }
 }
 
