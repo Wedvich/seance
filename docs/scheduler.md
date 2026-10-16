@@ -107,8 +107,8 @@ table gains rows.
   (`seance-register-v2|deviceId|ts|roles`), so a v1 register still verifies — as a daemon with
   no roles, never nominated. After every daemon connect, close and sweep the relay
   re-evaluates: the leader is the capable connected daemon socket with the earliest
-  `connectedAt` (tie: lowest `deviceId`), where capable is signed `roles` plus whichever
-  capture guard Risks settles on (_Leader capture_). **Nomination is a pure module**,
+  `connectedAt` (tie: lowest `deviceId`), where capable is signed `roles`; readers then
+  ignore a leader they cannot verify (Risks, _Leader capture_). **Nomination is a pure module**,
   `relay/src/leadership.ts`: the candidates' `{ deviceId, roles, connectedAt }` and the
   current leader in, the next leader out, with its own suite that needs no workerd. `hub.ts`
   (580 lines already) only calls it from its connect, close and sweep paths and applies the
@@ -429,7 +429,7 @@ queue yet.
    imports `daemon/`, and nothing in `daemon/` imports `scheduler/` except `leader.ts`.
 2. Relay leadership — `roles` on `register`, inside the signed message (v2 domain tag);
    nomination as the pure `relay/src/leadership.ts`, called from `hub.ts` on connect, close and
-   sweep; the leader-capture guard, once Risks has it decided; `scheduler:term`, `lead`/`follow`,
+   sweep; `scheduler:term`, `lead`/`follow`,
    `not_leader` on a stale term, `scheduler: { deviceId,
 term } | null` in the registry push.
 3. `leader.ts` — the leader's own persistent app-role `RelayClient` (not `LazyRelay`) and the
@@ -439,7 +439,8 @@ term } | null` in the registry push.
 5. `session-event` on the local socket + `claude-mods/session-events`; the daemon binds each
    event to a pane and takes session and task from its own pane map, keeps only `https:` PR
    URLs, and forwards to the leader sealed to `"scheduler"`.
-6. PWA — `auto` in the picker (greyed with no leader), `route-preview` and the decision view.
+6. PWA — `auto` in the picker (greyed with no leader, or one whose registry entry does not
+   open: "leader unverified"), `route-preview` and the decision view.
 7. Kept `status` — the relay keeps the last one in the entry on close and sweep and clears it
    on `register`; `newestQuotaByAccount` folds kept statuses' quota, pressure readers skip
    them, and the PWA's account cards get an asleep machine's reading with its age. Independent
@@ -459,9 +460,10 @@ term } | null` in the registry push.
   reserved against (relay, scheduler).
 - Nomination, re-nomination and the `deviceId` tie reproduce over plain inputs in
   `leadership.ts`'s own suite, without workerd (relay).
-- A register whose `roles` the signature does not cover is never nominated; a bearer-token
-  holder's socket that connected first holds no term the fleet acts on — tested against
-  whichever capture guard Risks settles on (relay, e2e).
+- A register whose `roles` the signature does not cover is never nominated (relay). A
+  bearer-token holder's daemon socket with signed `roles` and no PSK, connected first, is
+  nominated, and the PWA reads it as "leader unverified": `auto` greys and nothing is sent to
+  it (e2e).
 - A `session-event` naming another session or task moves only the state the daemon's own pane
   map attributes to the sender; a non-`https:` PR URL never reaches the PWA or a push (daemon).
 - The leader's app-role leg stays up through more than `LazyRelay`'s idle window with no
@@ -484,7 +486,7 @@ spawn or a session report gives it a reading; M4's OAuth poll closes this.
 **Record.** DESIGN.md gains a _Scheduler_ section (leadership and term, nomination in
 `leadership.ts`, library and adapters, `taskId` idempotency, quota unknown), _Local op socket_
 (the `session-event` frame kind), _Threat model_ (plaintext but signed `roles`, the
-leader-capture guard, term fencing, the mod as an ingest-only path whose every field is
+unverified-leader check and the capture it leaves open until M3, term fencing, the mod as an ingest-only path whose every field is
 untrusted), _Wire protocol_ rows, _Presence & identity_ (the kept `status`, replacing "never in
 storage").
 
@@ -492,6 +494,10 @@ storage").
 
 **Goal.** Queue a block of work with dependencies and leave; it runs, survives leader changes,
 and finishes without anyone watching.
+
+**Gate.** Leader capture reopens and is settled with a relay-side guard (Risks, _Leader
+capture_) before the store lands — under M2's reader-only check a squatter's term would delete
+the queue.
 
 **Lands, in order.**
 
@@ -596,8 +602,8 @@ Nothing below is open. An implementer who wants a different value changes this s
 same PR, with the reason.
 
 1. **Leader** = earliest-connected capable daemon, ties by `deviceId`; nomination only, no
-   voting. The ordering is settled; what makes a daemon capable beyond signed `roles` is not
-   (Risks, _Leader capture_).
+   voting. Capable is signed `roles`; readers ignore a leader whose entry does not open, and
+   a relay-side guard is owed before M3 (Risks, _Leader capture_).
 2. **Enqueue needs no leader.** Apps create tasks in the store at `expect: 0`; everything else
    waits for one. Matters only for old daemons and the ≤ ~90s re-nomination gap, and costs
    nothing (a token holder could already fill the registry with junk).
@@ -637,7 +643,8 @@ same PR, with the reason.
   alias or overwrite it with junk that readers skip — but not read, forge or roll one back, and
   an alias is a label, retyped in a second. Holding the leader's term would be a larger act,
   and as planned it is not an edge case — next item.
-- **Leader capture is routine. Open: the owner decides before M2's relay leadership lands.**
+- **Leader capture is routine. Decided for M2: readers ignore an unverifiable leader (B
+  below); reopens before M3's store.**
   Earliest `connectedAt` wins, and `roles` is the only other gate. Device ids are
   self-certifying, so anyone with the bearer token can mint one, sign a valid register with
   `roles: ["scheduler"]` and hold one socket open. A real leader's socket is replaced after
@@ -660,12 +667,15 @@ same PR, with the reason.
     lead until the squatter's socket goes. It turns a silent stall into a visible one and
     stops apps sending it requests; it does not protect the queue.
 
-  **Recommendation: the allowlist.** The relay is the only party that acts on the term, so
-  only a check in the relay keeps a squatter from holding one. The reader-side check is a
-  cheap tripwire on top — an allowlisted seed copied out of `state.json` without the PSK
-  (a separate secret on a keychain, DPAPI or TPM install) then reads "leader unverified" rather
-  than a stalled queue — but no substitute. The choice lands in _Settled defaults_ and
-  DESIGN.md's threat model.
+  **Decision (owner, 2026-10-16): the reader check for M2.** M2 has no store — the queue is
+  in-memory on the leader — so what a squatter's term can do there is hold `auto` unavailable
+  until its socket goes, and the reader check makes that visible ("leader unverified") instead
+  of a silent stall. It cannot read a prompt, forge a spawn or open an event: everything it
+  would receive is sealed under the PSK it lacks. M3 changes that: term-fenced `store-put` and
+  `store-delete` would let it delete the queue, and only a check in the relay — the one party
+  that acts on the term — stops that. So the question reopens as M3's gate; the allowlist is
+  the standing recommendation, with the reader check kept as its tripwire (an allowlisted seed
+  copied out of `state.json` without the PSK then reads "leader unverified").
 
 - **Prompts at rest on Cloudflare.** Sealed under the PSK like `info`, and ciphertext length is
   unpadded, so the relay bounds prompt length — the same concession as live frames.
