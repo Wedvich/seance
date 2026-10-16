@@ -10,6 +10,7 @@ import {
   expectedSystemUnit,
   installedUnits,
   noSystemdMessage,
+  parseMainPid,
   pinTaskCommand,
   restartCommandFor,
   scopeChecks,
@@ -181,6 +182,18 @@ describe("restartCommandFor", () => {
   test("a system unit needs root, a user unit does not", () => {
     expect(restartCommandFor("system")).toBe("sudo systemctl restart seanced.service");
     expect(restartCommandFor("user")).not.toContain("sudo");
+  });
+});
+
+describe("parseMainPid", () => {
+  test("a running unit's pid, trailing newline and all", () => {
+    expect(parseMainPid("4242\n")).toBe(4242);
+  });
+
+  test("null for a stopped unit, so nothing is signalled", () => {
+    expect(parseMainPid("0\n")).toBeNull();
+    expect(parseMainPid("")).toBeNull();
+    expect(parseMainPid("garbage")).toBeNull();
   });
 });
 

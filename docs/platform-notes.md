@@ -79,8 +79,15 @@ What the user-unit flow still does that this doesn't:
   for.
 - Linger is irrelevant — system units outlive sessions by nature — and `doctor` says so
   instead of probing user scope.
-- `seanced restart` needs root here; it says `sudo systemctl restart seanced.service`
-  rather than surfacing systemd's interactive-auth refusal.
+
+`seanced restart` works without root here, so `git pull && seanced restart` is the same
+update as on a user unit. It can't ask the system manager to restart the unit, so it
+reads the unit's `MainPID` (a read-only query anyone may make), SIGTERMs that process —
+it runs as you — and waits for `Restart=always` to relaunch it, about five seconds
+(`RestartSec`). Two cases still need `sudo systemctl restart seanced.service`, and it says
+so: a unit that isn't running (no process to signal), and a daemon installed with
+`--user` for a different account (the signal is refused). Like the self-update, it
+can't apply a changed unit definition.
 
 `doctor` and `seanced status` both report the system unit correctly now: which scope owns
 the daemon, whether it is active, the bun path resolved against the unit's _own_ recorded

@@ -614,19 +614,68 @@ export async function serviceLoaded(scope?: UnitScope): Promise<boolean> {
   return scopeActive(scope ?? (await ownerScope()));
 }
 
-/** What restarts this box's daemon, in the scope that owns it — a system unit needs privilege the CLI doesn't have. */
+/** The privileged restart, for what the unprivileged one can't reach: a stopped unit, or a daemon running as someone else. */
 export function restartCommandFor(scope: UnitScope): string {
   return scope === "system" ? `sudo systemctl restart ${UNIT_NAME}` : `seanced restart`;
+}
+
+/** `systemctl show -p MainPID --value` output, or null when no process is running (systemd reports 0). */
+export function parseMainPid(stdout: string): number | null {
+  const pid = Number(stdout.trim());
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+async function systemMainPid(): Promise<number | null> {
+  const result = await exec(scopeArgv("system").concat(["show", "-p", "MainPID", "--value", UNIT_NAME]));
+  return result.exitCode === 0 ? parseMainPid(result.stdout) : null;
+}
+
+/** RestartSec plus a cold start, with room to spare on a slow box. */
+const RELAUNCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Restarts a system unit's daemon without root, by the same route `selfRestart`
+ * takes: the process runs as this user, so this user may SIGTERM it, and
+ * `Restart=always` relaunches it. Only `systemctl stop` suppresses that policy,
+ * and it stays root-only. MainPID comes from systemd rather than `runtime.json`
+ * so a stale pid can never aim the signal at an unrelated process. Like
+ * `selfRestart`, this can't apply a changed unit definition — doctor reports drift.
+ */
+async function signalRestart(): Promise<void> {
+  const pid = await systemMainPid();
+  if (pid === null) {
+    throw new Error(`the system unit isn't running, and starting it needs root: ${restartCommandFor("system")}`);
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "EPERM") {
+      throw new Error(`the daemon runs as another user — restarting it needs root: ${restartCommandFor("system")}`, {
+        cause: err,
+      });
+    }
+    throw err;
+  }
+  const deadline = Date.now() + RELAUNCH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    // oxlint-disable-next-line no-await-in-loop -- a poll is sequential by definition
+    await Bun.sleep(500);
+    // oxlint-disable-next-line no-await-in-loop -- ditto
+    const next = await systemMainPid();
+    if (next !== null && next !== pid) return;
+  }
+  throw new Error(
+    `the daemon exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
+      `check \`systemctl status ${UNIT_NAME}\` and \`seanced doctor\``,
+  );
 }
 
 export async function restartService(): Promise<void> {
   if (!systemdRunning()) throw new Error(noSystemdMessage(isWsl()));
   const scope = await ownerScope();
-  // Root-owned unit, unprivileged caller: say so rather than surface systemd's
-  // interactive-auth refusal, which reads like the unit is broken.
-  if (scope === "system" && process.getuid?.() !== 0) {
-    throw new Error(`the daemon runs under a system unit — restarting it needs root: ${restartCommandFor(scope)}`);
-  }
+  // Root-owned unit, unprivileged caller: systemctl would answer with an
+  // interactive-auth refusal, so signal the daemon instead.
+  if (scope === "system" && process.getuid?.() !== 0) return signalRestart();
   const result = await exec(scopeArgv(scope).concat(["restart", UNIT_NAME]));
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --${scope} restart failed: ${result.stderr.trim()}`);
