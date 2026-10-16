@@ -268,6 +268,11 @@ function ChartPlot(props: { history: HistoryView; series: Parameters<typeof char
             y2={CHART_HEIGHT - (pct / 100) * CHART_HEIGHT}
           />
         ))}
+        {lines.map((line, index) =>
+          line.gaps === "" ? null : (
+            <path key={`${line.key}/gaps`} className={`chart-gap chart-c${index % PALETTE_SIZE}`} d={line.gaps} />
+          ),
+        )}
         {lines.map((line, index) => (
           <path key={line.key} className={`chart-line chart-c${index % PALETTE_SIZE}`} d={line.d} />
         ))}
