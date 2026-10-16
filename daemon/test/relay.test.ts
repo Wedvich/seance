@@ -421,7 +421,7 @@ describe("daemon ↔ relay integration", () => {
           { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
         ),
       handle: () => Promise.resolve(null),
-      onScheduler: (env) => void routed.push(env),
+      onScheduler: (env) => routed.push(env) > 0,
     });
     client.start();
     try {

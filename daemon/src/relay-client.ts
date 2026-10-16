@@ -4,6 +4,7 @@ import {
   ENVELOPE_MAX_CT_LENGTH,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
+  isSchedulerOp,
   MACHINES_ID,
   ReplayError,
   ReplayGuard,
@@ -20,6 +21,7 @@ import {
   type OpName,
   type Plain,
   type RelayToDaemonFrame,
+  type SchedulerError,
   type SessionEvent,
 } from "@seance/shared";
 import { log } from "./log.ts";
@@ -42,8 +44,13 @@ export interface RelayClientOpts {
   readonly onLead?: (term: number) => void;
   /** The relay moved the role elsewhere. */
   readonly onFollow?: () => void;
-  /** An envelope `to: "scheduler"`, unopened. Absent, one is dropped as misaddressed. */
-  readonly onScheduler?: (env: Envelope) => void;
+  /**
+   * An envelope `to: "scheduler"`, unopened; true when a running term took it.
+   * One nobody took is opened here only to answer an app's request
+   * `not_leader`; anything else is dropped. Absent, every one is dropped as
+   * misaddressed.
+   */
+  readonly onScheduler?: (env: Envelope) => boolean;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
@@ -78,6 +85,13 @@ export class RelayClient {
    * relay is upgraded, until it restarted.
    */
   #signV1 = false;
+  /**
+   * The scheduler role was handed back (`resign`): registers on this socket
+   * sign `roles: []`. Cleared by the next dial, whose register asks for the
+   * role again — a redial is where the daemon re-proves the bearer token whose
+   * rejection is the one reason it resigns.
+   */
+  #resigned = false;
   #stopped = false;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -114,6 +128,42 @@ export class RelayClient {
   async reRegister(): Promise<void> {
     if (!this.connected) return;
     await this.#register();
+  }
+
+  /**
+   * Hands the scheduler role back to the relay after this daemon ended its own
+   * term (DESIGN.md, Scheduler, "The leader"): a signed v2 register over no
+   * roles on this same socket, so the relay re-nominates at once instead of
+   * keeping an idle leader until the socket drops. The signature and the
+   * socket are what bind it: only this machine's key signs for its id, and a
+   * register moves only the socket it arrives on. The role is asked for again
+   * by the next dial's register. No-op while disconnected: the drop already
+   * told the relay.
+   */
+  async resign(): Promise<void> {
+    if (this.#resigned) return;
+    this.#resigned = true;
+    if (!this.connected || !this.#registered) return;
+    log.info("scheduler: handing the role back to the relay");
+    await this.#register();
+  }
+
+  /**
+   * One reply to an envelope another part of the daemon opened — the leader
+   * answering an app's scheduler request. Sealed from this machine's id, as
+   * every daemon reply is, and sized like one (`#sealReply`). Whether it left.
+   */
+  async reply(to: string, response: Plain): Promise<boolean> {
+    if (!this.connected || !this.#registered) return false;
+    const sealed = await this.#sealReply(to, response);
+    const ws = this.#ws;
+    if (ws === null || !this.connected) {
+      log.warn(`wire unsent re=${quote(response.re ?? "")} op=${quote(response.op)} reason=disconnected`);
+      return false;
+    }
+    ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
+    log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(to)}`);
+    return true;
   }
 
   /**
@@ -179,8 +229,9 @@ export class RelayClient {
     // Signed fresh each time: the relay bounds the timestamp, so a frame built
     // once at start would stop verifying after a minute.
     const ts = Date.now();
-    // Every daemon may lead: the relay nominates among those that say so.
-    const roles = this.#signV1 ? undefined : [DAEMON_ROLES.scheduler];
+    // Every daemon may lead: the relay nominates among those that say so. A
+    // resigned one still signs v2, over no roles — explicit, not merely absent.
+    const roles = this.#signV1 ? undefined : this.#resigned ? [] : [DAEMON_ROLES.scheduler];
     const frame: DaemonFrame = {
       t: "register",
       deviceId: identity.deviceId,
@@ -210,6 +261,7 @@ export class RelayClient {
     this.#ws = ws;
     this.#opened = false;
     this.#registered = false;
+    this.#resigned = false;
 
     ws.addEventListener("open", () => {
       this.#opened = true;
@@ -324,7 +376,7 @@ export class RelayClient {
     // answers `env.from`. Not opened on this leg: the leader's own client
     // opens, replay-checks and correlates them, so one guard sees them once.
     if (env.to === SCHEDULER_ID && this.#opts.onScheduler !== undefined) {
-      this.#opts.onScheduler(env);
+      if (!this.#opts.onScheduler(env)) await this.#refuseScheduler(env);
       return;
     }
     const broadcast = env.to === MACHINES_ID;
@@ -382,6 +434,31 @@ export class RelayClient {
     // Logged after the send, so the line never claims a frame that never left.
     // A reply carries a fresh iv, so the two directions join through `re`, not the iv.
     log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(env.from)}`);
+  }
+
+  /**
+   * An envelope to the scheduler that no running term took. An app's request
+   * is answered `not_leader` rather than left to time out — the relay routed
+   * it here because its record still names this daemon (a term ended on its
+   * own, a relay restart), and silence would read as a dead machine. Opened
+   * under this leg's guard: no term's guard saw it. Anything else — a reply
+   * or event for a term that ended — opens nothing that acts.
+   */
+  async #refuseScheduler(env: Envelope): Promise<void> {
+    let plain: Plain;
+    try {
+      plain = await open(this.#opts.key, env);
+      this.#guard.check(env.iv, plain.ts);
+    } catch {
+      log.warn(`wire dropped iv=${quote(env.iv)} from=${quote(env.from)} reason=not-leading`);
+      return;
+    }
+    if (plain.re !== undefined || env.from !== APP_ID || !isSchedulerOp(plain.op)) {
+      log.warn(`wire dropped iv=${quote(env.iv)} from=${quote(env.from)} reason=not-leading`);
+      return;
+    }
+    const payload: SchedulerError = { ok: false, code: "not_leader", message: "this daemon is not leading" };
+    await this.reply(env.from, { id: crypto.randomUUID(), ts: Date.now(), op: plain.op, re: plain.id, payload });
   }
 
   /**

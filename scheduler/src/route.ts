@@ -5,14 +5,23 @@ import {
   isStatusStale,
   liveStatus,
   newestQuotaByAccount,
+  type Candidate,
+  type Decision,
   type ExclaveInfo,
   type Machine,
   type MachineStatus,
   type NewestQuota,
+  type QuotaBasis,
   type QuotaObservation,
+  type Reason,
+  type ScoreComponents,
 } from "@seance/shared";
 import type { SchedulerConfig } from "./config.ts";
-import { IN_FLIGHT, type Placement, type Target, type Task } from "./task.ts";
+import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
+
+// The decision record is a wire type — `route-preview` and `queue` carry it —
+// so its shapes live in the schema of record.
+export type { Candidate, Decision, QuotaBasis, Reason, ReasonCode, Score, ScoreComponents } from "@seance/shared";
 
 /**
  * Filter → score → sticky over one snapshot, as one pure function
@@ -20,67 +29,6 @@ import { IN_FLIGHT, type Placement, type Target, type Task } from "./task.ts";
  * pair; each is either rejected with every reason that applies, or scored
  * with every component, so the record explains the choice and each loser.
  */
-
-export type Reason =
-  | { readonly code: "offline" }
-  /** Connected, but no status, or one `isStatusStale` calls stale: pressure is unknown. */
-  | { readonly code: "status_stale" }
-  | { readonly code: "task_id_unsupported" }
-  /** A daemon predating exclaves: which account a spawn would bill is unknown. */
-  | { readonly code: "exclaves_unknown" }
-  | { readonly code: "disk_low"; readonly freeMib: number }
-  | { readonly code: "pressure_unknown" }
-  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
-  | { readonly code: "repo_absent" }
-  | { readonly code: "auth_missing" }
-  | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
-  | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
-  | { readonly code: "cap_reached"; readonly inFlight: number; readonly max: number };
-
-export type ReasonCode = Reason["code"];
-
-export interface ScoreComponents {
-  readonly accountPressure: number;
-  readonly machinePressure: number;
-  readonly dependencyDistance: number;
-  readonly queuePressure: number;
-}
-
-export interface Score {
-  /** Raw, before weights — what the record shows. */
-  readonly components: ScoreComponents;
-  /** The bonus subtracted for the lineage owner; 0 elsewhere. */
-  readonly sticky: number;
-  readonly total: number;
-}
-
-/** The reading a candidate's account was judged on, so the record shows its age. */
-export interface QuotaBasis {
-  readonly observedAt: number;
-  readonly observer: string;
-  readonly source: QuotaObservation["s"];
-}
-
-export interface Candidate {
-  readonly deviceId: string;
-  readonly machine: string;
-  /** Null for a daemon that reports no exclaves. */
-  readonly exclave: string | null;
-  readonly clone?: string;
-  readonly rejected: readonly Reason[];
-  readonly score?: Score;
-  readonly quota?: QuotaBasis;
-  /** Over the line but allowed to spend credits — dispatching here spills (M4 alerts on it). */
-  readonly spill?: { readonly window: string; readonly projectedPct: number };
-}
-
-export interface Decision {
-  readonly at: number;
-  readonly chosen: Target | null;
-  /** Scored candidates first, lowest total first; then the rejected, in fleet order. */
-  readonly candidates: readonly Candidate[];
-}
-
 export interface RouteInput {
   readonly task: Task;
   readonly machines: readonly Machine[];

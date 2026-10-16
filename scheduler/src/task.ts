@@ -1,5 +1,8 @@
-import type { SpawnMode } from "@seance/shared";
-import type { Decision } from "./route.ts";
+import type { Task, TaskState } from "@seance/shared";
+
+// The task's shapes are wire types — `queue` replies carry them — so they live
+// in the schema of record; this module owns only how a task moves.
+export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskState } from "@seance/shared";
 
 /**
  * M2's slice of the task lifecycle (docs/scheduler.md, "Task states"): no deps,
@@ -20,64 +23,10 @@ export const TRANSITIONS = {
   done: [],
   failed: [],
   cancelled: [],
-} as const satisfies Record<string, readonly string[]>;
-
-export type TaskState = keyof typeof TRANSITIONS;
+} as const satisfies Record<TaskState, readonly TaskState[]>;
 
 /** States that hold a concurrency slot and count toward projected usage. */
 export const IN_FLIGHT: readonly TaskState[] = ["reserved", "running", "needs-input"];
-
-/** Where a session runs or ran: what pins, lineage and dependency distance are measured against. */
-export interface Placement {
-  readonly deviceId: string;
-  readonly exclave: string;
-}
-
-/** What the person asked for. Everything the spawn carries except where it lands. */
-export interface TaskSpec {
-  /** `RepoEntry.origin` — the repo, not a machine's clone of it. */
-  readonly repo: string;
-  readonly mode: SpawnMode;
-  readonly prompt?: string;
-  readonly title?: string;
-  readonly model?: string;
-  readonly effort?: string;
-  readonly plan?: boolean;
-  /** Restrict to a machine, an exclave name, or both; absent fields are free. */
-  readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
-  /** The session this one continues — its owner gets the sticky bonus. */
-  readonly lineage?: Placement;
-  /** Where the work this task builds on lives (M3 fills it from deps); drives `dependency_distance`. */
-  readonly base?: Placement;
-}
-
-/** A placement plus the machine-local clone name `spawn` takes. */
-export interface Target extends Placement {
-  readonly clone: string;
-}
-
-export interface Reservation extends Target {
-  readonly expiresAt: number;
-}
-
-export interface Assignment extends Target {
-  /** Absent when the daemon answered `task_running`, which names the pane only. */
-  readonly window?: string;
-  /** The session's pane id, when the daemon reported one. */
-  readonly pane?: string;
-}
-
-export interface Task {
-  readonly id: string;
-  readonly spec: TaskSpec;
-  readonly state: TaskState;
-  readonly createdAt: number;
-  readonly reservation?: Reservation;
-  readonly assignment?: Assignment;
-  /** The routing decision that placed it — written with the reservation, never per tick. */
-  readonly decision?: Decision;
-  readonly failure?: { readonly code: string; readonly message: string };
-}
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   const allowed: readonly TaskState[] = TRANSITIONS[from];

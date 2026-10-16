@@ -318,6 +318,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     selfDeviceId: state.deviceId,
     createRelay: (term, onEvent) => appRelayClient(config, key, (line) => log.info(line), { term, onEvent }),
     local: createLocalOps(handlerCtx, "leader"),
+    // Late-bound: the client below is built after the leader it hands frames to.
+    reply: (to, response) => client.reply(to, response),
+    resign: () => void client.resign(),
     ...opts.leader,
   });
 
