@@ -8,6 +8,8 @@ import {
   importPsk,
   MAX_ACTIVE_TASKS,
   open,
+  parseQueueReply,
+  parseSubmitReply,
   QUEUE_PROMPT_PREVIEW,
   RelayClient,
   RequestFailure,
@@ -111,6 +113,19 @@ function leaderOver(relay: TestRelay, store: QueueStore = new MemoryQueueStore()
   return { leader, legs, replies, resigned: () => resigned };
 }
 
+/** Read as the app reads one, so a reply only the leader's own types accept fails here. */
+function queueReply(payload: unknown): QueueResponse {
+  const reply = parseQueueReply(payload);
+  if (reply === null || "ok" in reply) throw new Error(`not a queue reply: ${JSON.stringify(payload)}`);
+  return reply;
+}
+
+function submitReply(payload: unknown): SubmitResponse {
+  const reply = parseSubmitReply(payload);
+  if (reply === null || "ok" in reply) throw new Error(`not a submit reply: ${JSON.stringify(payload)}`);
+  return reply;
+}
+
 /** An app's request to the scheduler, sealed as the PWA's client seals one. */
 function appRequest(op: OpName, payload: unknown = {}, from = APP_ID): Promise<Envelope> {
   return seal(key, { to: SCHEDULER_ID, from }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
@@ -134,7 +149,7 @@ describe("leader requests", () => {
       const asked = await open(key, queue);
       expect(queued.to).toBe(APP_ID);
       expect(queued.response).toMatchObject({ op: "queue", re: asked.id });
-      const tasks = (queued.response.payload as QueueResponse).tasks;
+      const { tasks } = queueReply(queued.response.payload);
       // Newest first, and the prompt cut to its preview.
       expect(tasks.map((t) => t.id)).toEqual(["new", "old"]);
       expect(tasks[0]?.spec.prompt).toBe(long.slice(0, QUEUE_PROMPT_PREVIEW));
@@ -172,15 +187,17 @@ describe("leader requests", () => {
       await leader.settled();
       const request = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it", taskId: "mine" };
       leader.deliver(await appRequest("submit", request));
-      const { task: queuedTask } = (await replies.next()).response.payload as SubmitResponse;
+      const submitted = (await replies.next()).response.payload;
+      // Checked raw: the app's parse rebuilds the spec, so it would hide a `taskId` the leader kept.
+      expect(submitted).not.toHaveProperty(["task", "spec", "taskId"]);
+      const { task: queuedTask } = submitReply(submitted);
       // The app's `taskId` is not a field a task takes: the scheduler mints its own.
       expect(queuedTask.id).not.toBe("mine");
       expect(queuedTask).toMatchObject({ state: "ready", spec: { repo: "github.com/acme/app", prompt: "fix it" } });
-      expect(queuedTask.spec).not.toHaveProperty("taskId");
       expect((await store.get(queuedTask.id))?.body.id).toBe(queuedTask.id);
 
       leader.deliver(await appRequest("queue"));
-      const queued = ((await replies.next()).response.payload as QueueResponse).tasks;
+      const queued = queueReply((await replies.next()).response.payload).tasks;
       // Placed on submit, so the decision is already there — with nobody in this registry to choose.
       expect(queued).toMatchObject([{ id: queuedTask.id, decision: { chosen: null } }]);
 

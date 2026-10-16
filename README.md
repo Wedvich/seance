@@ -303,6 +303,15 @@ daemon connects again. `seanced uninstall` deletes it for you on the way out; un
 
 There is no title field: the daemon names the tmux window after the prompt.
 
+**Auto** at the top of the machine picker lets the scheduler choose: the repository
+picker then lists repos by origin, across every machine that has a clone, and a
+placement preview under the tiles says where it would start and why each other
+machine lost. **Queue on auto** hands it to the scheduler, and the verdict follows
+the task until it is running, with the decision behind it. Auto is greyed — with
+the reason — when no scheduler is leading, or when the one nominated can't be
+verified (its registry entry doesn't open with your key); picking a machine directly
+always works, with or without one.
+
 **Settings → Machines** shows every machine with its exclaves and accounts, current
 CPU and memory pressure, the newest quota reading per account, and history
 charts drawn from each daemon's own store — an asleep machine's history waits until

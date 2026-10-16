@@ -5,8 +5,10 @@ import {
   type MetricName,
   type MetricsSeries,
   type MetricsStep,
+  type Decision,
   type SessionEntry,
   type SpawnErrorCode,
+  type Task,
 } from "@seance/shared";
 
 /** Offered models. The wire keeps `model` a free string so this can change without a daemon deploy. */
@@ -68,11 +70,27 @@ export type Verdict =
       readonly reason: "dropped" | "undelivered";
       readonly machine: string;
       readonly sessionCount: number | null;
-    };
+    }
+  /**
+   * An `auto` spawn the scheduler accepted. `task` is the newest copy the
+   * leader reported — refreshed from `queue` while the verdict is up — so the
+   * screen follows it from waiting to placed, with its decision.
+   */
+  | { readonly kind: "queued"; readonly task: Task }
+  /** `submit` never landed, or the leader refused it; `message` says which. */
+  | { readonly kind: "unqueued"; readonly message: string; readonly mayHaveLanded: boolean };
 
 /** What survives a reload; transient fields are deliberately absent. */
 export interface PersistedForm {
   readonly machineId: string | null;
+  /**
+   * The machine picker's `auto`: the scheduler places the spawn. Beside
+   * `machineId` rather than a sentinel in it, so turning it off falls back to
+   * the machine picked last.
+   */
+  readonly auto: boolean;
+  /** The repo `auto` runs, by `RepoEntry.origin` — the cross-machine key, since no clone is chosen. */
+  readonly autoRepo: string | null;
   /**
    * Last repo picked per machine, by deviceId — the single source of truth for
    * the repo selection, so switching machines restores what you last ran there
@@ -126,6 +144,12 @@ export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly
   "30d": { span: 30 * 24 * 3600, step: 3600 },
 };
 
+/** The form's `route-preview`: what the scheduler would decide now, for the repo it was asked about. */
+export type PreviewState =
+  | { readonly kind: "loading"; readonly repo: string }
+  | { readonly kind: "ok"; readonly repo: string; readonly decision: Decision }
+  | { readonly kind: "failed"; readonly repo: string; readonly message: string };
+
 export type HistoryResult =
   | { readonly kind: "loading" }
   | { readonly kind: "ok"; readonly series: readonly MetricsSeries[] }
@@ -148,6 +172,8 @@ export interface HistoryView {
  */
 export const DEFAULT_FORM: PersistedForm = {
   machineId: null,
+  auto: false,
+  autoRepo: null,
   repos: {},
   prompt: "",
   worktree: true,

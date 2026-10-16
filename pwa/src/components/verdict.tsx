@@ -1,6 +1,9 @@
 import type { JSX } from "preact";
+import type { Machine, Task } from "@seance/shared";
+import { describeDecision, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
 import { failureBody } from "../view.ts";
+import { DecisionCard } from "./decision.tsx";
 
 interface Content {
   readonly glyph: string;
@@ -12,7 +15,62 @@ interface Content {
   readonly showBack: boolean;
 }
 
-function describe(verdict: Verdict, machineName: string): Content {
+/** What the person can do next about a task the scheduler holds, by its state. */
+function queuedBody(task: Task): string {
+  switch (task.state) {
+    case "ready":
+      return "The scheduler holds it and places it as soon as a machine can take it. Nothing is running yet.";
+    case "reserved":
+      return "The scheduler picked a machine and is starting the session there.";
+    case "running":
+    case "needs-input":
+      return "Open Claude on your phone and continue the session from there.";
+    case "lost":
+      return "Its machine stopped answering, so the scheduler will not start it anywhere else — the session may still be alive there. It settles once that machine is back.";
+    case "done":
+      return "The session ended.";
+    case "failed":
+      return "The machine refused the spawn. Nothing is running.";
+    case "cancelled":
+      return "Nothing is running.";
+  }
+}
+
+function describe(verdict: Verdict, machineName: string, machines: readonly Machine[], now: number): Content {
+  if (verdict.kind === "queued") {
+    const { task } = verdict;
+    const settled = task.state !== "ready" && task.state !== "reserved";
+    return {
+      // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.
+      glyph: task.state === "failed" ? "!" : task.state === "lost" ? "?" : settled ? "✓" : "…",
+      glyphClass:
+        task.state === "failed"
+          ? "verdict-glyph verdict-glyph-err"
+          : settled && task.state !== "lost"
+            ? "verdict-glyph"
+            : "verdict-glyph verdict-glyph-muted",
+      headline: taskHeadline(task, machines, now),
+      body: queuedBody(task),
+      detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
+      primary: { label: "Start another", onClick: "another" },
+      showBack: true,
+    };
+  }
+
+  if (verdict.kind === "unqueued") {
+    return {
+      glyph: verdict.mayHaveLanded ? "?" : "!",
+      glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
+      headline: verdict.mayHaveLanded ? "The scheduler's answer was lost." : "The scheduler didn't queue it.",
+      body: verdict.mayHaveLanded
+        ? `${verdict.message} It may have been queued anyway — check your sessions before trying again.`
+        : verdict.message,
+      detail: null,
+      primary: { label: "Back to the form", onClick: "back" },
+      showBack: false,
+    };
+  }
+
   if (verdict.kind === "ok" && verdict.pending === true) {
     // The process is up, so this is not a failure — but "It's running" would be
     // a lie about the only thing you came here to learn, and the detail below
@@ -116,6 +174,8 @@ function describe(verdict: Verdict, machineName: string): Content {
 export function VerdictView(props: {
   verdict: Verdict;
   machineName: string;
+  machines: readonly Machine[];
+  now: number;
   /** True while the exit animation plays; unmount follows via onExited. */
   closing?: boolean;
   onExited?: () => void;
@@ -124,8 +184,10 @@ export function VerdictView(props: {
   onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
-  const { verdict, machineName, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
-  const content = describe(verdict, machineName);
+  const { verdict, machineName, machines, now, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
+  const content = describe(verdict, machineName, machines, now);
+  const decision = verdict.kind === "queued" ? verdict.task.decision : undefined;
+  const placed = verdict.kind === "queued" && verdict.task.state !== "ready";
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
@@ -144,6 +206,13 @@ export function VerdictView(props: {
       <h2 className="verdict-headline">{content.headline}</h2>
       <p className="verdict-body">{content.body}</p>
       {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
+      {decision !== undefined && (
+        <DecisionCard
+          summary={describeDecision(decision, machines, now, placed ? "did" : "would")}
+          title={placed ? "WHY THERE" : "WHERE IT WOULD GO"}
+          quota
+        />
+      )}
       <div className="verdict-actions">
         <button type="button" className="primary" onClick={onPrimary}>
           {content.primary.label}

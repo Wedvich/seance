@@ -5,6 +5,7 @@ import {
   MODEL_LABELS,
   type HistoryView,
   type PersistedForm,
+  type PreviewState,
   type RescanState,
   type SessionsView,
   type SheetKind,
@@ -25,7 +26,7 @@ export interface Tile {
   readonly label: string;
   readonly value: string;
   readonly mono: boolean;
-  readonly dot: "ok" | "off" | null;
+  readonly dot: "ok" | "off" | "auto" | null;
 }
 
 export interface Banner {
@@ -41,6 +42,19 @@ export interface PrimaryButton {
   readonly enabled: boolean;
   /** True while a spawn is in flight; drives the busy shimmer. */
   readonly busy: boolean;
+}
+
+/** The machine picker's `auto` row, greyed with the reason whenever nothing could answer it. */
+export interface AutoAvailability {
+  readonly available: boolean;
+  /** Why it is greyed; null while available. */
+  readonly reason: string | null;
+}
+
+/** A repo as `auto` names it: by origin, labelled by its path on the host. */
+export interface AutoRepo {
+  readonly origin: string;
+  readonly label: string;
 }
 
 export interface ViewModel {
@@ -60,6 +74,9 @@ export interface ViewModel {
   readonly ignoredNote: string | null;
   readonly machine: Machine | null;
   readonly repo: RepoEntry | null;
+  readonly autoAvailability: AutoAvailability;
+  /** Non-null while the form is on `auto`. */
+  readonly auto: { readonly repo: AutoRepo | null; readonly repos: readonly AutoRepo[] } | null;
 }
 
 export interface AppState {
@@ -83,6 +100,8 @@ export interface AppState {
   /** The repo sheet's rescan row; a failure is cleared once its sheet closes. */
   readonly rescan: RescanState;
   readonly verdict: Verdict | null;
+  /** The `auto` form's `route-preview`; null while the form is on a machine. */
+  readonly preview: PreviewState | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
   readonly sessions: Readonly<Record<string, SessionsView | "unknown">>;
 }
@@ -245,6 +264,43 @@ function deriveMeta(state: AppState): string {
   return `${connected.length} online · ${asleep} asleep · ${total}${partial ? "+" : ""} ${noun}`;
 }
 
+/**
+ * `auto` is offered only when a verified leader would answer it. An unverified
+ * one is named as such rather than as "no leader": it is what a bearer-token
+ * holder squatting the role looks like, and the fix is not to wait (DESIGN.md,
+ * Scheduler, "Leadership").
+ */
+export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
+  if (relay.status !== "open") return { available: false, reason: "Not connected to the relay" };
+  if (relay.scheduler.kind === "none") return { available: false, reason: "No scheduler is leading right now" };
+  if (relay.scheduler.kind === "unverified") {
+    return { available: false, reason: "Leader unverified — its registry entry doesn't open with this key" };
+  }
+  return { available: true, reason: null };
+}
+
+/** `host/path` → `path`: the host says nothing a person picks a repo by. A remote-less origin is its basename already. */
+function originLabel(origin: string): string {
+  const slash = origin.indexOf("/");
+  return slash === -1 ? origin : origin.slice(slash + 1);
+}
+
+/** Every repo some machine has a clone of, by origin, once each — what `auto` can be asked to run. */
+export function autoRepos(machines: readonly Machine[]): readonly AutoRepo[] {
+  const origins = new Set<string>();
+  for (const machine of machines) {
+    for (const repo of machine.repos) if (repo.origin !== undefined) origins.add(repo.origin);
+  }
+  return [...origins]
+    .map((origin) => ({ origin, label: originLabel(origin) }))
+    .toSorted((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+}
+
+/** The remembered origin, else the first — as `resolveRepo` falls back for a machine. */
+export function resolveAutoRepo(repos: readonly AutoRepo[], form: PersistedForm): AutoRepo | null {
+  return repos.find((repo) => repo.origin === form.autoRepo) ?? repos[0] ?? null;
+}
+
 function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
   const { relay } = state;
   if (relay.rejection !== null) {
@@ -310,6 +366,7 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       opensSettings: false,
     };
   }
+  if (state.form.auto) return null;
   if (machine !== null && !machine.connected) {
     return { title: `${machine.name} is offline`, body: offlineBody(machine), tone: "fg2", opensSettings: false };
   }
@@ -317,6 +374,10 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
 }
 
 function deriveFooterStatus(state: AppState, machine: Machine | null, now: number): string {
+  if (state.form.auto) {
+    const { reason } = deriveAutoAvailability(state.relay);
+    return reason ?? "The scheduler picks the machine";
+  }
   if (machine === null) return "";
   if (!machine.connected) return `Last seen ${formatSeen(machine.lastSeen, now)} · sessions unknown`;
   const count = sessionCount(state, machine.deviceId);
@@ -340,6 +401,12 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
   }
   // Ahead of `spawning`, which it precedes: the two are never both set.
   if (state.rescanning) return { label: "Rescanning…", enabled: false, busy: true };
+  if (state.form.auto) {
+    if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
+    if (!deriveAutoAvailability(relay).available) return blocked("Auto is unavailable");
+    if (resolveAutoRepo(autoRepos(relay.machines), state.form) === null) return blocked("No repo to run");
+    return { label: "Queue on auto", enabled: true, busy: false };
+  }
   if (state.spawning) return { label: "Starting…", enabled: false, busy: true };
   if (machine === null) return blocked("Pick a machine");
   if (!machine.connected) return blocked(`${machine.name} is asleep`);
@@ -393,20 +460,26 @@ export function deriveView(state: AppState, now: number): ViewModel {
         )
       : null;
 
+  const auto = state.form.auto;
+  const repos = auto ? autoRepos(state.relay.machines) : [];
+  const autoRepo = auto ? resolveAutoRepo(repos, state.form) : null;
+
   return {
     meta: deriveMeta(state),
     relayState: state.relay.status === "open" ? "connected" : state.relay.settling ? "connecting" : "offline",
     relayLine: deriveRelayLine(state.relay),
     banner: deriveBanner(state, machine),
-    machineTile: {
-      label: "MACHINE",
-      value: machine?.name ?? "No machines",
-      mono: false,
-      dot: machine === null ? null : machine.connected ? "ok" : "off",
-    },
+    machineTile: auto
+      ? { label: "MACHINE", value: "Auto", mono: false, dot: "auto" }
+      : {
+          label: "MACHINE",
+          value: machine?.name ?? "No machines",
+          mono: false,
+          dot: machine === null ? null : machine.connected ? "ok" : "off",
+        },
     repoTile: {
       label: "REPOSITORY",
-      value: repoLabel ?? "No repos",
+      value: (auto ? autoRepo?.label : repoLabel) ?? "No repos",
       mono: true,
       dot: null,
     },
@@ -428,5 +501,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     ignoredNote: deriveIgnoredNote(state.relay),
     machine,
     repo,
+    autoAvailability: deriveAutoAvailability(state.relay),
+    auto: auto ? { repo: autoRepo, repos } : null,
   };
 }

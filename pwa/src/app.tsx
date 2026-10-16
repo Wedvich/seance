@@ -60,6 +60,8 @@ export function App(props: { store: Store }): JSX.Element {
               key={rendered}
               verdict={rendered}
               machineName={view.machine?.name ?? "that machine"}
+              machines={state.relay.machines}
+              now={now}
               closing={exit.closing}
               onExited={exit.onExited}
               onRetry={() => store.retrySpawn(rendered)}
@@ -77,6 +79,7 @@ export function App(props: { store: Store }): JSX.Element {
               machines={state.relay.machines}
               now={now}
               rescan={state.rescan}
+              preview={state.preview}
             />
           )}
         </main>
@@ -167,6 +170,8 @@ function useSpawnActions(store: Store): SpawnActions {
       spawn: () => void store.spawn(),
       dismissLayer: () => store.dismissLayer(),
       selectMachine: (deviceId) => store.selectMachine(deviceId),
+      selectAuto: () => store.selectAuto(),
+      refreshPreview: () => void store.refreshPreview(),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
       rescan: () => void store.rescan(),

@@ -17,10 +17,16 @@ import {
   type MetricsReply,
   type MetricsRequest,
   type Plain,
+  type QueueReply,
   type RegistryView,
   type RepoEntry,
   type RequestOp,
   type RescanResponse,
+  type RoutePreviewReply,
+  type SchedulerLeader,
+  type SchedulerOp,
+  type SubmitReply,
+  type TaskRequest,
   type UndeliverableCode,
 } from "./types.ts";
 import {
@@ -29,7 +35,10 @@ import {
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
+  parseQueueReply,
   parseRescanResponse,
+  parseRoutePreviewReply,
+  parseSubmitReply,
 } from "./parse.ts";
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
 import { sanitizeStatus } from "./status-reader.ts";
@@ -50,7 +59,14 @@ export type SchedulerEventHandler = (plain: Plain, from: string) => void;
  * declined delivery is not — the request certainly did not land. "unsupported"
  * never left the app: the machine's register blob doesn't advertise the op.
  */
-export type FailureReason = UndeliverableCode | "refused" | "unsupported" | "timeout" | "disconnected";
+export type FailureReason =
+  | UndeliverableCode
+  | "refused"
+  | "unsupported"
+  | "timeout"
+  | "disconnected"
+  | "no_leader"
+  | "leader_unverified";
 
 export class RequestFailure extends Error {
   constructor(
@@ -77,6 +93,10 @@ export function failureReasonText(failure: RequestFailure): string {
       return "sent as the scheduler under a term that is no longer the leader's";
     case "disconnected":
       return "lost the relay connection before the request went out";
+    case "no_leader":
+      return "no scheduler is leading — no connected daemon can take auto right now";
+    case "leader_unverified":
+      return "the nominated scheduler's registry entry does not open with this key, so nothing is sent to it";
     // The message already names the code the relay sent, or the op the daemon
     // predates; no fixed line could.
     case "refused":
@@ -112,6 +132,20 @@ export interface Machine {
   /** The register blob's `exclaves`, which `status` indexes; absent from a daemon that predates them. */
   readonly exclaves?: readonly ExclaveInfo[];
 }
+
+/**
+ * Who would answer `auto` (DESIGN.md, Scheduler, "Leadership"). `unverified`
+ * is a leader the relay nominated whose registry entry did not become a
+ * `Machine` — its `info` not sealed `from` its own id under this key — which is
+ * what a bearer-token holder squatting the role looks like. Treated as no
+ * leader: nothing is sent to it.
+ */
+export type SchedulerAvailability =
+  | { readonly kind: "none" }
+  | { readonly kind: "unverified"; readonly deviceId: string; readonly term: number }
+  | { readonly kind: "ready"; readonly deviceId: string; readonly term: number };
+
+const NO_SCHEDULER: SchedulerAvailability = { kind: "none" };
 
 export interface RelayState {
   readonly status: RelayStatus;
@@ -150,6 +184,8 @@ export interface RelayState {
    * "every machine vanished". Reset whenever the socket leaves `open`.
    */
   readonly registrySettled: boolean;
+  /** From the last registry push, checked against the entries that opened. */
+  readonly scheduler: SchedulerAvailability;
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -186,6 +222,7 @@ const INITIAL_STATE: RelayState = {
   skewed: 0,
   settling: true,
   registrySettled: false,
+  scheduler: NO_SCHEDULER,
 };
 
 interface Pending {
@@ -221,6 +258,14 @@ function parseRegistryView(value: unknown): RegistryView | null {
   };
 }
 
+/** Lenient like an entry's status: a malformed field costs `auto`, never the push. Absent is a relay that predates leadership. */
+function parseLeader(value: unknown): SchedulerLeader | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, term } = value;
+  if (typeof deviceId !== "string" || typeof term !== "number" || !Number.isSafeInteger(term)) return null;
+  return { deviceId, term };
+}
+
 /**
  * `RelayToAppFrame`, loosened where forward compatibility needs it: a registry
  * push carries how many entries were skipped instead of failing whole, and
@@ -228,7 +273,12 @@ function parseRegistryView(value: unknown): RegistryView | null {
  * can still fail its request fast.
  */
 type ParsedFrame =
-  | { readonly t: "registry"; readonly entries: readonly RegistryView[]; readonly skipped: number }
+  | {
+      readonly t: "registry";
+      readonly entries: readonly RegistryView[];
+      readonly skipped: number;
+      readonly scheduler: SchedulerLeader | null;
+    }
   | { readonly t: "msg"; readonly env: Envelope }
   | { readonly t: "status"; readonly deviceId: string; readonly env: Envelope }
   | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string }
@@ -267,7 +317,7 @@ function parseFrame(text: string): ParsedFrame | null {
       }
       entries.push(entry);
     }
-    return { t: "registry", entries, skipped };
+    return { t: "registry", entries, skipped, scheduler: parseLeader(value["scheduler"]) };
   }
   if (value["t"] === "msg") {
     const env = parseEnvelope(value["env"]);
@@ -383,6 +433,8 @@ export class RelayClient {
    */
   readonly #scans = new Map<string, RescanResponse>();
   #entries: readonly RegistryView[] = [];
+  /** The leader the last push named, before it is checked against the entries that opened. */
+  #leader: SchedulerLeader | null = null;
   #state: RelayState = INITIAL_STATE;
   #socket: WebSocket | null = null;
   #attempt = 0;
@@ -598,7 +650,9 @@ export class RelayClient {
         // received since the send. A silently dead app socket looks exactly like
         // a silent machine from here, and marking on that guess paints every
         // polled machine asleep at once.
-        if (this.#socket === socket && this.#lastFrameAt >= sentAt) this.#markProvenOffline(deviceId);
+        if (this.#socket === socket && this.#lastFrameAt >= sentAt && deviceId !== SCHEDULER_ID) {
+          this.#markProvenOffline(deviceId);
+        }
         reject(new RequestFailure("timeout", `${op} timed out after ${limit}ms`));
       }, limit);
 
@@ -786,7 +840,7 @@ export class RelayClient {
       // The count is the only trace the skipped entries leave — parseFrame sees
       // peer-supplied text, so nothing of them is echoed.
       if (frame.skipped > 0) this.#wireLog("dropped", `reason=entry-shape count=${frame.skipped}`);
-      await this.#onRegistry(frame.entries, frame.skipped);
+      await this.#onRegistry(frame.entries, frame.skipped, frame.scheduler);
       return;
     }
     if (frame.t === "status") {
@@ -810,7 +864,8 @@ export class RelayClient {
   }
 
   #onUndeliverable(to: string, iv: string, code: string): void {
-    if (code === "offline") this.#markProvenOffline(to);
+    // The scheduler address names no machine: there is nothing to mark.
+    if (code === "offline" && to !== SCHEDULER_ID) this.#markProvenOffline(to);
     const id = this.#idByIv.get(iv);
     // Quoted like every other wire value: `to`, `iv` and `code` are all relay-supplied text.
     this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
@@ -869,9 +924,10 @@ export class RelayClient {
     pending?.settle({ ok: true, payload: plain.payload });
   }
 
-  async #onRegistry(entries: readonly RegistryView[], skipped: number): Promise<void> {
+  async #onRegistry(entries: readonly RegistryView[], skipped: number, leader: SchedulerLeader | null): Promise<void> {
     this.#clearRegistrySettle();
     this.#entries = entries;
+    this.#leader = leader;
     this.#skippedEntries = skipped;
     // Replaced, not pruned: seeding a fresh map from this push's own keys makes
     // cache ⊆ registry hold by construction. A slow decrypt from an older push
@@ -1045,6 +1101,7 @@ export class RelayClient {
       } else machines.push(built);
     }
     this.#patch({
+      scheduler: this.#schedulerAvailability(machines),
       // Every push re-derives the whole list, and the app connect behind every
       // resume re-sends a registry that is usually identical. Handing back the
       // previous array is what lets #patch — and Preact — skip the render.
@@ -1057,6 +1114,63 @@ export class RelayClient {
       skewed: skewedHere + this.#skippedEntries,
       ...extra,
     });
+  }
+
+  /**
+   * The relay's nominee is believed only when its own entry opened into a
+   * `Machine`: the rule that decides which entries become machines is the one
+   * that says the nominee holds the PSK, which the relay cannot check (DESIGN.md,
+   * Scheduler, "Leadership"). Same object back while nothing moved.
+   */
+  #schedulerAvailability(machines: readonly Machine[]): SchedulerAvailability {
+    const leader = this.#leader;
+    const prior = this.#state.scheduler;
+    if (leader === null) return NO_SCHEDULER;
+    const kind = machines.some((m) => m.deviceId === leader.deviceId) ? "ready" : "unverified";
+    if (prior.kind === kind && prior.deviceId === leader.deviceId && prior.term === leader.term) return prior;
+    return { kind, deviceId: leader.deviceId, term: leader.term };
+  }
+
+  /**
+   * One request to the scheduler, refused here — never sent — unless a
+   * verified leader is nominated. Sealed `to: SCHEDULER_ID`, so the relay
+   * routes it to whoever leads by the time it lands; the reply, validated like
+   * any that reaches the render path, comes from that daemon. Null is a reply
+   * this build cannot read.
+   */
+  async #schedule<T>(op: SchedulerOp, payload: unknown, parse: (value: unknown) => T | null): Promise<T | null> {
+    const scheduler = this.#state.scheduler;
+    if (scheduler.kind === "none") throw new RequestFailure("no_leader", "no scheduler is leading");
+    if (scheduler.kind === "unverified") {
+      throw new RequestFailure("leader_unverified", `the scheduler nominee ${quote(scheduler.deviceId)} is unverified`);
+    }
+    let reply: unknown;
+    try {
+      reply = await this.request<unknown>(SCHEDULER_ID, op, payload);
+    } catch (err) {
+      // The relay answers `offline` for this address when no leader holds a socket: no machine was asked.
+      if (err instanceof RequestFailure && err.reason === "offline") {
+        throw new RequestFailure("no_leader", "the relay has no leader to route to");
+      }
+      throw err;
+    }
+    const parsed = parse(reply);
+    if (parsed === null) this.#wireLog("dropped", `from=${quote(SCHEDULER_ID)} reason=${op}-shape`);
+    return parsed;
+  }
+
+  /** What routing would decide for `request` now; reserves nothing. */
+  routePreview(request: TaskRequest): Promise<RoutePreviewReply | null> {
+    return this.#schedule("route-preview", request, parseRoutePreviewReply);
+  }
+
+  /** M2 only — M3 enqueues through the store instead (`SubmitResponse`). */
+  submit(request: TaskRequest): Promise<SubmitReply | null> {
+    return this.#schedule("submit", request, parseSubmitReply);
+  }
+
+  queue(): Promise<QueueReply | null> {
+    return this.#schedule("queue", {}, parseQueueReply);
   }
 
   /** Same object back when nothing moved: `useState` bails out on reference equality. */

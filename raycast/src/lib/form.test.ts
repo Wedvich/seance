@@ -342,6 +342,7 @@ function relayOf(machines: readonly Machine[]): RelayState {
     skewed: 0,
     settling: false,
     registrySettled: true,
+    scheduler: { kind: "none" },
   };
 }
 

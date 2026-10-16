@@ -10,6 +10,7 @@ import {
   SCHEDULER_ID,
   seal,
   toBase64,
+  type Decision,
   type Envelope,
   type MachineInfo,
   type MachineStatus,
@@ -890,6 +891,79 @@ describe("scheduler leg", () => {
       await waitFor((s) => s.machines.every((m) => !ids.includes(m.deviceId) || !m.connected), "both gone");
       for (const id of ids) client.forget(id);
       await waitFor((s) => s.machines.every((m) => !ids.includes(m.deviceId)), "both forgotten");
+      client.stop();
+    }
+  });
+});
+
+describe("auto", () => {
+  type Msg = { t: "msg"; env: Envelope };
+  const decision: Decision = { at: 1, chosen: null, candidates: [] };
+
+  test("a nominee whose entry does not open is unverified and is sent nothing; one whose entry opens answers", async () => {
+    const squatterId = await newDeviceId();
+    const leaderId = await newDeviceId();
+    const { client, waitFor } = startClient();
+    // A bearer-token holder's daemon socket: a signed register with roles, and an
+    // info blob it could not seal under the PSK.
+    const squatter = await connectDaemon(relay);
+    squatter.send(await register(squatterId, { roles: [DAEMON_ROLES.scheduler] }));
+    await squatter.waitFor("lead");
+    let leader: Awaited<ReturnType<typeof connectDaemon>> | null = null;
+    try {
+      const unverified = await waitFor((s) => s.scheduler.kind === "unverified", "the squatter nominated");
+      expect(unverified.scheduler).toMatchObject({ kind: "unverified", deviceId: squatterId });
+      const request = { repo: "github.com/acme/app", mode: "worktree" } as const;
+      await expect(client.routePreview(request)).rejects.toMatchObject({ reason: "leader_unverified" });
+      await expect(client.submit(request)).rejects.toMatchObject({ reason: "leader_unverified" });
+      await squatter.expectNo("msg");
+
+      squatter.close();
+      await waitFor((s) => s.scheduler.kind === "none", "no leader once the squatter goes");
+      await expect(client.queue()).rejects.toMatchObject({ reason: "no_leader" });
+
+      leader = await connectDaemon(relay);
+      const info = await seal(
+        key,
+        { to: APP_ID, from: leaderId },
+        { id: leaderId, ts: Date.now(), op: "machine-info", payload: machineInfo(leaderId) },
+      );
+      leader.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+      await waitFor((s) => s.scheduler.kind === "ready", "the real leader verified");
+      const asked = client.routePreview(request);
+      const { env } = await leader.waitFor<Msg>("msg");
+      expect({ to: env.to, from: env.from }).toEqual({ to: SCHEDULER_ID, from: APP_ID });
+      const plain = await open(key, env);
+      expect(plain).toMatchObject({ op: "route-preview", payload: request });
+      const reply: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "route-preview",
+        re: plain.id,
+        payload: { decision },
+      };
+      leader.send({ t: "msg", env: await seal(key, { to: APP_ID, from: leaderId }, reply) });
+      expect(await asked).toEqual({ decision });
+
+      // A reply this build cannot read is null, never half a decision.
+      const garbled = client.routePreview(request);
+      const second = await open(key, (await leader.waitFor<Msg>("msg")).env);
+      const bad: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "route-preview",
+        re: second.id,
+        payload: { decision: { at: "x" } },
+      };
+      leader.send({ t: "msg", env: await seal(key, { to: APP_ID, from: leaderId }, bad) });
+      expect(await garbled).toBeNull();
+    } finally {
+      squatter.close();
+      leader?.close();
+      const ids = [squatterId, leaderId];
+      await pollUntil(() => client.getState().scheduler.kind === "none", "both gone");
+      for (const id of ids) client.forget(id);
+      await waitFor((s) => s.registrySize === 0 || s.machines.every((m) => !ids.includes(m.deviceId)), "forgotten");
       client.stop();
     }
   });

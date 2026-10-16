@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DAEMON_ROLES,
   liveStatus,
   newestQuotaByAccount,
   type RegistryView,
@@ -15,9 +16,9 @@ import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
-import { connectApp } from "../relay/test/harness.ts";
+import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
 import { deriveMachines } from "../pwa/src/machines-view.ts";
-import type { AppState } from "../pwa/src/view.ts";
+import { deriveView, type AppState } from "../pwa/src/view.ts";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
@@ -927,4 +928,133 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       await remote.stop();
     }
   }, 90_000);
+});
+
+describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
+  // M2's first Exit bullet: two daemons up, an `auto` spawn from the app lands
+  // where its decision record says, and the record says why the other lost.
+  test("an auto spawn lands on the machine its decision names, and the record says why the other was rejected", async () => {
+    // B is signed out: its only exclave has no account, so it can bill nothing.
+    const second = await stack.startSecondDaemon({ name: "AutoBox" });
+    const app = startApp(stack, { auto: true, prompt: "route me" });
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      // Both machines decrypted with a live status, and the leader verified.
+      const ready = (state: AppState): boolean =>
+        state.relay.scheduler.kind === "ready" &&
+        [stack.deviceId, second.deviceId].every((id) => {
+          const machine = state.relay.machines.find((m) => m.deviceId === id);
+          return machine?.connected === true && machine.status !== undefined && machine.repos.length > 0;
+        });
+      await app.waitForApp(ready, "both machines live and the leader verified");
+      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({ available: true, reason: null });
+
+      // The preview first, as the form shows it: a dry run, nothing reserved.
+      await app.store.refreshPreview();
+      const preview = app.store.getState().preview;
+      if (preview?.kind !== "ok") throw new Error(`no preview: ${JSON.stringify(preview)}`);
+      expect(preview.decision.chosen?.deviceId).toBe(stack.deviceId);
+      expect(stack.daemon.leader.term()).not.toBeNull();
+      expect((await stack.leaderStore.list()).filter((t) => t.body.state === "reserved")).toEqual([]);
+      // A drop leaves the leader as it was, and the form still asks again once back — a
+      // preview the drop failed in flight would otherwise stand until tapped.
+      app.client.reconnect();
+      await app.waitForApp(
+        (state) => state.relay.status === "open" && state.preview?.kind === "ok" && state.preview !== preview,
+        "the preview asked again after the reconnect",
+      );
+
+      await app.store.spawn();
+      const queued = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
+        "the queued task to run",
+      );
+      if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      const { task } = queued.verdict;
+      const decision = task.decision;
+      expect(decision?.chosen?.deviceId).toBe(stack.deviceId);
+      expect(task.assignment?.deviceId).toBe(decision?.chosen?.deviceId);
+      const loser = decision?.candidates.find((c) => c.deviceId === second.deviceId);
+      expect(loser?.score).toBeUndefined();
+      expect(loser?.rejected).toContainEqual({ code: "auth_missing" });
+      // And it really is there: the chosen machine runs a session carrying the task id.
+      const listed = await app.client.request<{ sessions: readonly SessionEntry[] }>(stack.deviceId, "sessions", {});
+      if ("ok" in listed) throw new Error(listed.code);
+      const session = listed.sessions.find((s) => s.taskId === task.id);
+      expect(session).toBeDefined();
+      window = session?.window ?? null;
+      // Nothing reached B: no spawn ever audited there.
+      expect(await Bun.file(second.log).text()).not.toContain('op="spawn"');
+    } finally {
+      if (window !== null) await killWindow(window);
+      app.stop();
+      await second.stop();
+    }
+  }, 60_000);
+
+  // M2's Exit, the reader check: a bearer-token holder's daemon socket with
+  // signed roles and no PSK, connected first, is nominated; the app reads it as
+  // "leader unverified", greys auto, and sends it nothing. With the real leader
+  // down auto greys too, and it returns under a higher term.
+  test("a squatter nominated first reads as leader unverified: auto greys and nothing is sent to it", async () => {
+    const app = startApp(stack, { auto: true });
+    const squatterId = await newDeviceId();
+    let squatter: Awaited<ReturnType<typeof connectDaemon>> | null = null;
+    let down = false;
+    try {
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the suite's daemon verified as leader");
+      const before = app.client.getState().scheduler;
+      const term = before.kind === "ready" ? before.term : 0;
+
+      stack.daemon.stop();
+      down = true;
+      await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
+      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({
+        available: false,
+        reason: "No scheduler is leading right now",
+      });
+
+      // Signed roles, so the relay nominates it; an info blob it cannot seal under the PSK.
+      squatter = await connectDaemon(stack.relay);
+      squatter.send(await register(squatterId, { roles: [DAEMON_ROLES.scheduler] }));
+      await squatter.waitFor("lead");
+      await stack.restartDaemon();
+      down = false;
+      const seen = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "unverified" && ownMachine(state, stack.deviceId)?.connected === true,
+        "the squatter nominated, with the real daemon back and following",
+      );
+      expect(seen.relay.scheduler).toMatchObject({ kind: "unverified", deviceId: squatterId });
+      const view = deriveView(seen, Date.now());
+      expect(view.autoAvailability).toEqual({
+        available: false,
+        reason: "Leader unverified — its registry entry doesn't open with this key",
+      });
+      expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
+      // The form can neither preview nor queue, and the client refuses at the source.
+      await app.store.refreshPreview();
+      expect(app.store.getState().preview).toBeNull();
+      await app.store.spawn();
+      expect(app.store.getState().verdict).toBeNull();
+      await expect(app.client.queue()).rejects.toMatchObject({ reason: "leader_unverified" });
+      await squatter.expectNo("msg", 500);
+
+      // The squatter's socket goes: the real daemon leads, verified, under a higher term.
+      squatter.close();
+      const back = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && state.relay.scheduler.deviceId === stack.deviceId,
+        "the real daemon to lead again",
+      );
+      const now = back.relay.scheduler;
+      expect(now.kind === "ready" ? now.term : 0).toBeGreaterThan(term);
+      // The form asks the new leader at once, mid-takeover: `not_ready` is waited out, not shown.
+      await app.waitForApp((state) => state.preview?.kind === "ok", "the preview from the new leader");
+    } finally {
+      squatter?.close();
+      if (down) await stack.restartDaemon();
+      app.stop();
+    }
+  }, 60_000);
 });

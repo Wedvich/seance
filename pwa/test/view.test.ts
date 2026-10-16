@@ -41,6 +41,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     skewed: 0,
     settling: false,
     registrySettled: true,
+    scheduler: { kind: "none" },
     ...overrides,
   };
 }
@@ -58,6 +59,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     rescanning: false,
     rescan: "idle",
     verdict: null,
+    preview: null,
     sessions: {},
     ...overrides,
   };
@@ -453,5 +455,83 @@ describe("failureBody", () => {
   // unlisted one used to leave the verdict card blank.
   test("says something for a code minted after this build", () => {
     expect(failureBody("quota_exceeded", "seance", "MacBook Pro")).toContain("refused the spawn");
+  });
+});
+
+describe("auto", () => {
+  const withOrigins = machine({
+    repos: [
+      {
+        name: "seance",
+        path: "/Users/martin/repos/seance",
+        defaultBranch: "main",
+        origin: "github.com/wedvich/seance",
+      },
+      { name: "scratch", path: "/Users/martin/repos/scratch", defaultBranch: "main", origin: "scratch" },
+    ],
+  });
+  const other = machine({
+    deviceId: "dev-2",
+    name: "WSL",
+    repos: [{ name: "seance-1", path: "/home/m/seance", defaultBranch: "main", origin: "github.com/wedvich/seance" }],
+  });
+  const ready = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+
+  test("greyed with the reason whenever no verified leader would answer it", () => {
+    const cases = [
+      [{ kind: "none" }, "No scheduler is leading right now"],
+      [
+        { kind: "unverified", deviceId: "squat", term: 3 },
+        "Leader unverified — its registry entry doesn't open with this key",
+      ],
+    ] as const;
+    for (const [scheduler, reason] of cases) {
+      const view = deriveView(state({ relay: relay({ machines: [withOrigins], scheduler }) }, { auto: true }), NOW);
+      expect(view.autoAvailability).toEqual({ available: false, reason });
+      expect(view.footerStatus).toBe(reason);
+      expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
+    }
+    const down = deriveView(state({ relay: relay({ status: "retrying", scheduler: ready }) }), NOW);
+    expect(down.autoAvailability.available).toBe(false);
+  });
+
+  test("with a verified leader it queues, naming no machine, over every repo some machine clones", () => {
+    const view = deriveView(
+      state({ relay: relay({ machines: [withOrigins, other], scheduler: ready }) }, { auto: true }),
+      NOW,
+    );
+    expect(view.autoAvailability).toEqual({ available: true, reason: null });
+    expect(view.machineTile).toEqual({ label: "MACHINE", value: "Auto", mono: false, dot: "auto" });
+    // One row per origin, however many machines clone it; the host is dropped from the label.
+    expect(view.auto?.repos).toEqual([
+      { origin: "scratch", label: "scratch" },
+      { origin: "github.com/wedvich/seance", label: "wedvich/seance" },
+    ]);
+    expect(view.repoTile.value).toBe("scratch");
+    expect(view.button).toEqual({ label: "Queue on auto", enabled: true, busy: false });
+    expect(view.banner).toBeNull();
+  });
+
+  test("the remembered origin is the one shown; a machine picked directly ignores auto entirely", () => {
+    const remembered = deriveView(
+      state(
+        { relay: relay({ machines: [withOrigins], scheduler: ready }) },
+        { auto: true, autoRepo: "github.com/wedvich/seance" },
+      ),
+      NOW,
+    );
+    expect(remembered.repoTile.value).toBe("wedvich/seance");
+    // No leader at all, and a direct pick still starts: it goes to the daemon, not the scheduler.
+    const relayed = relay({ machines: [withOrigins, other], scheduler: { kind: "none" } });
+    const direct = deriveView(state({ relay: relayed }, { auto: false, machineId: "dev-2" }), NOW);
+    expect(direct.auto).toBeNull();
+    expect(direct.machineTile.value).toBe("WSL");
+    expect(direct.button.enabled).toBe(true);
+  });
+
+  test("with no clone carrying an origin there is nothing to run", () => {
+    const view = deriveView(state({ relay: relay({ scheduler: ready }) }, { auto: true }), NOW);
+    expect(view.auto?.repos).toEqual([]);
+    expect(view.button).toEqual({ label: "No repo to run", enabled: false, busy: false });
   });
 });

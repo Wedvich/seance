@@ -50,6 +50,8 @@ export function readForm(): PersistedForm {
   const record = raw as Record<string, unknown>;
   return {
     machineId: asString(record["machineId"]),
+    auto: record["auto"] === true,
+    autoRepo: asString(record["autoRepo"]),
     repos: asRepoMap(record["repos"]),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,

@@ -295,7 +295,11 @@ Séance's noise is cover for a real intruder.
    leader whose entry does not open as no leader, and what the squatter would
    be sent is sealed under the PSK. What it holds is the term, so it can keep
    `auto` unavailable until its socket goes — a visible stall, not a silent
-   one. M3's term-fenced store would let it delete the queue, so a relay-side
+   one. Built in M2 item 6: the PWA greys `auto` as "leader unverified" and the
+   app-role client refuses to send to such a leader at all. Daemons cannot
+   make the check — they never see the registry — but all they send the
+   scheduler is fire-and-forget `session-event`s, sealed under the PSK, so a
+   squatter learns their timing and nothing else. M3's term-fenced store would let it delete the queue, so a relay-side
    gate lands before it (Scheduler, "Leadership").
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
@@ -684,7 +688,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `msg` (daemon→app)                       | `daemon/src/relay-client.ts`                                                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                      |
 | `msg` (→`"machines"` broadcast)          | any PSK holder                                                                                                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                       |
 | op `update-available`                    | `daemon/src/run.ts` via `broadcast()`                                                                                                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                        |
-| `registry`                               | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                                                                                  | `shared/src/app-client.ts` (`scheduler` not yet read)                                                                                                                                                                                                                                                                                  |
+| `registry`                               | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                                                                                  | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened                                                                                                                                                                                                              |
 | `undeliverable`                          | `relay/src/hub.ts`                                                                                                                                 | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                             |
 | `forget`                                 | `shared/src/app-client.ts`                                                                                                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                |
 | `forget-refused`                         | `relay/src/hub.ts`                                                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                    |
@@ -975,7 +979,8 @@ together (re-sends registry data on every poll, useless offline).
 
 The scheduler (docs/scheduler.md is the plan; this section takes over each part as it lands) runs
 on one daemon at a time, the one the relay nominates. Nothing else about that daemon changes: it
-is an ordinary daemon with extra legs.
+is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's `auto` — is complete
+(2026-10-16); what it leaves for M3 and M4 is docs/scheduler.md's M2 "Gaps".
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 
@@ -2224,6 +2229,31 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   on a second machine meant retyping it. The spawned prompt rides the ok verdict;
   the form itself is still cleared on success, so a reload cannot resurrect a
   draft already acted on.
+- **`auto` is a machine-picker row, and the scheduler is asked only through it** (scheduler M2
+  item 6). The row sits above the machines, laid out like them, with a blue dot where a machine
+  has its green one (on the MACHINE tile too, once picked). It is greyed with its reason, its dot
+  grey like an offline machine's, unless `RelayState.scheduler` is `ready`: `none` reads "No scheduler is leading right now",
+  `unverified` reads "Leader unverified". Unverified is a nominee whose registry entry did not
+  open into a `Machine` — the rule that already decides which entries render, here deciding who
+  is believed to hold the PSK (Scheduler, "Leadership"). The client enforces the same check at
+  the source: `routePreview`, `submit` and `queue` throw `leader_unverified` or `no_leader`
+  without sending, so nothing reaches a squatter however the UI is driven; the relay's `offline`
+  for the scheduler address (no leader socket) comes back as `no_leader` too, and marks no
+  machine offline. On `auto` the repo
+  picker lists repos by `origin` across the fleet (a clone's name is machine-local), remembered
+  as `PersistedForm.autoRepo` beside `auto` rather than as a sentinel in `machineId`, so leaving
+  auto restores the machine picked last. A **placement preview** card asks `route-preview`
+  whenever auto is chosen, its repo changes, the leader changes or is verified, or the socket
+  comes back from a drop (which can fail a preview in flight while leaving the leader as it was) — the
+  decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
+  disclosure (`decision-view.ts` holds the wording). The preview leaves out the quota reading
+  each candidate was judged on; the queued task's record shows it, its age read as the account
+  cards read it, observer named and "asleep" when it is. **Queue on auto** sends `submit` (M2 only); the
+  verdict shows the task and its decision and re-reads `queue` every 2s, at most 30 times, while
+  the task is `ready` or `reserved` — a poll, because M2 has no `queue-changed` push (M3). A lost
+  `submit` reply says it may have been queued anyway and offers no retry: a second submit would be
+  a second task. Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
+  leader.
 - **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
   header only once there is something to clear — an always-present greyed control
   is noise — and empties the field on the first tap. It is replaced in the same

@@ -115,6 +115,13 @@ function TrashIcon(): JSX.Element {
   );
 }
 
+/** A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike. */
+export type Dot = "ok" | "off" | "auto";
+
+export function dotClass(dot: Dot): string {
+  return dot === "ok" ? "dot dot-ok" : dot === "auto" ? "dot dot-auto" : "dot";
+}
+
 export function SheetItem(props: {
   label: string;
   sub?: string | null;
@@ -123,7 +130,7 @@ export function SheetItem(props: {
   mono?: boolean;
   /** Command row (does something) rather than option row (picks something). */
   action?: boolean;
-  dot?: "ok" | "off" | null;
+  dot?: Dot | null;
   /** Trailing remove button. A nested button would be invalid, so this splits the row in two. */
   onRemove?: (() => void) | null;
   removeLabel?: string;
@@ -148,7 +155,7 @@ export function SheetItem(props: {
 
   const item = (
     <button type="button" className={classes.join(" ")} onClick={onClick} disabled={disabled} aria-current={selected}>
-      {dot !== null && <span className={dot === "ok" ? "dot dot-ok" : "dot"} />}
+      {dot !== null && <span className={dotClass(dot)} />}
       <span className="sheet-item-text">
         <span className={mono ? "sheet-item-label sheet-item-mono" : "sheet-item-label"}>{label}</span>
         {sub !== null && <span className="sheet-item-sub">{sub}</span>}

@@ -4,12 +4,16 @@ import type {
   MetricsRequest,
   RepoEntry,
   RescanResponse,
+  SchedulerAvailability,
+  SchedulerErrorCode,
   SessionsResponse,
   SpawnClient,
   SpawnRequest,
   SpawnResponse,
+  Task,
+  TaskRequest,
 } from "@seance/shared";
-import { failureReasonText, RequestFailure, type RelayClient } from "@seance/shared";
+import { failureReasonText, RequestFailure, TASK_REQUEST_LIMITS, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
   RANGE_SPANS,
@@ -22,12 +26,13 @@ import {
   type Model,
   type PendingSpawn,
   type PersistedForm,
+  type PreviewState,
   type SheetKind,
   type Verdict,
 } from "./state.ts";
 import { accountSeries } from "./chart.ts";
 import type { AppState } from "./view.ts";
-import { resolveMachine, resolveRepo } from "./view.ts";
+import { autoRepos, deriveAutoAvailability, resolveAutoRepo, resolveMachine, resolveRepo } from "./view.ts";
 
 /**
  * Owns the screen's state and the orchestration the transport deliberately
@@ -69,6 +74,40 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   internal_error: "The machine couldn't read its history store.",
 };
 
+/** What a scheduler refusal means to the person who asked; every code is worded, so a new one fails the build. */
+const SCHEDULER_ERRORS: Record<SchedulerErrorCode, string> = {
+  not_leader: "The scheduler moved to another machine while this was on its way. Try again.",
+  not_ready: "The scheduler is still taking over. Try again in a moment.",
+  invalid_request: "The scheduler refused the request. Update seanced and the app to matching versions.",
+  queue_full: "The scheduler already holds as many unfinished tasks as it will take.",
+  internal_error: "The scheduler hit an error.",
+  too_large: "The scheduler's answer was too large to send back.",
+};
+
+const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
+
+/**
+ * A queued task is followed while it is still on its way to a machine: the
+ * verdict re-reads `queue` this often, this many times, and stops once the task
+ * is placed or settled. A poll rather than a push because M2 has no
+ * `queue-changed` (M3), and bounded so a task no machine can take does not keep
+ * the phone asking.
+ */
+export const QUEUE_POLL_MS = 2_000;
+export const QUEUE_POLLS = 30;
+
+/** A preview answered `not_ready` (takeover still running) is asked again this often, this many times. */
+const PREVIEW_RETRY_MS = 1_000;
+const PREVIEW_RETRIES = 10;
+
+/**
+ * What would answer a preview: a new leader, or the same one verified at last,
+ * asks again. Never "", which is what a drop resets the last-asked key to.
+ */
+function schedulerKey(scheduler: SchedulerAvailability): string {
+  return scheduler.kind === "none" ? "none" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
+}
+
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
 
@@ -95,6 +134,10 @@ export class Store {
    * lands first (a rescan with no socket fails at once) would be the one it closes.
    */
   #held = false;
+  /** The leader `auto` last previewed against: a new one, or one verified at last, asks again. */
+  #previewedLeader = "";
+  #followTimer: ReturnType<typeof setTimeout> | null = null;
+  #previewRetry: ReturnType<typeof setTimeout> | null = null;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
     this.#client = client;
@@ -111,6 +154,7 @@ export class Store {
       rescanning: false,
       rescan: "idle",
       verdict: null,
+      preview: null,
       sessions: {},
     };
   }
@@ -138,6 +182,8 @@ export class Store {
       unsubscribe();
       document.removeEventListener("visibilitychange", onVisible);
       this.#disarmUndo();
+      this.#stopFollowing();
+      this.#stopPreviewRetry();
     };
   }
 
@@ -163,6 +209,9 @@ export class Store {
       // place means nothing ever counts as woken again and the session lists
       // stay at whatever the very first connect saw.
       this.#wokenAt = new Map();
+      // The leader usually survives a drop unchanged, so without this a preview
+      // the drop failed mid-flight would never be asked again on reconnect.
+      this.#previewedLeader = "";
       return;
     }
 
@@ -175,6 +224,7 @@ export class Store {
     // a question the reply is about to answer — leaving nothing to reconcile if the
     // reply is the thing that gets dropped.
     if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
+    if (schedulerKey(relay.scheduler) !== this.#previewedLeader && this.#state.form.auto) void this.refreshPreview();
   }
 
   /**
@@ -293,10 +343,88 @@ export class Store {
     // Counted before the patch: clearing the verdict here would otherwise leave
     // its entry behind once the sheet's back had been spent. Settings is not the
     // sheet's to close.
-    const { sheet, verdict } = this.#state;
-    const open = (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
-    this.#patch({ form: { ...this.#state.form, machineId }, verdict: null });
+    const open = this.#sheetAndVerdictOpen();
+    this.#patch({ form: { ...this.#state.form, machineId, auto: false }, verdict: null, preview: null });
     if (open > 0) history.go(-open);
+  }
+
+  /**
+   * The picker's `auto`: the scheduler places the spawn. Refused while nothing
+   * verified would answer it — the row is greyed then, and this is its backstop.
+   */
+  selectAuto(): void {
+    if (!deriveAutoAvailability(this.#state.relay).available) return;
+    const open = this.#sheetAndVerdictOpen();
+    this.#patch({ form: { ...this.#state.form, auto: true }, verdict: null });
+    if (open > 0) history.go(-open);
+    void this.refreshPreview();
+  }
+
+  /** The history entries a machine pick closes. */
+  #sheetAndVerdictOpen(): number {
+    const { sheet, verdict } = this.#state;
+    return (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
+  }
+
+  /**
+   * Asks the leader what it would decide for the form as it stands, reserving
+   * nothing. A reply that lands after the form moved on is dropped, as a chart's is.
+   */
+  async refreshPreview(attempt = 0): Promise<void> {
+    this.#stopPreviewRetry();
+    const { form, relay } = this.#state;
+    this.#previewedLeader = schedulerKey(relay.scheduler);
+    const repo = resolveAutoRepo(autoRepos(relay.machines), form);
+    if (!form.auto || !deriveAutoAvailability(relay).available || repo === null) {
+      this.#patch({ preview: null });
+      return;
+    }
+    // A retry keeps showing the loading card it already shows.
+    const current = this.#state.preview;
+    const asked: PreviewState =
+      attempt > 0 && current?.kind === "loading" && current.repo === repo.origin
+        ? current
+        : { kind: "loading", repo: repo.origin };
+    this.#patch({ preview: asked });
+    let result: PreviewState;
+    try {
+      const reply = await this.#client.routePreview(this.#taskRequest(repo.origin, false));
+      if (reply === null) result = { kind: "failed", repo: repo.origin, message: SCHEDULER_UNREADABLE };
+      else if ("ok" in reply) {
+        // A leader that has just taken the role answers this until its takeover ends — seconds,
+        // and the very moment a new leader makes the form ask — so it is waited out, not shown.
+        if (reply.code === "not_ready" && attempt < PREVIEW_RETRIES) {
+          if (this.#state.preview === asked) {
+            this.#previewRetry = setTimeout(() => void this.refreshPreview(attempt + 1), PREVIEW_RETRY_MS);
+          }
+          return;
+        }
+        result = { kind: "failed", repo: repo.origin, message: SCHEDULER_ERRORS[reply.code] };
+      } else result = { kind: "ok", repo: repo.origin, decision: reply.decision };
+    } catch (err) {
+      const text = err instanceof RequestFailure ? failureReasonText(err) : "the preview failed";
+      result = { kind: "failed", repo: repo.origin, message: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
+    }
+    if (this.#state.preview !== asked) return;
+    this.#patch({ preview: result });
+  }
+
+  #stopPreviewRetry(): void {
+    if (this.#previewRetry !== null) clearTimeout(this.#previewRetry);
+    this.#previewRetry = null;
+  }
+
+  /** The form as a `TaskRequest`; a preview leaves the prompt out, which routing never reads. */
+  #taskRequest(origin: string, withPrompt: boolean): TaskRequest {
+    const { form } = this.#state;
+    const prompt = form.prompt.trim();
+    return {
+      repo: origin,
+      mode: form.worktree ? "worktree" : "here",
+      model: form.model,
+      effort: form.effort,
+      ...(withPrompt && prompt !== "" ? { prompt } : {}),
+    };
   }
 
   /**
@@ -314,8 +442,15 @@ export class Store {
     this.#client.forget(machineId);
   }
 
+  /** On `auto`, `repo` is an origin, and the choice is the form's, not a machine's. */
   selectRepo(repo: string): void {
     const { form, relay } = this.#state;
+    if (form.auto) {
+      this.#patch({ form: { ...form, autoRepo: repo } });
+      this.dismissLayer();
+      void this.refreshPreview();
+      return;
+    }
     // Keyed by the resolved machine, not form.machineId, which is null until picked.
     const machine = resolveMachine(relay, form.machineId);
     const repos = machine === null ? form.repos : { ...form.repos, [machine.deviceId]: repo };
@@ -506,7 +641,93 @@ export class Store {
     return parsed.repos;
   }
 
+  /**
+   * `auto` goes to the leader as `submit` (M2 only; M3 enqueues through the
+   * store). A machine picked directly is the daemon's own spawn below, which
+   * needs no leader at all.
+   */
+  async #submitAuto(): Promise<void> {
+    const { relay, form } = this.#state;
+    const repo = resolveAutoRepo(autoRepos(relay.machines), form);
+    if (repo === null || !deriveAutoAvailability(relay).available || this.#state.spawning) return;
+    this.#stopFollowing();
+    // The leader bounds what it holds; past the bound it answers `invalid_request`, whose wording blames versions.
+    const length = form.prompt.trim().length;
+    if (length > TASK_REQUEST_LIMITS.prompt) {
+      const message = `The prompt is ${length} characters; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine.`;
+      this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
+      return;
+    }
+    this.#patch({ spawning: true, verdict: null });
+    try {
+      const reply = await this.#client.submit(this.#taskRequest(repo.origin, true));
+      if (reply === null) {
+        this.#showVerdict({ kind: "unqueued", message: SCHEDULER_UNREADABLE, mayHaveLanded: true });
+      } else if ("ok" in reply) {
+        // `too_large` is the transport's verdict on the reply; the task behind it was queued.
+        const mayHaveLanded = reply.code === "too_large" || reply.code === "internal_error";
+        this.#showVerdict({ kind: "unqueued", message: SCHEDULER_ERRORS[reply.code], mayHaveLanded });
+      } else {
+        this.#disarmUndo();
+        this.#patch({ form: { ...this.#state.form, prompt: "" }, promptUndo: null });
+        this.#showVerdict({ kind: "queued", task: reply.task });
+        this.#follow(reply.task.id, QUEUE_POLLS);
+      }
+    } catch (err) {
+      const failure = err instanceof RequestFailure ? err : new RequestFailure("disconnected", String(err));
+      // A timeout or a dropped socket may have come after the leader queued it.
+      const mayHaveLanded = failure.reason === "timeout" || failure.reason === "disconnected";
+      const text = failureReasonText(failure);
+      this.#showVerdict({
+        kind: "unqueued",
+        message: `${text.charAt(0).toUpperCase()}${text.slice(1)}`,
+        mayHaveLanded,
+      });
+    } finally {
+      this.#patch({ spawning: false });
+    }
+  }
+
+  /** Re-reads the queued task while its verdict is up and it has not reached a machine yet. */
+  #follow(taskId: string, left: number): void {
+    this.#stopFollowing();
+    if (left <= 0) return;
+    this.#followTimer = setTimeout(() => {
+      this.#followTimer = null;
+      void this.#refreshTask(taskId, left - 1);
+    }, QUEUE_POLL_MS);
+  }
+
+  async #refreshTask(taskId: string, left: number): Promise<void> {
+    const showing = (): Task | null => {
+      const verdict = this.#state.verdict;
+      return verdict?.kind === "queued" && verdict.task.id === taskId ? verdict.task : null;
+    };
+    if (showing() === null) return;
+    let task: Task | undefined;
+    try {
+      const reply = await this.#client.queue();
+      task = reply === null || "ok" in reply ? undefined : reply.tasks.find((t) => t.id === taskId);
+    } catch {
+      // A missed poll keeps what was shown; the next one asks again.
+    }
+    const shown = showing();
+    if (shown === null) return;
+    if (task !== undefined) this.#patch({ verdict: { kind: "queued", task } });
+    const state = (task ?? shown).state;
+    if (state === "ready" || state === "reserved") this.#follow(taskId, left);
+  }
+
+  #stopFollowing(): void {
+    if (this.#followTimer !== null) clearTimeout(this.#followTimer);
+    this.#followTimer = null;
+  }
+
   async spawn(): Promise<void> {
+    if (this.#state.form.auto) {
+      await this.#submitAuto();
+      return;
+    }
     const { relay, form } = this.#state;
     const machine = resolveMachine(relay, form.machineId);
     const repo = resolveRepo(machine, form);
