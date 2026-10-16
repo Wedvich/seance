@@ -1185,9 +1185,12 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   either later is a client change with no protocol change. Old daemons ignore
   it, exactly as they ignore `client`.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
-  dialog (`projects[<path>].hasTrustDialogAccepted` in `~/.claude.json`, or
-  under `$CLAUDE_CONFIG_DIR` when set — the daemon mirrors claude's own
-  lookup) that no remote can answer, so an untrusted repo spawned from the
+  dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
+  the exclave the repo sits in — `~/.claude.json` for `default`,
+  `~/.claude-<name>/.claude.json` for a named one, never the daemon's own
+  `$CLAUDE_CONFIG_DIR`, since the owner's shell hook picks the session's config
+  dir by cwd; until 2026-10-16 it used the daemon's, so a named exclave's spawn
+  still met the dialog) that no remote can answer, so an untrusted repo spawned from the
   phone reports success and sits dead at the prompt. Both spawn paths answer
   it up front (`trust.ts`): read claude's config, set the flag for the repo
   root when missing, write back atomically (tmp + rename, mode preserved).

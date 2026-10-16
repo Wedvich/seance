@@ -5,19 +5,14 @@ import { join } from "node:path";
 import { ensureRepoTrusted } from "./trust.ts";
 
 let dir: string;
-let prevConfigDir: string | undefined;
 
-// Fresh CLAUDE_CONFIG_DIR per test: the module memoizes per (config, repo)
-// pair, so unique paths also keep the memo from leaking between tests.
+// A fresh config dir per test: the module memoizes per (config, repo) pair,
+// so unique paths also keep the memo from leaking between tests.
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "seance-trust-"));
-  prevConfigDir = process.env["CLAUDE_CONFIG_DIR"];
-  process.env["CLAUDE_CONFIG_DIR"] = dir;
 });
 
 afterEach(async () => {
-  if (prevConfigDir === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
-  else process.env["CLAUDE_CONFIG_DIR"] = prevConfigDir;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -36,7 +31,7 @@ async function readConfig(): Promise<TestConfig> {
 
 describe("ensureRepoTrusted", () => {
   test("never creates claude's config — a machine claude hasn't run on is left alone", async () => {
-    await ensureRepoTrusted(join(dir, "repo"));
+    await ensureRepoTrusted(join(dir, "repo"), configPath());
     expect(await Bun.file(configPath()).exists()).toBe(false);
   });
 
@@ -54,7 +49,7 @@ describe("ensureRepoTrusted", () => {
       }),
     );
 
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     const config = await readConfig();
     expect(config.projects?.[repo]?.["hasTrustDialogAccepted"]).toBe(true);
@@ -67,7 +62,7 @@ describe("ensureRepoTrusted", () => {
     const repo = join(dir, "repo");
     await writeFile(configPath(), JSON.stringify({ firstStartTime: "2026-01-01" }));
 
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     const config = await readConfig();
     expect(config.projects?.[repo]?.["hasTrustDialogAccepted"]).toBe(true);
@@ -80,7 +75,7 @@ describe("ensureRepoTrusted", () => {
     const original = JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: true } } });
     await writeFile(configPath(), original);
 
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     expect(await readFile(configPath(), "utf8")).toBe(original);
   });
@@ -88,10 +83,10 @@ describe("ensureRepoTrusted", () => {
   test("memoized per run: an external revert is not fought until restart", async () => {
     const repo = join(dir, "repo");
     await writeFile(configPath(), JSON.stringify({ projects: {} }));
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     await writeFile(configPath(), JSON.stringify({ projects: { [repo]: { hasTrustDialogAccepted: false } } }));
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     expect((await readConfig()).projects?.[repo]?.["hasTrustDialogAccepted"]).toBe(false);
   });
@@ -100,7 +95,7 @@ describe("ensureRepoTrusted", () => {
     const repo = join(dir, "repo");
     await writeFile(configPath(), "not json {{{");
 
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     expect(await readFile(configPath(), "utf8")).toBe("not json {{{");
   });
@@ -110,7 +105,7 @@ describe("ensureRepoTrusted", () => {
     await writeFile(configPath(), JSON.stringify({ projects: {} }));
     await chmod(configPath(), 0o600);
 
-    await ensureRepoTrusted(repo);
+    await ensureRepoTrusted(repo, configPath());
 
     expect((await stat(configPath())).mode & 0o777).toBe(0o600);
     expect((await readConfig()).projects?.[repo]?.["hasTrustDialogAccepted"]).toBe(true);
@@ -121,7 +116,7 @@ describe("ensureRepoTrusted", () => {
     const b = join(dir, "b");
     await writeFile(configPath(), JSON.stringify({ projects: {} }));
 
-    await Promise.all([ensureRepoTrusted(a), ensureRepoTrusted(b)]);
+    await Promise.all([ensureRepoTrusted(a, configPath()), ensureRepoTrusted(b, configPath())]);
 
     const config = await readConfig();
     expect(config.projects?.[a]?.["hasTrustDialogAccepted"]).toBe(true);

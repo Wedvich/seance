@@ -41,7 +41,8 @@ const CONFIG: Config = {
 };
 
 const ctx: HandlerContext = {
-  backend: createBackend(CONFIG),
+  // Nothing here reaches a real spawn; a home that isn't one keeps it that way.
+  backend: createBackend(CONFIG, { home: "/nonexistent/seance-home" }),
   getRepos: () => REPOS,
   rescan: () => Promise.resolve(REPOS),
   auditSink: collect,

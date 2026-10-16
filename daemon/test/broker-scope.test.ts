@@ -57,7 +57,7 @@ async function withDaemon(
   const daemon = await startDaemon({
     config,
     resolvedPsk: { psk: PSK, source },
-    backend: createBackend(config, { waitMs: 700 }),
+    backend: createBackend(config, { home: join(base, "home"), waitMs: 700 }),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,

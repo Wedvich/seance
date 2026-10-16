@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
+import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
 import { isRegistered } from "./sessions.ts";
 import {
   capturePane,
@@ -252,6 +253,12 @@ export interface SpawnOptions {
   /** Machine tag suffixed onto the remote-control session name; absent means none. */
   readonly machineTag?: string;
   /**
+   * Where the exclaves live, so a repo is pre-trusted in its own exclave's
+   * config. Required, not defaulted to `homedir()`: a test that forgot it
+   * would write the developer's real `~/.claude.json`.
+   */
+  readonly home: string;
+  /**
    * How long to wait for claude to register before acking it as pending. The
    * TUI titles the pane within ~0.5s on a warm machine; `--worktree` puts a
    * fetch before that, so the default leaves room for a slow origin.
@@ -270,7 +277,7 @@ export async function spawnSession(
   }
 
   // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
-  await ensureRepoTrusted(repo.path);
+  await ensureRepoTrusted(repo.path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
 
   const slug = slugify(request.title ?? request.prompt ?? "session");
   const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);

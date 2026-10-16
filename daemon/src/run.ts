@@ -8,6 +8,7 @@ import {
   type MachineInfo,
   type UpdateAvailable,
 } from "@seance/shared";
+import { homedir } from "node:os";
 import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -133,7 +134,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // come from one reading of `.exclaves`: a status quota entry indexes into
   // this list, and the cached repos get re-tagged here so the instant register
   // below can't pair a stale tag with a fresh list.
-  let exclaveScan = await scanExclaves(opts.home);
+  // One home for the scan and the backend, so a spawn pre-trusts the repo in
+  // the config dir of the exclave the scan placed it in.
+  const home = opts.home ?? homedir();
+  let exclaveScan = await scanExclaves(home);
   warnRejected(exclaveScan);
   state = { ...state, repos: tagExclaves(state.repos, exclaveScan.exclaves) };
 
@@ -176,7 +180,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const rescan = async (): Promise<State["repos"]> => {
     const [repos, exclaves] = await Promise.all([
       scanRepos(config.repoRoots, state.repos),
-      scanExclaves(opts.home, exclaveScan.info),
+      scanExclaves(home, exclaveScan.info),
     ]);
     const scanned = tagExclaves(repos, exclaves.exclaves);
     if (stopped) return scanned;
@@ -231,7 +235,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // in the origin they are tagged with — which is what keeps "every spawn path
   // audits through one formatter" true as surfaces are added.
   const handlerCtx: HandlerContext = {
-    backend: opts.backend ?? createBackend(config),
+    backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,
     auditSink: daemonSink,
