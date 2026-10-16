@@ -121,8 +121,10 @@ green:
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
-  so only the AAD-bound `from` says which machine an entry describes), and a `register` moves a
-  route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
+  so only the AAD-bound `from` says which machine an entry describes), every blob opened outside
+  the replay guard (`machine-info`, `status`) goes through `openAtRest` in `shared/src/crypto.ts`,
+  which refuses one whose `op` isn't the slot's — shape alone does not say which blob it is —
+  and a `register` moves a route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
   through `shared/src/identity.ts`; the seed never leaves `state.json`). Don't let changes drift
   from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
