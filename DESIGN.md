@@ -1268,6 +1268,11 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   WAL inherits the mode) under `METRIC_NAMES`, Prometheus's data model and
   nothing else — metric, label set, timestamp, number — in three tiers sharing
   `METRICS_STEPS`: raw 30s for 48h, 5-min averages for 30d, hourly forever.
+  Each tier is keyed `(ts, series)`, because every rollup, prune and query is a
+  time range — keyed series-first, each rollup was a full scan plus a sort, ~3 ms
+  and ~150 KiB of WAL a tick. The key is gated on `PRAGMA user_version`: a store
+  below it has its tiers dropped and recreated rather than migrated (their
+  history began 2026-10-15), since `IF NOT EXISTS` would keep the old key.
   Each write re-rolls every bucket from its oldest new sample onward, across
   all series, from the tier below,
   so a quota observation stamped hours back still lands in its own hour, and the
