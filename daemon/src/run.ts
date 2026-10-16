@@ -158,7 +158,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
-      capabilities: [CAPABILITIES.metrics],
+      capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
     const sealed = await seal(

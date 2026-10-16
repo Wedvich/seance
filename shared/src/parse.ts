@@ -6,6 +6,7 @@ import {
   METRICS_STEPS,
   QUOTA_SOURCES,
   SPAWN_ERROR_CODES,
+  TASK_ID_PATTERN,
   type Envelope,
   type ExclaveInfo,
   type MachineInfo,
@@ -317,6 +318,10 @@ export function parseRescanResponse(value: unknown): RescanResponse | null {
   const repos = parseRepoList(value["repos"]);
   if (repos === null) return null;
   return { repos, scannedAt: value["scannedAt"] };
+}
+
+export function isTaskId(value: unknown): value is string {
+  return typeof value === "string" && TASK_ID_PATTERN.test(value);
 }
 
 /** Receivers never reject on this — display routing only; the wire keeps `string`. */

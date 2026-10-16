@@ -347,9 +347,12 @@ nothing checked it. The last is the gap they leave.
   wire-supplied may be concatenated into a command unquoted. `plan` is the one
   wire field exempt, and only because it is a boolean whose flag value is a
   literal: no wire-supplied text reaches the command line, so there is nothing
-  to quote. A future flag carrying wire _text_ is back under the rule.
+  to quote. A future flag carrying wire _text_ is back under the rule. `taskId`
+  never enters the shell string at all: it is an argv value to `tmux set-option`,
+  and bounded to `TASK_ID_PATTERN` before it gets that far.
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
-  effort, plan mode when on, prompt length and prompt SHA-256 prefix — never the
+  effort, plan mode when on, task id when present (and, on `task_running`, the
+  session it collided with), prompt length and prompt SHA-256 prefix — never the
   prompt text, which would make `seanced.log` a transcript of everything ever
   asked. With a stolen PSK this log is the only thing that says someone else
   used your machines.
@@ -839,10 +842,13 @@ send error that caused it.
 
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
-- `sessions {}` → running claude tmux windows. The one live pull — session
-  state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client? }`
-  → `{ ok, window, path, sessions }` or `{ ok: false, code, message }`. The
+- `sessions {}` → running claude tmux windows, each `{ id?, window, repo, path,
+taskId? }`. The one live pull — session state is inherently fresh-only.
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId? }`
+  → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
+  rides only on `task_running`: the `SessionEntry.id` already running the
+  request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
+  `capabilities`, since an old daemon ignores the field and spawns a duplicate. The
   verdict embeds a refreshed session list so the PWA updates without a
   second round trip. That list is polled (2s cap) until it holds the window
   just announced: detection keys off claude's process title, which it can set
@@ -1186,6 +1192,37 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   `seanced spawn` does not take it either; the field is on the wire, so adding
   either later is a client change with no protocol change. Old daemons ignore
   it, exactly as they ignore `client`.
+- **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
+  scheduler's dispatch idempotency key: a spawn naming a task some live pane
+  already carries is refused `task_running` with that pane's id, before the repo
+  lookup and before any window opens; `sessions` reports it per entry. Live, not
+  registered: a pane still on a startup dialog is running the task, and a dead
+  one held by remain-on-exit is not. Bounded to `TASK_ID_PATTERN` (1–64 of
+  `[A-Za-z0-9._:-]`) by `isSpawnRequest`, so an out-of-bounds id is a malformed
+  request. **The record is a tmux pane user option, `@seance-task`**, set by
+  argv right after `new-window` and read back as a field of the `list-panes`
+  formats `sessions.ts` already runs. It lives exactly as long as the session:
+  a restarted daemon reads the same answer, and nothing can outlive the pane it
+  names, so there is no reconciliation and no stale entry to sweep. Two spawns
+  for one task in one process are serialized per id (`taskSpawns` in
+  `spawn.ts`) — the relay and the local socket share the process and neither
+  queues — so both never pass the check before either has tagged its pane. A
+  pane that can't be tagged is killed and the spawn fails `launch_error`:
+  untagged, it is the duplicate the tag exists to prevent. `taskIdOfPane` is
+  the pane → task lookup, for anything that must attribute by pane (M2's
+  `session-event`) rather than by what an event claims. Rejected: a file in
+  `stateDir()` (outlives the pane on a crash, and a tmux server restart leaves
+  it naming sessions that are gone, so it needs a sweep the pane option gets
+  free); the window name (user-renamable, and the tmux-rename mod renames it);
+  `-e` env on the window (not readable through a format); a marker in the start
+  command (atomic with creation and immutable, but `pane_start_command` carries
+  wire text, so reading one value back means parsing the whole command line); chaining `; set-option -p` onto `new-window` to make the tag atomic (with no `-t` it lands on whichever pane tmux calls current — measured on 3.7, a `-d` window tagged another window's pane — and no target names the window just created).
+  Two gaps, both accepted. A daemon that dies between `new-window` and the tag
+  leaves an untagged pane its successor can't refuse a duplicate for — a window
+  of one tmux exec. And any same-uid process can rewrite the option, which is
+  why the read revalidates it against the pattern; a session relabelling itself
+  is the same residual the threat model accepts for the session-event path.
+  `seanced spawn` takes no task id: only the scheduler mints them.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
   the exclave the repo sits in — `~/.claude.json` for `default`,

@@ -5,13 +5,14 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { git } from "./exec.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
-import { isRegistered } from "./sessions.ts";
+import { isRegistered, listPanes, paneRunningTask } from "./sessions.ts";
 import {
   capturePane,
   FIELD_SEP,
   PANE_TITLED,
   resolveTargetSession,
   sanitizeWindowName,
+  TASK_OPTION,
   tmux,
   tmuxOk,
   TmuxError,
@@ -247,6 +248,25 @@ async function awaitRegistration(windowId: string, waitMs: number): Promise<bool
   return titled;
 }
 
+/**
+ * Records the task on the new window's one pane, before anything can list it.
+ * Argv, so the id never reaches a shell. A pane that can't be tagged is killed:
+ * running untagged, it would be the duplicate the tag exists to prevent. Left
+ * open: a daemon that dies between `new-window` and this call leaves an
+ * untagged pane its successor can't refuse a duplicate for.
+ */
+async function tagTask(windowId: string, taskId: string): Promise<void> {
+  try {
+    await tmuxOk(["set-option", "-p", "-t", windowId, TASK_OPTION, taskId]);
+  } catch (err) {
+    // Gone already: claude died before remain-on-exit could hold it — the same death `awaitRegistration` reports.
+    if ((await tmux(["kill-window", "-t", windowId])).exitCode !== 0) {
+      throw new SpawnFailure("claude_died", "claude exited before the session started (window already closed)");
+    }
+    throw new SpawnFailure("launch_error", `could not record the task on the session: ${String(err)}`);
+  }
+}
+
 export interface SpawnOptions {
   /** tmux session group the new window lands in. */
   readonly tmuxSession: string;
@@ -266,7 +286,42 @@ export interface SpawnOptions {
   readonly waitMs?: number;
 }
 
+/**
+ * Spawns per task id in flight, so two requests for one task never both pass
+ * the duplicate check before either has tagged its pane — the relay and the
+ * local socket share this process, and neither serializes. Holds only what is
+ * running now; what is already spawned is read from tmux.
+ */
+const taskSpawns = new Map<string, Promise<unknown>>();
+
 export async function spawnSession(
+  request: SpawnRequest,
+  repos: readonly RepoEntry[],
+  opts: SpawnOptions,
+): Promise<SpawnOutcome> {
+  const { taskId } = request;
+  if (taskId === undefined) return spawnUntracked(request, repos, opts);
+  const prior = taskSpawns.get(taskId) ?? Promise.resolve();
+  const run = prior
+    .catch(() => undefined)
+    .then(async () => {
+      // Before the repo lookup: a task already running is the answer even if a rescan has since lost its repo.
+      const running = paneRunningTask(await listPanes(), taskId);
+      if (running !== null) {
+        const where = running.windowName === "" ? running.paneId : running.windowName;
+        throw new SpawnFailure("task_running", `task ${taskId} is already running in ${where}`, running.paneId);
+      }
+      return spawnUntracked(request, repos, opts);
+    });
+  taskSpawns.set(taskId, run);
+  try {
+    return await run;
+  } finally {
+    if (taskSpawns.get(taskId) === run) taskSpawns.delete(taskId);
+  }
+}
+
+async function spawnUntracked(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
@@ -318,6 +373,7 @@ export async function spawnSession(
     } catch (err) {
       throw new SpawnFailure("launch_error", err instanceof TmuxError ? err.message : String(err));
     }
+    if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
     registered = await awaitRegistration(windowId, opts.waitMs ?? 5_000);
   } finally {

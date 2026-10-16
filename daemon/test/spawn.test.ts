@@ -330,6 +330,68 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
+  test("a taskId rides the pane: listed with the session, and a second spawn for it is refused with that pane", async () => {
+    const first = await spawnSession(
+      { repo: "myrepo", mode: "here", title: "Task One", taskId: "task-1" },
+      repos,
+      WAIT,
+    );
+    try {
+      const listed = await waitForSession(first.window);
+      expect(listed?.taskId).toBe("task-1");
+      // Where it lives is the point: tmux holds it, so a restarted daemon reads the same answer.
+      const option = await tmuxOk(["show-options", "-p", "-v", "-t", listed?.id ?? "", "@seance-task"]);
+      expect(option.trim()).toBe("task-1");
+
+      // The first spawn has settled, so nothing in-process remembers the task — this refusal is read off tmux.
+      const refused = await spawnSession(
+        { repo: "myrepo", mode: "here", title: "Task Dup", taskId: "task-1" },
+        repos,
+        WAIT,
+      ).catch((err: unknown) => err);
+      expect(refused).toBeInstanceOf(SpawnFailure);
+      expect(refused).toMatchObject({ code: "task_running", id: listed?.id });
+      // Refused before new-window, so there is no window to wait out.
+      expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Task Dup");
+    } finally {
+      await killWindow(first.window);
+    }
+
+    // Once the session is gone the task is free again: a re-dispatch after it ended is no duplicate.
+    const again = await spawnSession(
+      { repo: "myrepo", mode: "here", title: "Task Again", taskId: "task-1" },
+      repos,
+      WAIT,
+    );
+    await killWindow(again.window);
+  });
+
+  test("two concurrent spawns for one task start exactly one session", async () => {
+    const results = await Promise.allSettled(
+      ["Race A", "Race B"].map((title) =>
+        spawnSession({ repo: "myrepo", mode: "here", title, taskId: "race" }, repos, WAIT),
+      ),
+    );
+    try {
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const refused = results.find((r) => r.status === "rejected");
+      expect(refused?.status === "rejected" ? refused.reason : null).toMatchObject({ code: "task_running" });
+    } finally {
+      await Promise.all(results.map((r) => (r.status === "fulfilled" ? killWindow(r.value.window) : undefined)));
+    }
+  });
+
+  test("a spawn without a taskId tags nothing", async () => {
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Untracked" }, repos, WAIT);
+    try {
+      const listed = await waitForSession(outcome.window);
+      expect(listed).toBeDefined();
+      expect(listed !== undefined && "taskId" in listed).toBe(false);
+    } finally {
+      await killWindow(outcome.window);
+    }
+  });
+
   // The `~/pengefix/<repo>-<name>` layout: a hand-made worktree beside the clone,
   // which the scan no longer registers, so no path prefix can attribute it.
   test("a claude in a sibling worktree is listed under the main clone's repo", async () => {

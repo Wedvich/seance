@@ -275,6 +275,35 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
+  test("taskId: advertised, listed with the session, and a duplicate refused — before and after a daemon restart", async () => {
+    const app = startApp(stack, { machineId: stack.deviceId });
+    let window: string | null = null;
+    try {
+      const ready = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      expect(ownMachine(ready, stack.deviceId)?.capabilities).toContain("taskId");
+
+      const spawn = { repo: "myrepo", mode: "here", title: "tracked", taskId: "e2e-task" } as const;
+      const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", spawn);
+      if (!reply.ok) throw new Error(`spawn failed: ${reply.message}`);
+      window = reply.window;
+      const entry = reply.sessions.find((s) => s.window === window);
+      expect(entry?.taskId).toBe("e2e-task");
+
+      const duplicate = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", { ...spawn, title: "dup" });
+      expect(duplicate).toMatchObject({ ok: false, code: "task_running", id: entry?.id });
+
+      // A restarted daemon has nothing in memory; the pane is what still says the task is running.
+      await stack.restartDaemon();
+      await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine back online");
+      const afterRestart = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", { ...spawn, title: "dup" });
+      expect(afterRestart).toMatchObject({ ok: false, code: "task_running", id: entry?.id });
+      expect(await listWindows()).not.toContain("dup");
+    } finally {
+      if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  });
+
   test("rescan: a new clone reaches the app through re-register and a registry push", async () => {
     const app = startApp(stack, { machineId: stack.deviceId });
     const clonePath = join(stack.fixture.root, "newrepo");
