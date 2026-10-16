@@ -1311,7 +1311,13 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
   A field the host can't answer is absent — the first tick has no cpu or I/O
   delta, macOS has no exec-free I/O counter, a tmux outage drops `sess` for the
-  tick — never a guess: a failed collector drops its field and stores no
+  tick — never a guess. A cpu delta is no reading in two more cases. One spans a sleep:
+  neither macOS nor Linux counts suspended time, so it holds only the seconds awake,
+  which is wake-up work (measured at 38–94% busy at each dark wake of a Mac whose steady load
+  was ~20%, and with the long gap that reading became the average outright). It is caught by the
+  counted time per core falling short of half the wall time, and its baseline restarts. The
+  other is shorter than `MIN_CPU_WINDOW_MS` (5s), like the tick a register forces a second
+  after the last; its baseline stays, so the next tick measures across both. A failed collector drops its field and stores no
   sample rather than repeating its average, and the next reading eases from
   that average over the whole gap since the last good one. Rejected for macOS:
   free + inactive + speculative pages
