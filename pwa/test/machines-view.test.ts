@@ -47,6 +47,27 @@ describe("deriveMachines", () => {
     expect(card?.charts).toBe(true);
   });
 
+  // The relay still lists a slept Mac's socket while a timed-out request has marked it asleep:
+  // its 17-minute-old beat read as CPU 85% beside "last seen 17m ago".
+  test("an asleep card draws no pressure or sessions from its last status; its quota still counts", () => {
+    const status = {
+      at: S - 17 * 60,
+      scan: 1,
+      cpu: 85,
+      mem: 39,
+      sess: [2],
+      quota: [{ x: 0, h: 7, s: "cache" as const, at: S - 18 * 60 }],
+    };
+    const { cards, accounts } = deriveMachines(
+      [machine({ connected: false, lastSeen: NOW - 17 * 60_000, status })],
+      NOW,
+    );
+    expect(cards[0]?.meta).toStartWith("asleep · last seen");
+    expect(cards[0]?.gauges).toEqual([]);
+    expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
+    expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
+  });
+
   test("an account across machines takes the newest observation; unsigned exclaves group nowhere", () => {
     const older = machine({
       deviceId: "a",
@@ -130,7 +151,26 @@ describe("chartLines", () => {
       window,
       size,
     );
-    expect(line?.d).toBe("M0 100L30 50M90 0");
+    // 90 is a run of one, so it is drawn as a dot; the gap before it is bridged apart, dotted.
+    expect([line?.d, line?.gaps]).toEqual(["M0 100L30 50M90 0h0", "M30 50L90 0"]);
+  });
+
+  // What a Mac in clamshell sleep leaves: one tick per dark wake, each alone.
+  test("lone points between gaps are dots, each gap bridged once", () => {
+    const [line] = chartLines(
+      [
+        series(METRIC_NAMES.cpu, [
+          [0, 50],
+          [120, 50],
+          [240, 0],
+          [270, 0],
+        ]),
+      ],
+      window,
+      size,
+    );
+    expect(line?.d).toBe("M0 50h0M120 50h0M240 100L270 100");
+    expect(line?.gaps).toBe("M0 50L120 50M120 50L240 100");
   });
 
   test("a quota series holds its level between observations, across any gap", () => {
@@ -144,7 +184,7 @@ describe("chartLines", () => {
       window,
       size,
     );
-    expect(line?.d).toBe("M0 100H240V50");
+    expect([line?.d, line?.gaps]).toEqual(["M0 100H240V50", ""]);
   });
 });
 
