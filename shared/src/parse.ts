@@ -1,5 +1,7 @@
 import {
   METRICS_ERROR_CODES,
+  METRICS_MAX_LABEL_LENGTH,
+  METRICS_MAX_LABELS,
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
@@ -231,11 +233,25 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
  */
 export function isMetricsRequest(value: unknown): value is MetricsRequest {
   if (!isRecord(value)) return false;
-  const { from, to, step, names } = value;
+  const { from, to, step, names, labels } = value;
   if (!isUint(from) || !isUint(to) || from > to) return false;
   const known = METRICS_STEPS.find((s) => s === step);
   if (known === undefined || (to - from) / known + 1 > METRICS_MAX_POINTS) return false;
-  return names === undefined || (isStringArray(names) && names.length > 0);
+  if (names !== undefined && !(isStringArray(names) && names.length > 0)) return false;
+  return labels === undefined || isLabelMatchers(labels);
+}
+
+function isLabelMatchers(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.length > METRICS_MAX_LABELS) return false;
+  return entries.every(
+    ([name, wanted]) =>
+      name !== "" &&
+      name.length <= METRICS_MAX_LABEL_LENGTH &&
+      typeof wanted === "string" &&
+      wanted.length <= METRICS_MAX_LABEL_LENGTH,
+  );
 }
 
 /** `Number.isFinite`, not `typeof`: JSON can't carry NaN/Infinity, but in-process callers can. */

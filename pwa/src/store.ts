@@ -365,7 +365,14 @@ export class Store {
     const from = to - span + step;
     const asked: HistoryView = { target, range, from, to, step, result: { kind: "loading" } };
     this.#patch({ history: asked });
-    const result = await this.#fetchHistory(target, { from, to, step, names: TARGET_METRICS[target.kind] });
+    const names = TARGET_METRICS[target.kind];
+    // Only this account's series cross the wire; a daemon that predates `labels`
+    // sends every exclave's, which `#fetchHistory` narrows all the same.
+    const request: MetricsRequest =
+      target.kind === "account"
+        ? { from, to, step, names, labels: { account: target.accountId } }
+        : { from, to, step, names };
+    const result = await this.#fetchHistory(target, request);
     // A later pick or a closed screen has replaced the chart this answers.
     if (this.#state.history !== asked) return;
     this.#patch({ history: { ...asked, result } });

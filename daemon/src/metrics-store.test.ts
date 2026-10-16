@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { M5_KEEP_S, MetricsStore, RAW_KEEP_S } from "./metrics-store.ts";
+import { M5_KEEP_S, MetricsStore, RAW_KEEP_S, type Sample } from "./metrics-store.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -52,6 +52,48 @@ describe("MetricsStore", () => {
     expect(names(["mem_pct", "cpu_pct"])).toEqual(["cpu_pct", "mem_pct"]);
     expect(names(["not_yet_a_metric"])).toEqual([]);
     expect(store.query({ from: NOW, to: NOW, step: 30 })).toHaveLength(3);
+    store.close();
+  });
+
+  test("labels keep the series meeting every matcher, and a label a series lacks matches only empty", () => {
+    const store = MetricsStore.memory();
+    const quota = (exclave: string, account: string, model?: string): Sample => ({
+      metric: model === undefined ? "quota_7d_pct" : "quota_7d_model_pct",
+      labels: { machine: "mac", exclave, account, ...(model === undefined ? {} : { model }) },
+      ts: NOW,
+      value: 50,
+    });
+    store.write(
+      [
+        quota("default", "a"),
+        quota("default", "a", "Opus"),
+        quota("work", "b"),
+        quota("other", "a"),
+        { metric: "cpu_pct", labels: machine, ts: NOW, value: 10 },
+      ],
+      NOW,
+    );
+    const matched = (labels: Readonly<Record<string, string>>): readonly string[] =>
+      store
+        .query({ from: NOW, to: NOW, step: 30, labels })
+        .map((s) => [s.metric, s.labels["exclave"], s.labels["model"]].filter(Boolean).join("/"));
+    expect(matched({ account: "a" })).toEqual([
+      "quota_7d_pct/default",
+      "quota_7d_model_pct/default/Opus",
+      "quota_7d_pct/other",
+    ]);
+    expect(matched({ account: "a", exclave: "default" })).toEqual([
+      "quota_7d_pct/default",
+      "quota_7d_model_pct/default/Opus",
+    ]);
+    expect(matched({ account: "a", model: "" })).toEqual(["quota_7d_pct/default", "quota_7d_pct/other"]);
+    expect(matched({ account: "c" })).toEqual([]);
+    // Inherited properties are not labels.
+    expect(matched({ constructor: "" })).toHaveLength(5);
+    // Combined with names, both apply; the points of a matched series are all there.
+    expect(store.query({ from: NOW, to: NOW, step: 30, names: ["quota_7d_pct"], labels: { account: "b" } })).toEqual([
+      { metric: "quota_7d_pct", labels: { account: "b", exclave: "work", machine: "mac" }, points: [[NOW, 50]] },
+    ]);
     store.close();
   });
 
