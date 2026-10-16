@@ -397,7 +397,7 @@ read yet.
 A PWA spawn on `auto` lands on the machine and exclave the scheduler chose, with the decision
 explained, and the role survives the leading machine going away. Landed as #115 (the library),
 #114 (leadership), #112 (`taskId`), #117 (`leader.ts`), #118 (session events and the mod), #113
-(the kept `status`) and item 6 as a stack of three: the leader answering `queue` and
+(the kept `status`) and item 6 as #120–#122: the leader answering `queue` and
 `route-preview`, M2's temporary `submit`, and the PWA's `auto`, with item 3's two gaps closed
 along the way (a term the daemon ends itself goes back to the relay; a task on a machine that
 stops answering becomes `lost`). Recorded in DESIGN.md _Scheduler_ (leadership, the leader,
