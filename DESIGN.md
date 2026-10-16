@@ -1251,8 +1251,9 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
   `host/path`, and the whole lowercased (the hosts we route to compare
   case-insensitively; a key that differed by case would split one repo in two).
-  Basename when there is no remote, or only a local/`file://` one — some
-  machine's mirror is not an identity. Re-read every scan, not carried
+  Basename when there is no remote, or only a local, `file://` or drive-letter
+  one (a Windows `C:\…` or UNC `\\…` path, which the scp rule would otherwise
+  key as host `c`) — some machine's mirror is not an identity. Re-read every scan, not carried
   forward: a remote does get repointed, and the read is one file. Not followed:
   `include` directives and `url.<base>.insteadOf`, so a repo that only names its
   remote through those keys by basename. Known split: the same repo over https
