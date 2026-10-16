@@ -1,5 +1,4 @@
-import { stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { realpath } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
@@ -23,7 +22,7 @@ import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { exec } from "./exec.ts";
-import { claudeConfigTargets, listExclaves, type ClaudeConfigTarget } from "./exclaves.ts";
+import { userScopeTargets } from "./exclaves.ts";
 import {
   brokerFailureText,
   brokerFleet,
@@ -33,7 +32,7 @@ import {
   type Fleet,
   type FleetLease,
 } from "./fleet.ts";
-import { recordedBunCheck } from "./link.ts";
+import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
 import { readState } from "./state.ts";
 
@@ -495,37 +494,38 @@ export function mcpBunPath(output: string): string | null {
   return /^\s*Command:\s*(.+?)\s*$/mu.exec(output)?.[1] ?? null;
 }
 
-export interface McpTargets {
-  readonly present: readonly ClaudeConfigTarget[];
-  /** Listed in `~/.exclaves` but never set up — registering would create the dir, so these are skipped. */
-  readonly missing: readonly ClaudeConfigTarget[];
+/**
+ * `Args:` line of `claude mcp get`, minus the trailing `mcp` subcommand — the
+ * script Claude Code will run. Null when the output doesn't parse.
+ */
+export function mcpScriptPath(output: string): string | null {
+  return /^\s*Args:\s*(.+?)\s+mcp\s*$/mu.exec(output)?.[1] ?? null;
 }
 
 /**
- * Where `mcp install` registers: every exclave's config dir, not just the one the
- * invoking shell happens to select — a user-scope entry lives in one `.claude.json`,
- * and each exclave has its own.
+ * Null when the entry runs this checkout's main.ts, compared realpath to realpath
+ * so a symlinked checkout path still matches. Otherwise the stale-clone hazard
+ * `modChecksFrom` guards for mods: an entry left pointing at another clone runs
+ * *its* code, and fails in every session once that clone is deleted or never had
+ * `bun install` run. Exported for tests; `current` defaults to `resolvedMain()`.
  */
-export async function mcpTargets(home: string = homedir()): Promise<McpTargets> {
-  const { exclaves } = await listExclaves(home);
-  const targets = claudeConfigTargets(exclaves, process.env["CLAUDE_CONFIG_DIR"]);
-  const exists = await Promise.all(
-    targets.map((t) =>
-      stat(t.configDir)
-        .then((info) => info.isDirectory())
-        .catch(() => false),
-    ),
-  );
-  return { present: targets.filter((_, i) => exists[i]), missing: targets.filter((_, i) => !exists[i]) };
+export async function mcpScriptCheck(recorded: string | null, label: string, current?: string): Promise<Check | null> {
+  if (recorded === null) return null;
+  const [real, expected] = await Promise.all([realpath(recorded).catch(() => recorded), current ?? resolvedMain()]);
+  if (real === expected) return null;
+  return {
+    level: "warn",
+    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seanced mcp install\` repoints it`,
+  };
 }
 
-/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun still resolves; renders under doctor's binaries section. */
+/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
     return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
   }
-  const { present } = await mcpTargets();
+  const { present } = await userScopeTargets();
   const perTarget = await Promise.all(
     present.map(async (target): Promise<readonly Check[]> => {
       const result = await exec([claude, "mcp", "get", "seance"], { timeoutMs: 15_000, env: target.env });
@@ -538,14 +538,14 @@ export async function mcpChecks(): Promise<readonly Check[]> {
         ];
       }
       const registered: Check = { level: "ok", message: `MCP server registered with Claude Code in ${target.label}` };
-      // Same drift hazard as the plist/unit: `mcp install` records PATH's bun in
-      // Claude's config, and nothing rewrites that entry on its own.
-      const drift = await recordedBunCheck(
-        mcpBunPath(result.stdout),
-        `MCP entry (${target.label})`,
-        "seanced mcp install",
-      );
-      return drift === null ? [registered] : [registered, drift];
+      // Same drift hazard as the plist/unit: `mcp install` records PATH's bun and
+      // this checkout's main.ts in Claude's config, and nothing rewrites that entry
+      // on its own.
+      const findings = await Promise.all([
+        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seanced mcp install"),
+        mcpScriptCheck(mcpScriptPath(result.stdout), target.label),
+      ]);
+      return [registered].concat(findings.filter((check) => check !== null));
     }),
   );
   return perTarget.flat();

@@ -3,12 +3,14 @@
 // marketplace is read in place, never copied, so a `git pull` reaches the next
 // session (or `/reload-plugins`) with nothing to re-run — unlike the Raycast
 // import. Marketplace and plugin names are read from the marketplace file
-// rather than restated here.
+// rather than restated here. Plugins live per config dir, so every command here
+// runs once per exclave (`userScopeTargets`), as `mcp install` does.
 
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Check } from "./check.ts";
 import { exec, execFailure } from "./exec.ts";
+import { userScopeTargets, type ClaudeConfigTarget } from "./exclaves.ts";
 import { checkoutRoot } from "./selfsource.ts";
 
 export interface Marketplace {
@@ -62,11 +64,34 @@ function claudeBin(): string {
   return claude;
 }
 
-async function removeMarketplace(claude: string, name: string): Promise<"removed" | "absent"> {
-  const result = await exec([claude, "plugin", "marketplace", "remove", name, "--json"], { timeoutMs: 30_000 });
+type Env = ClaudeConfigTarget["env"];
+
+async function removeMarketplace(claude: string, name: string, env: Env): Promise<"removed" | "absent"> {
+  const result = await exec([claude, "plugin", "marketplace", "remove", name, "--json"], { timeoutMs: 30_000, env });
   if (result.exitCode === 0) return "removed";
   if (jsonResult(result.stdout)?.["failureCode"] === "not_configured") return "absent";
   throw new Error(`claude plugin marketplace remove: ${execFailure(result)}`);
+}
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Runs `each` over every present config dir, in exclave order, one at a time:
+ * each `claude plugin` call rewrites its dir's settings file. A failing dir
+ * doesn't stop the rest; the failures are thrown together at the end.
+ */
+async function perTarget(
+  report: (line: string) => void,
+  each: (target: ClaudeConfigTarget) => Promise<void>,
+): Promise<void> {
+  const { present, missing } = await userScopeTargets();
+  for (const target of missing) report(`skipped ${target.label} — ${target.configDir} does not exist yet`);
+  const failures: string[] = [];
+  for (const target of present) {
+    // oxlint-disable-next-line no-await-in-loop -- serialized on purpose, see above
+    await each(target).catch((err: unknown) => failures.push(`${target.label}: ${errorText(err)}`));
+  }
+  if (failures.length > 0) throw new Error(failures.join("\n"));
 }
 
 /**
@@ -76,60 +101,75 @@ async function removeMarketplace(claude: string, name: string): Promise<"removed
  * cascade-delete each plugin's saved options and data. `install` is
  * idempotent too, so a re-run only ever converges.
  */
-export async function installMods(): Promise<Marketplace> {
+export async function installMods(report: (line: string) => void): Promise<void> {
   const claude = claudeBin();
   const root = await realCheckoutRoot();
   const market = await readMarketplace(root);
-  const added = await exec([claude, "plugin", "marketplace", "add", root, "--scope", "user", "--json"], {
-    timeoutMs: 30_000,
-  });
-  if (added.exitCode !== 0) throw new Error(`claude plugin marketplace add: ${execFailure(added)}`);
-  for (const plugin of market.plugins) {
-    // oxlint-disable-next-line no-await-in-loop -- each install rewrites Claude's settings file; serialized on purpose
-    const result = await exec([claude, "plugin", "install", `${plugin.name}@${market.name}`, "--scope", "user"], {
-      timeoutMs: 60_000,
+  await perTarget(report, async ({ label, env }) => {
+    const added = await exec([claude, "plugin", "marketplace", "add", root, "--scope", "user", "--json"], {
+      timeoutMs: 30_000,
+      env,
     });
-    if (result.exitCode !== 0) throw new Error(`claude plugin install ${plugin.name}: ${execFailure(result)}`);
-  }
-  return market;
+    if (added.exitCode !== 0) throw new Error(`claude plugin marketplace add: ${execFailure(added)}`);
+    for (const plugin of market.plugins) {
+      // oxlint-disable-next-line no-await-in-loop -- each install rewrites Claude's settings file; serialized on purpose
+      const result = await exec([claude, "plugin", "install", `${plugin.name}@${market.name}`, "--scope", "user"], {
+        timeoutMs: 60_000,
+        env,
+      });
+      if (result.exitCode !== 0) throw new Error(`claude plugin install ${plugin.name}: ${execFailure(result)}`);
+      report(`Claude mod ${plugin.name} installed in ${label}`);
+    }
+  });
 }
 
 /** Removing the marketplace uninstalls every plugin installed from it. */
-export async function uninstallMods(): Promise<{ readonly market: Marketplace; readonly removed: boolean }> {
+export async function uninstallMods(report: (line: string) => void): Promise<void> {
+  const claude = claudeBin();
   const market = await readMarketplace(await realCheckoutRoot());
-  return { market, removed: (await removeMarketplace(claudeBin(), market.name)) === "removed" };
+  await perTarget(report, async ({ label, env }) => {
+    report(
+      (await removeMarketplace(claude, market.name, env)) === "removed"
+        ? `removed the ${market.name} marketplace and its mods from ${label}`
+        : `nothing installed in ${label}`,
+    );
+  });
 }
 
 /**
  * One line per mod: installed, and read from *this* checkout. The folder check
  * is the stale-clone hazard `cliOnPath` guards for the PATH link — a mod read
  * from a deleted or abandoned clone fails silently in every session. Exported
- * for tests; `listed` is `claude plugin list --json`.
+ * for tests; `listed` is `claude plugin list --json` run against the config dir
+ * `label` names.
  */
-export function modChecksFrom(market: Marketplace, root: string, listed: unknown): readonly Check[] {
+export function modChecksFrom(market: Marketplace, root: string, listed: unknown, label: string): readonly Check[] {
   const installed = Array.isArray(listed) ? listed.filter(isRecord) : [];
   return market.plugins.map((plugin): Check => {
     const id = `${plugin.name}@${market.name}`;
     const entry = installed.find((row) => row["id"] === id);
     if (entry === undefined) {
-      return { level: "warn", message: `Claude mod ${plugin.name} not installed — run \`seanced mod install\`` };
+      return {
+        level: "warn",
+        message: `Claude mod ${plugin.name} not installed in ${label} — run \`seanced mod install\``,
+      };
     }
     const expected = join(root, plugin.source);
     const folder = entry["readFromFolder"];
     if (folder !== expected) {
       return {
         level: "warn",
-        message: `Claude mod ${plugin.name} is read from ${String(folder)}, not this checkout's ${expected} — \`seanced mod install\` repoints it`,
+        message: `Claude mod ${plugin.name} in ${label} is read from ${String(folder)}, not this checkout's ${expected} — \`seanced mod install\` repoints it`,
       };
     }
     if (entry["enabled"] === false) {
-      return { level: "warn", message: `Claude mod ${plugin.name} installed but disabled in Claude Code` };
+      return { level: "warn", message: `Claude mod ${plugin.name} installed in ${label} but disabled in Claude Code` };
     }
-    return { level: "ok", message: `Claude mod ${plugin.name} installed` };
+    return { level: "ok", message: `Claude mod ${plugin.name} installed in ${label}` };
   });
 }
 
-/** Doctor's mod lines, rendered in the binaries section beside the MCP ones. */
+/** Doctor's mod lines, per exclave, rendered in the binaries section beside the MCP ones. */
 export async function modChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null)
@@ -140,15 +180,23 @@ export async function modChecks(): Promise<readonly Check[]> {
     market = await readMarketplace(root);
   } catch (err) {
     // doctor gathers checks with Promise.all: a throw here would abort the whole report
-    return [{ level: "warn", message: `Claude mods: ${err instanceof Error ? err.message : String(err)}` }];
+    return [{ level: "warn", message: `Claude mods: ${errorText(err)}` }];
   }
-  const result = await exec([claude, "plugin", "list", "--json"], { timeoutMs: 15_000 });
-  if (result.exitCode !== 0) return [{ level: "warn", message: `claude plugin list: ${execFailure(result)}` }];
-  let listed: unknown;
-  try {
-    listed = JSON.parse(result.stdout);
-  } catch {
-    return [{ level: "warn", message: "claude plugin list --json printed something other than JSON" }];
-  }
-  return modChecksFrom(market, root, listed);
+  const { present } = await userScopeTargets();
+  const checks = await Promise.all(
+    present.map(async ({ label, env }): Promise<readonly Check[]> => {
+      const result = await exec([claude, "plugin", "list", "--json"], { timeoutMs: 15_000, env });
+      if (result.exitCode !== 0) {
+        return [{ level: "warn", message: `claude plugin list (${label}): ${execFailure(result)}` }];
+      }
+      let listed: unknown;
+      try {
+        listed = JSON.parse(result.stdout);
+      } catch {
+        return [{ level: "warn", message: `claude plugin list --json (${label}) printed something other than JSON` }];
+      }
+      return modChecksFrom(market, root, listed, label);
+    }),
+  );
+  return checks.flat();
 }

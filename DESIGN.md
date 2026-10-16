@@ -2359,10 +2359,16 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   schema. What gets registered is PATH-resolved bun plus this checkout's
   `main.ts`, the same target `link` points at, so the entry survives both a
   `git pull` and a bun upgrade. A user-scope entry reaches one `.claude.json`, so
-  both commands run once per exclave (`mcpTargets` in `daemon/src/mcp.ts`):
+  both commands run once per exclave (`userScopeTargets` in `daemon/src/exclaves.ts`,
+  shared with `mod install`):
   `default` with `CLAUDE_CONFIG_DIR` unset, each named one with it set, plus the
   ambient dir when no exclave owns it. One that has no config dir yet is skipped,
-  because `claude mcp add` would create it. `doctor` reports the entry per exclave.
+  because `claude mcp add` would create it. `doctor` reports the entry per exclave,
+  and warns when its script is not this checkout's `main.ts` (realpath on both
+  sides, so a symlinked checkout path still matches): an entry left on another
+  clone runs that clone's code, and once observed failing in every session
+  because that clone had never had `bun install` run — while doctor, checking
+  only the registration and the bun path, said all was well.
   Rejected: registering only in the invoking shell's config dir, which is what
   left the exclaves without it.
   Nothing re-registers on its own — no self-update path touches Claude config —
@@ -2998,6 +3004,16 @@ marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
   save), installing from GitHub (`<owner>/<repo>`; a copy that only `claude plugin
 update` refreshes, and the checkout already on the machine is the version the
   daemon runs).
+- **Per exclave**: plugins live per config dir (`<configDir>/plugins/`, enabled in
+  that dir's `settings.json`), so `mod install`, `mod uninstall` and doctor's mod
+  lines run once per exclave over the same targets as `mcp install`
+  (`userScopeTargets`): each Claude invocation gets the target's
+  `CLAUDE_CONFIG_DIR` (unset for `default`), a dir never set up is skipped rather
+  than created, and every line names the exclave. Serialized, since each call
+  rewrites its dir's settings file; a failing exclave doesn't stop the rest, and
+  the run fails with all of them listed. Rejected: the invoking shell's config dir
+  only — what it did first, which left every named exclave without
+  session-events, so their sessions sent the leader no events and no rate limits.
 - **Tested by `claude plugin test`, not `bun:test`** — the one exception to the
   runner rule: a mod's tests import `claude-code/testing`, which only Claude
   Code provides. `scripts/test.ts` runs each mod as a shard of its own —
