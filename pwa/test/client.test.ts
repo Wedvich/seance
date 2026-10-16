@@ -2,11 +2,15 @@
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import {
   APP_ID,
+  DAEMON_ROLES,
   importPsk,
   isRecord,
   newestQuotaByAccount,
+  open,
+  SCHEDULER_ID,
   seal,
   toBase64,
+  type Envelope,
   type MachineInfo,
   type MachineStatus,
   type Plain,
@@ -73,6 +77,8 @@ function startClient(
     readonly log?: (line: string) => void;
     /** Dials somewhere other than the real relay; only the hostile-peer suite does. */
     readonly url?: string;
+    /** A scheduler leader's leg; only the scheduler suite builds one. */
+    readonly scheduler?: { readonly term: number };
   } = {},
 ): {
   client: RelayClient;
@@ -91,6 +97,7 @@ function startClient(
     ...(opts.pingIntervalMs === undefined ? {} : { pingIntervalMs: opts.pingIntervalMs }),
     ...(opts.pongTimeoutMs === undefined ? {} : { pongTimeoutMs: opts.pongTimeoutMs }),
     ...(opts.log === undefined ? {} : { log: opts.log }),
+    ...(opts.scheduler === undefined ? {} : { scheduler: opts.scheduler }),
   });
   const waitFor = (predicate: (state: RelayState) => boolean, label: string): Promise<RelayState> =>
     new Promise((resolve, reject) => {
@@ -833,6 +840,61 @@ describe("requests", () => {
 
 // The relay pushes presence rather than being polled, so a dead app socket
 // freezes the machine list with no other symptom — the pings below bound that.
+// The leader's leg (daemon/src/leader.ts) against the real DO: nomination, the
+// term fence, and the reply the relay routes to the leader's daemon socket.
+describe("scheduler leg", () => {
+  type Msg = { t: "msg"; env: Envelope };
+
+  test("a request goes out as the scheduler under its term, and the reply is correlated through deliver", async () => {
+    const leaderId = await newDeviceId();
+    const targetId = await newDeviceId();
+    // Sealed blobs, so both show as machines and can be forgotten after: the
+    // registry is capped and permanent, and this file runs close to the cap.
+    const info = async (deviceId: string): Promise<Envelope> =>
+      seal(
+        key,
+        { to: APP_ID, from: deviceId },
+        { id: deviceId, ts: Date.now(), op: "machine-info", payload: machineInfo(deviceId) },
+      );
+    const leader = await connectDaemon(relay);
+    leader.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info: await info(leaderId) }));
+    const { term } = await leader.waitFor<{ t: "lead"; term: number }>("lead");
+    const target = await connectDaemon(relay);
+    target.send(await register(targetId, { info: await info(targetId) }));
+    const { client, waitFor } = startClient({ scheduler: { term } });
+    const stale = startClient({ scheduler: { term: term - 1 } });
+    try {
+      await waitFor((s) => s.status === "open" && s.registrySettled, "open");
+      await stale.waitFor((s) => s.status === "open", "stale open");
+
+      const reply = client.request<SessionsResponse>(targetId, "sessions", {});
+      const { env } = await target.waitFor<Msg>("msg");
+      expect(env.from).toBe(SCHEDULER_ID);
+      const request = await open(key, env);
+      // The target answers `env.from`, as a real daemon does.
+      const payload: SessionsResponse = { sessions: [], at: Date.now() };
+      const answer: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "sessions", re: request.id, payload };
+      target.send({ t: "msg", env: await seal(key, { to: SCHEDULER_ID, from: targetId }, answer) });
+      // Routed to the leader's daemon socket, never to an app one.
+      const routed = await leader.waitFor<Msg>("msg");
+      await client.deliver(routed.env);
+      expect(await reply).toEqual(payload);
+
+      await expect(stale.client.request(targetId, "sessions", {})).rejects.toMatchObject({ reason: "not_leader" });
+      await target.expectNo("msg");
+    } finally {
+      stale.client.stop();
+      target.close();
+      leader.close();
+      const ids = [leaderId, targetId];
+      await waitFor((s) => s.machines.every((m) => !ids.includes(m.deviceId) || !m.connected), "both gone");
+      for (const id of ids) client.forget(id);
+      await waitFor((s) => s.machines.every((m) => !ids.includes(m.deviceId)), "both forgotten");
+      client.stop();
+    }
+  });
+});
+
 describe("heartbeat", () => {
   test("relay pongs keep a healthy socket open across many beats", async () => {
     const { client, waitFor } = startClient({ pingIntervalMs: 30, pongTimeoutMs: 500 });

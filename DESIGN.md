@@ -378,10 +378,13 @@ nothing checked it. The last is the gap they leave.
   The origin also rides the per-op `audit request` line, not just the spawn
   lines, because enumeration is the same signal as spawning. Ending a session
   is the same signal too: every despawn path audits through its own one
-  formatter (`despawnAudit`), under the same three origins. Reap destroys
+  formatter (`despawnAudit`), under the same origins. Reap destroys
   things — worktrees, branches, windows — and audits each one (`reapAudit`)
   under `cli` or under `schedule`, the fourth origin, which is the daemon's own
-  timer: a 3am cleanup must not read as someone at the desk. The daemon writes
+  timer: a 3am cleanup must not read as someone at the desk. `leader` is the
+  daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
+  "The leader") — distinct from `local`, which says a peer on the op socket asked,
+  and from the `client=scheduler` other machines log under `relay`. The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -656,28 +659,28 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                          | Sent from                                                                                | Handled in                                                                                                                                            |
-| ----------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                     |
-| `lead` / `follow`                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`             | `daemon/src/relay-client.ts` — logged only until `leader.ts`                                                                                          |
-| `msg` (→`"scheduler"`)              | any app or daemon                                                                        | routed by `relay/src/hub.ts` to the nominated leader's socket; no leader → `undeliverable` (app) or dropped (daemon)                                  |
-| `msg` (`from: "scheduler"`, `term`) | the leader's app-role leg                                                                | fenced by `relay/src/hub.ts` `#holdsTerm` — a stale term is `undeliverable { code: "not_leader" }`; then routed as any app `msg`                      |
-| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                       |
-| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                     |
-| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                      |
-| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                       |
-| `registry`                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                        | `shared/src/app-client.ts` (`scheduler` not yet read)                                                                                                 |
-| `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                            |
-| `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                               |
-| `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                                                                   |
-| `"ping"` / `"pong"`                 | both socket legs                                                                         | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                       |
-| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                   | same file — both ends share it, or nothing decrypts                                                                                                   |
-| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                 |
-| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                         |
-| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                       | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                |
-| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register |
-| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`     | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                |
-| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed          | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)    |
+| Frame / op                          | Sent from                                                                                                          | Handled in                                                                                                                                                                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                         |
+| `lead` / `follow`                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                       | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                        |
+| `msg` (→`"scheduler"`)              | any app or daemon                                                                                                  | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it |
+| `msg` (`from: "scheduler"`, `term`) | the leader's app-role leg: `daemon/src/leader.ts` over `shared/src/app-client.ts` built with `scheduler: { term }` | fenced by `relay/src/hub.ts` `#holdsTerm` — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                     |
+| `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                           |
+| `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                         |
+| `msg` (→`"machines"` broadcast)     | any PSK holder                                                                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                          |
+| op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                           |
+| `registry`                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                                                  | `shared/src/app-client.ts` (`scheduler` not yet read)                                                                                                                                                                                     |
+| `undeliverable`                     | `relay/src/hub.ts`                                                                                                 | `shared/src/app-client.ts`                                                                                                                                                                                                                |
+| `forget`                            | `shared/src/app-client.ts`                                                                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                   |
+| `forget-refused`                    | `relay/src/hub.ts`                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                       |
+| `"ping"` / `"pong"`                 | both socket legs                                                                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                           |
+| envelope `seal`/`open`, AAD, replay | `shared/src/crypto.ts`                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                       |
+| ops `sessions` / `spawn`            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                                                  | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                                                                                                     |
+| op `rescan`                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                                                  | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                             |
+| op `despawn`                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                    |
+| `status` (daemon→relay)             | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                           | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                     |
+| `status` (relay→app)                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                    |
+| op `metrics`                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                        |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -972,14 +975,14 @@ is an ordinary daemon with extra legs.
   the life of the DO, so a term a demoted leader holds can never come round again. On a change
   the relay sends `lead { term }` to the new leader's socket and `follow` to the old leader's, if
   it is still connected under a different id (a superseded socket is closing and gets nothing).
-  Both are plaintext relay assertions; the daemon logs them and, until `leader.ts` lands (M2 item
-  3), does nothing else.
+  Both are plaintext relay assertions; the daemon starts or ends a term on them ("The leader",
+  below).
 - **`SCHEDULER_ID = "scheduler"`** is a reserved wire address, refused by `register` like `"app"`
   and `"machines"`. An envelope `to: "scheduler"` routes to the leader's newest socket, the AAD
   still naming `"scheduler"`; with no leader an app gets `undeliverable { code: "offline" }` (never
   `unknown`: the address is real) and a daemon's is dropped, as any daemon-origin envelope nobody
-  can take. A daemon that is not running the scheduler drops one as misaddressed, so advertising
-  the role ahead of `leader.ts` opens nothing.
+  can take. A daemon running no term drops one unopened (`reason=not-leading`), so a stray
+  envelope to a follower opens nothing.
 - **The term is a fence, not a credential.** The leader speaks on its app-role leg as
   `from: "scheduler"`, and that `msg` carries `term`. The relay delivers it only when the term is
   the connected leader's, and otherwise answers the sender `undeliverable { code: "not_leader" }`
@@ -999,6 +1002,55 @@ is an ordinary daemon with extra legs.
   and a relay-side gate (the `SCHEDULER_LEADERS` allowlist in docs/scheduler.md, Risks) lands
   first. Its place is fixed: a filter over `nominate`'s candidates in `#renominate`, before
   anything acts on a term.
+
+### The leader (`daemon/src/leader.ts`) — landed 2026-10-16, M2 item 3
+
+- **One term is one run.** `lead { term }` builds the term's app-role leg, the `Fleet` over it, a
+  `Scheduler` and its 30s tick timer; the same term again is a no-op, a different one ends the
+  running term first. A term ends on `follow`, on the daemon's own relay socket dropping, on a
+  `not_leader` answer to anything it sent, on its leg's token being rejected, and with the daemon
+  handle — and ending it stops the timer, drops the listener and stops the leg, so nothing of a
+  term outlives it (the broker's discipline; the daemon suite counts timers back to baseline under
+  a fake clock). The socket drop ends it because the term is that socket's: the relay bumps the
+  term for every new leader socket and routes every reply to it. The _leg_ dropping does not: the
+  shared client redials and re-reads the registry under the same term.
+- **Its own leg, persistent, sent as the scheduler.** The shared app-role `RelayClient`, built per
+  term with `scheduler: { term }` over the key the daemon imported at start, seals every request
+  `from: "scheduler"` and puts `term` on the frame. Not `LazyRelay`, which hangs up after five idle
+  minutes — the loop must hear every registry and `status` push between its own calls — and not
+  the broker's, so neither lifecycle can end the other's socket. Rejected: one client re-termed in
+  place, since a request sealed under the old term could then leave under the new one.
+- **Replies come back on the daemon socket.** A daemon answers `env.from`, so a reply to the
+  leader is `to: "scheduler"`, and the relay routes that to the leader's _daemon_ socket, not its
+  app leg. `relay-client.ts` hands such an envelope over unopened, and the leg's `deliver` opens,
+  replay-checks (its own `ReplayGuard`) and correlates it on `re` as if it had arrived on the leg.
+  This was the one reply-path change the plan missed, and it is daemon-side only. A `not_leader`
+  still arrives on the leg, by `iv`, as for any app.
+- **This machine only in process.** A dispatch to the leader's own `deviceId` never leaves it:
+  `createLocalOps(…, "leader")` in `handlers.ts` runs the same validation, backend and audit lines
+  the op handlers do, under the new origin `leader`, and takes no `Plain`, so only `sessions`,
+  `spawn` and `despawn` can be asked for. Every other machine audits a scheduler dispatch as
+  `origin=relay client=scheduler`.
+- **Takeover before any dispatch.** The term waits for its leg's first authoritative registry, then
+  `Scheduler.takeover()` loads the store and asks `sessions` of each machine holding an in-flight
+  task, once per machine: a reservation whose session exists is `running`, one with none waits out
+  its TTL, a running task whose session is gone is `done` (it ended while nobody led), and an
+  unanswered machine leaves its tasks as they were. A takeover that throws is retried every tick
+  interval rather than left as a term that holds the role and runs nothing. Only then do the first tick and the timer run;
+  after it, every change to the leg's machine list ticks, and ticks coalesce in the library.
+- **The term rides every write and dispatch.** Dispatches carry it on the frame, where the relay
+  fences them. Writes go through a store wrapper that refuses once the term has ended, so a pass
+  still awaiting a verdict cannot write into the store the next term reads; M3's term-fenced
+  `store-put` replaces it at the relay. The store itself outlives terms, as the relay's will: M2's
+  is the library's `MemoryQueueStore`, one per daemon process, so a daemon demoted and re-promoted
+  reconciles what it left, and a leader change across machines loses the queue (M2's stated gap).
+- **Not answered yet.** An app request `to: "scheduler"` (`queue`, `route-preview`) reaches the leg
+  and is dropped there as a message with no `re` — item 6 adds the request path. `onSession` is
+  item 5's entry point, dropped outside a running term since takeover reads the same state from
+  `sessions`. Open: a term the daemon ends on its own (its leg's token rejected) tells the relay
+  nothing, so the role stays nominated here and idle until this daemon's socket redials; giving
+  it back would mean re-registering without `roles`. Likewise a task `running` on a machine that
+  never answers again (forgotten, retired) stays `running` until done detection (M3).
 
 ## Daemon (`seanced`, Bun)
 
@@ -2714,8 +2766,8 @@ update` refreshes, and the checkout already on the machine is the version the
 ## Scheduler (`scheduler/`) — library landed 2026-10-16 (M2 item 1)
 
 The plan and what is still ahead live in docs/scheduler.md; this section records what
-exists. So far that is the library alone: nothing hosts it until `daemon/src/leader.ts`
-(M2 item 3), so no spawn is routed yet.
+exists. `daemon/src/leader.ts` hosts it (_Scheduler_, "The leader"), but nothing submits a
+task until the PWA's `auto` (M2 item 6), so no spawn is routed yet.
 
 - **A pure library behind two interfaces** (`scheduler/src/ports.ts`). `QueueStore`
   (`list`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)`, `version_conflict` as
@@ -2775,6 +2827,10 @@ exists. So far that is the library alone: nothing hosts it until `daemon/src/lea
   `ready`; an unanswered check waits while the machine is connected and releases once it
   is not, the daemon's `task_running` being the backstop. The spawn audits as
   `client=scheduler`. Ticks coalesce: one asked for mid-pass runs once after it.
+- **Takeover** (`takeover()`) is `load()` plus one `sessions` read per machine with an
+  in-flight task, settled before the host's first tick: a reservation as the TTL check
+  settles one, except that a session carrying its id counts at any age; a running task
+  with no session left is `done`; an unanswered machine changes nothing.
 - **States are M2's slice** (`task.ts`): `ready → reserved → running ⇄ needs-input →
 done`, `failed`/`cancelled` off-path, one transition table, an illegal move a thrown
   bug. A session that ends is `done` until M3's done detection; a reserved task refuses

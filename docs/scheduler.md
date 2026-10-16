@@ -172,8 +172,10 @@ in a `session-event` are the daemon's own, from its pane map, never copied from 
 sent (Daemon changes, local socket).
 
 **Scheduler → daemon**: existing `spawn`/`sessions`/`despawn`, addressed from `"scheduler"` by
-the leader's app-role leg. Daemon replies to `env.from` already (`#onEnvelope` seals through `#sealReply` in `relay-client.ts`), so no
-reply-path change.
+the leader's app-role leg (landed with item 3). The target daemon needed no change — it replies
+to `env.from` already — but the relay routes that `to: "scheduler"` reply to the leader's
+_daemon_ socket, so the leader's daemon leg hands it to its app-role leg to correlate (DESIGN.md
+_Scheduler_, "The leader").
 
 **`SpawnRequest` gains two optional fields**, both ignored harmlessly by old daemons except
 where noted — a direct spawn (PWA machine pick, MCP, Raycast, CLI) and a scheduler spawn remain
@@ -194,7 +196,8 @@ the same op:
   support.
 
 Audit: scheduler spawns reach the target through the relay, so they audit as `origin=relay
-client=scheduler`; task ↔ session correlation is `taskId`.
+client=scheduler` — except on the leader's own machine, which it reaches in process as
+`origin=leader client=scheduler`; task ↔ session correlation is `taskId`.
 
 **App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
 `queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
@@ -236,19 +239,12 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
 - `claude-mods/session-events`: hooks (`SessionStart`, `Stop`, `Notification`,
   `UserPromptSubmit`, `SessionEnd`, `PostToolUse` matching PR-create output) + statusline tap
   for `rate_limits` → local socket. This is also the phase-2 bus.
-- **`leader.ts` — the scheduler role.** Advertises `roles: ["scheduler"]` on register. On
-  `lead { term }`: open the leader's app-role leg, build the two adapters (below), take over
-  (reconcile reservations against `sessions`), run the loop. **The leg is persistent**: a
-  `RelayClient` of the leader's own, with its own `ReplayGuard`, held for the whole term. Not
-  `LazyRelay` (`daemon/src/app-relay.ts`), which hangs up after 5 minutes idle and redials on
-  the next call — right for a Claude session that calls hours apart, wrong for a loop that must
-  hear every registry and `status` push between its own calls — and not shared with the
-  broker, so neither lifecycle can end the other's socket. On `follow`, socket loss or
-  `not_leader`: stop the loop, stop that client, drop the adapters, leak nothing — the broker's
-  lifecycle discipline: no timer, listener or socket outlives the term.
-  Nothing else in the daemon imports `scheduler/`. The daemon's own relay socket is still
-  daemon-role; the leader addresses other machines only through its app-role leg, and may
-  address itself only through the local op path (the broker's rule).
+- **`leader.ts` — the scheduler role. Landed 2026-10-16 (M2 item 3); DESIGN.md _Scheduler_,
+  "The leader", is the record**: a term per `lead`, its own persistent leg sent as the
+  scheduler, the `Fleet` over it with this machine reached in process (origin `leader`),
+  takeover before dispatch, and nothing of a term outliving `follow`, socket loss or
+  `not_leader`. `QueueStore` is still the library's in-memory one, fenced by the term; M3 swaps
+  in the relay's `store-*` ops behind the same interface.
 
 ## Scheduler (`scheduler/`)
 
@@ -262,7 +258,8 @@ adapter implementations (SQLite store, own app-role client) and no change here.
   bodies, with `version_conflict` surfaced as a value. Daemon adapter: the relay's `store-*`
   ops, sealing/opening with the daemon's already-imported `CryptoKey`, carrying its term.
 - `Fleet`: a registry + `status` feed, and `spawn`/`sessions`/`despawn` to a `deviceId`.
-  Daemon adapter: the leader's own long-lived app-role `RelayClient` (`leader.ts`, above).
+  Daemon adapter: the leader's own long-lived app-role `RelayClient` (`leader.ts`, above;
+  landed).
 
 Tests run the library against in-memory fakes of both; the daemon suite proves the adapters
 against `daemon/test/harness.ts`; the e2e suite proves the store against the real DO.
@@ -281,7 +278,9 @@ concurrency slot (session ended) but keeps `after: merged` dependents blocked.
 version-mismatched ones, as the PWA skips registry entries), then for each `reserved` or
 `running` task ask `sessions` on its machine: a session carrying the `taskId` → `running` with
 that pane; none and the reservation is unexpired → keep waiting; none and expired → release
-and re-route. Only then does the loop start dispatching.
+and re-route. Only then does the loop start dispatching. The reconcile landed with item 3 as
+`Scheduler.takeover()` (DESIGN.md _Scheduler_), which also settles a `running` task whose
+session is gone as `done`; opening and version-checking bodies is M3's store adapter.
 
 ```
                  registry + status (per machine)        task (sealed body)
@@ -421,9 +420,13 @@ queue yet.
    sweep; `scheduler:term`, `lead`/`follow`,
    `not_leader` on a stale term, `scheduler: { deviceId,
 term } | null` in the registry push.
-3. `leader.ts` — the leader's own persistent app-role `RelayClient` (not `LazyRelay`) and the
-   `Fleet` adapter over it, lifecycle on `lead` / `follow` / socket loss, leaking nothing on
-   demotion. `QueueStore` is the in-memory fake for this milestone.
+3. **Landed 2026-10-16 — DESIGN.md _Scheduler_, "The leader", is the record.** `leader.ts` —
+   the leader's own persistent app-role `RelayClient` (not `LazyRelay`) and the `Fleet` adapter
+   over it, lifecycle on `lead` / `follow` / socket loss / `not_leader`, leaking nothing on
+   demotion. `QueueStore` is the in-memory one for this milestone. Decided while building it:
+   replies to the leader arrive on its daemon socket and are handed to the leg; the leader's
+   own machine is reached in process under the new audit origin `leader`; the store outlives
+   terms and a wrapper refuses writes from an ended one.
 4. `taskId` on `spawn`, `task_running`, `taskId` in `sessions`; advertised in `capabilities`.
    **Landed 2026-10-16** — DESIGN.md _Daemon_, "Task ids", is the record: a tmux pane option,
    so it survives a daemon restart, and `taskIdOfPane` in `daemon/src/sessions.ts` is item 5's

@@ -38,7 +38,7 @@ export interface AppRelay {
  * (spawn, 90s), so the line never drops under an in-flight call — and the
  * in-flight count below guards that anyway.
  */
-const IDLE_MS = 5 * 60_000;
+export const IDLE_MS = 5 * 60_000;
 
 /** Bounds `acquire` when the relay is down; past it the call fails instead of riding the backoff forever. */
 export const CONNECT_TIMEOUT_MS = 10_000;
@@ -205,13 +205,15 @@ export class LazyRelay {
 /**
  * The shared app-role client, configured the way every daemon-side consumer
  * needs it. `log` is required rather than defaulted: the default is stdout,
- * which in `seanced mcp` is the protocol channel.
+ * which in `seanced mcp` is the protocol channel. `scheduler` makes it the
+ * leader's leg for one term (`leader.ts`).
  */
 export function appRelayClient(
   config: Pick<Config, "relayUrl" | "bearerToken">,
   key: CryptoKey,
   log: (line: string) => void,
-): AppRelay {
+  scheduler?: { readonly term: number },
+): RelayClient {
   return new RelayClient({
     url: appRelayUrl(config.relayUrl),
     token: config.bearerToken,
@@ -219,5 +221,6 @@ export function appRelayClient(
     log,
     // Bun dialing workerd needs this or frames die with close code 1002.
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+    ...(scheduler === undefined ? {} : { scheduler }),
   });
 }

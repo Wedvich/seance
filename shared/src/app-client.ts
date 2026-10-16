@@ -6,6 +6,7 @@ import {
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
   OP_TIMEOUT_MS,
+  SCHEDULER_ID,
   TOKEN_PARAM,
   type AppFrame,
   type Envelope,
@@ -394,6 +395,8 @@ export class RelayClient {
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
   readonly #log: (line: string) => void;
+  /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
+  readonly #term: number | null;
 
   constructor(opts: {
     readonly url: string;
@@ -412,6 +415,13 @@ export class RelayClient {
     readonly pongTimeoutMs?: number;
     /** Wire-log sink. Defaults to stdout; a consumer whose stdout is spoken for (the MCP server's JSON-RPC) passes its own. */
     readonly log?: (line: string) => void;
+    /**
+     * Speak as the scheduler leader (DESIGN.md, Scheduler): every request is
+     * sealed `from: SCHEDULER_ID` and its frame carries `term`, which the relay
+     * fences on. One client per term — a new term is a new client, so nothing
+     * sent under the old one can go out under the new.
+     */
+    readonly scheduler?: { readonly term: number };
   }) {
     this.#url = opts.url;
     this.#token = opts.token;
@@ -423,6 +433,7 @@ export class RelayClient {
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#log = opts.log ?? ((line) => console.log(line));
+    this.#term = opts.scheduler?.term ?? null;
   }
 
   /**
@@ -552,7 +563,9 @@ export class RelayClient {
     }
     const id = crypto.randomUUID();
     const plain: Plain = { id, ts: Date.now(), op, payload };
-    const env = await seal(this.#key, { to: deviceId, from: APP_ID }, plain);
+    const term = this.#term;
+    const env = await seal(this.#key, { to: deviceId, from: term === null ? APP_ID : SCHEDULER_ID }, plain);
+    const frame: AppFrame = { t: "msg", env, ...(term === null ? {} : { term }) };
     // Sealing is async, so the socket can die in the gap. Without this the request
     // would sit in #pending until its own timeout — 90s for a spawn.
     if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
@@ -584,13 +597,28 @@ export class RelayClient {
         },
       });
       this.#idByIv.set(env.iv, id);
-      socket.send(JSON.stringify({ t: "msg", env }));
+      socket.send(JSON.stringify(frame));
       // A probe: its pong (answered at the edge) is the uplink evidence the blame
       // check above needs, without waiting for the next 30s heartbeat beat. A
       // healthy socket produces it within an RTT; a dead one produces nothing.
       socket.send("ping");
       this.#wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
+  }
+
+  /**
+   * An envelope that reached the leader on another socket. A daemon answers a
+   * scheduler request to `env.from`, and the relay routes `to: SCHEDULER_ID` to
+   * the leader's daemon-role socket, never this app-role one — so the daemon
+   * leg hands it here, and it is opened, replay-checked and correlated exactly
+   * as one that arrived on this socket. Anything else is not this client's.
+   */
+  async deliver(env: Envelope): Promise<void> {
+    if (this.#term === null || env.to !== SCHEDULER_ID) {
+      this.#wireLog("dropped", `iv=${quote(env.iv)} to=${quote(env.to)} reason=not-scheduler`);
+      return;
+    }
+    await this.#onMessage(env);
   }
 
   #discard(id: string): void {

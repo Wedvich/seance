@@ -7,6 +7,7 @@ import {
   MACHINES_ID,
   ReplayError,
   ReplayGuard,
+  SCHEDULER_ID,
   open,
   quote,
   seal,
@@ -36,6 +37,12 @@ export interface RelayClientOpts {
   /** After every register frame leaves — connect and re-register alike — with the blob it carried. */
   readonly onRegister?: (info: Envelope) => void;
   readonly onDisconnect?: () => void;
+  /** The relay nominated this daemon scheduler leader under `term`. */
+  readonly onLead?: (term: number) => void;
+  /** The relay moved the role elsewhere. */
+  readonly onFollow?: () => void;
+  /** An envelope `to: "scheduler"`, unopened. Absent, one is dropped as misaddressed. */
+  readonly onScheduler?: (env: Envelope) => void;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
@@ -267,11 +274,20 @@ export class RelayClient {
       log.warn("dropped non-object frame from relay");
       return;
     }
-    // Leadership is logged and nothing more until the scheduler runs here
-    // (docs/scheduler.md, M2 item 3); nothing in this process acts on it yet.
-    if (frame.t === "lead" || frame.t === "follow") {
-      const term = frame.t === "lead" && typeof frame.term === "number" ? ` term=${frame.term}` : "";
-      log.info(`relay says ${frame.t}${term}`);
+    // Plaintext relay assertions, acted on by `leader.ts`; the term it runs
+    // under is what the relay fences every scheduler send on.
+    if (frame.t === "lead") {
+      if (typeof frame.term !== "number" || !Number.isSafeInteger(frame.term)) {
+        log.warn("dropped lead frame without a term");
+        return;
+      }
+      log.info(`relay says lead term=${frame.term}`);
+      this.#opts.onLead?.(frame.term);
+      return;
+    }
+    if (frame.t === "follow") {
+      log.info("relay says follow");
+      this.#opts.onFollow?.();
       return;
     }
     // `typeof null === "object"`, so null has to be named: it would otherwise reach
@@ -285,6 +301,13 @@ export class RelayClient {
   }
 
   async #onEnvelope(env: Envelope): Promise<void> {
+    // Replies to the leader's app-role requests, routed here because a daemon
+    // answers `env.from`. Not opened on this leg: the leader's own client
+    // opens, replay-checks and correlates them, so one guard sees them once.
+    if (env.to === SCHEDULER_ID && this.#opts.onScheduler !== undefined) {
+      this.#opts.onScheduler(env);
+      return;
+    }
     const broadcast = env.to === MACHINES_ID;
     if (!broadcast && env.to !== this.#opts.identity.deviceId) {
       log.warn(`wire dropped iv=${quote(env.iv)} to=${quote(env.to)} reason=misaddressed`);
