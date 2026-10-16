@@ -455,7 +455,22 @@ export interface MetricsRequest {
    * doesn't keep matches nothing, so a newer app gets fewer series, not an error.
    */
   readonly names?: readonly string[];
+  /**
+   * Prometheus-style equality matchers, all of which a series must meet; a
+   * label the series lacks reads as `""`. An account chart sends `{ account }`
+   * so a multi-exclave machine's other accounts stay off the wire. A daemon that
+   * predates the key ignores it and returns every series, so a caller filters
+   * the reply again.
+   */
+  readonly labels?: Readonly<Record<string, string>>;
 }
+
+/**
+ * Bounds on `MetricsRequest.names` (entries, each name) and `.labels`
+ * (matchers, each name and value): every entry costs a comparison per series read.
+ */
+export const METRICS_MAX_FILTERS = 8;
+export const METRICS_MAX_FILTER_LENGTH = 128;
 
 /** Prometheus's data model and nothing else, so an external metrics stack is a consumer, not a redesign. */
 export interface MetricsSeries {

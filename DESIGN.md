@@ -815,9 +815,19 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
-- `metrics { from, to, step, names? }` → `{ series }` or `{ ok: false, code, message }`
+- `metrics { from, to, step, names?, labels? }` → `{ series }` or `{ ok: false, code, message }`
   — history from the daemon's local store (Telemetry, under Daemon), Prometheus
   series at the tier `step` names, limited to the `METRIC_NAMES` in `names`.
+  `labels` is Prometheus's `=`: a series is kept only if it meets every
+  matcher, and a label it lacks reads as `""`. Both filters share one bound:
+  at most `METRICS_MAX_FILTERS` names or matchers, each name and value
+  non-empty (a label value may be `""`) and at most
+  `METRICS_MAX_FILTER_LENGTH`. The store filters labels after its fixed SQL, so the
+  statement never grows with a request. An account chart sends `{ account }`,
+  because otherwise a machine's reply carries every exclave's quota series, and
+  at 30 days hourly that is ~17 KB sealed per series. A daemon that predates
+  `labels` ignores it and returns everything, and the app's `accountSeries`
+  still narrows the reply.
   Advertised as `"metrics"` in the register blob's `capabilities`, and
   `RelayClient.metrics` refuses a machine without it: a daemon that predates
   the op drops it unanswered, and the timeout would mark a live machine

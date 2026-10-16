@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import { useMemo } from "preact/hooks";
 import { chartLines } from "../chart.ts";
 import type { AccountCard, Gauge, MachineCard, MachinesView, QuotaBar } from "../machines-view.ts";
 import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
@@ -237,8 +238,14 @@ function HistoryChart(props: { history: HistoryView; onPick: (range: HistoryRang
 
 function ChartPlot(props: { history: HistoryView; series: Parameters<typeof chartLines>[0] }): JSX.Element {
   const { history, series } = props;
-  const lines = chartLines(series, history, { width: CHART_WIDTH, height: CHART_HEIGHT }).filter(
-    (line) => line.d !== "",
+  const { from, to, step } = history;
+  // The screen re-renders on every status beat; the geometry changes only with the reply or its window.
+  const lines = useMemo(
+    () =>
+      chartLines(series, { from, to, step }, { width: CHART_WIDTH, height: CHART_HEIGHT }).filter(
+        (line) => line.d !== "",
+      ),
+    [series, from, to, step],
   );
   if (lines.length === 0) return <p className="chart-status">Nothing recorded in this range.</p>;
 

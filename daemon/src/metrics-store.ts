@@ -194,22 +194,30 @@ export class MetricsStore {
 
   /**
    * Every series with a point in the range, at the tier the step names, limited
-   * to `names` when given; bounds on the range are the caller's.
+   * to `names` and to series meeting every `labels` matcher when given; bounds
+   * on the range are the caller's. Labels are matched here rather than in the
+   * SQL, so the statement stays fixed however many matchers a request carries.
    */
   query(request: MetricsRequest): readonly MetricsSeries[] {
     const select = this.#select.get(request.step);
     if (select === undefined) return [];
     const out: MetricsSeries[] = [];
-    let current: { readonly metric: string; readonly labels: string; readonly points: [number, number][] } | null =
-      null;
+    // `points` is null for a series the matchers turned away: its rows are skipped, not collected.
+    let current: {
+      readonly metric: string;
+      readonly labels: string;
+      readonly points: [number, number][] | null;
+    } | null = null;
     const names = request.names === undefined ? null : JSON.stringify(request.names);
     for (const row of select.all(request.from, request.to, names)) {
       if (!isPointRow(row)) continue;
       if (current === null || current.metric !== row.metric || current.labels !== row.labels) {
-        current = { metric: row.metric, labels: row.labels, points: [] };
-        out.push({ metric: row.metric, labels: parseLabels(row.labels), points: current.points });
+        const labels = parseLabels(row.labels);
+        const points = request.labels === undefined || matchesLabels(labels, request.labels) ? [] : null;
+        current = { metric: row.metric, labels: row.labels, points };
+        if (points !== null) out.push({ metric: row.metric, labels, points });
       }
-      current.points.push([row.ts, row.value]);
+      current.points?.push([row.ts, row.value]);
     }
     return out;
   }
@@ -217,6 +225,13 @@ export class MetricsStore {
   close(): void {
     this.#db.close();
   }
+}
+
+/** Prometheus's `=`: a label the series lacks reads as `""`, so `{ model: "" }` keeps only the unmodelled. */
+function matchesLabels(labels: Readonly<Record<string, string>>, matchers: Readonly<Record<string, string>>): boolean {
+  return Object.entries(matchers).every(
+    ([name, wanted]) => (Object.hasOwn(labels, name) ? labels[name] : "") === wanted,
+  );
 }
 
 function bucket(ts: number, step: number): number {

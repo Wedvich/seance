@@ -8,7 +8,14 @@ import {
   parseMetricsResponse,
   parseRepoEntry,
 } from "./parse.ts";
-import { METRICS_MAX_POINTS, type MachineStatus, type MetricsSeries, type QuotaObservation } from "./types.ts";
+import {
+  METRICS_MAX_FILTER_LENGTH,
+  METRICS_MAX_FILTERS,
+  METRICS_MAX_POINTS,
+  type MachineStatus,
+  type MetricsSeries,
+  type QuotaObservation,
+} from "./types.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
 const info = { name: "mac", platform: "darwin", repos: [repo], scannedAt: 1_700_000_000_000 };
@@ -120,6 +127,14 @@ describe("parseMachineStatus", () => {
   });
 });
 
+function withNames(names: readonly string[]): boolean {
+  return isMetricsRequest({ from: 10, to: 20, step: 30, names });
+}
+
+function withLabels(labels: unknown): boolean {
+  return isMetricsRequest({ from: 10, to: 20, step: 30, labels });
+}
+
 describe("metrics", () => {
   test("a request names a known step and an ordered range", () => {
     expect(isMetricsRequest({ from: 10, to: 20, step: 30 })).toBe(true);
@@ -141,6 +156,32 @@ describe("metrics", () => {
     expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: [] })).toBe(false);
     expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: "cpu_pct" })).toBe(false);
     expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: [1] })).toBe(false);
+    expect(isMetricsRequest({ from: 10, to: 20, step: 30, names: [""] })).toBe(false);
+  });
+
+  test("names are bounded like labels, in count and in each name's length", () => {
+    const many = Array.from({ length: METRICS_MAX_FILTERS + 1 }, (_, i) => `m${i}`);
+    expect(withNames(many.slice(1))).toBe(true);
+    expect(withNames(many)).toBe(false);
+    const long = "x".repeat(METRICS_MAX_FILTER_LENGTH);
+    expect(withNames([long])).toBe(true);
+    expect(withNames([`${long}x`])).toBe(false);
+  });
+
+  test("labels are bounded string matchers, and an empty set is malformed rather than a filter for everything", () => {
+    expect(withLabels({ account: "org:acct" })).toBe(true);
+    expect(withLabels({ account: "org:acct", model: "" })).toBe(true);
+    expect(withLabels({})).toBe(false);
+    expect(withLabels(["account"])).toBe(false);
+    expect(withLabels({ account: 1 })).toBe(false);
+    expect(withLabels({ "": "x" })).toBe(false);
+    const many = Object.fromEntries(Array.from({ length: METRICS_MAX_FILTERS + 1 }, (_, i) => [`l${i}`, "v"]));
+    expect(withLabels(Object.fromEntries(Object.entries(many).slice(1)))).toBe(true);
+    expect(withLabels(many)).toBe(false);
+    const long = "x".repeat(METRICS_MAX_FILTER_LENGTH);
+    expect(withLabels({ [long]: long })).toBe(true);
+    expect(withLabels({ [`${long}x`]: "v" })).toBe(false);
+    expect(withLabels({ account: `${long}x` })).toBe(false);
   });
 
   test("a reply is the history or a known refusal, and an unknown code is unreadable", () => {
