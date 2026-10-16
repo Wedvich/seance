@@ -388,19 +388,41 @@ describe("the local short circuit", () => {
     lazy.stop();
   });
 
-  test("a handler that failed reads as an error, not an empty session list", async () => {
-    // `ErrorResponse` is what a throwing handler answers with; neither client
-    // treats it as a failure, so an unchecked reply renders as `undefined`.
-    const failure = { ok: false, code: "internal_error", message: "tmux is not installed" };
-    for (const via of ["local", "relay"] as const) {
-      const local = via === "local" ? fakeLocal(() => failure) : null;
-      const lazy = new LazyRelay({ create: () => fakeRelay([machine()], () => failure) });
-      const client = await connectedClient(lazy, local);
-      const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
-      expect(result.isError).toBe(true);
-      expect(toolText(result)).toContain("tmux is not installed");
-      lazy.stop();
+  test("a handler that failed, or a reply too large to send, reads as an error, not an empty session list", async () => {
+    // `ErrorResponse` is what a throwing handler answers with, and what the
+    // transport sends in place of an oversized reply; neither client treats it
+    // as a failure, so an unchecked reply renders as `undefined`.
+    const failures = [
+      { ok: false, code: "internal_error", message: "tmux is not installed" },
+      { ok: false, code: "too_large", message: "reply would seal to 70000 chars, over 65536" },
+    ];
+    for (const failure of failures) {
+      for (const via of ["local", "relay"] as const) {
+        const local = via === "local" ? fakeLocal(() => failure) : null;
+        const lazy = new LazyRelay({ create: () => fakeRelay([machine()], () => failure) });
+        const client = await connectedClient(lazy, local);
+        const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
+        expect(result.isError).toBe(true);
+        expect(toolText(result)).toBe(`get_sessions failed (${failure.code}): ${failure.message}`);
+        lazy.stop();
+      }
     }
+  });
+
+  test("a spawn answered too_large may have run, and says to look before retrying", async () => {
+    const failure = { ok: false, code: "too_large", message: "reply would seal to 70000 chars, over 65536" };
+    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
+    const client = await connectedClient(
+      lazy,
+      fakeLocal(() => failure),
+    );
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance" },
+    });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain("check get_sessions");
+    lazy.stop();
   });
 
   test("list_machines marks which entry is this box", async () => {

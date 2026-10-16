@@ -47,7 +47,10 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
     spawn: (deviceId, request) =>
       client.request<SpawnResponse>(deviceId, "spawn", { ...request, client: SPAWN_CLIENT } satisfies SpawnRequest),
     rescan: async (deviceId) => {
-      const reply = await client.request<unknown>(deviceId, "rescan", {});
+      const reply = await client.request<RescanResponse>(deviceId, "rescan", {});
+      // A daemon refusal (`too_large` on a machine with many repos) says why;
+      // applyScan would only call it unreadable.
+      if ("ok" in reply) throw new Error(`the daemon refused the rescan (${reply.code}): ${reply.message}`);
       // Folds the fresh list into the machine it came from, so a rescan that
       // found nothing new still moves `scannedAt` — without this the daemon
       // only re-registers on a *changed* set and the picker looks inert.

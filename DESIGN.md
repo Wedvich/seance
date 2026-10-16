@@ -529,11 +529,12 @@ The Durable Object persists a machine registry:
   `Machine.scannedAt` without a register, and comparing against it would drop
   every status until the repo set next changed. A status that opened is proof
   of life and clears a timeout's offline mark, as a reply does.
-  **Reading** (`shared/src/status-reader.ts`): the parser checks types, and
-  one set of rules checks ranges and relations, so the PWA and the scheduler
-  cannot disagree on one. `RelayClient` applies `sanitizeStatus` against the
-  register blob's exclave count before setting `Machine.status`. It refuses
-  the whole snapshot for a number past `Number.MAX_SAFE_INTEGER`, a percent
+  **Reading** (`shared/src/status-reader.ts`): the parser checks types —
+  every wire integer a non-negative safe integer, since `Number.isInteger`
+  alone accepts `1e308` — and one set of rules checks ranges and relations, so
+  the PWA and the scheduler cannot disagree on one. `RelayClient` applies
+  `sanitizeStatus` against the register blob's exclave count before setting
+  `Machine.status`. It refuses the whole snapshot for a percent
   over 100, a `sess` that is not one count per exclave, a quota index out of
   range or repeated, or more entries kept plus trimmed (`tr`) than there are
   exclaves. It drops one observation stamped further ahead than clock skew
@@ -822,10 +823,15 @@ send error that caused it.
   not per handler, because `metrics`, `sessions` and `rescan` all grow with
   data. Rejected: a per-handler check against a predicted sealed length (each
   op re-states the envelope arithmetic, and every reply is encoded twice).
+  It and a crashed handler's `internal_error` are `TRANSPORT_ERROR_CODES`:
+  any op can answer with that `ErrorResponse`, so every op's own code list
+  spreads them, and the app-role `request<T>` resolves to `T | ErrorResponse`
+  — a caller reads no field before checking, which the compiler enforces.
   Known edge, accepted: a `spawn` or `despawn` success embeds the session list
   (~200 B per entry), so past ~240 live sessions on one machine a spawn that
-  happened would read as `too_large`. Machines run 10–20; trimming the list or
-  a "may have run" verdict would be a wire change for a case nothing reaches.
+  happened would read as `too_large`. Machines run 10–20; trimming the list
+  would be a wire change for a case nothing reaches, so the PWA and MCP word
+  a spawn's `too_large` as "may be running" rather than as a failure.
 
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
@@ -1245,8 +1251,9 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
   `host/path`, and the whole lowercased (the hosts we route to compare
   case-insensitively; a key that differed by case would split one repo in two).
-  Basename when there is no remote, or only a local/`file://` one — some
-  machine's mirror is not an identity. Re-read every scan, not carried
+  Basename when there is no remote, or only a local, `file://` or drive-letter
+  one (a Windows `C:\…` or UNC `\\…` path, which the scp rule would otherwise
+  key as host `c`) — some machine's mirror is not an identity. Re-read every scan, not carried
   forward: a remote does get repointed, and the read is one file. Not followed:
   `include` directives and `url.<base>.insteadOf`, so a repo that only names its
   remote through those keys by basename. Known split: the same repo over https
@@ -1292,7 +1299,8 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   per exclave — in M1 only what Claude Code itself cached in each exclave's
   `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
-  is not cached; source `cache`, stamped at its fetch time). The three pressure
+  is not cached; source `cache`, stamped at its fetch time, capped a minute past
+  now so one far-future stamp can't stay "newest" for an account). The three pressure
   numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
   laptop back from sleep resets to its first reading instead of trusting a stale
   average, and no reader keeps a window of its own. Collectors are exec-free
@@ -1303,7 +1311,10 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   repo roots reporting the fullest volume, `/proc/diskstats` over whole devices.
   A field the host can't answer is absent — the first tick has no cpu or I/O
   delta, macOS has no exec-free I/O counter, a tmux outage drops `sess` for the
-  tick — never a guess. Rejected for macOS: free + inactive + speculative pages
+  tick — never a guess: a failed collector drops its field and stores no
+  sample rather than repeating its average, and the next reading eases from
+  that average over the whole gap since the last good one. Rejected for macOS:
+  free + inactive + speculative pages
   from `vm_stat` — file cache and the compressor hold most of an idle Mac's RAM,
   so it read ~70% used on a 48 GB Mac the kernel rated at normal pressure, and
   `machine_pressure` would have steered work away from it. Every sample also
@@ -1325,7 +1336,7 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   and a rollup never re-averages a bucket the prune horizon has cut into. The
   config file is re-parsed only when its stat changes. Each sample goes out as the
   `status` frame (Presence & identity), stamped with the `scannedAt` of the
-  blob last handed to a register — `state.scannedAt` moves on every hourly
+  blob last registered — `state.scannedAt` moves on every hourly
   rescan while a re-register happens only on a changed set, and a reader drops
   a status whose stamp disagrees with the blob it holds — and trimmed to the
   relay's bound when a machine's exclaves outgrow it (`daemon/src/status.ts`:
@@ -1334,7 +1345,12 @@ restart`). Rejected: daemon-inside-tmux (reboot silently takes
   is logged once) and then padded to one sealed length. Sent after
   each register too, re-arming the beat so the next lands past the relay's
   floor: the register just changed the blob a status indexes, and the registry
-  push an app got carries no snapshot until this one. History is the
+  push an app got carries no snapshot until this one. The stamp and the
+  exclave list it indexes are one value (`Registered`, `telemetry.ts`),
+  committed by `run.ts` once the register frame has left and read once as a
+  tick starts, so a register mid-tick can't pair one scan's indexes with
+  another's stamp; a tick asked for after a register waits out the one in
+  flight rather than sharing it. History is the
   `metrics` op's. Nothing routes from this store — the scheduler reads only the
   latest `status` — so a Prometheus + Grafana stack later is one more consumer
   (an exposition endpoint, or remote write, since daemons dial out and laptops

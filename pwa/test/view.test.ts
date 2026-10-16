@@ -426,6 +426,14 @@ describe("failureBody", () => {
     expect(failureBody("launch_error", "seance", "MacBook Pro")).toContain("couldn't open a window");
   });
 
+  // The transport answers too_large for the reply, not the spawn — a success
+  // embeds the session list — so the card must not say nothing is running.
+  test("too_large says the session may be running", () => {
+    const body = failureBody("too_large", "seance", "MacBook Pro");
+    expect(body).toContain("may be running");
+    expect(body).not.toContain("Nothing is running");
+  });
+
   test("names the repo and machine where that is the actionable part", () => {
     expect(failureBody("repo_not_found", "seance", "Mac Studio")).toBe(
       "seance isn't on Mac Studio anymore. Rescan its repos and try again.",

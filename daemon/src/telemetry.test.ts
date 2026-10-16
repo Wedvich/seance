@@ -10,8 +10,10 @@ import {
   parseDiskstats,
   parseMeminfo,
   parseMemorystatusLevel,
+  QUOTA_CLOCK_SKEW_MS,
   readCachedQuota,
   type HostProbe,
+  type Registered,
 } from "./telemetry.ts";
 
 const cleanups: string[] = [];
@@ -47,6 +49,14 @@ function scanOf(home: string): ExclaveScan {
     ],
     rejected: [],
   };
+}
+
+const SCAN = T0 - 3_600_000;
+
+/** One value per test, as run.ts holds one per register: a tick shares an in-flight sample only for the same one. */
+function registeredOf(home: string, scan = SCAN): () => Registered {
+  const registered = { scan, exclaves: scanOf(home) };
+  return () => registered;
 }
 
 const cached = {
@@ -97,7 +107,7 @@ describe("createTelemetry", () => {
     const telemetry = createTelemetry(store, {
       machine: "mac",
       diskPaths: [join(home, "a"), join(home, "b")],
-      exclaves: () => scanOf(home),
+      registered: registeredOf(home),
       sessions: async () => sessions,
       probe: fakeProbe(),
     });
@@ -105,6 +115,7 @@ describe("createTelemetry", () => {
     const first = await telemetry.tick(T0);
     expect(first).toEqual({
       at: T0 / 1000,
+      scan: SCAN,
       mem: 75,
       disk: 90,
       free: 10 * 1024,
@@ -151,7 +162,7 @@ describe("createTelemetry", () => {
     const telemetry = createTelemetry(store, {
       machine: "mac",
       diskPaths: [home],
-      exclaves: () => scanOf(home),
+      registered: registeredOf(home),
       sessions: async () => [],
       probe: { ...probe, memory: async () => ({ total: 16 * GiB, available }) },
     });
@@ -174,7 +185,7 @@ describe("createTelemetry", () => {
     const telemetry = createTelemetry(store, {
       machine: "mac",
       diskPaths: [join(home, "missing")],
-      exclaves: () => scanOf(home),
+      registered: registeredOf(home),
       sessions: async () => {
         throw new Error("no server running");
       },
@@ -187,7 +198,7 @@ describe("createTelemetry", () => {
         },
       },
     });
-    expect(await telemetry.tick(T0)).toEqual({ at: T0 / 1000 });
+    expect(await telemetry.tick(T0)).toEqual({ at: T0 / 1000, scan: SCAN });
     expect(store.query({ from: 0, to: T0 / 1000, step: 30 })).toEqual([]);
     store.close();
   });
@@ -201,7 +212,7 @@ describe("createTelemetry", () => {
     const telemetry = createTelemetry(store, {
       machine: "mac",
       diskPaths: [],
-      exclaves: () => scanOf(home),
+      registered: registeredOf(home),
       sessions: async () => [],
       probe: fakeProbe(),
     });
@@ -222,7 +233,7 @@ describe("createTelemetry", () => {
     const telemetry = createTelemetry(store, {
       machine: "mac",
       diskPaths: [],
-      exclaves: () => scanOf(home),
+      registered: registeredOf(home),
       sessions: () => gate.promise,
       probe: fakeProbe(),
     });
@@ -233,9 +244,81 @@ describe("createTelemetry", () => {
     expect((await b).at).toBe(T0 / 1000);
     store.close();
   });
+
+  test("a register mid-tick: the stamp and every index come from the read at tick start, and the next tick has the new one", async () => {
+    const home = await makeHome();
+    await mkdir(join(home, ".claude-work"), { recursive: true });
+    await writeFile(join(home, ".claude-work", ".claude.json"), JSON.stringify({ cachedUsageUtilization: cached }));
+    const store = MetricsStore.memory();
+    const before = { scan: SCAN, exclaves: scanOf(home) };
+    // The same exclaves in the other order: under this blob `work` is index 0.
+    const reordered = scanOf(home);
+    const after = {
+      scan: SCAN + 1,
+      exclaves: { ...reordered, exclaves: reordered.exclaves.toReversed(), info: reordered.info.toReversed() },
+    };
+    let registered = before;
+    const gate = Promise.withResolvers<readonly SessionEntry[]>();
+    const telemetry = createTelemetry(store, {
+      machine: "mac",
+      diskPaths: [],
+      registered: () => registered,
+      sessions: () => gate.promise,
+      probe: fakeProbe(),
+    });
+    const inFlight = telemetry.tick(T0);
+    registered = after;
+    const next = telemetry.tick(T0 + 1000);
+    expect(next).not.toBe(inFlight);
+    gate.resolve([session(join(home, "work", "repo"))]);
+    const first = await inFlight;
+    expect([first.scan, first.sess, first.quota?.map((q) => q.x)]).toEqual([SCAN, [0, 1], [1]]);
+    const second = await next;
+    expect([second.scan, second.sess, second.quota?.map((q) => q.x)]).toEqual([SCAN + 1, [1, 0], [0]]);
+    store.close();
+  });
+
+  test("a failed reading is absent and stores nothing; the next one eases from the last good average over the whole gap", async () => {
+    const home = await makeHome();
+    const store = MetricsStore.memory();
+    const readings: (number | Error)[] = [4 * GiB, new Error("EIO"), 16 * GiB];
+    const telemetry = createTelemetry(store, {
+      machine: "mac",
+      diskPaths: [],
+      registered: registeredOf(home),
+      sessions: async () => [],
+      probe: {
+        ...fakeProbe(),
+        memory: async () => {
+          const next = readings.shift();
+          if (next === undefined || next instanceof Error) throw next ?? new Error("no reading");
+          return { total: 16 * GiB, available: next };
+        },
+      },
+    });
+    expect((await telemetry.tick(T0)).mem).toBe(75);
+    expect((await telemetry.tick(T0 + 30_000)).mem).toBeUndefined();
+    // 90s since the last good reading, not the 60s since the failed one.
+    expect((await telemetry.tick(T0 + 90_000)).mem).toBe(Math.round(75 * (1 - 90 / 120)));
+    const mem = store.query({ from: 0, to: T0 / 1000 + 90, step: 30 }).find((s) => s.metric === METRIC_NAMES.mem);
+    expect(mem?.points.map(([ts]) => ts)).toEqual([T0 / 1000, T0 / 1000 + 90]);
+    store.close();
+  });
 });
 
 describe("readCachedQuota", () => {
+  test("a stamp from the future is capped a small skew past now", async () => {
+    const home = await makeHome();
+    const file = join(home, "future.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        cachedUsageUtilization: { fetchedAtMs: T0 + 86_400_000, utilization: { five_hour: { utilization: 5 } } },
+      }),
+    );
+    expect((await readCachedQuota(file, 0, T0))?.at).toBe(Math.floor((T0 + QUOTA_CLOCK_SKEW_MS) / 1000));
+  });
+
   test("nothing cached, or no file, is no observation", async () => {
     const home = await makeHome();
     expect(await readCachedQuota(join(home, "missing.json"), 0)).toBeNull();

@@ -190,6 +190,10 @@ describe("origin", () => {
     expect(normalizeOrigin("/srv/mirrors/seance.git")).toBeNull();
     expect(normalizeOrigin("../sibling")).toBeNull();
     expect(normalizeOrigin("file:///srv/mirrors/seance.git")).toBeNull();
+    // Windows paths, which the scp-style branch would read as host `c`.
+    expect(normalizeOrigin("C:/src/seance")).toBeNull();
+    expect(normalizeOrigin("c:\\src\\seance.git")).toBeNull();
+    expect(normalizeOrigin("\\\\fileserver\\mirrors\\seance.git")).toBeNull();
     expect(normalizeOrigin("https://github.com")).toBeNull();
     expect(normalizeOrigin("")).toBeNull();
   });

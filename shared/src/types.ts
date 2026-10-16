@@ -341,8 +341,13 @@ export interface MachineInfo {
   readonly capabilities?: readonly string[];
 }
 
-/** The `capabilities` entry for the `metrics` op: a daemon without it ignores the op, which an app sees only as a timeout. */
-export const METRICS_CAPABILITY = "metrics";
+/**
+ * `MachineInfo.capabilities` entries. `metrics`: the op — a daemon without it
+ * ignores the op, which an app sees only as a timeout.
+ */
+export const CAPABILITIES = { metrics: "metrics" } as const;
+
+export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
 
 export const QUOTA_SOURCES = ["session", "oauth", "cache"] as const;
 
@@ -494,8 +499,17 @@ export interface MetricsResponse {
   readonly series: readonly MetricsSeries[];
 }
 
+/**
+ * Codes the transport can answer any op with, whatever its handler would have
+ * said (`ErrorResponse`): `internal_error` from a crashed handler, `too_large`
+ * from a reply that would seal past `ENVELOPE_MAX_CT_LENGTH`.
+ */
+export const TRANSPORT_ERROR_CODES = ["internal_error", "too_large"] as const;
+
+export type TransportErrorCode = (typeof TRANSPORT_ERROR_CODES)[number];
+
 /** `too_large`: the reply would not fit one envelope — ask fewer `names` or a coarser step. */
-export const METRICS_ERROR_CODES = ["invalid_request", "too_large", "internal_error"] as const;
+export const METRICS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;
 
 export type MetricsErrorCode = (typeof METRICS_ERROR_CODES)[number];
 
@@ -574,7 +588,7 @@ export const SPAWN_ERROR_CODES = [
   "launch_error",
   "claude_died",
   "timeout",
-  "internal_error",
+  ...TRANSPORT_ERROR_CODES,
 ] as const;
 
 export type SpawnErrorCode = (typeof SPAWN_ERROR_CODES)[number];
@@ -617,7 +631,7 @@ export interface DespawnRequest {
   readonly client?: string;
 }
 
-export const DESPAWN_ERROR_CODES = ["invalid_target", "session_not_found", "internal_error"] as const;
+export const DESPAWN_ERROR_CODES = ["invalid_target", "session_not_found", ...TRANSPORT_ERROR_CODES] as const;
 
 export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
 
@@ -646,10 +660,12 @@ export interface RescanResponse {
 /**
  * Reply payload when an op handler crashes, or (`too_large`) when its reply
  * would seal past `ENVELOPE_MAX_CT_LENGTH` and the daemon's transport sends
- * this instead; `re` still correlates it to the request.
+ * this instead; `re` still correlates it to the request. Any op's reply can be
+ * one, which is why the app-role `request<T>` resolves to `T | ErrorResponse`
+ * and every op's own code list includes these.
  */
 export interface ErrorResponse {
   readonly ok: false;
-  readonly code: "internal_error" | "too_large";
+  readonly code: TransportErrorCode;
   readonly message: string;
 }

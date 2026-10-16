@@ -1,9 +1,9 @@
 import type {
-  ErrorResponse,
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
   RepoEntry,
+  RescanResponse,
   SessionsResponse,
   SpawnClient,
   SpawnRequest,
@@ -206,7 +206,7 @@ export class Store {
     await Promise.all(
       deviceIds.map(async (deviceId) => {
         try {
-          const reply = await this.#client.request<SessionsResponse | ErrorResponse>(deviceId, "sessions", {});
+          const reply = await this.#client.request<SessionsResponse>(deviceId, "sessions", {});
           // A daemon refusal (`internal_error`, `too_large`) arrives as a reply,
           // not a throw: unchecked, `sessions` lands in state as undefined.
           if ("ok" in reply) throw new Error(reply.code);
@@ -236,7 +236,7 @@ export class Store {
     const machine = this.#state.relay.machines.find((entry) => entry.deviceId === pending.machineId);
     let count: number | null = null;
     try {
-      const reply = await this.#client.request<SessionsResponse | ErrorResponse>(pending.machineId, "sessions", {});
+      const reply = await this.#client.request<SessionsResponse>(pending.machineId, "sessions", {});
       if ("ok" in reply) throw new Error(reply.code);
       count = reply.sessions.length;
       this.#patch({
@@ -498,7 +498,8 @@ export class Store {
    * would leave the row asserting the previous scan's time.
    */
   async #rescan(deviceId: string): Promise<readonly RepoEntry[]> {
-    const reply = await this.#client.request<unknown>(deviceId, "rescan", {});
+    const reply = await this.#client.request<RescanResponse>(deviceId, "rescan", {});
+    if ("ok" in reply) throw new Error(reply.code);
     const parsed = this.#client.applyScan(deviceId, reply);
     // A reply this build can't read is a failed rescan, not a shorter list.
     if (parsed === null) throw new Error("unreadable rescan reply");

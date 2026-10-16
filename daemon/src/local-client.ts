@@ -1,5 +1,5 @@
 import type { Socket } from "bun";
-import { isRecord, OP_TIMEOUT_MS, type Plain, type RequestOp } from "@seance/shared";
+import { isRecord, OP_TIMEOUT_MS, type ErrorResponse, type Plain, type RequestOp } from "@seance/shared";
 import { socketPath } from "./paths.ts";
 
 /**
@@ -169,7 +169,8 @@ export async function exchange(
 }
 
 /**
- * Sends one op to the local daemon and returns its payload. `timeoutMs` defaults
+ * Sends one op to the local daemon and returns its payload — the op's own reply,
+ * or the `ErrorResponse` the op socket answers a crashed handler with. `timeoutMs` defaults
  * to the same per-op deadline the app-role client uses, so a local spawn gets the
  * same 90s ceiling as a relayed one rather than a second number to keep in sync.
  */
@@ -177,7 +178,7 @@ export async function localRequest<T>(
   op: RequestOp,
   payload: unknown,
   opts: { readonly path?: string; readonly timeoutMs?: number } = {},
-): Promise<T> {
+): Promise<T | ErrorResponse> {
   const request: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
   const timeoutMs = opts.timeoutMs ?? OP_TIMEOUT_MS[op];
   const reply = await exchange(request, {
@@ -192,7 +193,7 @@ export async function localRequest<T>(
   if (!isRecord(reply) || re !== request.id) {
     throw new LocalRequestFailed(`the daemon answered a different request (${String(re)})`);
   }
-  return reply["payload"] as T;
+  return reply["payload"] as T | ErrorResponse;
 }
 
 /** Whether a daemon is listening locally — `status` and `doctor` report it, and it is the pre-check for a clear error. */

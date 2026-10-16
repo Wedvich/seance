@@ -118,6 +118,7 @@ describe("the local op socket", () => {
 
   test("sessions answers over the socket with no relay in the picture", async () => {
     const reply = await localRequest<SessionsResponse>("sessions", {}, { path: sockPath });
+    if ("ok" in reply) throw new Error(reply.message);
     expect(Array.isArray(reply.sessions)).toBe(true);
     expect(logged()).toContain('audit request origin=local op="sessions"');
   });

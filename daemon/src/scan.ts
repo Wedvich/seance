@@ -41,11 +41,14 @@ async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
  * thing is lowercased — the hosts we route to compare case-insensitively, and
  * a key that differs by case would split one repo in two. A local path (or
  * `file://`) is some machine's mirror, not a repo identity, so it reads as no
- * remote. Null when nothing usable remains.
+ * remote — a Windows drive-letter or UNC path too, which git takes as local
+ * before scp syntax and which would otherwise key `C:/src/repo` as host `c`.
+ * Null when nothing usable remains.
  */
 export function normalizeOrigin(url: string): string | null {
   let rest = url.trim();
   if (rest === "" || rest.startsWith("/") || rest.startsWith(".")) return null;
+  if (/^[a-z]:[\\/]/iu.test(rest) || rest.startsWith("\\\\")) return null;
   const scheme = rest.match(/^([a-z][a-z0-9+.-]*):\/\//iu);
   if (scheme !== null) {
     if (scheme[1]?.toLowerCase() === "file") return null;

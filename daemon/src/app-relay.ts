@@ -1,4 +1,11 @@
-import { appRelayUrl, RelayClient, REGISTRY_SETTLE_MS, type RelayState, type RequestOp } from "@seance/shared";
+import {
+  appRelayUrl,
+  RelayClient,
+  REGISTRY_SETTLE_MS,
+  type ErrorResponse,
+  type RelayState,
+  type RequestOp,
+} from "@seance/shared";
 import type { Config } from "./config.ts";
 
 /**
@@ -20,7 +27,8 @@ export interface AppRelay {
   readonly stop: () => void;
   readonly getState: () => RelayState;
   readonly subscribe: (listener: () => void) => () => void;
-  readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T>;
+  /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
+  readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T | ErrorResponse>;
 }
 
 /**

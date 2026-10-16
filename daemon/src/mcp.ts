@@ -55,7 +55,8 @@ export interface LocalMachine {
    * cloned since startup, and rejects every repo if the first scan hadn't landed.
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
-  readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T>;
+  /** Any op may answer with an `ErrorResponse`, as over the relay. */
+  readonly request: <T>(op: RequestOp, payload: unknown) => Promise<T | ErrorResponse>;
   /** Whether its daemon is listening, asked without sending an op — nothing is run or audited. */
   readonly reachable: () => Promise<boolean>;
 }
@@ -266,7 +267,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
     async ({ machine }) => {
       if (local !== null && isLocalRef(local, machine)) {
         try {
-          return renderSessions(await local.request<SessionsResponse | ErrorResponse>("sessions", {}));
+          return renderSessions(await local.request<SessionsResponse>("sessions", {}));
         } catch (err) {
           return errorResult(localFailureText("get_sessions", err));
         }
@@ -275,9 +276,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         const resolved = resolveMachine(lease.machines, machine);
         if ("error" in resolved) return errorResult(resolved.error);
         try {
-          return renderSessions(
-            await lease.request<SessionsResponse | ErrorResponse>(resolved.machine.deviceId, "sessions", {}),
-          );
+          return renderSessions(await lease.request<SessionsResponse>(resolved.machine.deviceId, "sessions", {}));
         } catch (err) {
           return errorResult(failureText("get_sessions", err));
         }
@@ -325,7 +324,12 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         ...(plan === undefined ? {} : { plan }),
       };
       const rendered = (reply: SpawnResponse, where: string): ToolResult => {
-        if (!reply.ok) return errorResult(`spawn failed (${reply.code}): ${reply.message}`);
+        if (!reply.ok) {
+          // `too_large` judges the reply, not the spawn: a success embeds the
+          // session list, so an agent must look before it retries.
+          const look = reply.code === "too_large" ? " — it may be running; check get_sessions" : "";
+          return errorResult(`spawn failed (${reply.code}): ${reply.message}${look}`);
+        }
         const note = reply.note === undefined ? "" : `\nnote: ${reply.note}`;
         const state = reply.pending === true ? " (started, not registered yet)" : "";
         return textResult(`spawned window ${reply.window} on ${where} at ${reply.path}${state}${note}`);
@@ -396,7 +400,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
 
       if (local !== null && isLocalRef(local, machine)) {
         try {
-          return rendered(await local.request<DespawnResponse | ErrorResponse>("despawn", request), local.name);
+          return rendered(await local.request<DespawnResponse>("despawn", request), local.name);
         } catch (err) {
           return errorResult(localFailureText("despawn_session", err));
         }
@@ -410,10 +414,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
           return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
         }
         try {
-          return rendered(
-            await lease.request<DespawnResponse | ErrorResponse>(target.deviceId, "despawn", request),
-            target.name,
-          );
+          return rendered(await lease.request<DespawnResponse>(target.deviceId, "despawn", request), target.name);
         } catch (err) {
           return errorResult(failureText("despawn_session", err));
         }
@@ -438,7 +439,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
     platform: process.platform,
     // Falls back to the startup read: a transient failure shouldn't read as "no repos".
     repos: async (): Promise<readonly RepoEntry[]> => (await readState())?.repos ?? state.repos,
-    request: <T>(op: RequestOp, payload: unknown): Promise<T> => localRequest<T>(op, payload),
+    request: <T>(op: RequestOp, payload: unknown): Promise<T | ErrorResponse> => localRequest<T>(op, payload),
     reachable: (): Promise<boolean> => localSocketReachable(),
   };
 }
