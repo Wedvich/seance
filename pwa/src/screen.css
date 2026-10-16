@@ -1227,6 +1227,17 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* Fainter than the line it bridges: nothing was measured there. Dashes are in screen
+   pixels, since non-scaling-stroke keeps the plot's stretched x axis out of them. */
+.chart-gap {
+  fill: none;
+  stroke-width: 1;
+  stroke-dasharray: 1 4;
+  stroke-linecap: round;
+  opacity: 0.45;
+  vector-effect: non-scaling-stroke;
+}
+
 .chart-axis {
   display: flex;
   justify-content: space-between;
