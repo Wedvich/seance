@@ -1,10 +1,19 @@
 import { importPsk, toBase64 } from "@seance/shared";
-import { join } from "node:path";
+import type { Subprocess } from "bun";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
+import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
-import { makeClaudeStub, makeGitFixture, type ClaudeStub, type GitFixture } from "../daemon/test/fixtures.ts";
+import {
+  makeClaudeStub,
+  makeGitFixture,
+  pollUntil,
+  type ClaudeStub,
+  type GitFixture,
+} from "../daemon/test/fixtures.ts";
 import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/state.ts";
 import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
@@ -41,6 +50,60 @@ export function wsUrl(relay: TestRelay, path: string): string {
   return url.href;
 }
 
+/** The account every fixture exclave signs into, so each machine's view of it folds into one account card. */
+export const E2E_ACCOUNT = { organizationUuid: "e2e-org", accountUuid: "e2e-account" };
+export const E2E_ACCOUNT_ID = `${E2E_ACCOUNT.organizationUuid}:${E2E_ACCOUNT.accountUuid}`;
+
+export interface ExclaveFixture {
+  /** `default` is `~/.claude.json`; any other name is listed in `~/.exclaves`. */
+  readonly id: string;
+  /** The cached reading's `fetchedAtMs` — its observed-at, which decides the newest observer. */
+  readonly observedAtMs: number;
+  readonly fiveHourPct: number;
+}
+
+/**
+ * A home of the daemon's own, so its exclaves are the fixture's and never the
+ * developer's `~/.exclaves` and `~/.claude.json`. Each exclave is signed into
+ * `E2E_ACCOUNT` with one cached quota reading, in the shape Claude Code leaves.
+ * An unlisted `default` is signed out.
+ */
+async function makeHome(dir: string, exclaves: readonly ExclaveFixture[]): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const named = exclaves.filter((exclave) => exclave.id !== DEFAULT_EXCLAVE).map((exclave) => exclave.id);
+  if (named.length > 0) await writeFile(join(dir, ".exclaves"), `${named.join("\n")}\n`);
+  await Promise.all(
+    exclaves.map(async (exclave) => {
+      const file =
+        exclave.id === DEFAULT_EXCLAVE ? join(dir, ".claude.json") : join(dir, `.claude-${exclave.id}`, ".claude.json");
+      await mkdir(dirname(file), { recursive: true });
+      // A reset hours out, so the reading is shown as reported rather than floored to 0.
+      const resetsAt = new Date(exclave.observedAtMs + 5 * 3_600_000).toISOString();
+      await writeFile(
+        file,
+        JSON.stringify({
+          oauthAccount: E2E_ACCOUNT,
+          cachedUsageUtilization: {
+            fetchedAtMs: exclave.observedAtMs,
+            utilization: { five_hour: { utilization: exclave.fiveHourPct, resets_at: resetsAt } },
+          },
+        }),
+      );
+    }),
+  );
+  return dir;
+}
+
+/** A second real daemon on the stack's relay and tmux server, in its own process (`remote-daemon.ts`). */
+export interface SecondDaemon {
+  readonly deviceId: string;
+  /** Its stdout, where its audit lines land. */
+  readonly log: string;
+  /** Its windows' tmux session, beside the suite's own. */
+  readonly tmuxSession: string;
+  readonly stop: () => Promise<void>;
+}
+
 export interface Stack {
   readonly relay: TestRelay;
   /** The daemon's own config — the local MCP path reads its `name` to recognise this box. */
@@ -55,6 +118,17 @@ export interface Stack {
    * overrides the default budget for the new daemon; pass nothing to get it back.
    */
   readonly restartDaemon: (opts?: { readonly spawnWaitMs?: number }) => Promise<void>;
+  /**
+   * Boot machine B: same config as the suite's daemon bar `name` and tmux
+   * session, its own state dir — so its own deviceId — and its own home. A
+   * separate process, because `stateDir()` comes from the environment and two
+   * daemons in one process would share a deviceId and an op socket. Resolves
+   * once B has minted its identity; dispose stops any still running.
+   */
+  readonly startSecondDaemon: (opts: {
+    readonly name: string;
+    readonly exclaves?: readonly ExclaveFixture[];
+  }) => Promise<SecondDaemon>;
   readonly dispose: () => Promise<void>;
 }
 
@@ -63,11 +137,12 @@ export interface Stack {
  * one stable deviceId), SEANCE_TMUX_SOCKET (`usePrivateTmux`, whose server
  * outlives dispose), SEANCE_CLAUDE_BIN. The caller owns
  * them because they are process-global and the daemon suite plays the same
- * game in its own files.
+ * game in its own files. `exclaves` populate the daemon's fixture home.
  */
-export async function startStack(base: string): Promise<Stack> {
+export async function startStack(base: string, exclaves: readonly ExclaveFixture[] = []): Promise<Stack> {
   const fixture = await makeGitFixture(base);
   const stub = await makeClaudeStub(base);
+  const home = await makeHome(join(base, "home"), exclaves);
   process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
 
   const relay = await startRelay(TOKEN);
@@ -96,6 +171,7 @@ export async function startStack(base: string): Promise<Stack> {
       // keyless-MCP flow needs it, and nothing else here depends on the source.
       resolvedPsk: { psk: PSK, source: "credential" },
       backend: createBackend(config, { waitMs: spawnWaitMs }),
+      home,
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
@@ -105,6 +181,53 @@ export async function startStack(base: string): Promise<Stack> {
   const stateDir = process.env["SEANCE_STATE_DIR"];
   if (stateDir === undefined) throw new Error("startStack requires SEANCE_STATE_DIR to be set first");
   const { deviceId } = (await Bun.file(join(stateDir, "state.json")).json()) as { deviceId: string };
+
+  const secondProcs = new Set<Subprocess>();
+  const startSecondDaemon = async (opts: {
+    readonly name: string;
+    readonly exclaves?: readonly ExclaveFixture[];
+  }): Promise<SecondDaemon> => {
+    const dir = join(base, `second-${opts.name.toLowerCase()}`);
+    const secondState = join(dir, "state");
+    const configDir = join(dir, "config");
+    const tmuxSession = `${TMUX_SESSION}-${opts.name.toLowerCase()}`;
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "config.json"), JSON.stringify({ ...config, name: opts.name, tmuxSession }));
+    const secondHome = await makeHome(join(dir, "home"), opts.exclaves ?? []);
+    const log = join(dir, "daemon.log");
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "remote-daemon.ts"), secondHome], {
+      env: { ...process.env, SEANCE_STATE_DIR: secondState, SEANCE_CONFIG_DIR: configDir },
+      stdin: "pipe",
+      stdout: Bun.file(log),
+      stderr: Bun.file(join(dir, "daemon.err")),
+    });
+    secondProcs.add(proc);
+    const stop = async (): Promise<void> => {
+      secondProcs.delete(proc);
+      proc.kill();
+      await proc.exited;
+    };
+
+    const statePath = join(secondState, "state.json");
+    try {
+      // Until it parses, not until it exists: the poll can land mid-write.
+      await pollUntil(
+        async () =>
+          typeof (
+            await Bun.file(statePath)
+              .json()
+              .catch(() => null)
+          )?.deviceId === "string",
+        `${opts.name}'s state.json`,
+        10_000,
+      );
+    } catch (error) {
+      await stop();
+      throw error;
+    }
+    const { deviceId: secondId } = (await Bun.file(statePath).json()) as { deviceId: string };
+    return { deviceId: secondId, log, tmuxSession, stop };
+  };
 
   const stack: Stack = {
     relay,
@@ -122,8 +245,11 @@ export async function startStack(base: string): Promise<Stack> {
       daemon = await startTestDaemon(opts.spawnWaitMs);
       stack.daemon = daemon;
     },
+    startSecondDaemon,
     dispose: async (): Promise<void> => {
       daemon.stop();
+      for (const proc of secondProcs) proc.kill();
+      await Promise.all([...secondProcs].map((proc) => proc.exited));
       await relay.dispose();
     },
   };

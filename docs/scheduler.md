@@ -368,8 +368,8 @@ observation per account, and history charts — without a scheduler. Landed as #
 Recorded in DESIGN.md _Presence & identity_, _Wire protocol_, _Daemon_ and _PWA_. Every exit
 criterion has a test — pressure from the first registry push, a `status` gone with its socket,
 the size and rate floors, a stray `~/.exclaves` line costing one exclave, an old daemon with no
-`exclaves` still rendering, and `status` through the real DO — though "pressure for every
-connected machine" is only exercised with one.
+`exclaves` still rendering, and `status` through the real DO — with two real daemons, each
+status indexing its own blob and one account folded across both machines.
 
 **Gaps, until later milestones close them.** No scheduler: you pick the exclave by hand and read
 the pressure yourself. Quota comes only from Claude Code's own cached utilization per config dir

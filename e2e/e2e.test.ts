@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry, SpawnResponse } from "@seance/shared";
@@ -16,6 +16,7 @@ import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
 import { tmux } from "../daemon/src/tmux.ts";
 import { buildMcpServer, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import {
+  E2E_ACCOUNT_ID,
   killWindow,
   listRegisteredWindows,
   listWindows,
@@ -43,7 +44,8 @@ beforeAll(async () => {
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   privateTmux = usePrivateTmux(base, "e2e");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
-  stack = await startStack(base);
+  // Observed well before any second machine's reading, so that one is the newest.
+  stack = await startStack(base, [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }]);
 });
 
 afterAll(async () => {
@@ -516,28 +518,63 @@ describe("mcp ↔ relay ↔ daemon", () => {
   });
 });
 
+describe("two daemons ↔ relay ↔ app", () => {
+  test("status: a fresh app sees both machines' pressure, and one account folded across them", async () => {
+    // The account sits at a different exclave index on each machine — `default`
+    // here, `work` (after a signed-out `default`) there — so the fold has to
+    // resolve each status's indexes against its own blob.
+    const second = await stack.startSecondDaemon({
+      name: "StatusBox",
+      exclaves: [{ id: "work", observedAtMs: Date.now() - 60_000, fiveHourPct: 64 }],
+    });
+    const app = startApp(stack);
+    try {
+      const ids = [stack.deviceId, second.deviceId];
+      const state = await app.waitForApp(
+        (s) => ids.every((id) => ownMachine(s, id)?.status?.quota !== undefined),
+        "both machines with a status carrying quota",
+      );
+      expect(
+        state.relay.machines
+          .filter((machine) => machine.connected)
+          .map((machine) => machine.deviceId)
+          .toSorted(),
+      ).toEqual(ids.toSorted());
+      for (const id of ids) {
+        const machine = ownMachine(state, id);
+        const status = machine?.status;
+        if (machine === null || status === undefined) throw new Error("unreachable");
+        // Each status indexes its own machine's blob, not the other's.
+        expect(status.scan).toBe(machine.scannedAt);
+        expect(status.sess?.length).toBe(machine.exclaves?.length);
+      }
+      expect(ownMachine(state, second.deviceId)?.exclaves?.map((exclave) => exclave.id)).toEqual(["default", "work"]);
+
+      const view = deriveMachines(state.relay.machines, Date.now());
+      for (const id of ids) {
+        const card = view.cards.find((c) => c.deviceId === id);
+        expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
+      }
+      const account = view.accounts.find((a) => a.accountId === E2E_ACCOUNT_ID);
+      // Both machines' exclaves, in fleet order — the registry's, not boot order.
+      expect(account?.title.split(" · ").toSorted()).toEqual(["default", "work"]);
+      expect(account?.detail).toContain("TestMac");
+      expect(account?.detail).toContain("StatusBox");
+      // StatusBox read the account nine minutes after TestMac did: its numbers win.
+      expect(account?.observed).toEndWith("on StatusBox");
+      expect(account?.bars.map((bar) => [bar.label, bar.pct])).toEqual([["5h", 64]]);
+    } finally {
+      app.stop();
+      await second.stop();
+    }
+  });
+});
+
 describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", () => {
   test("a process with no PSK lists, sees, spawns and despawns on another machine through its own daemon", async () => {
-    // Machine B: a second real daemon, in its own process with its own state
-    // dir — so its own deviceId — on the same relay and tmux server.
-    const remoteState = join(base, "remote-state");
-    const remoteConfigDir = join(base, "remote-config");
-    await mkdir(remoteConfigDir, { recursive: true });
-    await writeFile(
-      join(remoteConfigDir, "config.json"),
-      JSON.stringify({
-        ...stack.config,
-        name: "RemoteBox",
-        tmuxSession: "e2e-remote",
-      }),
-    );
-    const remoteLog = join(base, "remote.log");
-    const remote = Bun.spawn([process.execPath, join(import.meta.dir, "remote-daemon.ts")], {
-      env: { ...process.env, SEANCE_STATE_DIR: remoteState, SEANCE_CONFIG_DIR: remoteConfigDir },
-      stdin: "pipe",
-      stdout: Bun.file(remoteLog),
-      stderr: Bun.file(join(base, "remote.err")),
-    });
+    // Machine B: a second real daemon, its own deviceId, on the same relay and tmux server.
+    const remote = await stack.startSecondDaemon({ name: "RemoteBox" });
+    const remoteLog = remote.log;
 
     // Machine A is this suite's daemon; the MCP server below is the keyless
     // process beside it. `key` answering null is the credential-delivered
@@ -646,11 +683,10 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       );
     } finally {
       audit.mockRestore();
-      if (window !== null) await tmux(["kill-window", "-t", `e2e-remote:${window}`]);
+      if (window !== null) await tmux(["kill-window", "-t", `${remote.tmuxSession}:${window}`]);
       await client.close();
       fleet.stop();
-      remote.kill();
-      await remote.exited;
+      await remote.stop();
     }
   }, 90_000);
 });
