@@ -29,7 +29,8 @@ import {
   parseMetricsReply,
   parseRescanResponse,
 } from "./parse.ts";
-import { open as openEnvelope, ReplayGuard, seal } from "./crypto.ts";
+import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
+import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
@@ -862,7 +863,7 @@ export class RelayClient {
       return;
     }
     try {
-      const plain = await openEnvelope(this.#key, env);
+      const plain = await openAtRest(this.#key, env, "machine-info");
       const info = parseMachineInfo(plain.payload);
       // Logged where an unopenable blob is not: an entry sealed with a key this
       // app doesn't hold is an expected steady state — it is what `ignored`
@@ -873,7 +874,10 @@ export class RelayClient {
       // line per blob rather than one per push.
       if (info === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=info-shape`);
       this.#infoCache.set(cacheKey, info ?? "skewed");
-    } catch {
+    } catch (err) {
+      // Opened under our key but sealed as another op: a blob moved into this
+      // slot, not one sealed with a key we don't hold — worth a line, once.
+      if (err instanceof OpMismatchError) this.#wireLog("dropped", `from=${quote(env.from)} reason=info-op`);
       this.#infoCache.set(cacheKey, "unopenable");
     }
   }
@@ -896,11 +900,12 @@ export class RelayClient {
     }
     let status: MachineStatus | null = null;
     try {
-      const plain = await openEnvelope(this.#key, env);
+      const plain = await openAtRest(this.#key, env, "status");
       status = parseMachineStatus(plain.payload);
       if (status === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=status-shape`);
-    } catch {
-      // Not ours to read, like an info blob sealed with another key: steady state, not news.
+    } catch (err) {
+      if (err instanceof OpMismatchError) this.#wireLog("dropped", `from=${quote(env.from)} reason=status-op`);
+      // Otherwise not ours to read, like an info blob sealed with another key: steady state, not news.
     }
     // A snapshot that opened is the machine speaking — the same proof of life a
     // reply gives, and fresher than any mark a timeout left.
@@ -945,7 +950,15 @@ export class RelayClient {
       // rescan reply moves that without re-registering, and the status indexes
       // the blob's `exclaves`. A mismatch is a status from before a re-register,
       // held back until the next beat replaces it (DESIGN.md, Presence & identity).
-      const status = this.#statuses.get(entry.deviceId)?.status ?? null;
+      // Sanitized here rather than at decrypt: the rules need the register
+      // blob's exclave count, and the two blobs open in parallel. The same
+      // object comes back when nothing is dropped, so `sameMachine` still sees
+      // no change. Staleness is the consumer's call (`isStatusStale`), never applied here.
+      const opened = this.#statuses.get(entry.deviceId)?.status ?? null;
+      const status =
+        opened === null || opened.scan !== info.scannedAt
+          ? null
+          : sanitizeStatus(opened, info.exclaves?.length ?? 0, Date.now());
       const built: Machine = {
         deviceId: entry.deviceId,
         name: info.name,
@@ -954,7 +967,7 @@ export class RelayClient {
         scannedAt: scanned.scannedAt,
         lastSeen: entry.lastSeen,
         connected,
-        ...(status !== null && status.scan === info.scannedAt ? { status } : {}),
+        ...(status === null ? {} : { status }),
         ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
         ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
       };
