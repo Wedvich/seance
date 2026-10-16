@@ -66,7 +66,12 @@ exit 0
     );
     await chmod(join(bin, "bun"), 0o755);
     await chmod(join(bin, "claude"), 0o755);
+    // The default exclave's config dir: install skips one that doesn't exist yet.
+    await mkdir(join(root, ".claude"));
     env = { ...process.env, HOME: root, PATH: `${bin}${delimiter}${dirname(process.execPath)}` };
+    // An inherited one is an extra, ambient target — a developer's shell would
+    // register into it where CI wouldn't.
+    delete env["CLAUDE_CONFIG_DIR"];
   });
 
   afterEach(async () => {
@@ -108,5 +113,13 @@ exit 0
     const { code, argv } = await run("uninstall");
     expect(code).toBe(0);
     expect(argv).toEqual(removeArgv);
+  });
+
+  test("install skips an exclave never set up, rather than creating its dir", async () => {
+    await rm(join(root, ".claude"), { recursive: true });
+    const { out, code, argv } = await run("install");
+    expect(code).toBe(0);
+    expect(argv).toEqual([]);
+    expect(out).toContain(`skipped default — ${join(root, ".claude")} does not exist yet`);
   });
 });

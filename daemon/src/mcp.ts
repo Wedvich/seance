@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
@@ -21,6 +23,7 @@ import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { exec } from "./exec.ts";
+import { claudeConfigTargets, listExclaves, type ClaudeConfigTarget } from "./exclaves.ts";
 import {
   brokerFailureText,
   brokerFleet,
@@ -492,19 +495,58 @@ export function mcpBunPath(output: string): string | null {
   return /^\s*Command:\s*(.+?)\s*$/mu.exec(output)?.[1] ?? null;
 }
 
-/** Whether the local Claude Code knows about `seanced mcp`, and whether its recorded bun still resolves; renders under doctor's binaries section. */
+export interface McpTargets {
+  readonly present: readonly ClaudeConfigTarget[];
+  /** Listed in `~/.exclaves` but never set up — registering would create the dir, so these are skipped. */
+  readonly missing: readonly ClaudeConfigTarget[];
+}
+
+/**
+ * Where `mcp install` registers: every exclave's config dir, not just the one the
+ * invoking shell happens to select — a user-scope entry lives in one `.claude.json`,
+ * and each exclave has its own.
+ */
+export async function mcpTargets(home: string = homedir()): Promise<McpTargets> {
+  const { exclaves } = await listExclaves(home);
+  const targets = claudeConfigTargets(exclaves, process.env["CLAUDE_CONFIG_DIR"]);
+  const exists = await Promise.all(
+    targets.map((t) =>
+      stat(t.configDir)
+        .then((info) => info.isDirectory())
+        .catch(() => false),
+    ),
+  );
+  return { present: targets.filter((_, i) => exists[i]), missing: targets.filter((_, i) => !exists[i]) };
+}
+
+/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun still resolves; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
     return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
   }
-  const result = await exec([claude, "mcp", "get", "seance"], { timeoutMs: 15_000 });
-  if (result.exitCode !== 0) {
-    return [{ level: "warn", message: "MCP server not registered with Claude Code — run `seanced mcp install`" }];
-  }
-  const registered: Check = { level: "ok", message: "MCP server registered with Claude Code" };
-  // Same drift hazard as the plist/unit: `mcp install` records PATH's bun in
-  // Claude's config, and nothing rewrites that entry on its own.
-  const drift = await recordedBunCheck(mcpBunPath(result.stdout), "MCP entry", "seanced mcp install");
-  return drift === null ? [registered] : [registered, drift];
+  const { present } = await mcpTargets();
+  const perTarget = await Promise.all(
+    present.map(async (target): Promise<readonly Check[]> => {
+      const result = await exec([claude, "mcp", "get", "seance"], { timeoutMs: 15_000, env: target.env });
+      if (result.exitCode !== 0) {
+        return [
+          {
+            level: "warn",
+            message: `MCP server not registered with Claude Code in ${target.label} — run \`seanced mcp install\``,
+          },
+        ];
+      }
+      const registered: Check = { level: "ok", message: `MCP server registered with Claude Code in ${target.label}` };
+      // Same drift hazard as the plist/unit: `mcp install` records PATH's bun in
+      // Claude's config, and nothing rewrites that entry on its own.
+      const drift = await recordedBunCheck(
+        mcpBunPath(result.stdout),
+        `MCP entry (${target.label})`,
+        "seanced mcp install",
+      );
+      return drift === null ? [registered] : [registered, drift];
+    }),
+  );
+  return perTarget.flat();
 }
