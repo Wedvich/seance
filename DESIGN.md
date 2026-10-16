@@ -285,6 +285,17 @@ Séance's noise is cover for a real intruder.
    rather than after any silence. What the token still buys here is the two
    things it always did: junk entries under ids nobody will ever sign for,
    bounded by the entry cap, and `forget`.
+   **Leader capture** (added 2026-10-16, scheduler M2). `roles` is plaintext
+   but signed (v2), so a holder cannot add the role to a real machine's
+   register — but it can mint an id of its own, sign `roles`, and hold one
+   socket open; a real leader's socket resets its `connectedAt` on every sleep
+   or network change, the squatter's never does, so it becomes leader as a
+   matter of routine. Accepted for M2: there is no store yet, apps treat a
+   leader whose entry does not open as no leader, and what the squatter would
+   be sent is sealed under the PSK. What it holds is the term, so it can keep
+   `auto` unavailable until its socket goes — a visible stall, not a silent
+   one. M3's term-fenced store would let it delete the queue, so a relay-side
+   gate lands before it (Scheduler, "Leadership").
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -468,7 +479,8 @@ The Durable Object persists a machine registry:
   expires a machine you own just because it slept through a holiday.
 - **Self-certifying ids** (2026-10-15). A `register` carries the daemon's
   raw public key, a timestamp, and an ML-DSA-65 signature over
-  `seance-register|<deviceId>|<ts>`; the hub (`relay/src/hub.ts`, via
+  `seance-register|<deviceId>|<ts>` — or, when it carries `roles`, over
+  `seance-register-v2|<deviceId>|<ts>|<roles>` (Scheduler, "Leadership"); the hub (`relay/src/hub.ts`, via
   `shared/src/identity.ts`) accepts it only if the key hashes to the id, the
   signature verifies, and `ts` is within ±60s. The id _is_ the key, so there
   is nothing to enrol and no registry of keys to keep: the relay learns the
@@ -646,12 +658,15 @@ Who owns each frame in code — the place to change when a frame changes:
 
 | Frame / op                          | Sent from                                                                                | Handled in                                                                                                                                            |
 | ----------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`)                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                     |
+| `register`                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)      | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                     |
+| `lead` / `follow`                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`             | `daemon/src/relay-client.ts` — logged only until `leader.ts`                                                                                          |
+| `msg` (→`"scheduler"`)              | any app or daemon                                                                        | routed by `relay/src/hub.ts` to the nominated leader's socket; no leader → `undeliverable` (app) or dropped (daemon)                                  |
+| `msg` (`from: "scheduler"`, `term`) | the leader's app-role leg                                                                | fenced by `relay/src/hub.ts` `#holdsTerm` — a stale term is `undeliverable { code: "not_leader" }`; then routed as any app `msg`                      |
 | `msg` (app→daemon)                  | `shared/src/app-client.ts`                                                               | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                       |
 | `msg` (daemon→app)                  | `daemon/src/relay-client.ts`                                                             | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                     |
 | `msg` (→`"machines"` broadcast)     | any PSK holder                                                                           | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                      |
 | op `update-available`               | `daemon/src/run.ts` via `broadcast()`                                                    | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                       |
-| `registry`                          | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                            |
+| `registry`                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                        | `shared/src/app-client.ts` (`scheduler` not yet read)                                                                                                 |
 | `undeliverable`                     | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts`                                                                                                                            |
 | `forget`                            | `shared/src/app-client.ts`                                                               | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                               |
 | `forget-refused`                    | `relay/src/hub.ts`                                                                       | `shared/src/app-client.ts` — logged, never modelled                                                                                                   |
@@ -917,6 +932,73 @@ Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
 offline machines. Rejected: one combined poll op returning repos + sessions
 together (re-sends registry data on every poll, useless offline).
+
+## Scheduler
+
+The scheduler (docs/scheduler.md is the plan; this section takes over each part as it lands) runs
+on one daemon at a time, the one the relay nominates. Nothing else about that daemon changes: it
+is an ordinary daemon with extra legs.
+
+### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
+
+- **Capable is signed `roles`.** `register` carries a plaintext `roles` list — today only
+  `"scheduler"` (`DAEMON_ROLES`) — because the relay must read it to nominate on it. Since the
+  relay acts on it, the signature covers it: a register with `roles` is signed over
+  `seance-register-v2|<deviceId>|<ts>|<roles joined by ",">` and verified against that message
+  only (`shared/src/identity.ts`). A register without `roles` is v1 and verifies as before, as a
+  daemon with no roles, which is never nominated. A frame whose `roles` its signature does not
+  cover — a v1 signature with roles spliced on — is refused `register unverified`, not demoted to
+  roleless: the relay never guesses which half of a frame to believe. Roles stay raw strings on
+  the wire, bounded like ids (≤8, id charset, so neither separator can appear), because the
+  signature covers the list as sent and a role minted later must still verify; the hub keeps only
+  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises the role.
+  A daemon whose v2 register is refused signs its next one v1 and alternates from there
+  (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
+  deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
+  Any drop that was not a refusal resets it to v2, so the role comes back once the relay catches up.
+- **Nomination is a pure function**, `nominate(candidates, current)`: the connected, registered
+  daemons' `{ deviceId, roles, connectedAt }` — one per id, its newest socket's — and the current
+  leader in, the next leader (or null) out. A current leader that is still capable keeps the
+  role, even across its own reconnect; otherwise the earliest `connectedAt` wins, ties to the
+  lowest `deviceId`. Stickiness matters only in the race where a leader's new socket registers
+  before its old one's close is processed — without it the role would move to whoever has sat
+  connected longest on every redial. Its suite (`relay/test/leadership.test.ts`) needs no workerd.
+  `hub.ts` calls it from exactly three places — after a register, a socket close and a sweep — in
+  `#renominate`, and nowhere decides leadership itself.
+- **`scheduler:term`** is one DO storage record, `{ term, deviceId, connectedAt }`. Every change
+  bumps `term` and writes once: a new leader, no leader, or the same leader on a new socket (the
+  daemon behind it may have restarted, and whatever its old socket still had in flight belongs to
+  the old term). A close or sweep that changes nothing costs one read. The term is monotonic for
+  the life of the DO, so a term a demoted leader holds can never come round again. On a change
+  the relay sends `lead { term }` to the new leader's socket and `follow` to the old leader's, if
+  it is still connected under a different id (a superseded socket is closing and gets nothing).
+  Both are plaintext relay assertions; the daemon logs them and, until `leader.ts` lands (M2 item
+  3), does nothing else.
+- **`SCHEDULER_ID = "scheduler"`** is a reserved wire address, refused by `register` like `"app"`
+  and `"machines"`. An envelope `to: "scheduler"` routes to the leader's newest socket, the AAD
+  still naming `"scheduler"`; with no leader an app gets `undeliverable { code: "offline" }` (never
+  `unknown`: the address is real) and a daemon's is dropped, as any daemon-origin envelope nobody
+  can take. A daemon that is not running the scheduler drops one as misaddressed, so advertising
+  the role ahead of `leader.ts` opens nothing.
+- **The term is a fence, not a credential.** The leader speaks on its app-role leg as
+  `from: "scheduler"`, and that `msg` carries `term`. The relay delivers it only when the term is
+  the connected leader's, and otherwise answers the sender `undeliverable { code: "not_leader" }`
+  by `iv`, like any refusal — so a leader demoted while partitioned fails fast instead of acting on
+  a role it lost. Every registry push carries the term, so this stops a stale leader, never a
+  stranger; `from: "app"` envelopes are untouched and ignore `term`. M3's term-fenced store writes
+  reuse the same check (`#holdsTerm`).
+- **The registry push carries `scheduler: { deviceId, term } | null`**, frame-level beside
+  `entries`, so an app can grey out `auto` without a round trip. Null unless the recorded leader is
+  connected: a record a relay restart left behind names nobody routable until the next register
+  re-nominates.
+- **Leader capture is open, by decision, until M3.** Anyone with the bearer token can mint an id,
+  sign `roles` and hold a socket, and connected-longest wins. M2's answer is the reader check:
+  apps ignore a leader whose registry entry does not open (`info` sealed `from` its own id), so a
+  squatter reads as "leader unverified" and is sent nothing — everything it would receive is
+  sealed under the PSK it lacks. M3's store is the point where the term starts protecting state,
+  and a relay-side gate (the `SCHEDULER_LEADERS` allowlist in docs/scheduler.md, Risks) lands
+  first. Its place is fixed: a filter over `nominate`'s candidates in `#renominate`, before
+  anything acts on a term.
 
 ## Daemon (`seanced`, Bun)
 

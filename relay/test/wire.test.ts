@@ -4,7 +4,9 @@ import {
   IDENTITY_PUBLIC_KEY_BYTES,
   IDENTITY_SIGNATURE_BYTES,
   MACHINES_ID,
+  MAX_REGISTER_ROLES,
   PROTOCOL_VERSION,
+  SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   base64Length,
   type Envelope,
@@ -94,6 +96,25 @@ describe("parseDaemonFrame", () => {
   test("a daemon cannot claim a reserved wire address", () => {
     expect(parseDaemonFrame(registerFrame({ deviceId: APP_ID }))).toBeNull();
     expect(parseDaemonFrame(registerFrame({ deviceId: MACHINES_ID }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ deviceId: SCHEDULER_ID }))).toBeNull();
+  });
+
+  test("roles are optional, kept raw for the signature, and bounded like ids", () => {
+    expect(parseDaemonFrame(registerFrame())).not.toHaveProperty("roles");
+    expect(parseDaemonFrame(registerFrame({ roles: ["scheduler"] }))).toMatchObject({ roles: ["scheduler"] });
+    // A role this relay does not know still parses: the signature covers it.
+    expect(parseDaemonFrame(registerFrame({ roles: ["scheduler", "later"] }))).toMatchObject({
+      roles: ["scheduler", "later"],
+    });
+    expect(parseDaemonFrame(registerFrame({ roles: [] }))).toMatchObject({ roles: [] });
+    expect(parseDaemonFrame(registerFrame({ roles: "scheduler" }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ roles: [1] }))).toBeNull();
+    // `,` and `|` are v2's separators; the id charset keeps them out.
+    expect(parseDaemonFrame(registerFrame({ roles: ["a,b"] }))).toBeNull();
+    expect(parseDaemonFrame(registerFrame({ roles: ["a|b"] }))).toBeNull();
+    expect(
+      parseDaemonFrame(registerFrame({ roles: Array.from({ length: MAX_REGISTER_ROLES + 1 }, () => "x") })),
+    ).toBeNull();
   });
 
   test("malformed JSON and unknown frame types are dropped, not thrown", () => {
@@ -130,5 +151,17 @@ describe("parseAppFrame", () => {
     expect(parseAppFrame(JSON.stringify({ t: "msg", env: env() }))).not.toBeNull();
     expect(parseAppFrame(JSON.stringify({ t: "register", deviceId: "device-1" }))).toBeNull();
     expect(parseAppFrame(JSON.stringify({ t: "msg", env: env({ ct: "" }) }))).toBeNull();
+  });
+
+  test("a msg's term is optional and, when present, a non-negative integer", () => {
+    const scheduled = env({ from: SCHEDULER_ID });
+    expect(parseAppFrame(JSON.stringify({ t: "msg", env: scheduled, term: 3 }))).toMatchObject({
+      env: scheduled,
+      term: 3,
+    });
+    expect(parseAppFrame(JSON.stringify({ t: "msg", env: scheduled }))).not.toHaveProperty("term");
+    for (const term of [-1, 1.5, "3", null, 2 ** 53]) {
+      expect(parseAppFrame(JSON.stringify({ t: "msg", env: scheduled, term }))).toBeNull();
+    }
   });
 });

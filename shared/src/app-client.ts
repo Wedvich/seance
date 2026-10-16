@@ -65,6 +65,8 @@ export function failureReasonText(failure: RequestFailure): string {
       return "that machine is not connected to the relay";
     case "unknown":
       return "the relay has never seen that machine";
+    case "not_leader":
+      return "sent as the scheduler under a term that is no longer the leader's";
     case "disconnected":
       return "lost the relay connection before the request went out";
     // The message already names the code the relay sent, or the op the daemon
@@ -184,8 +186,14 @@ interface Pending {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+const UNDELIVERABLE_MESSAGES = {
+  offline: "that machine is not connected",
+  unknown: "unknown machine",
+  not_leader: "not the scheduler leader",
+} as const satisfies Record<UndeliverableCode, string>;
+
 function isUndeliverableCode(value: unknown): value is UndeliverableCode {
-  return value === "offline" || value === "unknown";
+  return typeof value === "string" && Object.hasOwn(UNDELIVERABLE_MESSAGES, value);
 }
 
 function parseRegistryView(value: unknown): RegistryView | null {
@@ -765,7 +773,7 @@ export class RelayClient {
     this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
     if (id === undefined) return;
     const error = isUndeliverableCode(code)
-      ? new RequestFailure(code, code === "offline" ? "that machine is not connected" : "unknown machine")
+      ? new RequestFailure(code, UNDELIVERABLE_MESSAGES[code])
       : new RequestFailure("refused", `the relay refused to deliver the request (code ${quote(code)})`);
     this.#pending.get(id)?.settle({ ok: false, error });
   }

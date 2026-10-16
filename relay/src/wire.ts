@@ -6,7 +6,9 @@ import {
   base64Length,
   isRecord,
   MACHINES_ID,
+  MAX_REGISTER_ROLES,
   parseEnvelope as parseEnvelopeShape,
+  SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   type AppFrame,
   type DaemonFrame,
@@ -46,6 +48,22 @@ function routableId(value: unknown): value is string {
   return boundedString(value, MAX_ID_LENGTH) && SAFE_ID.test(value);
 }
 
+/**
+ * Raw, not narrowed to the roles this relay knows: the signature covers the
+ * list as sent, so dropping an unknown one here would fail a newer daemon's
+ * register outright. The id charset is what keeps v2's `,`-joined message
+ * unambiguous (`shared/src/identity.ts`).
+ */
+function parseRoles(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_REGISTER_ROLES) return null;
+  return value.every(routableId) ? value : null;
+}
+
+/** A term is a counter the relay minted, so anything but a non-negative integer is malformed. */
+function isTerm(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text) as unknown;
@@ -74,13 +92,24 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
   if (value["t"] === "register") {
     const info = parseEnvelope(value["info"]);
     if (info === null || !routableId(value["deviceId"])) return null;
-    // APP_ID and MACHINES_ID are wire addresses, not machines: a daemon
-    // squatting one would show up as a machine called "app" or swallow every
-    // broadcast addressed to the group.
-    if (value["deviceId"] === APP_ID || value["deviceId"] === MACHINES_ID) return null;
+    // APP_ID, MACHINES_ID and SCHEDULER_ID are wire addresses, not machines: a
+    // daemon squatting one would show up as a machine called "app", swallow
+    // every broadcast addressed to the group, or every envelope for the leader.
+    const id = value["deviceId"];
+    if (id === APP_ID || id === MACHINES_ID || id === SCHEDULER_ID) return null;
     if (!exactBase64(value["key"], KEY_LENGTH) || !exactBase64(value["sig"], SIG_LENGTH)) return null;
     if (typeof value["ts"] !== "number" || !Number.isFinite(value["ts"])) return null;
-    return { t: "register", deviceId: value["deviceId"], info, key: value["key"], ts: value["ts"], sig: value["sig"] };
+    const roles = value["roles"] === undefined ? undefined : parseRoles(value["roles"]);
+    if (roles === null) return null;
+    return {
+      t: "register",
+      deviceId: id,
+      info,
+      key: value["key"],
+      ts: value["ts"],
+      sig: value["sig"],
+      ...(roles === undefined ? {} : { roles }),
+    };
   }
   if (value["t"] === "msg") {
     const env = parseEnvelope(value["env"]);
@@ -104,5 +133,8 @@ export function parseAppFrame(text: string): AppFrame | null {
   }
   if (value["t"] !== "msg") return null;
   const env = parseEnvelope(value["env"]);
-  return env === null ? null : { t: "msg", env };
+  if (env === null) return null;
+  const term = value["term"];
+  if (term === undefined) return { t: "msg", env };
+  return isTerm(term) ? { t: "msg", env, term } : null;
 }

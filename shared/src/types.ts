@@ -12,6 +12,27 @@ export const APP_ID = "app";
  */
 export const MACHINES_ID = "machines";
 
+/**
+ * The scheduler's wire address. The relay routes an envelope addressed here to
+ * whichever daemon it nominated leader (DESIGN.md, "Scheduler leadership"), and
+ * the leader's app-role leg sends as it, fenced by its term. Reserved like
+ * `APP_ID` and `MACHINES_ID`: no daemon may register under it.
+ */
+export const SCHEDULER_ID = "scheduler";
+
+/**
+ * Plaintext `register.roles` values — the one capability the relay itself
+ * reads. `scheduler`: the daemon may be nominated leader. Only a v2 register
+ * (signature over the roles) carries them; the relay acts on no other value,
+ * and accepts an unknown one only so the signature covering it still verifies.
+ */
+export const DAEMON_ROLES = { scheduler: "scheduler" } as const;
+
+export type DaemonRole = (typeof DAEMON_ROLES)[keyof typeof DAEMON_ROLES];
+
+/** `register.roles` entries at most — a bound for the relay, far above the one role there is. */
+export const MAX_REGISTER_ROLES = 8;
+
 /** WS upgrade paths. Role is fixed by path, so the app sends no register frame. */
 export const DAEMON_PATH = "/daemon";
 export const APP_PATH = "/app";
@@ -59,8 +80,19 @@ export type DaemonFrame =
       readonly key: string;
       /** Signing time, ms — the relay refuses one outside `REGISTER_FRESHNESS_MS`. */
       readonly ts: number;
-      /** base64 signature over `deviceId` and `ts`, made with `key`. */
+      /**
+       * base64 signature made with `key`: over `deviceId`, `ts` and `roles` when
+       * `roles` is present (v2), over `deviceId` and `ts` alone when it is not
+       * (v1, which registers a daemon with no roles).
+       */
       readonly sig: string;
+      /**
+       * What the relay may nominate this daemon for (`DaemonRole`). Plaintext
+       * because the relay must read it, signed because it acts on it. Raw
+       * strings on the wire: a role minted after the relay was built still has
+       * to verify, and is then ignored.
+       */
+      readonly roles?: readonly string[];
     }
   | { readonly t: "msg"; readonly env: Envelope }
   /**
@@ -72,8 +104,17 @@ export type DaemonFrame =
    */
   | { readonly t: "status"; readonly env: Envelope };
 
-/** Layer 1: relay→daemon frames. */
-export type RelayToDaemonFrame = { readonly t: "msg"; readonly env: Envelope };
+/**
+ * Layer 1: relay→daemon frames. `lead` tells a daemon the relay nominated it
+ * scheduler leader under `term`; `follow` that it no longer is. Plaintext relay
+ * assertions: the relay is the only party that decides leadership, and what a
+ * leader does with the role is sealed and term-fenced (DESIGN.md, "Scheduler
+ * leadership").
+ */
+export type RelayToDaemonFrame =
+  | { readonly t: "msg"; readonly env: Envelope }
+  | { readonly t: "lead"; readonly term: number }
+  | { readonly t: "follow" };
 
 /**
  * Layer 1: app→relay frames. `forget` deletes one registry entry — the only
@@ -82,11 +123,35 @@ export type RelayToDaemonFrame = { readonly t: "msg"; readonly env: Envelope };
  * machine being forgotten is by definition not there to answer.
  */
 export type AppFrame =
-  | { readonly t: "msg"; readonly env: Envelope }
+  | {
+      readonly t: "msg";
+      readonly env: Envelope;
+      /**
+       * The scheduler term an envelope sent `from: SCHEDULER_ID` claims — required
+       * there, ignored for `from: APP_ID`. A fence against a stale leader, not
+       * authentication: every registry push carries the current term.
+       */
+      readonly term?: number;
+    }
   | { readonly t: "forget"; readonly deviceId: string };
 
-/** Why the relay could not hand an envelope to its target daemon. */
-export type UndeliverableCode = "offline" | "unknown";
+/**
+ * Why the relay did not hand an envelope on. `offline`/`unknown`: the target
+ * daemon has no open socket — for `to: SCHEDULER_ID`, no leader is nominated.
+ * `not_leader`: the envelope was sent as the scheduler under a term that is not
+ * the current leader's.
+ */
+export type UndeliverableCode = "offline" | "unknown" | "not_leader";
+
+/**
+ * The nominated scheduler leader, as the registry push carries it — null when
+ * no connected daemon is capable. `term` is the relay's monotonic counter,
+ * bumped on every change of leader or of the leader's socket.
+ */
+export interface SchedulerLeader {
+  readonly deviceId: string;
+  readonly term: number;
+}
 
 /**
  * Why the relay would not delete an entry. Only one reason, and it is one a
@@ -107,7 +172,12 @@ export type ForgetRefusalCode = (typeof FORGET_REFUSAL_CODES)[number];
  * and it reaches every open app rather than just the one that asked.
  */
 export type RelayToAppFrame =
-  | { readonly t: "registry"; readonly entries: readonly RegistryView[] }
+  | {
+      readonly t: "registry";
+      readonly entries: readonly RegistryView[];
+      /** Who `to: SCHEDULER_ID` reaches now. Absent from relays that predate leadership: read it as null. */
+      readonly scheduler?: SchedulerLeader | null;
+    }
   | { readonly t: "msg"; readonly env: Envelope }
   /** A daemon's latest `status`, forwarded as it arrives — a small frame, not a registry re-push. */
   | { readonly t: "status"; readonly deviceId: string; readonly env: Envelope }

@@ -54,12 +54,16 @@ export interface TestRelay {
   readonly url: string;
   readonly port: number;
   readonly registers: AsyncQueue<RegisterFrame>;
+  /** Per `registers` entry, in push order: which connection (1-based) sent it — a redial apart from a re-register. */
+  readonly registerConnections: readonly number[];
   readonly messages: AsyncQueue<Envelope>;
   /** `status` envelopes, apart from `messages` so a reply assertion never meets a snapshot first. */
   readonly statuses: AsyncQueue<Envelope>;
   autoPong: boolean;
   /** Close every register the way the real DO refuses an id another live socket holds. */
   refuseRegisters: boolean;
+  /** Refuse this many registers as `refuseRegisters` does, then admit — no race with a redial. */
+  refuseNextRegisters: number;
   rejectedCount: () => number;
   connectionCount: () => number;
   sendToDaemon: (env: Envelope) => void;
@@ -76,8 +80,14 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const socketDevices = new Map<Bun.ServerWebSocket<unknown>, string>();
   let rejected = 0;
   let connections = 0;
+  const ordinals = new Map<Bun.ServerWebSocket<unknown>, number>();
+  const registerConnections: number[] = [];
 
-  const relay: { autoPong: boolean; refuseRegisters: boolean } = { autoPong: true, refuseRegisters: false };
+  const relay: { autoPong: boolean; refuseRegisters: boolean; refuseNextRegisters: number } = {
+    autoPong: true,
+    refuseRegisters: false,
+    refuseNextRegisters: 0,
+  };
 
   const server = Bun.serve({
     port,
@@ -90,8 +100,9 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       return new Response("expected websocket", { status: 400 });
     },
     websocket: {
-      open() {
+      open(ws) {
         connections += 1;
+        ordinals.set(ws, connections);
       },
       message(ws, raw) {
         const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
@@ -101,7 +112,9 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
         }
         const frame = JSON.parse(text) as DaemonFrame;
         if (frame.t === "register") {
-          if (relay.refuseRegisters) {
+          registerConnections.push(ordinals.get(ws) ?? 0);
+          if (relay.refuseRegisters || relay.refuseNextRegisters > 0) {
+            if (relay.refuseNextRegisters > 0) relay.refuseNextRegisters -= 1;
             registers.push(frame);
             ws.close(1000, "register unverified");
             return;
@@ -119,6 +132,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
         const deviceId = socketDevices.get(ws);
         if (deviceId !== undefined && daemons.get(deviceId) === ws) daemons.delete(deviceId);
         socketDevices.delete(ws);
+        ordinals.delete(ws);
       },
     },
   });
@@ -127,6 +141,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     url: `ws://127.0.0.1:${server.port}`,
     port: Number(server.port),
     registers,
+    registerConnections,
     messages,
     statuses,
     get autoPong() {
@@ -140,6 +155,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set refuseRegisters(value: boolean) {
       relay.refuseRegisters = value;
+    },
+    get refuseNextRegisters() {
+      return relay.refuseNextRegisters;
+    },
+    set refuseNextRegisters(value: number) {
+      relay.refuseNextRegisters = value;
     },
     rejectedCount: () => rejected,
     connectionCount: () => connections,

@@ -65,16 +65,27 @@ export async function identityFromSeed(seed: Uint8Array<ArrayBuffer>): Promise<I
   return { deviceId: await deviceIdOf(raw), publicKey: toBase64(raw), privateKey };
 }
 
-/** One encoding on both ends, or nothing verifies — the signature's domain-separated message. */
-function registerMessage(deviceId: string, ts: number): Uint8Array<ArrayBuffer> {
-  return new Uint8Array(new TextEncoder().encode(`seance-register|${deviceId}|${ts}`));
+/**
+ * One encoding on both ends, or nothing verifies — the signature's
+ * domain-separated message. v1 covers the route alone; v2, under its own tag so
+ * neither message can be read as the other, also covers `roles`, the one other
+ * register field the relay acts on. The join is unambiguous because the relay
+ * admits role strings only from its id charset, which has neither `,` nor `|`.
+ */
+function registerMessage(deviceId: string, ts: number, roles?: readonly string[]): Uint8Array<ArrayBuffer> {
+  const text =
+    roles === undefined
+      ? `seance-register|${deviceId}|${ts}`
+      : `seance-register-v2|${deviceId}|${ts}|${roles.join(",")}`;
+  return new Uint8Array(new TextEncoder().encode(text));
 }
 
-export async function signRegister(identity: Identity, ts: number): Promise<string> {
+/** `roles` absent signs v1; present (even empty) signs v2, and the frame must carry exactly that list. */
+export async function signRegister(identity: Identity, ts: number, roles?: readonly string[]): Promise<string> {
   const sig = await crypto.subtle.sign(
     { name: IDENTITY_ALGORITHM },
     identity.privateKey,
-    registerMessage(identity.deviceId, ts),
+    registerMessage(identity.deviceId, ts, roles),
   );
   return toBase64(new Uint8Array(sig));
 }
@@ -85,9 +96,19 @@ export type RegisterVerdict = "ok" | "key-id-mismatch" | "bad-signature" | "stal
  * The relay's check, in the order a forgery fails cheapest: the key must hash
  * to the id before any signature is examined, so a key the caller minted for an
  * id it does not own is refused on a digest. `now` is the relay's clock.
+ *
+ * A claim with `roles` verifies against v2 only, never falling back to v1: a
+ * signature that does not cover the roles a frame carries is a bad signature,
+ * not a roleless register, so nothing can splice roles onto a v1 register.
  */
 export async function verifyRegister(
-  claim: { readonly deviceId: string; readonly publicKey: string; readonly ts: number; readonly sig: string },
+  claim: {
+    readonly deviceId: string;
+    readonly publicKey: string;
+    readonly ts: number;
+    readonly sig: string;
+    readonly roles?: readonly string[];
+  },
   now: number,
 ): Promise<RegisterVerdict> {
   if (Math.abs(now - claim.ts) > REGISTER_FRESHNESS_MS) return "stale";
@@ -111,7 +132,7 @@ export async function verifyRegister(
     { name: IDENTITY_ALGORITHM },
     publicKey,
     sig,
-    registerMessage(claim.deviceId, claim.ts),
+    registerMessage(claim.deviceId, claim.ts, claim.roles),
   );
   return ok ? "ok" : "bad-signature";
 }

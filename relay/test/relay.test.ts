@@ -3,6 +3,7 @@ import {
   MACHINES_ID,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
+  SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   type RegistryView,
   type RelayToAppFrame,
@@ -28,6 +29,7 @@ type MsgFrame = Extract<RelayToAppFrame, { t: "msg" }>;
 type UndeliverableFrame = Extract<RelayToAppFrame, { t: "undeliverable" }>;
 type ForgetRefusedFrame = Extract<RelayToAppFrame, { t: "forget-refused" }>;
 type StatusFrame = Extract<RelayToAppFrame, { t: "status" }>;
+type DaemonMsg = Extract<RelayToDaemonFrame, { t: "msg" }>;
 
 let relay: TestRelay;
 
@@ -160,7 +162,7 @@ describe("routing", () => {
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
 
-    expect(await daemon.waitFor<RelayToDaemonFrame>("msg")).toEqual({ t: "msg", env });
+    expect(await daemon.waitFor<DaemonMsg>("msg")).toEqual({ t: "msg", env });
     daemon.close();
     app.close();
   });
@@ -221,7 +223,7 @@ describe("routing", () => {
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
 
-    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await redialed.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     await app.expectNo("undeliverable");
     redialed.close();
     app.close();
@@ -238,7 +240,7 @@ describe("routing", () => {
     const env = envelope(MACHINES_ID, senderId);
     sender.send({ t: "msg", env });
 
-    expect((await receiver.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await receiver.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     // The sender must not be self-nudged, sockets that never registered are
     // not machines, and a broadcast is daemon-bound — apps never see it.
     await sender.expectNo("msg");
@@ -258,7 +260,7 @@ describe("routing", () => {
     const env = envelope(MACHINES_ID, APP_ID);
     app.send({ t: "msg", env });
 
-    expect((await daemon.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await daemon.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     // Fire-and-forget: nothing correlates a broadcast, so no notice even for
     // an app sender the relay could answer.
     await app.expectNo("undeliverable");
@@ -337,7 +339,7 @@ describe("identity", () => {
     // never stopped reporting the machine online.
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
-    expect((await incumbent.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await incumbent.waitFor<DaemonMsg>("msg")).env).toEqual(env);
 
     // Read off a fresh socket's first push: the refusal changes nothing, so it
     // pushes no registry of its own to wait for.
@@ -367,7 +369,7 @@ describe("identity", () => {
 
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
-    expect((await incumbent.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await incumbent.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     incumbent.close();
     app.close();
   });
@@ -400,7 +402,7 @@ describe("identity", () => {
     // throughout — the zombie's close must not have flipped it.
     const env = envelope(deviceId, APP_ID);
     app.send({ t: "msg", env });
-    expect((await redialed.waitFor<RelayToDaemonFrame>("msg")).env).toEqual(env);
+    expect((await redialed.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     const observer = await connectApp(relay);
     const entries = (await observer.waitFor<RegistryFrame>("registry")).entries;
     expect(entries.find((entry) => entry.deviceId === deviceId)?.connected).toBe(true);
@@ -849,4 +851,223 @@ describe("silent-socket sweep", () => {
     await waitForEntry(app, deviceId, (entry) => !entry.connected);
     app.close();
   }, 20_000);
+});
+
+type LeadFrame = Extract<RelayToDaemonFrame, { t: "lead" }>;
+
+// Own instance, last in the file: nomination is hub-wide, so every daemon the
+// shared relay's suites leave connected would be a candidate here, and its
+// registry is already near MAX_DEVICES. Sweep timings are compressed for the
+// re-nomination test, so every daemon below heartbeats unless told not to.
+describe("scheduler leadership", () => {
+  const SILENCE_LIMIT_MS = 2_000;
+  const SCHEDULER = ["scheduler"];
+  let hub: TestRelay;
+  const beats = new Map<Client, ReturnType<typeof setInterval>>();
+
+  beforeAll(async () => {
+    // Same settle as the sweep suite: the previous suite's dispose() just ran.
+    await Bun.sleep(500);
+    hub = await startRelay(TOKEN, { sweepIntervalMs: 250, sweepSilenceLimitMs: SILENCE_LIMIT_MS });
+  });
+
+  afterAll(async () => {
+    for (const beat of beats.values()) clearInterval(beat);
+    await hub.dispose();
+  });
+
+  async function nextRegistry(app: Client, matches: (frame: RegistryFrame) => boolean): Promise<RegistryFrame> {
+    for (;;) {
+      const frame = await app.waitFor<RegistryFrame>("registry");
+      if (matches(frame)) return frame;
+    }
+  }
+
+  const connected =
+    (deviceId: string, want: boolean) =>
+    (frame: RegistryFrame): boolean =>
+      frame.entries.some((entry) => entry.deviceId === deviceId && entry.connected === want);
+
+  function heartbeat(daemon: Client): void {
+    beats.set(
+      daemon,
+      setInterval(() => daemon.sendRaw("ping"), 300),
+    );
+  }
+
+  /** A registered daemon and the push that showed it, which also says who leads once it joined. */
+  async function join(
+    app: Client,
+    deviceId: string,
+    opts: { readonly roles?: readonly string[]; readonly heartbeat?: boolean } = {},
+  ): Promise<{ readonly daemon: Client; readonly registry: RegistryFrame }> {
+    const daemon = await connectDaemon(hub);
+    if (opts.heartbeat !== false) heartbeat(daemon);
+    daemon.send(await register(deviceId, opts.roles === undefined ? {} : { roles: opts.roles }));
+    return { daemon, registry: await nextRegistry(app, connected(deviceId, true)) };
+  }
+
+  function quiet(daemon: Client): void {
+    clearInterval(beats.get(daemon));
+    beats.delete(daemon);
+  }
+
+  async function leave(app: Client, daemon: Client, deviceId: string): Promise<RegistryFrame> {
+    quiet(daemon);
+    daemon.close();
+    return nextRegistry(app, connected(deviceId, false));
+  }
+
+  test("the earliest-connected daemon with signed roles leads, a roleless one never does, and a close re-nominates", async () => {
+    const app = await connectApp(hub);
+    expect((await app.waitFor<RegistryFrame>("registry")).scheduler).toBeNull();
+    const oldId = await newDeviceId();
+    const firstId = await newDeviceId();
+    const secondId = await newDeviceId();
+
+    // Connected longest, but a v1 register carries no roles.
+    const old = await join(app, oldId);
+    expect(old.registry.scheduler).toBeNull();
+
+    const first = await join(app, firstId, { roles: SCHEDULER });
+    const { term } = await first.daemon.waitFor<LeadFrame>("lead");
+    expect(first.registry.scheduler).toEqual({ deviceId: firstId, term });
+
+    const second = await join(app, secondId, { roles: SCHEDULER });
+    expect(second.registry.scheduler).toEqual({ deviceId: firstId, term });
+    await second.daemon.expectNo("lead");
+
+    const handedOver = await leave(app, first.daemon, firstId);
+    expect(handedOver.scheduler).toEqual({ deviceId: secondId, term: term + 1 });
+    expect(await second.daemon.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+
+    expect((await leave(app, second.daemon, secondId)).scheduler).toBeNull();
+    await old.daemon.expectNo("lead");
+    await leave(app, old.daemon, oldId);
+    app.close();
+  });
+
+  // A token holder relaying a captured v1 register cannot add roles to it, and
+  // the relay does not quietly demote the frame to a roleless one either.
+  test("a register whose roles the signature does not cover is refused and never leads", async () => {
+    const deviceId = await newDeviceId();
+    const daemon = await connectDaemon(hub);
+    daemon.send({ ...(await register(deviceId)), roles: SCHEDULER });
+    expect(await daemon.waitClosed()).toBe(1000);
+    await daemon.expectNo("lead");
+    const observer = await connectApp(hub);
+    expect((await observer.waitFor<RegistryFrame>("registry")).scheduler).toBeNull();
+    observer.close();
+  });
+
+  test("envelopes to the scheduler reach the leader; with none, an app hears offline", async () => {
+    const app = await connectApp(hub);
+    const lone = envelope(SCHEDULER_ID, APP_ID);
+    app.send({ t: "msg", env: lone });
+    expect(await app.waitFor<UndeliverableFrame>("undeliverable")).toEqual({
+      t: "undeliverable",
+      to: SCHEDULER_ID,
+      iv: lone.iv,
+      code: "offline",
+    });
+
+    const otherId = await newDeviceId();
+    const leaderId = await newDeviceId();
+    const other = await join(app, otherId);
+    // Daemon-origin with no leader: dropped, and nobody is told.
+    other.daemon.send({ t: "msg", env: envelope(SCHEDULER_ID, otherId) });
+    const leader = await join(app, leaderId, { roles: SCHEDULER });
+    await leader.daemon.waitFor<LeadFrame>("lead");
+    await leader.daemon.expectNo("msg");
+
+    const fromApp = envelope(SCHEDULER_ID, APP_ID);
+    app.send({ t: "msg", env: fromApp });
+    expect((await leader.daemon.waitFor<DaemonMsg>("msg")).env).toEqual(fromApp);
+    const fromDaemon = envelope(SCHEDULER_ID, otherId);
+    other.daemon.send({ t: "msg", env: fromDaemon });
+    expect((await leader.daemon.waitFor<DaemonMsg>("msg")).env).toEqual(fromDaemon);
+    await app.expectNo("undeliverable");
+
+    await leave(app, leader.daemon, leaderId);
+    await leave(app, other.daemon, otherId);
+    app.close();
+  });
+
+  test("a demoted leader hears follow, and anything sent under its term is refused not_leader", async () => {
+    const app = await connectApp(hub);
+    const aId = await newDeviceId();
+    const bId = await newDeviceId();
+    const a = await join(app, aId, { roles: SCHEDULER });
+    const b = await join(app, bId, { roles: SCHEDULER });
+    const { term } = await a.daemon.waitFor<LeadFrame>("lead");
+
+    // The leader's app-role leg dispatching under its term.
+    const dispatched = envelope(bId, SCHEDULER_ID);
+    app.send({ t: "msg", env: dispatched, term });
+    expect((await b.daemon.waitFor<DaemonMsg>("msg")).env).toEqual(dispatched);
+
+    // `a` gives up the role with a fresh v2 register over no roles.
+    a.daemon.send(await register(aId, { roles: [] }));
+    expect(await a.daemon.waitFor("follow")).toEqual({ t: "follow" });
+    expect(await b.daemon.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+
+    for (const claimed of [term, undefined]) {
+      const stale = envelope(bId, SCHEDULER_ID);
+      app.send({ t: "msg", env: stale, ...(claimed === undefined ? {} : { term: claimed }) });
+      // oxlint-disable-next-line no-await-in-loop -- each refusal is matched to its own send
+      expect(await app.waitFor<UndeliverableFrame>("undeliverable")).toEqual({
+        t: "undeliverable",
+        to: bId,
+        iv: stale.iv,
+        code: "not_leader",
+      });
+    }
+    await b.daemon.expectNo("msg");
+
+    const current = envelope(aId, SCHEDULER_ID);
+    app.send({ t: "msg", env: current, term: term + 1 });
+    expect((await a.daemon.waitFor<DaemonMsg>("msg")).env).toEqual(current);
+
+    await leave(app, b.daemon, bId);
+    await leave(app, a.daemon, aId);
+    app.close();
+  });
+
+  test("a leader keeps the role across its own reconnect, under a new term on the new socket", async () => {
+    const app = await connectApp(hub);
+    const leaderId = await newDeviceId();
+    const otherId = await newDeviceId();
+    const first = await join(app, leaderId, { roles: SCHEDULER });
+    const { term } = await first.daemon.waitFor<LeadFrame>("lead");
+    const other = await join(app, otherId, { roles: SCHEDULER });
+
+    const redialed = await connectDaemon(hub);
+    heartbeat(redialed);
+    quiet(first.daemon);
+    redialed.send(await register(leaderId, { roles: SCHEDULER }));
+    expect(await redialed.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+    expect(await first.daemon.waitClosed()).toBe(1000);
+    await nextRegistry(app, (frame) => frame.scheduler?.deviceId === leaderId && frame.scheduler.term === term + 1);
+    await other.daemon.expectNo("lead");
+
+    await leave(app, redialed, leaderId);
+    await leave(app, other.daemon, otherId);
+    app.close();
+  });
+
+  test("a leader that stops heartbeating is replaced within one sweep", async () => {
+    const app = await connectApp(hub);
+    const silentId = await newDeviceId();
+    const liveId = await newDeviceId();
+    const silent = await join(app, silentId, { roles: SCHEDULER, heartbeat: false });
+    const { term } = await silent.daemon.waitFor<LeadFrame>("lead");
+    const live = await join(app, liveId, { roles: SCHEDULER });
+
+    expect(await silent.daemon.waitClosed(10_000)).toBe(1000);
+    expect(await live.daemon.waitFor<LeadFrame>("lead", 5_000)).toEqual({ t: "lead", term: term + 1 });
+    await nextRegistry(app, (frame) => frame.scheduler?.deviceId === liveId);
+
+    await leave(app, live.daemon, liveId);
+    app.close();
+  }, 15_000);
 });
