@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { addWorktree, makeClone, makeSeparateGitDirClone } from "../test/fixtures.ts";
 import { enclosingWorktreeCommonDir, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
@@ -12,6 +12,13 @@ afterAll(async () => {
 
 // Root reads through any mode, so an unreadable fixture can't be made there.
 const AS_ROOT = process.getuid?.() === 0;
+
+// `worktree.useRelativePaths` arrived in git 2.48; older git ignores the key
+// and writes absolute pointers, so only the hand-written fixture runs there.
+const GIT_RELATIVE_WORKTREES = ((): boolean => {
+  const match = /(\d+)\.(\d+)/u.exec(Bun.spawnSync(["git", "--version"]).stdout.toString());
+  return match !== null && (Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) >= 48));
+})();
 
 async function makeRoot(): Promise<string> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "seance-gitdir-")));
@@ -124,12 +131,24 @@ describe("enclosingWorktreeCommonDir", () => {
     expect((await enclosingWorktreeCommonDir(sibling)).commonDir).toBe(common);
   });
 
-  test("relative gitdir and commondir (worktree.useRelativePaths) resolve", async () => {
-    const { root, main } = await makeLayout();
-    const relative = join(root, "web-rel");
-    await addWorktree(main, relative, "-c", "worktree.useRelativePaths=true");
-    expect(await Bun.file(join(relative, ".git")).text()).toStartWith("gitdir: ../");
-    expect((await enclosingWorktreeCommonDir(relative)).commonDir).toBe(join(main, ".git"));
+  test.skipIf(!GIT_RELATIVE_WORKTREES)(
+    "relative gitdir and commondir (worktree.useRelativePaths) resolve",
+    async () => {
+      const { root, main } = await makeLayout();
+      const worktree = join(root, "web-rel");
+      await addWorktree(main, worktree, "-c", "worktree.useRelativePaths=true");
+      expect(await Bun.file(join(worktree, ".git")).text()).toStartWith("gitdir: ../");
+      expect((await enclosingWorktreeCommonDir(worktree)).commonDir).toBe(join(main, ".git"));
+    },
+  );
+
+  // The same layout on any git: the pointer git 2.48 writes, spelled by hand.
+  // `commondir` is already relative (`../..`) on every version.
+  test("a relative gitdir pointer resolves from the worktree, on any git", async () => {
+    const { main, sibling } = await makeLayout();
+    await writeFile(join(sibling, ".git"), `gitdir: ${relative(sibling, await adminDirOf(sibling))}\n`);
+    expect(await Bun.file(join(sibling, ".git")).text()).toStartWith("gitdir: ../");
+    expect((await enclosingWorktreeCommonDir(sibling)).commonDir).toBe(join(main, ".git"));
   });
 
   // `commondir` is `../..` from the admin dir; resolved lexically from a symlink
