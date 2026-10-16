@@ -5,10 +5,16 @@ import type { Decision } from "./route.ts";
  * M2's slice of the task lifecycle (docs/scheduler.md, "Task states"): no deps,
  * so no `queued`/`blocked`, and no done detection, so no `awaiting-merge` — a
  * session that ends is `done`. M3 widens this table; nothing else encodes it.
+ *
+ * `reserved` reaches `needs-input` and `done` directly, not only through
+ * `running`: a session event for a reserved task is proof its spawn landed
+ * even when the reply never came, and a session that already ended is one
+ * observed transition, so one store write — a `running` written first would
+ * record a state no one observed, at the cost of a second write.
  */
 export const TRANSITIONS = {
   ready: ["reserved", "cancelled"],
-  reserved: ["running", "ready", "failed", "cancelled"],
+  reserved: ["running", "needs-input", "done", "ready", "failed", "cancelled"],
   running: ["needs-input", "done", "failed", "cancelled"],
   "needs-input": ["running", "done", "failed", "cancelled"],
   done: [],

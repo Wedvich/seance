@@ -5,18 +5,21 @@ import {
   type Fleet,
   type QueueStore,
   type SchedulerConfig,
-  type SessionState,
+  type SessionSource,
   type StoreWrite,
   type TaskSessionsReply,
   type Unreachable,
 } from "@seance/scheduler";
 import {
+  parseSessionEvent,
   quote,
   RequestFailure,
   type DespawnResponse,
   type Envelope,
   type ErrorResponse,
+  type Plain,
   type SessionsResponse,
+  type SessionState,
   type SpawnResponse,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
@@ -58,8 +61,12 @@ export interface LeaderRelay extends AppRelay {
 export interface LeaderOpts {
   /** This machine. The leader reaches it through `local`, never a relay round trip back to itself. */
   readonly selfDeviceId: string;
-  /** A fresh leg per term, never shared with the broker or with another term. */
-  readonly createRelay: (term: number) => LeaderRelay;
+  /**
+   * A fresh leg per term, never shared with the broker or with another term.
+   * `onEvent` is what the leg hands an envelope that answers nothing — a
+   * daemon's `session-event` — once it has opened and replay-checked it.
+   */
+  readonly createRelay: (term: number, onEvent: (plain: Plain, from: string) => void) => LeaderRelay;
   /** This machine's ops, audited under origin `leader`. */
   readonly local: LocalOps;
   /**
@@ -81,11 +88,14 @@ export interface Leader {
   /** An envelope `to: "scheduler"` from the daemon's relay leg; dropped unless a term is running. */
   readonly deliver: (env: Envelope) => void;
   /**
-   * Item 5's entry point: a `session-event` the daemon has already bound to a
-   * task. Dropped outside a running term — takeover reads the same state from
-   * `sessions` — so it never queues behind a takeover in flight.
+   * A `session-event` from this machine, in process (`run.ts`): the leader
+   * reaches itself only locally. Other machines' arrive through the term's leg.
+   * `from` is where the event came from, which is what lets one resolve a task
+   * still reserved (`Scheduler.onSession`). Dropped outside a running term —
+   * takeover reads the same state from `sessions` — so it never queues behind
+   * a takeover in flight.
    */
-  readonly onSession: (taskId: string, state: SessionState) => Promise<void>;
+  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
   /** The term being run, or null while following. */
   readonly term: () => number | null;
   /** Resolves once the current term has taken over and is ticking, or has ended; tests await it. */
@@ -122,7 +132,8 @@ function fencedStore(inner: QueueStore, term: number, live: () => boolean): Queu
 }
 
 function sessionsOf(reply: SessionsResponse | ErrorResponse | Unreachable): TaskSessionsReply {
-  return "ok" in reply ? reply : { ok: true, sessions: reply.sessions };
+  if ("ok" in reply) return reply;
+  return { ok: true, sessions: reply.sessions, ...(reply.ended === undefined ? {} : { ended: reply.ended }) };
 }
 
 interface TermFleetOpts {
@@ -175,7 +186,7 @@ interface TermRun {
   readonly term: number;
   readonly settled: Promise<void>;
   readonly deliver: (env: Envelope) => void;
-  readonly onSession: (taskId: string, state: SessionState) => Promise<void>;
+  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
   readonly end: () => void;
 }
 
@@ -193,7 +204,22 @@ function startTerm(
   let live = true;
   let running = false;
   let timer: ReturnType<typeof setInterval> | null = null;
-  const relay = opts.createRelay(term);
+  // Declared before the leg that calls it; it reads `scheduler` only once a term is running.
+  const onSession = async (taskId: string, state: SessionState, from?: SessionSource): Promise<void> => {
+    if (live && running) await scheduler.onSession(taskId, state, from).catch(report);
+  };
+  // What another daemon sent the scheduler, already opened and replay-checked
+  // by the leg. The sealer's id is AAD-bound; the event's fields are its
+  // daemon's own binding, re-validated here — the PR URL above all.
+  const onEvent = (plain: Plain, from: string): void => {
+    const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
+    if (event === null) {
+      log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event`);
+      return;
+    }
+    void onSession(event.taskId, event.state, { deviceId: from, pane: event.session });
+  };
+  const relay = opts.createRelay(term, onEvent);
   const isLive = (): boolean => live;
   const scheduler = new Scheduler({
     store: fencedStore(opts.store, term, isLive),
@@ -273,9 +299,7 @@ function startTerm(
     deliver: (env) => {
       if (live) relay.deliver(env).catch(report);
     },
-    onSession: async (taskId, state) => {
-      if (live && running) await scheduler.onSession(taskId, state).catch(report);
-    },
+    onSession,
     end: () => {
       live = false;
       running = false;
@@ -329,7 +353,7 @@ export function createLeader(options: LeaderOpts): Leader {
       }
       current.deliver(env);
     },
-    onSession: async (taskId, state) => current?.onSession(taskId, state),
+    onSession: async (taskId, state, from) => current?.onSession(taskId, state, from),
     term: () => current?.term ?? null,
     settled: async () => current?.settled,
     stop: () => {

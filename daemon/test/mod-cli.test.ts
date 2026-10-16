@@ -67,8 +67,10 @@ exit 0
     expect(argv).toEqual([
       `plugin marketplace add ${checkout} --scope user --json`,
       "plugin install tmux-rename@seance --scope user",
+      "plugin install session-events@seance --scope user",
     ]);
     expect(out).toContain("installed tmux-rename@seance");
+    expect(out).toContain("installed session-events@seance");
   });
 
   test("a repeat install never removes first — that would delete the mods' saved data", async () => {

@@ -326,6 +326,55 @@ describe("leader in the daemon", () => {
     expect(lines.some((line) => line.includes('audit request origin=leader op="sessions"'))).toBe(true);
   });
 
+  test("a session event another daemon sends the scheduler reaches the leader's state, from the machine it names", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const { daemon, deviceId } = await startLeaderDaemon(relay, store);
+    try {
+      // Mid-dispatch on `b`, its spawn reply lost: only the session's own event can say it ran.
+      const reservation = { deviceId: "b", ...target, expiresAt: Date.now() + 60_000 };
+      await store.put("t-b", 0, task("t-b", { state: "reserved", reservation }));
+
+      relay.lead(deviceId, 2);
+      const asked = await relay.appFrames.next(5_000);
+      const request = await open(key, asked.env);
+      const none: SessionsResponse = { sessions: [], at: Date.now() };
+      const answer = await seal(
+        key,
+        { to: SCHEDULER_ID, from: "b" },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "sessions", re: request.id, payload: none },
+      );
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: answer }));
+      await daemon.leader.settled();
+      expect((await store.get("t-b"))?.body.state).toBe("reserved");
+
+      const event = (from: string, payload: object) =>
+        seal(
+          key,
+          { to: SCHEDULER_ID, from },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload },
+        );
+      const ended = { session: "%3", taskId: "t-b", exclave: "default", state: "ended", at: Date.now() };
+      // From a machine the task was not placed on, and with a PR URL that is not https: neither moves it.
+      for (const env of [await event("c", ended), await event("b", { ...ended, prUrl: "javascript:x" })]) {
+        relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
+      }
+      // Had either been taken, the task would already be done, and a later `busy` could not move it.
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", { ...ended, state: "busy" }) }));
+      await pollUntil(async () => (await store.get("t-b"))?.body.state !== "reserved", "the busy event to land");
+      expect((await store.get("t-b"))?.body).toMatchObject({
+        state: "running",
+        assignment: { deviceId: "b", pane: "%3" },
+      });
+
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", ended) }));
+      await pollUntil(async () => (await store.get("t-b"))?.body.state === "done", "the ended event to land");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("the daemon's relay socket dropping ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore(), { pingIntervalMs: 100 });

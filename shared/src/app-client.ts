@@ -397,6 +397,8 @@ export class RelayClient {
   readonly #log: (line: string) => void;
   /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
   readonly #term: number | null;
+  /** The leader's leg only: what an envelope `to: SCHEDULER_ID` that answers nothing is handed to. */
+  readonly #onEvent: ((plain: Plain, from: string) => void) | null;
 
   constructor(opts: {
     readonly url: string;
@@ -419,9 +421,14 @@ export class RelayClient {
      * Speak as the scheduler leader (DESIGN.md, Scheduler): every request is
      * sealed `from: SCHEDULER_ID` and its frame carries `term`, which the relay
      * fences on. One client per term — a new term is a new client, so nothing
-     * sent under the old one can go out under the new.
+     * sent under the old one can go out under the new. `onEvent` takes what
+     * daemons send the scheduler unasked (`session-event`): opened and
+     * replay-checked like a reply, with the sealing machine's id.
      */
-    readonly scheduler?: { readonly term: number };
+    readonly scheduler?: {
+      readonly term: number;
+      readonly onEvent?: (plain: Plain, from: string) => void;
+    };
   }) {
     this.#url = opts.url;
     this.#token = opts.token;
@@ -434,6 +441,7 @@ export class RelayClient {
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#log = opts.log ?? ((line) => console.log(line));
     this.#term = opts.scheduler?.term ?? null;
+    this.#onEvent = opts.scheduler?.onEvent ?? null;
   }
 
   /**
@@ -837,8 +845,12 @@ export class RelayClient {
       this.#wireLog("dropped", `iv=${quote(env.iv)} re=${quote(plain.re ?? "")} reason=replay`);
       return;
     }
+    // Not a reply: on the leader's leg, an event a daemon sent the scheduler.
+    if (plain.re === undefined) {
+      if (env.to === SCHEDULER_ID) this.#onEvent?.(plain, env.from);
+      return;
+    }
     // Replies fan out to every open app socket, so another tab's are expected here.
-    if (plain.re === undefined) return;
     // Logged before the lookup: an unmatched `re` is the late reply to a request
     // that already timed out, and "arrived late" vs "never came" is the whole
     // point of the ids. Another tab's reply lands here too, hence `pending`.

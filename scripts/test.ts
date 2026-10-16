@@ -49,7 +49,7 @@ const SHARDS: readonly Shard[] = [
   { name: "raycast", paths: ["raycast/"] },
   { name: "scheduler", paths: ["scheduler/"] },
   { name: "scripts", paths: ["scripts/"] },
-  { name: "claude-mods", paths: ["claude-mods/tmux-rename"], runner: "claude-plugin" },
+  { name: "claude-mods", paths: ["claude-mods/tmux-rename", "claude-mods/session-events"], runner: "claude-plugin" },
 ];
 
 // `bun run test <path>` narrows to one bun shard (plus one for mods), so a single file still runs with

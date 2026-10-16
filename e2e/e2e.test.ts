@@ -13,6 +13,7 @@ import {
 } from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
+import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
 import { connectApp } from "../relay/test/harness.ts";
 import { deriveMachines } from "../pwa/src/machines-view.ts";
@@ -22,7 +23,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RelayClient } from "@seance/shared";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
-import { tmux } from "../daemon/src/tmux.ts";
+import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { buildMcpServer, localMachine, type LocalMachine } from "../daemon/src/mcp.ts";
 import {
   E2E_ACCOUNT_ID,
@@ -34,6 +35,7 @@ import {
   startStack,
   TOKEN,
   wsUrl,
+  type SecondDaemon,
   type Stack,
 } from "./harness.ts";
 
@@ -726,6 +728,82 @@ describe("scheduler leadership ↔ real daemons", () => {
       if (down) await stack.restartDaemon();
       await second.stop();
       watch.close();
+    }
+  });
+});
+
+/** Single-quoted for `sh -c`, as `spawn.ts` quotes its one shell string. */
+function q(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () => {
+  // The double spawn item 5 closes, end to end: a task reserved on machine B
+  // whose spawn reply never came, and whose session reports itself ended.
+  test("a session's ended event on another machine resolves the leader's reservation as done", async () => {
+    const taskId = "e2e-event-task";
+    let second: SecondDaemon | null = null;
+    let pane: string | null = null;
+    try {
+      // B's id first: booted once to mint it, then down, so the suite's daemon
+      // leads alone and takes the task over finding no session for it.
+      const minted = await stack.startSecondDaemon({ name: "EventBox" });
+      const b = minted.deviceId;
+      await minted.stop();
+      await stack.leaderStore.put(taskId, 0, {
+        id: taskId,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "reserved",
+        createdAt: Date.now(),
+        reservation: { deviceId: b, exclave: "default", clone: "app", expiresAt: Date.now() + 600_000 },
+      });
+      await stack.restartDaemon();
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      expect((await stack.leaderStore.get(taskId))?.body.state).toBe("reserved");
+      // Same state dir, same id; connected later, so it follows.
+      second = await stack.startSecondDaemon({ name: "EventBox" });
+      expect(second.deviceId).toBe(b);
+
+      // A pane carrying the task whose process sends `ended` through the real
+      // CLI to B's op socket: B binds it by peer pid and forwards it sealed to
+      // the scheduler, and the relay routes it to the leader.
+      const input = join(base, "event.json");
+      await Bun.write(input, JSON.stringify({ state: "ended" }));
+      const go = join(base, "event.go");
+      const main = join(import.meta.dir, "..", "daemon", "src", "main.ts");
+      // A session of its own: B's opens only with its first spawn.
+      const created = await tmuxOk([
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        "e2e-event-sender",
+        "-c",
+        stack.fixture.root,
+        "-e",
+        `SEANCE_STATE_DIR=${second.stateDir}`,
+        "sh",
+        "-c",
+        `while [ ! -e ${q(go)} ]; do sleep 0.05; done; ${q(process.execPath)} ${q(main)} session-event < ${q(input)}; exec sleep 600`,
+      ]);
+      pane = created.trim();
+      await tmux(["set-option", "-p", "-t", pane, "@seance-task", taskId]);
+      const socket = join(second.stateDir, "run", "seanced.sock");
+      await pollUntil(() => localSocketReachable(socket), "B's op socket", 10_000);
+      await Bun.write(go, "");
+
+      await pollUntil(
+        async () => (await stack.leaderStore.get(taskId))?.body.state === "done",
+        "the leader to take the event",
+        10_000,
+      );
+      expect((await stack.leaderStore.get(taskId))?.body.assignment).toMatchObject({ deviceId: b, pane });
+    } finally {
+      if (pane !== null) await tmux(["kill-session", "-t", "e2e-event-sender"]);
+      await second?.stop();
     }
   });
 });

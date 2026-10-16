@@ -20,6 +20,7 @@ import {
   type OpName,
   type Plain,
   type RelayToDaemonFrame,
+  type SessionEvent,
 } from "@seance/shared";
 import { log } from "./log.ts";
 
@@ -130,6 +131,22 @@ export class RelayClient {
     if (ws === null || !this.connected) return false;
     ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
     log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(op)} to=${quote(MACHINES_ID)}`);
+    return true;
+  }
+
+  /**
+   * A fire-and-forget report to whichever daemon leads (`session-event`). The
+   * relay drops it when no leader is nominated — every event is also in the
+   * `sessions` reply a new leader reconciles against, so nothing is retried.
+   */
+  async sendToScheduler(event: SessionEvent): Promise<boolean> {
+    if (!this.connected || !this.#registered) return false;
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload: event };
+    const sealed = await seal(this.#opts.key, { to: SCHEDULER_ID, from: this.#opts.identity.deviceId }, plain);
+    const ws = this.#ws;
+    if (ws === null || !this.connected) return false;
+    ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
+    log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(plain.op)} to=${quote(SCHEDULER_ID)}`);
     return true;
   }
 

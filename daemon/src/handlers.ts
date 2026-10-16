@@ -40,6 +40,13 @@ export interface HandlerContext {
   readonly auditSink: AuditSink;
   /** The local metrics store's read; absent, a `metrics` request is answered with a code, not dropped. */
   readonly metrics?: (request: MetricsRequest) => readonly MetricsSeries[];
+  /**
+   * Task ids whose sessions ended recently and no live pane runs (`EndedTasks`),
+   * for the `sessions` reply's `ended`; absent, the field is left off.
+   */
+  readonly endedTasks?: () => Promise<readonly string[]>;
+  /** Told of every task a spawn here launched, so it reads as ended once its pane is gone. */
+  readonly taskLaunched?: (taskId: string) => void;
   /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
 }
@@ -97,6 +104,7 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   await audit.request(payload);
   try {
     const outcome = await ctx.backend.spawn(payload, ctx.getRepos());
+    if (payload.taskId !== undefined) ctx.taskLaunched?.(payload.taskId);
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
@@ -185,7 +193,11 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
 }
 
 async function listSessions(ctx: HandlerContext): Promise<SessionsResponse> {
-  return { sessions: await ctx.backend.sessions(ctx.getRepos()), at: Date.now() };
+  const [sessions, ended] = await Promise.all([
+    ctx.backend.sessions(ctx.getRepos()),
+    ctx.endedTasks?.() ?? Promise.resolve(undefined),
+  ]);
+  return { sessions, at: Date.now(), ...(ended === undefined || ended.length === 0 ? {} : { ended }) };
 }
 
 /** The three ops the scheduler dispatches, typed, for a caller inside this process. */

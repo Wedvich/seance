@@ -5,6 +5,7 @@ import {
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
+  SESSION_STATES,
   SPAWN_ERROR_CODES,
   TASK_ID_PATTERN,
   type Envelope,
@@ -19,6 +20,8 @@ import {
   type RepoEntry,
   type RescanResponse,
   type ScopedWindow,
+  type SessionEvent,
+  type SessionState,
   type SpawnErrorCode,
 } from "./types.ts";
 
@@ -322,6 +325,48 @@ export function parseRescanResponse(value: unknown): RescanResponse | null {
 
 export function isTaskId(value: unknown): value is string {
   return typeof value === "string" && TASK_ID_PATTERN.test(value);
+}
+
+export function isSessionState(value: unknown): value is SessionState {
+  return SESSION_STATES.some((state) => state === value);
+}
+
+/** A PR URL is kept only under this length; past it, it is no URL anyone typed. */
+export const PR_URL_MAX_LENGTH = 2048;
+
+/**
+ * A PR URL as something the PWA may render as an `href` and a push may carry:
+ * `https:` only, and no credentials in it. Null for anything else, so a
+ * `javascript:` or `http:` value is dropped, never echoed. Returns the parsed
+ * form, not the input, so what goes on is what was checked.
+ */
+export function httpsUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > PR_URL_MAX_LENGTH) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "") return null;
+  return url.href;
+}
+
+/**
+ * The leader's check on a forwarded event. The sender is a PSK holder, so this
+ * is skew and bug hygiene rather than a trust boundary — the daemon already
+ * bound the event to its pane — but a `prUrl` is re-checked all the same: it is
+ * the one field that reaches an `href`.
+ */
+export function parseSessionEvent(value: unknown): SessionEvent | null {
+  if (!isRecord(value)) return null;
+  const { session, taskId, exclave, state, prUrl, at } = value;
+  if (typeof session !== "string" || session === "" || session.length > 64) return null;
+  if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > 64) return null;
+  if (!isSessionState(state) || typeof at !== "number" || !Number.isFinite(at)) return null;
+  const url = prUrl === undefined ? null : httpsUrl(prUrl);
+  if (prUrl !== undefined && url === null) return null;
+  return { session, taskId, exclave, state, at, ...(url === null ? {} : { prUrl: url }) };
 }
 
 /** Receivers never reject on this — display routing only; the wire keeps `string`. */

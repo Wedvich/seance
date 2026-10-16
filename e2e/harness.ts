@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
+import { MemoryQueueStore } from "../daemon/src/leader.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
 import {
@@ -101,6 +102,8 @@ export interface SecondDaemon {
   readonly log: string;
   /** Its windows' tmux session, beside the suite's own. */
   readonly tmuxSession: string;
+  /** Its `SEANCE_STATE_DIR`: a process given it reaches this daemon's op socket. */
+  readonly stateDir: string;
   readonly stop: () => Promise<void>;
 }
 
@@ -113,6 +116,11 @@ export interface Stack {
   readonly appKey: CryptoKey;
   readonly deviceId: string;
   daemon: DaemonHandle;
+  /**
+   * The queue the suite's daemon leads over, kept across `restartDaemon` as the
+   * relay's store will be (M3): a task put here is the next term's to take over.
+   */
+  readonly leaderStore: MemoryQueueStore;
   /**
    * Restart with identical opts — same state dir, so the same deviceId. `spawnWaitMs`
    * overrides the default budget for the new daemon; pass nothing to get it back.
@@ -163,6 +171,7 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
   // of dead: the failing stub is bash + sleep 0.3, which the shards running
   // concurrently can stretch past a second.
   const DEFAULT_SPAWN_WAIT_MS = 1_500;
+  const leaderStore = new MemoryQueueStore();
 
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
     startDaemon({
@@ -175,6 +184,7 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
+      leader: { store: leaderStore },
     });
 
   let daemon = await startTestDaemon();
@@ -226,7 +236,7 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
       throw error;
     }
     const { deviceId: secondId } = (await Bun.file(statePath).json()) as { deviceId: string };
-    return { deviceId: secondId, log, tmuxSession, stop };
+    return { deviceId: secondId, log, tmuxSession, stateDir: secondState, stop };
   };
 
   const stack: Stack = {
@@ -237,6 +247,7 @@ export async function startStack(base: string, exclaves: readonly ExclaveFixture
     appKey,
     deviceId,
     daemon,
+    leaderStore,
     restartDaemon: async (opts: { readonly spawnWaitMs?: number } = {}): Promise<void> => {
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest
