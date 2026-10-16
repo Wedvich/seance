@@ -17,7 +17,7 @@ import {
 import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { RelayDot } from "./relay-dot.tsx";
-import { Sheet, SheetItem } from "./sheet.tsx";
+import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 
 /** One collator for every sheet sort; constructing one per comparison is not free. */
 const collator = new Intl.Collator();
@@ -130,7 +130,7 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
     >
       <span className="label">{tile.label}</span>
       <span className={valueClass}>
-        {tile.dot !== null && <span className={tile.dot === "ok" ? "dot dot-ok" : "dot"} />}
+        {tile.dot !== null && <span className={dotClass(tile.dot)} />}
         <span>{tile.value}</span>
       </span>
     </button>
@@ -224,6 +224,7 @@ function ActiveSheet(props: {
         <SheetItem
           label="Auto"
           sub={auto.reason ?? "the scheduler picks the machine and the account"}
+          dot={auto.available ? "auto" : "off"}
           selected={view.auto !== null}
           disabled={!auto.available}
           onClick={actions.selectAuto}

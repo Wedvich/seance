@@ -2230,8 +2230,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the form itself is still cleared on success, so a reload cannot resurrect a
   draft already acted on.
 - **`auto` is a machine-picker row, and the scheduler is asked only through it** (scheduler M2
-  item 6). The row sits above the machines and is greyed with its reason unless
-  `RelayState.scheduler` is `ready`: `none` reads "No scheduler is leading right now",
+  item 6). The row sits above the machines, laid out like them, with a blue dot where a machine
+  has its green one (on the MACHINE tile too, once picked). It is greyed with its reason, its dot
+  grey like an offline machine's, unless `RelayState.scheduler` is `ready`: `none` reads "No scheduler is leading right now",
   `unverified` reads "Leader unverified". Unverified is a nominee whose registry entry did not
   open into a `Machine` — the rule that already decides which entries render, here deciding who
   is believed to hold the PSK (Scheduler, "Leadership"). The client enforces the same check at

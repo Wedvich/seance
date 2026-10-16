@@ -118,6 +118,11 @@
   background: var(--err);
 }
 
+/* `auto`: the scheduler places it — a choice of its own, not a machine's presence. */
+.dot-auto {
+  background: var(--auto);
+}
+
 /* Sized off .dot so the relay reads at the same weight as the MACHINE card's dot. */
 .relay-dot-wrap {
   position: relative;

@@ -501,7 +501,7 @@ describe("auto", () => {
       NOW,
     );
     expect(view.autoAvailability).toEqual({ available: true, reason: null });
-    expect(view.machineTile).toEqual({ label: "MACHINE", value: "Auto", mono: false, dot: null });
+    expect(view.machineTile).toEqual({ label: "MACHINE", value: "Auto", mono: false, dot: "auto" });
     // One row per origin, however many machines clone it; the host is dropped from the label.
     expect(view.auto?.repos).toEqual([
       { origin: "scratch", label: "scratch" },

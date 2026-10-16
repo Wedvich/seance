@@ -26,7 +26,7 @@ export interface Tile {
   readonly label: string;
   readonly value: string;
   readonly mono: boolean;
-  readonly dot: "ok" | "off" | null;
+  readonly dot: "ok" | "off" | "auto" | null;
 }
 
 export interface Banner {
@@ -470,7 +470,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     relayLine: deriveRelayLine(state.relay),
     banner: deriveBanner(state, machine),
     machineTile: auto
-      ? { label: "MACHINE", value: "Auto", mono: false, dot: null }
+      ? { label: "MACHINE", value: "Auto", mono: false, dot: "auto" }
       : {
           label: "MACHINE",
           value: machine?.name ?? "No machines",
