@@ -23,6 +23,11 @@ export interface SchedulerConfig {
   /** In-flight (reserved + running) scheduler tasks across the fleet. */
   readonly globalMax: number;
   readonly reservationTtlMs: number;
+  /**
+   * A running task whose machine has been absent this long is `lost`: shown as
+   * such, never dispatched again, until that machine answers for it.
+   */
+  readonly lostAfterMs: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -37,4 +42,5 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   minFreeMib: 1024,
   globalMax: 8,
   reservationTtlMs: 120_000,
+  lostAfterMs: 15 * 60_000,
 };

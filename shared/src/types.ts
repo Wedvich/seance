@@ -250,8 +250,9 @@ export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "s
  * Request ops an app sends `to: SCHEDULER_ID`, answered by the leader rather
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
+ * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview"] as const;
+export const SCHEDULER_OPS = ["queue", "route-preview", "submit"] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -269,6 +270,7 @@ export const OP_TIMEOUT_MS = {
   metrics: 15_000,
   queue: 10_000,
   "route-preview": 10_000,
+  submit: 15_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -828,9 +830,20 @@ export interface ErrorResponse {
 
 /**
  * The scheduler's task states (docs/scheduler.md, "Task states"): M2's slice.
- * `scheduler/src/task.ts` holds the one transition table over them.
+ * `scheduler/src/task.ts` holds the one transition table over them. `lost` is
+ * a running task whose machine has been absent past `lostAfterMs`: held, never
+ * dispatched again, until that machine's own `sessions` says what became of it.
  */
-export const TASK_STATES = ["ready", "reserved", "running", "needs-input", "done", "failed", "cancelled"] as const;
+export const TASK_STATES = [
+  "ready",
+  "reserved",
+  "running",
+  "needs-input",
+  "lost",
+  "done",
+  "failed",
+  "cancelled",
+] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
 
@@ -958,6 +971,8 @@ export interface Task {
   /** The routing decision that placed it — written with the reservation, never per tick. */
   readonly decision?: Decision;
   readonly failure?: { readonly code: string; readonly message: string };
+  /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
+  readonly absentSince?: number;
 }
 
 /**
@@ -965,7 +980,14 @@ export interface Task {
  * was demoted in between, or the relay's record outlived its role.
  * `not_ready`: it leads, but its takeover has not finished; ask again shortly.
  */
-export const SCHEDULER_ERROR_CODES = ["not_leader", "not_ready", "invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+export const SCHEDULER_ERROR_CODES = [
+  "not_leader",
+  "not_ready",
+  "invalid_request",
+  /** `submit` only: the leader already holds `MAX_ACTIVE_TASKS` unfinished tasks. */
+  "queue_full",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
 
 export type SchedulerErrorCode = (typeof SCHEDULER_ERROR_CODES)[number];
 
@@ -993,5 +1015,23 @@ export interface RoutePreviewResponse {
   readonly decision: Decision;
 }
 
+/**
+ * **M2 only.** `op: "submit"` (a `TaskRequest`) → the task the leader queued.
+ * M2's queue is in memory on the leader, so this is the one way in; M3 replaces
+ * it with the app sealing the task and `store-put`ting it at `expect: 0`, which
+ * queues with no leader up, and removes this op (docs/scheduler.md, M3).
+ */
+export interface SubmitResponse {
+  readonly task: Task;
+}
+
+/**
+ * **M2 only**, with `submit`: unfinished tasks the in-memory queue holds at
+ * most. A bound on what an app can make the leader hold, not a scheduling cap
+ * — `SchedulerConfig.globalMax` is that.
+ */
+export const MAX_ACTIVE_TASKS = 64;
+
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
+export type SubmitReply = SubmitResponse | SchedulerError;

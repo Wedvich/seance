@@ -6,6 +6,7 @@ import {
   APP_ID,
   appRelayUrl,
   importPsk,
+  MAX_ACTIVE_TASKS,
   open,
   QUEUE_PROMPT_PREVIEW,
   RelayClient,
@@ -18,6 +19,7 @@ import {
   type Plain,
   type QueueResponse,
   type SessionsResponse,
+  type SubmitResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
@@ -155,6 +157,55 @@ describe("leader requests", () => {
       await Bun.sleep(100);
       expect(replies.size).toBe(0);
       expect((await store.list()).map((t) => t.body.state)).toEqual(["ready", "ready"]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("submit queues a task under the scheduler's own id, which queue then shows with its decision; a full queue refuses", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      const request = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it", taskId: "mine" };
+      leader.deliver(await appRequest("submit", request));
+      const { task: queuedTask } = (await replies.next()).response.payload as SubmitResponse;
+      // The app's `taskId` is not a field a task takes: the scheduler mints its own.
+      expect(queuedTask.id).not.toBe("mine");
+      expect(queuedTask).toMatchObject({ state: "ready", spec: { repo: "github.com/acme/app", prompt: "fix it" } });
+      expect(queuedTask.spec).not.toHaveProperty("taskId");
+      expect((await store.get(queuedTask.id))?.body.id).toBe(queuedTask.id);
+
+      leader.deliver(await appRequest("queue"));
+      const queued = ((await replies.next()).response.payload as QueueResponse).tasks;
+      // Placed on submit, so the decision is already there — with nobody in this registry to choose.
+      expect(queued).toMatchObject([{ id: queuedTask.id, decision: { chosen: null } }]);
+
+      leader.deliver(await appRequest("submit", { repo: "r" }));
+      expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "invalid_request" });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("past MAX_ACTIVE_TASKS unfinished tasks, submit is queue_full", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    for (let i = 0; i < MAX_ACTIVE_TASKS; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
+      await store.put(`t${i}`, 0, task(`t${i}`, {}));
+    }
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      leader.deliver(await appRequest("submit", { repo: "r", mode: "here" }));
+      expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "queue_full" });
+      expect(await store.list()).toHaveLength(MAX_ACTIVE_TASKS);
     } finally {
       leader.stop();
       relay.stop();

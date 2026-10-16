@@ -206,7 +206,9 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 "reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `queue` and
 `route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
 answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
-term, `not_ready` during takeover. `enqueue` is _not_ a
+term, `not_ready` during takeover. M2 adds a temporary `submit` (a `TaskRequest` →
+`Scheduler.submit`), because its queue is in memory on the leader and there is no store to
+`store-put` into; M3 item 1 removes it. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling.
@@ -262,8 +264,22 @@ resources and quota come from the fleet feed and are persisted nowhere. `setting
 `push_subs` are two more sealed keys. A leader change loses only the in-memory view.
 
 **Task states:** `queued → blocked → ready → reserved → running → needs-input ⇄ running →
-awaiting-merge → done` with `failed`, `cancelled` off-path. `awaiting-merge` frees the
-concurrency slot (session ended) but keeps `after: merged` dependents blocked.
+awaiting-merge → done` with `failed`, `cancelled` and `lost` off-path. `awaiting-merge` frees the
+concurrency slot (session ended) but keeps `after: merged` dependents blocked. M2 builds the
+slice below (`scheduler/src/task.ts` is the copy that runs; M3 adds `queued`, `blocked` and
+`awaiting-merge`):
+
+| From                          | To                                                               | On                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ready`                       | `reserved`, `cancelled`                                          | routed and reserved; cancel                                                                       |
+| `reserved`                    | `running`, `needs-input`, `done`, `ready`, `failed`, `cancelled` | verdict or session event; TTL with no session → `ready`; daemon refusal                           |
+| `running`                     | `needs-input`, `lost`, `done`, `failed`, `cancelled`             | session event; machine absent past `lostAfterMs` → `lost`                                         |
+| `needs-input`                 | `running`, `lost`, `done`, `failed`, `cancelled`                 | as `running`                                                                                      |
+| `lost`                        | `running`, `needs-input`, `done`                                 | its own machine only: `sessions` (session there → `running`, none → `done`) or an event it sealed |
+| `done`, `failed`, `cancelled` | —                                                                | terminal                                                                                          |
+
+`lost` (M2 item 3's gap B, closed in item 6; DESIGN.md _Scheduler_, "`lost`"): never `ready`
+again, because a machine that only sleeps keeps its session and a re-dispatch would be its twin.
 
 **Takeover** (on `lead`): list the store, open every body (skip and report non-decrypting or
 version-mismatched ones, as the PWA skips registry entries), then for each `reserved` or
@@ -523,6 +539,9 @@ the queue.
 1. Relay store — `store-list` / `store-get` / `store-put` / `store-delete` with the per-prefix rules (only
    `task:` populated yet), `task:<id>` as `{ version, env }`,
    term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS`, create rate floor.
+   **Removes M2's `submit` op** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS` in
+   `shared/src/types.ts`; the `submit` case in `leader.ts`): the app's `store-put` at `expect: 0`
+   replaces it, and the PWA's `auto` moves to that in item 6.
 2. The at-rest `task` op and version binding — sealed body carries the version its put
    produces; readers open without the `ReplayGuard` and reject a mismatch.
 3. `QueueStore` adapter on those ops; takeover reconciliation against `sessions`.
@@ -676,6 +695,11 @@ same PR, with the reason.
 9. **An unreported `free` is not under the disk floor.** The floor guards a disk known to
    be full; read as unknown-therefore-filtered, a host with no statfs answer would never
    get work. Unlike quota, nothing about a missing disk reading makes it the risky choice.
+10. **A running task is `lost` after 15 min absent** (`lostAfterMs`, set with item 6,
+    2026-10-16). Long enough that a laptop lid closed for a coffee does not flip its task, short
+    enough that a forgotten machine's task stops reading `running` the same session. Recoverable
+    either way: the machine's own `sessions` settles it when it returns, so a short bound costs a
+    label, never a twin.
 
 ## Risks / unknowns
 

@@ -1,4 +1,5 @@
 import {
+  FINISHED,
   MemoryQueueStore,
   Scheduler,
   UNREACHABLE,
@@ -13,6 +14,7 @@ import {
 import {
   APP_ID,
   isSchedulerOp,
+  MAX_ACTIVE_TASKS,
   parseSessionEvent,
   parseTaskRequest,
   QUEUE_MAX_TASKS,
@@ -32,6 +34,7 @@ import {
   type SessionsResponse,
   type SessionState,
   type SpawnResponse,
+  type SubmitResponse,
   type Task,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
@@ -56,6 +59,9 @@ import { log } from "./log.ts";
 
 // For the daemon's tests, which the layering rule keeps from importing `scheduler/` themselves.
 export { MemoryQueueStore, type QueueStore, type Task } from "@seance/scheduler";
+
+/** M2's in-memory queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
+const KEEP_FINISHED = 50;
 
 /** The library's own cadence for ready tasks (docs/scheduler.md, Routing). */
 const TICK_INTERVAL_MS = 30_000;
@@ -256,7 +262,13 @@ function queueView(scheduler: Scheduler, now: number): QueueResponse {
  * The payload is untrusted input to a PSK holder that acts on it, so it is
  * parsed into a fresh value before anything reads it.
  */
-function answer(scheduler: Scheduler, op: SchedulerOp, payload: unknown, now: number): unknown {
+async function answer(
+  scheduler: Scheduler,
+  op: SchedulerOp,
+  payload: unknown,
+  now: number,
+  tick: () => void,
+): Promise<unknown> {
   switch (op) {
     case "queue":
       return queueView(scheduler, now);
@@ -264,6 +276,21 @@ function answer(scheduler: Scheduler, op: SchedulerOp, payload: unknown, now: nu
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
       const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
+      return reply;
+    }
+    // M2 only: the queue is this process's memory, so this is the one way in.
+    // M3 replaces it with an app's `store-put` at `expect: 0` and drops the op.
+    case "submit": {
+      const request = parseTaskRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed submit request");
+      await scheduler.prune(KEEP_FINISHED);
+      const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
+      if (active >= MAX_ACTIVE_TASKS) {
+        return schedulerError("queue_full", `the leader already holds ${active} unfinished tasks`);
+      }
+      const reply: SubmitResponse = { task: await scheduler.submit(request) };
+      // Placed now rather than on the next 30s tick; the reply is the task as queued.
+      tick();
       return reply;
     }
   }
@@ -300,7 +327,7 @@ function startTerm(
     let payload: unknown;
     try {
       payload = running
-        ? answer(scheduler, op, plain.payload, now())
+        ? await answer(scheduler, op, plain.payload, now(), tick)
         : schedulerError("not_ready", `term ${term} is still taking over`);
     } catch (err) {
       log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
