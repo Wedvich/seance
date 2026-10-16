@@ -41,11 +41,12 @@ function describe(verdict: Verdict, machineName: string, machines: readonly Mach
     const { task } = verdict;
     const settled = task.state !== "ready" && task.state !== "reserved";
     return {
-      glyph: task.state === "failed" || task.state === "lost" ? "!" : settled ? "✓" : "…",
+      // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.
+      glyph: task.state === "failed" ? "!" : task.state === "lost" ? "?" : settled ? "✓" : "…",
       glyphClass:
         task.state === "failed"
           ? "verdict-glyph verdict-glyph-err"
-          : settled
+          : settled && task.state !== "lost"
             ? "verdict-glyph"
             : "verdict-glyph verdict-glyph-muted",
       headline: taskHeadline(task, machines, now),
