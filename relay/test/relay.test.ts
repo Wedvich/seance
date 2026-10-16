@@ -412,7 +412,7 @@ describe("identity", () => {
 });
 
 describe("status", () => {
-  test("the latest rides the socket: forwarded to open apps, carried in the push a late app gets, gone with the socket", async () => {
+  test("the latest rides the socket: forwarded to open apps, carried in the push a late app gets", async () => {
     const deviceId = await newDeviceId();
     const app = await connectApp(relay);
     const daemon = await registeredDaemon(app, deviceId);
@@ -429,8 +429,36 @@ describe("status", () => {
     expect(entry.connected).toBe(true);
 
     daemon.close();
-    const gone = await waitForEntry(late, deviceId, (candidate) => !candidate.connected);
-    expect(gone.status).toBeUndefined();
+    app.close();
+    late.close();
+  });
+
+  // The M2 exit: an asleep machine's accounts keep their quota, so the status
+  // outlives the socket — and the register that replaces the blob it indexes
+  // takes it away again, until the daemon's next beat.
+  test("kept in the entry when the socket closes, pushed for the offline machine, cleared by the next register", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await registeredDaemon(app, deviceId);
+    const last = envelope(APP_ID, deviceId);
+    daemon.send({ t: "status", env: last });
+    await app.waitFor<StatusFrame>("status");
+
+    daemon.close();
+    const asleep = await waitForEntry(app, deviceId, (candidate) => !candidate.connected);
+    expect(asleep.status).toEqual(last);
+    // From storage, not a socket: an app that opens after the close gets it too.
+    const late = await connectApp(relay);
+    expect((await waitForEntry(late, deviceId, (candidate) => !candidate.connected)).status).toEqual(last);
+
+    const back = await connectDaemon(relay);
+    back.send(await register(deviceId));
+    const registered = await waitForEntry(app, deviceId, (candidate) => candidate.connected);
+    expect(registered.status).toBeUndefined();
+    // Gone from storage as well as the view: a close before the next beat keeps nothing.
+    back.close();
+    const again = await waitForEntry(app, deviceId, (candidate) => !candidate.connected);
+    expect(again.status).toBeUndefined();
     app.close();
     late.close();
   });
@@ -785,15 +813,16 @@ describe("silent-socket sweep", () => {
     daemon.send(await register(deviceId));
     await waitForEntry(app, deviceId, (entry) => entry.connected);
     const registeredAt = Date.now();
-    daemon.send({ t: "status", env: envelope(APP_ID, deviceId) });
+    const last = envelope(APP_ID, deviceId);
+    daemon.send({ t: "status", env: last });
     await app.waitFor<StatusFrame>("status");
 
     // The point of the sweep: a slept machine sends no close frame, so the
     // relay must close the socket and push the offline registry on its own.
     expect(await daemon.waitClosed(10_000)).toBe(1000);
     const entry = await waitForEntry(app, deviceId, (candidate) => !candidate.connected);
-    // A swept socket leaves no snapshot behind: it went with the socket.
-    expect(entry.status).toBeUndefined();
+    // Swept like a close: the snapshot is kept for the machine's accounts.
+    expect(entry.status).toEqual(last);
 
     // lastSeen is the last proof of life (accept time — it never pinged), not
     // the moment the sweep happened to run. Bounded by registration rather

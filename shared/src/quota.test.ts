@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { effectivePct, newestQuotaByAccount, type ExclaveInfo, type Machine, type QuotaObservation } from "./index.ts";
+import {
+  effectivePct,
+  liveStatus,
+  newestQuotaByAccount,
+  type ExclaveInfo,
+  type Machine,
+  type QuotaObservation,
+} from "./index.ts";
 
 const S = 1_800_000_000;
 
@@ -47,6 +54,21 @@ describe("newestQuotaByAccount", () => {
       ),
     ]);
     expect([...newest.keys()]).toEqual([]);
+  });
+
+  // Quota is the observation's, pressure the machine's (docs/scheduler.md,
+  // "Quota freshness"): the asleep laptop saw the account last, so its kept
+  // reading wins over an older live one — while its pressure is unknown.
+  test("an asleep machine's kept status folds like a live one, and reads as no pressure", () => {
+    const kept: QuotaObservation = { x: 0, h: 70, s: "cache", at: S - 60 };
+    const asleep = { ...host("laptop", [exclave("main", "org:acct")], [kept]), connected: false };
+    const awake = {
+      ...host("tower", [exclave("work", "org:acct")], [{ x: 0, h: 5, s: "cache", at: S - 3600 }]),
+      connected: true,
+    };
+    expect(newestQuotaByAccount([awake, asleep]).get("org:acct")).toEqual({ observation: kept, deviceId: "laptop" });
+    expect(liveStatus(asleep)).toBeUndefined();
+    expect(liveStatus(awake)).toBe(awake.status);
   });
 
   test("a machine with no status or no exclave list names no numbers", () => {
