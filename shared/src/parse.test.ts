@@ -7,14 +7,17 @@ import {
   parseMetricsReply,
   parseMetricsResponse,
   parseRepoEntry,
+  parseTaskRequest,
 } from "./parse.ts";
 import {
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
   METRICS_MAX_POINTS,
+  TASK_REQUEST_LIMITS,
   type MachineStatus,
   type MetricsSeries,
   type QuotaObservation,
+  type TaskRequest,
 } from "./types.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
@@ -249,5 +252,40 @@ describe("metrics", () => {
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Infinity]] }] })).toBeNull();
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Number.NaN]] }] })).toBeNull();
     expect(parseMetricsResponse({ rows: [] })).toBeNull();
+  });
+});
+
+describe("parseTaskRequest", () => {
+  const minimal: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
+
+  test("keeps the spawn fields it knows and nothing else", () => {
+    const full = { ...minimal, prompt: "fix it", title: "t", model: "opus", effort: "high", plan: true };
+    expect(parseTaskRequest(full)).toEqual(full);
+    expect(parseTaskRequest(minimal)).toEqual(minimal);
+    // A machine, a task id or anything else the request carries never reaches a task.
+    expect(parseTaskRequest({ ...minimal, taskId: "t1", deviceId: "d", pin: { deviceId: "d" } })).toEqual(minimal);
+  });
+
+  test("every field is typed, and the keys a spawn acts on are never empty", () => {
+    for (const bad of [
+      { ...minimal, repo: "" },
+      { ...minimal, mode: "elsewhere" },
+      { ...minimal, prompt: 1 },
+      { ...minimal, plan: "yes" },
+      { ...minimal, model: "" },
+      { ...minimal, effort: null },
+      null,
+      [minimal],
+    ]) {
+      expect(parseTaskRequest(bad)).toBeNull();
+    }
+  });
+
+  test("each field is bounded, the limit itself allowed", () => {
+    for (const field of ["repo", "prompt", "title", "model", "effort"] as const) {
+      const limit = TASK_REQUEST_LIMITS[field];
+      expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit) })).not.toBeNull();
+      expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit + 1) })).toBeNull();
+    }
   });
 });

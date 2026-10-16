@@ -236,7 +236,8 @@ export type OpName =
   | "update-available"
   | "status"
   | "metrics"
-  | "session-event";
+  | "session-event"
+  | SchedulerOp;
 
 /**
  * Ops that expect a response; `machine-info` and `status` are stored blobs,
@@ -244,6 +245,15 @@ export type OpName =
  * fire-and-forget report to the scheduler — none correlates a reply.
  */
 export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "status" | "session-event">;
+
+/**
+ * Request ops an app sends `to: SCHEDULER_ID`, answered by the leader rather
+ * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
+ * `APP_ID`: anything else sent the scheduler is an event, never a request.
+ */
+export const SCHEDULER_OPS = ["queue", "route-preview"] as const;
+
+export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
@@ -257,6 +267,8 @@ export const OP_TIMEOUT_MS = {
   spawn: 90_000,
   despawn: 20_000,
   metrics: 15_000,
+  queue: 10_000,
+  "route-preview": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -813,3 +825,173 @@ export interface ErrorResponse {
   readonly code: TransportErrorCode;
   readonly message: string;
 }
+
+/**
+ * The scheduler's task states (docs/scheduler.md, "Task states"): M2's slice.
+ * `scheduler/src/task.ts` holds the one transition table over them.
+ */
+export const TASK_STATES = ["ready", "reserved", "running", "needs-input", "done", "failed", "cancelled"] as const;
+
+export type TaskState = (typeof TASK_STATES)[number];
+
+/**
+ * What an app asks the scheduler to run: a `SpawnRequest`'s fields minus where
+ * it lands, with `repo` naming the repo (`RepoEntry.origin`), never a
+ * machine's clone of it. Bounded by `TASK_REQUEST_LIMITS`.
+ */
+export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "title" | "model" | "effort" | "plan"> {
+  readonly repo: string;
+}
+
+/**
+ * Lengths a `TaskRequest` field may reach, in UTF-16 units. A task is held on
+ * the leader and echoed in `queue` replies, so its fields are bounded here,
+ * not by the envelope alone as a direct spawn's are.
+ */
+export const TASK_REQUEST_LIMITS = { repo: 512, prompt: 32_768, title: 200, model: 64, effort: 64 } as const;
+
+/** Where a session runs or ran: what pins, lineage and dependency distance are measured against. */
+export interface Placement {
+  readonly deviceId: string;
+  readonly exclave: string;
+}
+
+/** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
+export interface TaskSpec extends TaskRequest {
+  /** Restrict to a machine, an exclave name, or both; absent fields are free. */
+  readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
+  /** The session this one continues — its owner gets the sticky bonus. */
+  readonly lineage?: Placement;
+  /** Where the work this task builds on lives (M3 fills it from deps); drives `dependency_distance`. */
+  readonly base?: Placement;
+}
+
+/** A placement plus the machine-local clone name `spawn` takes. */
+export interface Target extends Placement {
+  readonly clone: string;
+}
+
+export interface Reservation extends Target {
+  readonly expiresAt: number;
+}
+
+export interface Assignment extends Target {
+  /** Absent when the daemon answered `task_running`, which names the pane only. */
+  readonly window?: string;
+  /** The session's pane id, when the daemon reported one. */
+  readonly pane?: string;
+}
+
+/**
+ * Why a candidate was filtered (docs/scheduler.md, "Routing"): structured
+ * codes, every one that applies, so the record explains each loser.
+ */
+export type Reason =
+  | { readonly code: "offline" }
+  /** Connected, but no status, or one `isStatusStale` calls stale: pressure is unknown. */
+  | { readonly code: "status_stale" }
+  | { readonly code: "task_id_unsupported" }
+  /** A daemon predating exclaves: which account a spawn would bill is unknown. */
+  | { readonly code: "exclaves_unknown" }
+  | { readonly code: "disk_low"; readonly freeMib: number }
+  | { readonly code: "pressure_unknown" }
+  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
+  | { readonly code: "repo_absent" }
+  | { readonly code: "auth_missing" }
+  | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
+  | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
+  | { readonly code: "cap_reached"; readonly inFlight: number; readonly max: number };
+
+export type ReasonCode = Reason["code"];
+
+export interface ScoreComponents {
+  readonly accountPressure: number;
+  readonly machinePressure: number;
+  readonly dependencyDistance: number;
+  readonly queuePressure: number;
+}
+
+export interface Score {
+  /** Raw, before weights — what the record shows. */
+  readonly components: ScoreComponents;
+  /** The bonus subtracted for the lineage owner; 0 elsewhere. */
+  readonly sticky: number;
+  readonly total: number;
+}
+
+/** The reading a candidate's account was judged on, so the record shows its age. */
+export interface QuotaBasis {
+  /** Unix seconds, as `QuotaObservation.at`. */
+  readonly observedAt: number;
+  readonly observer: string;
+  readonly source: QuotaSource;
+}
+
+export interface Candidate {
+  readonly deviceId: string;
+  readonly machine: string;
+  /** Null for a daemon that reports no exclaves. */
+  readonly exclave: string | null;
+  readonly clone?: string;
+  readonly rejected: readonly Reason[];
+  readonly score?: Score;
+  readonly quota?: QuotaBasis;
+  /** Over the line but allowed to spend credits — dispatching here spills (M4 alerts on it). */
+  readonly spill?: { readonly window: string; readonly projectedPct: number };
+}
+
+/** One routing outcome: what `route-preview` returns and a task's record carries. */
+export interface Decision {
+  readonly at: number;
+  readonly chosen: Target | null;
+  /** Scored candidates first, lowest total first; then the rejected, in fleet order. */
+  readonly candidates: readonly Candidate[];
+}
+
+export interface Task {
+  readonly id: string;
+  readonly spec: TaskSpec;
+  readonly state: TaskState;
+  readonly createdAt: number;
+  readonly reservation?: Reservation;
+  readonly assignment?: Assignment;
+  /** The routing decision that placed it — written with the reservation, never per tick. */
+  readonly decision?: Decision;
+  readonly failure?: { readonly code: string; readonly message: string };
+}
+
+/**
+ * `not_leader`: the daemon the relay routed the request to runs no term — it
+ * was demoted in between, or the relay's record outlived its role.
+ * `not_ready`: it leads, but its takeover has not finished; ask again shortly.
+ */
+export const SCHEDULER_ERROR_CODES = ["not_leader", "not_ready", "invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type SchedulerErrorCode = (typeof SCHEDULER_ERROR_CODES)[number];
+
+export interface SchedulerError {
+  readonly ok: false;
+  readonly code: SchedulerErrorCode;
+  readonly message: string;
+}
+
+/** `queue` replies with at most this many tasks, newest first: each carries a decision, which grows with the fleet. */
+export const QUEUE_MAX_TASKS = 20;
+
+/** A `queue` reply's prompts are cut to this many UTF-16 units — enough to name a task, not to re-read it. */
+export const QUEUE_PROMPT_PREVIEW = 120;
+
+/** `op: "queue"` (no payload) → the leader's newest tasks, each with its latest decision. */
+export interface QueueResponse {
+  /** `spec.prompt` is cut to `QUEUE_PROMPT_PREVIEW`; a ready task's `decision` is its latest, placed or not. */
+  readonly tasks: readonly Task[];
+  readonly at: number;
+}
+
+/** `op: "route-preview"` (a `TaskRequest`) → what routing would decide now, reserving nothing. */
+export interface RoutePreviewResponse {
+  readonly decision: Decision;
+}
+
+export type QueueReply = QueueResponse | SchedulerError;
+export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;

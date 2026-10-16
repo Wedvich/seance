@@ -1033,6 +1033,41 @@ describe("scheduler leadership", () => {
     app.close();
   });
 
+  // The daemon hands the role back with a roleless register (Gap A). What makes
+  // that safe is that only the leader's key can sign one for its id: a token
+  // holder's attempt is refused like any unverified register, and moves nothing.
+  test("a roleless register for the leader's id that its key did not sign is refused, and the leader keeps its term", async () => {
+    const app = await connectApp(hub);
+    const leaderId = await newDeviceId();
+    const otherId = await newDeviceId();
+    const leader = await join(app, leaderId, { roles: SCHEDULER });
+    const { term } = await leader.daemon.waitFor<LeadFrame>("lead");
+    const other = await join(app, otherId, { roles: SCHEDULER });
+
+    const ts = Date.now();
+    const forged = {
+      ...(await register(leaderId, { roles: [], ts })),
+      sig: (await register(otherId, { roles: [], ts })).sig,
+    };
+    const squatter = await connectDaemon(hub);
+    squatter.send(forged);
+    expect(await squatter.waitClosed()).toBe(1000);
+    await leader.daemon.expectNo("follow");
+    await other.daemon.expectNo("lead");
+    const observer = await connectApp(hub);
+    expect((await observer.waitFor<RegistryFrame>("registry")).scheduler).toEqual({ deviceId: leaderId, term });
+    observer.close();
+
+    // The leader's own roleless register, on its own socket, hands the role on at once.
+    leader.daemon.send(await register(leaderId, { roles: [] }));
+    expect(await leader.daemon.waitFor("follow")).toEqual({ t: "follow" });
+    expect(await other.daemon.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+
+    await leave(app, other.daemon, otherId);
+    await leave(app, leader.daemon, leaderId);
+    app.close();
+  });
+
   test("a leader keeps the role across its own reconnect, under a new term on the new socket", async () => {
     const app = await connectApp(hub);
     const leaderId = await newDeviceId();

@@ -84,6 +84,8 @@ export interface TestRelay {
   refuseRegisters: boolean;
   /** Refuse this many registers as `refuseRegisters` does, then admit — no race with a redial. */
   refuseNextRegisters: number;
+  /** Close every app socket on open with 4401, as the real relay answers a bad `?t=` token. */
+  rejectApps: boolean;
   rejectedCount: () => number;
   /** Daemon connections only; app sockets count in `appConnectionCount`. */
   connectionCount: () => number;
@@ -130,11 +132,13 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: boolean;
     refuseRegisters: boolean;
     refuseNextRegisters: number;
+    rejectApps: boolean;
     schedulerTerm: number | null;
   } = {
     autoPong: true,
     refuseRegisters: false,
     refuseNextRegisters: 0,
+    rejectApps: false,
     schedulerTerm: null,
   };
 
@@ -200,6 +204,10 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       open(ws) {
         if (ws.data === "app") {
           appConnections += 1;
+          if (relay.rejectApps) {
+            ws.close(4401, "unauthorized");
+            return;
+          }
           apps.add(ws);
           ws.send(registryFrame());
           appEvents.push("open");
@@ -263,6 +271,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set refuseNextRegisters(value: number) {
       relay.refuseNextRegisters = value;
+    },
+    get rejectApps() {
+      return relay.rejectApps;
+    },
+    set rejectApps(value: boolean) {
+      relay.rejectApps = value;
     },
     get schedulerTerm() {
       return relay.schedulerTerm;

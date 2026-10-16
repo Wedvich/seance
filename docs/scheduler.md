@@ -203,7 +203,10 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 
 **App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
 `queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
-"reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `enqueue` is _not_ a
+"reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `queue` and
+`route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
+answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
+term, `not_ready` during takeover. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling.

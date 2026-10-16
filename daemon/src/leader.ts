@@ -11,16 +11,28 @@ import {
   type Unreachable,
 } from "@seance/scheduler";
 import {
+  APP_ID,
+  isSchedulerOp,
   parseSessionEvent,
+  parseTaskRequest,
+  QUEUE_MAX_TASKS,
+  QUEUE_PROMPT_PREVIEW,
   quote,
   RequestFailure,
   type DespawnResponse,
   type Envelope,
   type ErrorResponse,
+  type Plain,
+  type QueueResponse,
+  type RoutePreviewResponse,
+  type SchedulerError,
+  type SchedulerErrorCode,
   type SchedulerEventHandler,
+  type SchedulerOp,
   type SessionsResponse,
   type SessionState,
   type SpawnResponse,
+  type Task,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
@@ -70,6 +82,18 @@ export interface LeaderOpts {
   /** This machine's ops, audited under origin `leader`. */
   readonly local: LocalOps;
   /**
+   * Sends one answer to an app's scheduler request, over the daemon's own
+   * socket, sealed from this machine (`RelayClient.reply` in `relay-client.ts`).
+   * Not the term's leg: an answer must also go out while the leg is still
+   * dialling, and it writes nothing the term fence exists to stop.
+   */
+  readonly reply: (to: string, response: Plain) => Promise<boolean>;
+  /**
+   * Tells the relay this daemon gave the role up, for a term it ended on its
+   * own — the relay hears nothing else of it (`RelayClient.resign`).
+   */
+  readonly resign: () => void;
+  /**
    * Outlives terms, as the relay's store will (M3): a demoted-then-repromoted
    * daemon picks up what it left and reconciles it. Defaults to the library's
    * `MemoryQueueStore`, which is M2's queue.
@@ -85,8 +109,12 @@ export interface Leader {
   readonly lead: (term: number) => void;
   /** A `follow` frame or the daemon's relay socket dropping: ends the current term, if any. */
   readonly follow: (why: string) => void;
-  /** An envelope `to: "scheduler"` from the daemon's relay leg; dropped unless a term is running. */
-  readonly deliver: (env: Envelope) => void;
+  /**
+   * An envelope `to: "scheduler"` from the daemon's relay leg. False when no
+   * term runs, so the transport can answer an app's request `not_leader`
+   * instead of leaving it to time out.
+   */
+  readonly deliver: (env: Envelope) => boolean;
   /**
    * A `session-event` from this machine, in process (`run.ts`): the leader
    * reaches itself only locally. Other machines' arrive through the term's leg.
@@ -190,6 +218,57 @@ interface TermRun {
   readonly end: () => void;
 }
 
+/**
+ * Why a term ends itself. `resign` is set when the relay cannot know: it still
+ * names this daemon, so without being told it would route every `auto` here
+ * until the daemon's socket next drops.
+ */
+interface Demotion {
+  readonly why: string;
+  readonly resign: boolean;
+}
+
+function schedulerError(code: SchedulerErrorCode, message: string): SchedulerError {
+  return { ok: false, code, message };
+}
+
+/** Newest first and bounded, prompts cut: the reply carries a decision per task, which grows with the fleet. */
+function queueView(scheduler: Scheduler, now: number): QueueResponse {
+  const newest = scheduler
+    .tasks()
+    .toSorted((a, b) => b.createdAt - a.createdAt)
+    .slice(0, QUEUE_MAX_TASKS);
+  const tasks: Task[] = [];
+  for (const task of newest) {
+    const decision = scheduler.lastDecision(task.id);
+    const { prompt } = task.spec;
+    tasks.push({
+      ...task,
+      spec: prompt === undefined ? task.spec : { ...task.spec, prompt: prompt.slice(0, QUEUE_PROMPT_PREVIEW) },
+      ...(decision === undefined ? {} : { decision }),
+    });
+  }
+  return { tasks, at: now };
+}
+
+/**
+ * An app's request to a running term (DESIGN.md, Scheduler, "The leader").
+ * The payload is untrusted input to a PSK holder that acts on it, so it is
+ * parsed into a fresh value before anything reads it.
+ */
+function answer(scheduler: Scheduler, op: SchedulerOp, payload: unknown, now: number): unknown {
+  switch (op) {
+    case "queue":
+      return queueView(scheduler, now);
+    case "route-preview": {
+      const request = parseTaskRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
+      const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
+      return reply;
+    }
+  }
+}
+
 function report(err: unknown): void {
   // A pass the term's end cut short; the next term reconciles whatever it left.
   if (err instanceof TermEnded) return;
@@ -199,19 +278,44 @@ function report(err: unknown): void {
 function startTerm(
   term: number,
   opts: LeaderOpts & { readonly store: QueueStore },
-  demote: (why: string) => void,
+  demote: (demotion: Demotion) => void,
 ): TermRun {
   let live = true;
   let running = false;
   let timer: ReturnType<typeof setInterval> | null = null;
+  const now = opts.now ?? Date.now;
   // Declared before the leg that calls it; it reads `scheduler` only once a term is running.
   const onSession = async (taskId: string, state: SessionState, from?: SessionSource): Promise<void> => {
     if (live && running) await scheduler.onSession(taskId, state, from).catch(report);
   };
-  // What another daemon sent the scheduler, already opened and replay-checked
-  // by the leg. The sealer's id is AAD-bound; the event's fields are its
-  // daemon's own binding, re-validated here — the PR URL above all.
+  // Only an app asks the scheduler anything; a daemon's envelope is an event.
+  // Answered `not_ready` until takeover ends: before it the queue is the
+  // store's unreconciled view, and a submit would race the load.
+  const onRequest = async (plain: Plain, op: SchedulerOp, from: string): Promise<void> => {
+    if (from !== APP_ID) {
+      log.warn(`scheduler: dropped op=${quote(op)} from=${quote(from)} — requests come from apps only`);
+      return;
+    }
+    log.info(`scheduler: request op=${quote(op)} id=${quote(plain.id)} term=${term}`);
+    let payload: unknown;
+    try {
+      payload = running
+        ? answer(scheduler, op, plain.payload, now())
+        : schedulerError("not_ready", `term ${term} is still taking over`);
+    } catch (err) {
+      log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
+      payload = schedulerError("internal_error", String(err));
+    }
+    await opts.reply(from, { id: crypto.randomUUID(), ts: Date.now(), op, re: plain.id, payload });
+  };
+  // What another daemon or an app sent the scheduler, already opened and
+  // replay-checked by the leg. The sealer's id is AAD-bound; an event's fields
+  // are its daemon's own binding, re-validated here — the PR URL above all.
   const onEvent: SchedulerEventHandler = (plain, from) => {
+    if (isSchedulerOp(plain.op)) {
+      onRequest(plain, plain.op, from).catch(report);
+      return;
+    }
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
     if (event === null) {
       log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event`);
@@ -223,8 +327,14 @@ function startTerm(
   const isLive = (): boolean => live;
   const scheduler = new Scheduler({
     store: fencedStore(opts.store, term, isLive),
-    fleet: termFleet({ relay, selfDeviceId: opts.selfDeviceId, local: opts.local, live: isLive, demote }),
-    now: opts.now ?? Date.now,
+    fleet: termFleet({
+      relay,
+      selfDeviceId: opts.selfDeviceId,
+      local: opts.local,
+      live: isLive,
+      demote: (why) => demote({ why, resign: false }),
+    }),
+    now,
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 
@@ -239,9 +349,10 @@ function startTerm(
   const unsubscribe = relay.subscribe(() => {
     const state = relay.getState();
     // Terminal: the shared client never redials a rejected token, so the term
-    // could only sit there unable to reach anyone.
+    // could only sit there unable to reach anyone. The relay still names this
+    // daemon, though — nothing it can see changed — so the role goes back.
     if (state.status === "rejected") {
-      demote(`the relay rejected the leader's app-role leg (${state.rejection ?? "unknown"})`);
+      demote({ why: `the relay rejected the leader's app-role leg (${state.rejection ?? "unknown"})`, resign: true });
       return;
     }
     if (!running) {
@@ -328,6 +439,11 @@ export function createLeader(options: LeaderOpts): Leader {
     log.info(`scheduler: term ${run.term} ended — ${why}`);
   };
 
+  const demoted = (demotion: Demotion): void => {
+    end(demotion.why);
+    if (demotion.resign) opts.resign();
+  };
+
   return {
     lead: (term) => {
       if (stopped || current?.term === term) return;
@@ -335,23 +451,21 @@ export function createLeader(options: LeaderOpts): Leader {
       log.info(`scheduler: leading under term ${term}`);
       // A holder, not a `const run`: a demote fired synchronously inside
       // `startTerm` (a leg rejected at start) would otherwise read it in its TDZ.
-      const self: { run: TermRun | null; early: string | null } = { run: null, early: null };
-      const run = startTerm(term, opts, (why) => {
+      const self: { run: TermRun | null; early: Demotion | null } = { run: null, early: null };
+      const run = startTerm(term, opts, (demotion) => {
         // Only the run that asked: a late not_leader from an ended term must not end its successor.
-        if (self.run === null) self.early ??= why;
-        else if (current === self.run) end(why);
+        if (self.run === null) self.early ??= demotion;
+        else if (current === self.run) demoted(demotion);
       });
       self.run = run;
       current = run;
-      if (self.early !== null) end(self.early);
+      if (self.early !== null) demoted(self.early);
     },
     follow: (why) => end(why),
     deliver: (env) => {
-      if (current === null) {
-        log.warn(`wire dropped iv=${quote(env.iv)} from=${quote(env.from)} reason=not-leading`);
-        return;
-      }
+      if (current === null) return false;
       current.deliver(env);
+      return true;
     },
     onSession: async (taskId, state, from) => current?.onSession(taskId, state, from),
     term: () => current?.term ?? null,

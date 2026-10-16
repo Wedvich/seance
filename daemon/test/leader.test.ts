@@ -3,14 +3,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  APP_ID,
   appRelayUrl,
   importPsk,
   open,
+  QUEUE_PROMPT_PREVIEW,
   RelayClient,
   RequestFailure,
   SCHEDULER_ID,
   seal,
   toBase64,
+  type Envelope,
+  type OpName,
+  type Plain,
+  type QueueResponse,
   type SessionsResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
@@ -20,7 +26,7 @@ import type { LocalOps } from "../src/handlers.ts";
 import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
 import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
-import { startTestRelay, type TestRelay } from "./harness.ts";
+import { AsyncQueue, startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 const TOKEN = "leader-bearer";
@@ -72,17 +78,26 @@ const noLocalOps: LocalOps = {
  */
 function leaderOver(relay: TestRelay, store: QueueStore = new MemoryQueueStore(), tickIntervalMs?: number) {
   const legs: RelayClient[] = [];
+  const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
+  let resigned = 0;
   const leader: Leader = createLeader({
     selfDeviceId: "self",
     local: noLocalOps,
     store,
+    reply: (to, response) => {
+      replies.push({ to, response });
+      return Promise.resolve(true);
+    },
+    resign: () => {
+      resigned += 1;
+    },
     ...(tickIntervalMs === undefined ? {} : { tickIntervalMs }),
-    createRelay: (term) => {
+    createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
         token: TOKEN,
         key,
-        scheduler: { term },
+        scheduler: { term, onEvent },
         pingIntervalMs: 4 * IDLE_MS,
         log: () => {},
         createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
@@ -91,8 +106,92 @@ function leaderOver(relay: TestRelay, store: QueueStore = new MemoryQueueStore()
       return leg;
     },
   });
-  return { leader, legs };
+  return { leader, legs, replies, resigned: () => resigned };
 }
+
+/** An app's request to the scheduler, sealed as the PWA's client seals one. */
+function appRequest(op: OpName, payload: unknown = {}, from = APP_ID): Promise<Envelope> {
+  return seal(key, { to: SCHEDULER_ID, from }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
+}
+
+describe("leader requests", () => {
+  test("queue and route-preview are answered to the app; a malformed preview and a daemon's request are not acted on", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const long = "p".repeat(QUEUE_PROMPT_PREVIEW + 50);
+    await store.put("old", 0, task("old", { createdAt: 1, spec: { repo: "github.com/acme/app", mode: "here" } }));
+    await store.put("new", 0, task("new", { createdAt: 2, spec: { repo: "x", mode: "worktree", prompt: long } }));
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+
+      const queue = await appRequest("queue");
+      expect(leader.deliver(queue)).toBe(true);
+      const queued = await replies.next();
+      const asked = await open(key, queue);
+      expect(queued.to).toBe(APP_ID);
+      expect(queued.response).toMatchObject({ op: "queue", re: asked.id });
+      const tasks = (queued.response.payload as QueueResponse).tasks;
+      // Newest first, and the prompt cut to its preview.
+      expect(tasks.map((t) => t.id)).toEqual(["new", "old"]);
+      expect(tasks[0]?.spec.prompt).toBe(long.slice(0, QUEUE_PROMPT_PREVIEW));
+
+      leader.deliver(await appRequest("route-preview", { repo: "github.com/acme/app", mode: "worktree" }));
+      // The harness's registry is empty: a decision with nobody to choose, and nothing reserved.
+      expect((await replies.next()).response.payload).toMatchObject({ decision: { chosen: null, candidates: [] } });
+
+      for (const malformed of [
+        { repo: "", mode: "worktree" },
+        { repo: "r", mode: "worktree", model: 7 },
+      ]) {
+        leader.deliver(await appRequest("route-preview", malformed));
+        // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+        expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+
+      // Sealed by a daemon rather than an app: an event, never a request, so nothing answers it.
+      leader.deliver(await appRequest("queue", {}, "remote"));
+      await Bun.sleep(100);
+      expect(replies.size).toBe(0);
+      expect((await store.list()).map((t) => t.body.state)).toEqual(["ready", "ready"]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a request during takeover is answered not_ready, and none at all while following", async () => {
+    const relay = startTestRelay(TOKEN);
+    const inner = new MemoryQueueStore();
+    const gate = Promise.withResolvers<void>();
+    // The store is the external boundary here (M3's is the relay's); a slow read holds takeover open.
+    const slow: QueueStore = {
+      list: async () => {
+        await gate.promise;
+        return inner.list();
+      },
+      get: (id) => inner.get(id),
+      put: (id, version, body) => inner.put(id, version, body),
+      delete: (id, version) => inner.delete(id, version),
+    };
+    const { leader, replies } = leaderOver(relay, slow);
+    try {
+      expect(leader.deliver(await appRequest("queue"))).toBe(false);
+      leader.lead(1);
+      expect(await relay.appEvents.next()).toBe("open");
+      leader.deliver(await appRequest("queue"));
+      expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "not_ready" });
+      gate.resolve();
+      await leader.settled();
+      leader.deliver(await appRequest("queue"));
+      expect((await replies.next()).response.payload).toMatchObject({ tasks: [] });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
 
 describe("leader lifecycle", () => {
   // Fake timers from before the leader exists, so every timer it or its leg
@@ -235,23 +334,41 @@ describe("leader lifecycle", () => {
     }
   });
 
-  test("a reply for no running term is dropped, not handed to a leg", async () => {
-    const lines = await captureLog(async () => {
-      const relay = startTestRelay(TOKEN);
-      const { leader } = leaderOver(relay);
-      try {
-        const env = await seal(
-          key,
-          { to: SCHEDULER_ID, from: "remote" },
-          { id: "r", ts: Date.now(), op: "sessions", payload: {} },
-        );
-        leader.deliver(env);
-      } finally {
-        leader.stop();
-        relay.stop();
-      }
-    });
-    expect(lines.some((line) => line.includes("reason=not-leading"))).toBe(true);
+  test("a reply for no running term is not taken, and no leg is built for it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { leader, legs } = leaderOver(relay);
+    try {
+      const env = await seal(
+        key,
+        { to: SCHEDULER_ID, from: "remote" },
+        { id: "r", ts: Date.now(), op: "sessions", payload: {} },
+      );
+      expect(leader.deliver(env)).toBe(false);
+      expect(legs).toHaveLength(0);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a rejected leg ends the term and hands the role back; a follow, which the relay sent, does not", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { leader, resigned } = leaderOver(relay);
+    try {
+      leader.lead(1);
+      expect(await relay.appEvents.next()).toBe("open");
+      leader.follow("test");
+      expect(await relay.appEvents.next()).toBe("close");
+      expect(resigned()).toBe(0);
+
+      relay.rejectApps = true;
+      leader.lead(2);
+      await pollUntil(() => leader.term() === null, "the rejected term to end");
+      expect(resigned()).toBe(1);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
   });
 });
 
@@ -369,6 +486,74 @@ describe("leader in the daemon", () => {
 
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", ended) }));
       await pollUntil(async () => (await store.get("t-b"))?.body.state === "done", "the ended event to land");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("with no term running, an app's scheduler request is answered not_leader from this machine", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore());
+    try {
+      const request = await appRequest("route-preview", { repo: "r", mode: "worktree" });
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: request }));
+      const env = await relay.messages.next(5_000);
+      expect({ to: env.to, from: env.from }).toEqual({ to: APP_ID, from: deviceId });
+      const reply = await open(key, env);
+      expect(reply.re).toBe((await open(key, request)).id);
+      expect(reply.payload).toMatchObject({ ok: false, code: "not_leader" });
+
+      // A daemon's event to a follower answers nothing.
+      const event = await appRequest("session-event", {}, "remote");
+      relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: event }));
+      await Bun.sleep(100);
+      expect(relay.messages.size).toBe(0);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("a term ended by a rejected leg hands the role back on the same socket, and the next dial asks for it again", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore(), { pingIntervalMs: 100 });
+    try {
+      // Registers in arrival order, each with the connection that sent it; a startup rescan may add its own.
+      let seen = 1;
+      const nextRegister = async () => {
+        const frame = await relay.registers.next(5_000);
+        seen += 1;
+        return { frame, connection: relay.registerConnections[seen - 1] };
+      };
+      relay.rejectApps = true;
+      relay.lead(deviceId, 1);
+      let resigned = await nextRegister();
+      // The startup rescan's re-register can land first (it does on macOS runners):
+      // sent before the resign, on the same socket, it still asks for the role.
+      while (resigned.frame.roles?.length !== 0) {
+        expect(resigned.frame.roles).toEqual(["scheduler"]);
+        expect(resigned.connection).toBe(1);
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive one at a time
+        resigned = await nextRegister();
+      }
+      expect(resigned.frame.roles).toEqual([]);
+      // The same connection: the relay moves only the socket a signed register arrives on.
+      expect(resigned.connection).toBe(1);
+      expect(daemon.leader.term()).toBeNull();
+
+      relay.rejectApps = false;
+      relay.autoPong = false;
+      await pollUntil(() => relay.connectionCount() === 2, "the daemon redialling");
+      relay.autoPong = true;
+      let redialed = await nextRegister();
+      while (redialed.connection === 1) {
+        // A register left on the old socket after the resign (a rescan) still signs no roles.
+        expect(redialed.frame.roles).toEqual([]);
+        // oxlint-disable-next-line no-await-in-loop -- registers arrive one at a time
+        redialed = await nextRegister();
+      }
+      expect(redialed.frame.roles).toEqual(["scheduler"]);
     } finally {
       daemon.stop();
       relay.stop();

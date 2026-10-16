@@ -5,9 +5,13 @@ import {
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
+  SCHEDULER_OPS,
   SESSION_STATES,
   SPAWN_ERROR_CODES,
   TASK_ID_PATTERN,
+  TASK_REQUEST_LIMITS,
+  type SchedulerOp,
+  type TaskRequest,
   type Envelope,
   type ExclaveInfo,
   type MachineInfo,
@@ -367,6 +371,44 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
   const url = prUrl === undefined ? null : httpsUrl(prUrl);
   if (prUrl !== undefined && url === null) return null;
   return { session, taskId, exclave, state, at, ...(url === null ? {} : { prUrl: url }) };
+}
+
+function isBoundedString(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length <= max;
+}
+
+/**
+ * The leader's check on what an app asks it to route. The leader is a PSK
+ * holder that acts on this — it reserves, holds the task, and spawns from it on
+ * another machine — so every field is checked and bounded, and the result is
+ * built field by field: nothing the request carries beyond these reaches a
+ * task. Null for anything malformed or past `TASK_REQUEST_LIMITS`.
+ */
+export function parseTaskRequest(value: unknown): TaskRequest | null {
+  if (!isRecord(value)) return null;
+  const { repo, mode, prompt, title, model, effort, plan } = value;
+  const limits = TASK_REQUEST_LIMITS;
+  if (!isBoundedString(repo, limits.repo) || repo === "") return null;
+  if (mode !== "worktree" && mode !== "here") return null;
+  if (prompt !== undefined && !isBoundedString(prompt, limits.prompt)) return null;
+  if (title !== undefined && !isBoundedString(title, limits.title)) return null;
+  // Empty would reach the spawn as a flag with no value; absent is how a default is asked for.
+  if (model !== undefined && (!isBoundedString(model, limits.model) || model === "")) return null;
+  if (effort !== undefined && (!isBoundedString(effort, limits.effort) || effort === "")) return null;
+  if (plan !== undefined && typeof plan !== "boolean") return null;
+  return {
+    repo,
+    mode,
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(title === undefined ? {} : { title }),
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(plan === undefined ? {} : { plan }),
+  };
+}
+
+export function isSchedulerOp(value: unknown): value is SchedulerOp {
+  return SCHEDULER_OPS.some((op) => op === value);
 }
 
 /** Receivers never reject on this — display routing only; the wire keeps `string`. */
