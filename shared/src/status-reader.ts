@@ -37,18 +37,18 @@ export function isQuotaTrimmed(status: MachineStatus): boolean {
 
 /**
  * `null` when the status contradicts itself or the register blob it indexes:
- * a number past `Number.MAX_SAFE_INTEGER`, a percent over 100, a `sess` that
- * is not one count per exclave, a quota index out of range or repeated, or
- * more entries kept plus trimmed than there are exclaves. Like the parser, one
+ * a percent over 100, a `sess` that is not one count per exclave, a quota
+ * index out of range or repeated, or more entries kept plus trimmed than there
+ * are exclaves (the parser has already bounded every integer to the safe
+ * range). Like the parser, one
  * bad field costs the tick. A quota observation stamped further ahead than
  * clock skew is dropped alone — it would read as the newest for its account
  * until the clock caught up. Returns `status` itself when nothing is dropped.
  */
 export function sanitizeStatus(status: MachineStatus, exclaveCount: number, nowMs: number): MachineStatus | null {
-  const { at, scan, cpu, mem, disk, free, rd, wr, sess, quota, tr } = status;
-  if (![at, scan, free, rd, wr, tr].every(isSafe)) return null;
+  const { cpu, mem, disk, sess, quota, tr } = status;
   if (![cpu, mem, disk].every(isPct)) return null;
-  if (sess !== undefined && (sess.length !== exclaveCount || !sess.every(isSafe))) return null;
+  if (sess !== undefined && sess.length !== exclaveCount) return null;
   if (quota === undefined) return (tr ?? 0) > exclaveCount ? null : status;
   if (quota.length + (tr ?? 0) > exclaveCount) return null;
   const seen = new Set<number>();
@@ -64,13 +64,8 @@ export function sanitizeStatus(status: MachineStatus, exclaveCount: number, nowM
 }
 
 function isSaneObservation(q: QuotaObservation): boolean {
-  if (![q.at, q.hr, q.dr].every(isSafe) || !isPct(q.h) || !isPct(q.d)) return false;
-  return q.w === undefined || q.w.every((w) => isPct(w.p) && isSafe(w.r));
-}
-
-/** The parser has already checked these are non-negative integers when present. */
-function isSafe(value: number | undefined): boolean {
-  return value === undefined || value <= Number.MAX_SAFE_INTEGER;
+  if (!isPct(q.h) || !isPct(q.d)) return false;
+  return q.w === undefined || q.w.every((w) => isPct(w.p));
 }
 
 function isPct(value: number | undefined): boolean {

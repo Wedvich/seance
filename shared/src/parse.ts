@@ -51,9 +51,13 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
 }
 
-/** Wire integers are counts, percents and unix seconds — never negative, never fractional. */
+/**
+ * Wire integers are counts, percents and unix seconds — never negative, never
+ * fractional, and exact: `Number.isInteger` alone accepts `1e308`, which no
+ * counter reaches and on which arithmetic (`at * 1000`, a span) stops being exact.
+ */
 function isUint(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isOptionalUint(value: unknown): value is number | undefined {

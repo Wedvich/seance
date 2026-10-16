@@ -109,6 +109,17 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25.5 }] }] })).toBeNull();
   });
 
+  // `Number.isInteger(1e308)` is true: an integer check alone lets through
+  // numbers no counter reaches and on which `at * 1000` stops being exact.
+  test("every integer must be safe — top level, in sess and in quota", () => {
+    expect(parseMachineStatus({ ...status, free: Number.MAX_SAFE_INTEGER })).not.toBeNull();
+    expect(parseMachineStatus({ ...status, free: 1e308 })).toBeNull();
+    expect(parseMachineStatus({ ...status, at: 2 ** 60 })).toBeNull();
+    expect(parseMachineStatus({ ...status, sess: [1, 1e308] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, dr: 1e308 }] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25, r: 1e308 }] }] })).toBeNull();
+  });
+
   test("a model-scoped window names its model; one bad window costs the tick", () => {
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25 }] }] })).not.toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "", p: 25 }] }] })).toBeNull();
@@ -161,6 +172,8 @@ describe("metrics", () => {
     expect(isMetricsRequest({ from: 0, to: span, step: 3600 })).toBe(true);
     expect(isMetricsRequest({ from: 0, to: span + 3600, step: 3600 })).toBe(false);
     expect(isMetricsRequest({ from: 0, to: 2 ** 40, step: 30 })).toBe(false);
+    // A zero-width range far past any real clock passed the span check alone.
+    expect(isMetricsRequest({ from: 1e308, to: 1e308, step: 3600 })).toBe(false);
   });
 
   test("names filters by metric, and an empty list is malformed rather than a filter for nothing", () => {
