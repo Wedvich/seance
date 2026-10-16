@@ -1545,6 +1545,41 @@ describe("malformed frames", () => {
     }
   });
 
+  // Both blobs are opened outside the replay guard and bound to their machine
+  // by `from` alone, so `op` is what says which blob a slot holds — each
+  // payload here is shaped for the slot it is moved into, so shape cannot.
+  test("opens a blob at rest only as the op its slot expects, both ways", async () => {
+    const peer = startHostilePeer();
+    const deviceId = await newDeviceId();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ url: peer.url, log: (line) => lines.push(line) });
+    const sealAs = async (op: Plain["op"], payload: unknown): Promise<unknown> =>
+      seal(key, { to: APP_ID, from: deviceId }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const info = machineInfo("Swapped");
+      const entry = { deviceId, lastSeen: Date.now(), connected: true };
+      peer.send({ t: "registry", entries: [{ ...entry, info: await sealAs("status", info) }] });
+      await pollUntil(() => lines.some((line) => line.includes("reason=info-op")), "the info drop to be logged");
+      expect(client.getState().machines).toEqual([]);
+
+      peer.send(await registryFrame(deviceId, info));
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "a sound info lands");
+      const status = { at: Math.floor(Date.now() / 1000), scan: info.scannedAt, cpu: 99 };
+      peer.send({ t: "status", deviceId, env: await sealAs("machine-info", status) });
+      await pollUntil(() => lines.some((line) => line.includes("reason=status-op")), "the status drop to be logged");
+      expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.status).toBeUndefined();
+      peer.send({ t: "status", deviceId, env: await sealAs("status", status) });
+      await waitFor(
+        (s) => s.machines.find((m) => m.deviceId === deviceId)?.status?.cpu === 99,
+        "a status sealed as one lands",
+      );
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
   // A blob that opens but is not shaped like a MachineInfo used to reach the
   // spawn screen, where `machine.repos.map` runs on every render. It counts as
   // skew, not as ignored: "check the pre-shared key" is the wrong advice for a

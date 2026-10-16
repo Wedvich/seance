@@ -270,7 +270,7 @@ and re-route. Only then does the loop start dispatching.
 ```
 
 **Routing (per ready task, on any state change + a 30s tick while ready tasks exist)**, from
-the latest `status` per machine; a snapshot older than ~90s counts as unknown and the machine
+the latest `status` per machine; a snapshot `isStatusStale` calls stale (older than 90s) counts as unknown and the machine
 is filtered for new work:
 
 1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;

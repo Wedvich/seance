@@ -399,6 +399,13 @@ nothing checked it. The last is the gap they leave.
   app like `info`, and `relay/test/layering.test.ts` keeps any module under
   `relay/src` from reaching the envelope crypto or a payload parser — the first
   readable payload would make the relay's logs an activity timeline.
+- **A blob opened outside the replay guard is bound by its AAD `from` and
+  checked for its `op`.** `machine-info` and `status` are data at rest — the
+  relay re-sends the same envelope on every push — so no guard sees them, and
+  only `from` says which machine a blob describes and only `op` which kind of
+  blob it is: payload shape would let a `status` (or M3's `task`) stand in for
+  whatever its slot expects. Both go through `openAtRest`
+  (`shared/src/crypto.ts`), which throws unless `plain.op` is the one asked for.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -513,7 +520,8 @@ The Durable Object persists a machine registry:
   rejected because pressure over time is an activity timeline — and
   `relay/test/layering.test.ts` keeps it so. The app opens it as it opens
   `machine-info`: no replay guard (the registry re-sends the same envelope on
-  every push), bound to its `deviceId` through the AAD `from`, and shown only
+  every push), bound to its `deviceId` through the AAD `from`, refused unless
+  sealed as `op: "status"`, and shown only
   while its `scan` names the register blob this app decrypted — the relay
   already drops a socket's snapshot at each register, so this is the app's own
   guard against a sender stamping the wrong blob. "The register blob" means the
@@ -521,6 +529,20 @@ The Durable Object persists a machine registry:
   `Machine.scannedAt` without a register, and comparing against it would drop
   every status until the repo set next changed. A status that opened is proof
   of life and clears a timeout's offline mark, as a reply does.
+  **Reading** (`shared/src/status-reader.ts`): the parser checks types, and
+  one set of rules checks ranges and relations, so the PWA and the scheduler
+  cannot disagree on one. `RelayClient` applies `sanitizeStatus` against the
+  register blob's exclave count before setting `Machine.status`. It refuses
+  the whole snapshot for a number past `Number.MAX_SAFE_INTEGER`, a percent
+  over 100, a `sess` that is not one count per exclave, a quota index out of
+  range or repeated, or more entries kept plus trimmed (`tr`) than there are
+  exclaves. It drops one observation stamped further ahead than clock skew
+  (`STATUS_CLOCK_SKEW_MS`, the replay window), which would otherwise read as
+  the account's newest until the clock caught up. Freshness is the consumer's
+  call, never the client's: `isStatusStale` is true past three beats
+  (`STATUS_STALE_MS`, 90s) or for a stamp further ahead than skew. The PWA
+  shows a snapshot's age instead. `isQuotaTrimmed` says a trim happened, and
+  then an exclave without an observation is unknown, not unobserved.
   **Encoding** (`MachineStatus` in `shared/src/types.ts`): the blob shares a
   2 KiB attachment and base64 costs a third, so every number is an integer
   (whole percent, unix seconds, MiB), keys are short, an unknown field is
