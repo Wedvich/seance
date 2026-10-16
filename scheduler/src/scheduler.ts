@@ -4,6 +4,7 @@ import { UNREACHABLE, type Fleet, type QueueStore, type TaskSessionsReply, type 
 import { route, type Decision } from "./route.ts";
 import {
   advance,
+  FINISHED,
   IN_FLIGHT,
   type Assignment,
   type Reservation,
@@ -11,6 +12,9 @@ import {
   type TaskSpec,
   type TaskState,
 } from "./task.ts";
+
+/** States of a task whose session was placed on a machine and may still be running there. */
+const PLACED: ReadonlySet<TaskState> = new Set(["running", "needs-input", "lost"]);
 
 /** The `client` a scheduler spawn audits as: `origin=relay client=scheduler` (Settled defaults 3). */
 export const SCHEDULER_CLIENT = "scheduler";
@@ -34,7 +38,10 @@ export interface SchedulerOptions {
 
 export type CancelResult =
   | { readonly ok: true; readonly task: Task }
-  | { readonly ok: false; readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" };
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "dispatching" | "unreachable" | "finished" | "despawn_failed" | "conflict";
+    };
 
 interface Held {
   readonly version: number;
@@ -58,6 +65,14 @@ export class Scheduler {
   readonly #newId: () => string;
   readonly #held = new Map<string, Held>();
   readonly #decisions = new Map<string, Decision>();
+  /**
+   * deviceId → when a pass first saw it not connected (or gone from the
+   * registry), for machines holding placed tasks. Memory only: a new leader
+   * starts the count again, which can only delay `lost`, never hasten it — and
+   * it is this clock, not `Machine.lastSeen`, because a timeout's offline mark
+   * can make a machine read disconnected beside a `lastSeen` hours old.
+   */
+  readonly #absentSince = new Map<string, number>();
   #ticking: Promise<void> | null = null;
   #again = false;
 
@@ -82,19 +97,21 @@ export class Scheduler {
    * previous leader left in flight against its machine's own `sessions` — one
    * call per machine — before the host's first `tick` dispatches anything. A
    * reservation is settled as the TTL check settles one, except that a session
-   * carrying its id counts at any age. A running task whose session is gone
-   * ended while no leader was listening, so it is `done` (M2 has no done
-   * detection). An unanswered machine leaves its running tasks as they are.
+   * carrying its id counts at any age. A placed task is settled from its
+   * machine's sessions (`#settlePlaced`): gone is `done`, since it ended while
+   * no leader was listening (M2 has no done detection), and a `lost` one whose
+   * session is there runs again. An unanswered machine leaves its tasks as
+   * they are.
    */
   async takeover(): Promise<void> {
     await this.load();
-    const inFlight = this.tasks().filter((t) => IN_FLIGHT.includes(t.state));
-    const machines = new Set(inFlight.flatMap((t) => (t.reservation ?? t.assignment)?.deviceId ?? []));
+    const pending = this.tasks().filter((t) => IN_FLIGHT.includes(t.state) || t.state === "lost");
+    const machines = new Set(pending.flatMap((t) => (t.reservation ?? t.assignment)?.deviceId ?? []));
     const replies = new Map(
       await Promise.all([...machines].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
     );
     await Promise.all(
-      inFlight.map(async (task) => {
+      pending.map(async (task) => {
         const at = task.reservation;
         if (at !== undefined) {
           const reply = replies.get(at.deviceId);
@@ -102,13 +119,28 @@ export class Scheduler {
           return;
         }
         const reply = task.assignment === undefined ? undefined : replies.get(task.assignment.deviceId);
-        if (reply?.ok !== true || reply.sessions.some((s) => s.taskId === task.id)) return;
-        const current = this.task(task.id);
-        if (current?.state === "running" || current?.state === "needs-input") {
-          await this.#write(current, advance(current, "done"));
-        }
+        if (reply !== undefined) await this.#settlePlaced(task.id, reply);
       }),
     );
+  }
+
+  /**
+   * M2's queue is in memory and only grows, so past `keep` the oldest finished
+   * tasks are deleted — never one with anything left to happen.
+   */
+  async prune(keep: number): Promise<void> {
+    const finished = this.tasks()
+      .filter((t) => FINISHED.includes(t.state))
+      .toSorted((a, b) => a.createdAt - b.createdAt);
+    for (const task of finished.slice(0, Math.max(0, finished.length - keep))) {
+      const held = this.#held.get(task.id);
+      if (held === undefined) continue;
+      // oxlint-disable-next-line no-await-in-loop -- a handful at a time, and each delete is its own CAS
+      const write = await this.#store.delete(task.id, held.version);
+      if (!write.ok) continue;
+      this.#held.delete(task.id);
+      this.#decisions.delete(task.id);
+    }
   }
 
   tasks(): readonly Task[] {
@@ -184,7 +216,8 @@ export class Scheduler {
       await this.#write(task, advance(task, to, { assignment }));
       return;
     }
-    if (task.state !== "running" && task.state !== "needs-input") return;
+    // A lost task's machine speaking for it is the proof `lost` waits for.
+    if (task.state !== "running" && task.state !== "needs-input" && task.state !== "lost") return;
     if (from !== undefined && task.assignment !== undefined && from.deviceId !== task.assignment.deviceId) return;
     await this.#write(task, advance(task, to));
   }
@@ -197,6 +230,8 @@ export class Scheduler {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
+    // Its machine cannot be asked to despawn, and a cancel that left the session running would be a lie.
+    if (task.state === "lost") return { ok: false, code: "unreachable" };
     if (task.state !== "ready" && task.state !== "running" && task.state !== "needs-input") {
       return { ok: false, code: "finished" };
     }
@@ -221,6 +256,7 @@ export class Scheduler {
   }
 
   async #pass(): Promise<void> {
+    await this.#watchAbsence();
     await Promise.all(
       this.tasks()
         .filter((t) => t.state === "reserved")
@@ -270,6 +306,77 @@ export class Scheduler {
     if (current?.state !== "reserved") return;
     const next = verdict(current, at, reply);
     if (next !== null) await this.#write(current, next);
+  }
+
+  /**
+   * A placed task on a machine that stops answering is never routed again: its
+   * session may be alive on a machine that only sleeps, and a second dispatch
+   * would be its twin. Absent past `lostAfterMs` it is `lost`, so the record
+   * says so instead of reading `running` forever; once its machine is
+   * connected again, that machine's `sessions` settles it.
+   */
+  async #watchAbsence(): Promise<void> {
+    const now = this.#now();
+    const connected = new Set(
+      this.#fleet
+        .machines()
+        .filter((m) => m.connected)
+        .map((m) => m.deviceId),
+    );
+    const placed = this.tasks().filter((t) => PLACED.has(t.state) && t.assignment !== undefined);
+    const devices = new Set(placed.flatMap((t) => t.assignment?.deviceId ?? []));
+    for (const deviceId of [...this.#absentSince.keys()]) {
+      if (!devices.has(deviceId) || connected.has(deviceId)) this.#absentSince.delete(deviceId);
+    }
+    for (const deviceId of devices) {
+      if (!connected.has(deviceId) && !this.#absentSince.has(deviceId)) this.#absentSince.set(deviceId, now);
+    }
+
+    const lost: Promise<unknown>[] = [];
+    const recover = new Set<string>();
+    for (const task of placed) {
+      const deviceId = task.assignment?.deviceId ?? "";
+      if (task.state === "lost") {
+        if (connected.has(deviceId)) recover.add(deviceId);
+        continue;
+      }
+      const since = this.#absentSince.get(deviceId);
+      if (since !== undefined && now - since >= this.#config.lostAfterMs) {
+        lost.push(this.#write(task, advance(task, "lost", { absentSince: since })));
+      }
+    }
+    await Promise.all(lost);
+    await Promise.all(
+      [...recover].map(async (deviceId) => {
+        const reply = await this.#fleet.sessions(deviceId);
+        const back = this.tasks().filter((t) => t.state === "lost" && t.assignment?.deviceId === deviceId);
+        await Promise.all(back.map((t) => this.#settlePlaced(t.id, reply)));
+      }),
+    );
+  }
+
+  /**
+   * A placed task against its machine's own `sessions`: a session carrying its
+   * id is the task still running (a `lost` one runs again, on the pane listed
+   * now); none is a session that ended while nobody listened — `done`, whether
+   * or not `ended` still remembers it. An unanswered check changes nothing.
+   */
+  async #settlePlaced(id: string, reply: TaskSessionsReply): Promise<void> {
+    const current = this.task(id);
+    if (current === undefined || !PLACED.has(current.state) || !reply.ok) return;
+    const session = reply.sessions.find((s) => s.taskId === id);
+    if (session === undefined) {
+      await this.#write(current, advance(current, "done"));
+      return;
+    }
+    if (current.state !== "lost" || current.assignment === undefined) return;
+    const { window: _window, pane: _pane, ...target } = current.assignment;
+    const assignment: Assignment = {
+      ...target,
+      window: session.window,
+      ...(session.id === undefined ? {} : { pane: session.id }),
+    };
+    await this.#write(current, advance(current, "running", { assignment }));
   }
 
   /** Past its TTL, a reservation with no verdict is resolved from the machine's own `sessions`. */

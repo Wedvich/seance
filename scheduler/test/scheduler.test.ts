@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryQueueStore, Scheduler, SCHEDULER_CLIENT, type Task } from "../src/index.ts";
+import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, SCHEDULER_CLIENT, type Task } from "../src/index.ts";
 import { FakeFleet, machine, NOW, spec, unreachable } from "./fixtures.ts";
 
-function setup(fleet = new FakeFleet([machine("a")])) {
+function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const store = new MemoryQueueStore();
   const clock = { now: NOW };
   let n = 0;
-  const scheduler = new Scheduler({ store, fleet, now: () => clock.now, newId: () => `t${++n}` });
+  const scheduler = new Scheduler({ store, fleet, config, now: () => clock.now, newId: () => `t${++n}` });
   return { store, fleet, clock, scheduler };
 }
 
@@ -148,6 +148,185 @@ describe("reservation TTL", () => {
     fleet.beat(clock.now);
     await scheduler.tick();
     expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+  });
+});
+
+describe("a machine that stops answering", () => {
+  const LOST_AFTER = DEFAULT_CONFIG.lostAfterMs;
+
+  /** One task running on `a`, then `a` gone — disconnected, or forgotten from the registry. */
+  async function runningThenGone(gone: "disconnected" | "forgotten", config = DEFAULT_CONFIG) {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), config);
+    env.fleet.scripts.set("b", () => ({ ok: false, code: "repo_not_found", message: "only a runs it" }));
+    const task = await env.scheduler.submit(spec({ pin: { deviceId: "a" } }));
+    await env.scheduler.tick();
+    expect(env.scheduler.task(task.id)?.state).toBe("running");
+    env.fleet.fleet = gone === "forgotten" ? [machine("b")] : [machine("a", { connected: false }), machine("b")];
+    return { ...env, task };
+  }
+
+  test("past the bound a running task is lost, shown with when its machine went, and never dispatched again", async () => {
+    for (const gone of ["disconnected", "forgotten"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
+      const { clock, fleet, scheduler, task } = await runningThenGone(gone);
+      const absent = clock.now;
+      await scheduler.tick();
+      clock.now += LOST_AFTER - 1;
+      fleet.beat(clock.now);
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      expect(scheduler.task(task.id)?.state).toBe("running");
+
+      clock.now += 1;
+      fleet.beat(clock.now);
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      expect(scheduler.task(task.id)).toMatchObject({
+        state: "lost",
+        absentSince: absent,
+        assignment: { deviceId: "a" },
+      });
+      clock.now += 3_600_000;
+      fleet.beat(clock.now);
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      expect(scheduler.task(task.id)?.state).toBe("lost");
+      expect(fleet.spawns).toHaveLength(1);
+      // Its machine cannot be asked to end it.
+      // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
+      expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "unreachable" });
+    }
+  });
+
+  test("a lost task frees its slot: it does not count toward the global cap", async () => {
+    const { clock, fleet, scheduler, task } = await runningThenGone("disconnected", {
+      ...DEFAULT_CONFIG,
+      globalMax: 1,
+    });
+    fleet.scripts.delete("b");
+    expect(scheduler.preview(spec()).candidates.flatMap((c) => c.rejected)).toContainEqual(
+      expect.objectContaining({ code: "cap_reached" }),
+    );
+    await scheduler.tick();
+    clock.now += LOST_AFTER;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(scheduler.task(task.id)?.state).toBe("lost");
+    const next = await scheduler.submit(spec());
+    await scheduler.tick();
+    expect(scheduler.task(next.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+  });
+
+  test("its machine back with the session alive: running again on the pane listed now, with no twin", async () => {
+    const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
+    await scheduler.tick();
+    clock.now += LOST_AFTER;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(scheduler.task(task.id)?.state).toBe("lost");
+
+    // The daemon restarted its tmux view: the same task id, on a new pane.
+    fleet.running.set("a", [{ id: "%40", window: "w40", repo: "app", path: "/wt/x", taskId: task.id }]);
+    fleet.fleet = [machine("a"), machine("b")];
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(scheduler.task(task.id)).toMatchObject({
+      state: "running",
+      assignment: { deviceId: "a", pane: "%40", window: "w40" },
+    });
+    expect(scheduler.task(task.id)?.absentSince).toBeUndefined();
+    expect(fleet.spawns).toHaveLength(1);
+  });
+
+  test("its machine back without the session, or reporting it ended, settles it done", async () => {
+    for (const ended of [false, true]) {
+      // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
+      const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      clock.now += LOST_AFTER;
+      fleet.beat(clock.now);
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      fleet.running.set("a", []);
+      if (ended) fleet.ended.set("a", [task.id]);
+      fleet.fleet = [machine("a"), machine("b")];
+      fleet.beat(clock.now);
+      // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
+      await scheduler.tick();
+      expect(scheduler.task(task.id)?.state).toBe("done");
+      expect(fleet.spawns).toHaveLength(1);
+    }
+  });
+
+  test("an unanswered check keeps it lost; an event from its own machine settles it, one from another does not", async () => {
+    const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
+    await scheduler.tick();
+    clock.now += LOST_AFTER;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    fleet.fleet = [machine("a"), machine("b")];
+    fleet.beat(clock.now);
+    fleet.sessionsReply = () => unreachable;
+    await scheduler.tick();
+    expect(scheduler.task(task.id)?.state).toBe("lost");
+
+    await scheduler.onSession(task.id, "busy", { deviceId: "b", pane: "%1" });
+    expect(scheduler.task(task.id)?.state).toBe("lost");
+    await scheduler.onSession(task.id, "needs-input", { deviceId: "a", pane: "%1" });
+    expect(scheduler.task(task.id)?.state).toBe("needs-input");
+  });
+
+  test("a machine back inside the bound resets the count", async () => {
+    const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
+    await scheduler.tick();
+    clock.now += LOST_AFTER - 1;
+    fleet.fleet = [machine("a"), machine("b")];
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await scheduler.tick();
+    clock.now += LOST_AFTER - 1;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(scheduler.task(task.id)?.state).toBe("running");
+  });
+
+  test("takeover settles a lost task from its machine's sessions like a running one", async () => {
+    const { store, fleet, scheduler } = setup();
+    const lost: Task = {
+      id: "l1",
+      spec: spec(),
+      state: "lost",
+      createdAt: NOW,
+      absentSince: NOW - 1,
+      assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" },
+    };
+    await store.put("l1", 0, lost);
+    fleet.running.set("a", [{ id: "%2", window: "w2", repo: "app", path: "/p", taskId: "l1" }]);
+    await scheduler.takeover();
+    expect(scheduler.task("l1")).toMatchObject({ state: "running", assignment: { pane: "%2" } });
+  });
+});
+
+describe("prune", () => {
+  test("past the keep, the oldest finished tasks are deleted; nothing unfinished ever is", async () => {
+    const { clock, fleet, store, scheduler } = setup();
+    fleet.scripts.set("a", () => ({ ok: false, code: "repo_not_found", message: "gone" }));
+    const failed: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      clock.now += 1;
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      failed.push((await scheduler.submit(spec())).id);
+      // oxlint-disable-next-line no-await-in-loop -- each fails before the next is created
+      await scheduler.tick();
+    }
+    fleet.scripts.delete("a");
+    fleet.fleet = [machine("a", { connected: false })];
+    const ready = await scheduler.submit(spec());
+    await scheduler.prune(1);
+    expect(scheduler.tasks().map((t) => t.id)).toEqual([...failed.slice(2), ready.id]);
+    expect((await store.list()).map((s) => s.id)).toEqual([...failed.slice(2), ready.id]);
   });
 });
 
