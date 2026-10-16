@@ -31,7 +31,7 @@ import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { fitStatus } from "./status.ts";
-import { createTelemetry } from "./telemetry.ts";
+import { createTelemetry, type Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
@@ -137,11 +137,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   warnRejected(exclaveScan);
   state = { ...state, repos: tagExclaves(state.repos, exclaveScan.exclaves) };
 
-  // The stamp of the blob last handed to a register, which every `status` names
-  // as its `scan`: `state.scannedAt` moves on every hourly rescan while a
-  // re-register happens only on a changed repo set, and a reader drops a status
-  // whose stamp disagrees with the blob it holds (DESIGN.md, Presence & identity).
-  let registeredScan = 0;
+  // The stamp and exclave list of the blob last registered, which every
+  // `status` names as its `scan` and indexes into: `state.scannedAt` moves on
+  // every hourly rescan while a re-register happens only on a changed set, and
+  // a reader drops a status whose stamp disagrees with the blob it holds
+  // (DESIGN.md, Presence & identity). Committed only once the frame has left —
+  // keyed by the blob, so two overlapping registers each commit their own.
+  let registered: Registered = { scan: 0, exclaves: exclaveScan };
+  const candidates = new WeakMap<Envelope, Registered>();
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
@@ -153,8 +156,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       lastUpdate: state.lastUpdate ?? null,
       capabilities: [METRICS_CAPABILITY],
     };
-    registeredScan = info.scannedAt;
-    return seal(
+    const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
+    const sealed = await seal(
       key,
       { to: APP_ID, from: state.deviceId },
       {
@@ -164,6 +167,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         payload: info,
       },
     );
+    candidates.set(sealed, candidate);
+    return sealed;
   };
 
   let stopped = false;
@@ -180,6 +185,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // the blob is the only place apps learn either from.
     const changed = !repoSetsEqual(scanned, state.repos) || !exclaveInfoEqual(exclaves.info, exclaveScan.info);
     exclaveScan = exclaves;
+    // Same blob list, fresh paths: a moved exclave root is counted where it now
+    // is without a register, since every index still means the same exclave.
+    if (exclaveInfoEqual(exclaves.info, registered.exclaves.info)) registered = { ...registered, exclaves };
     state = { ...state, repos: scanned, scannedAt: Date.now() };
     await saveState(state);
     if (changed) {
@@ -241,7 +249,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const telemetry = createTelemetry(metrics, {
     machine: config.name,
     diskPaths: config.repoRoots,
-    exclaves: () => exclaveScan,
+    registered: () => registered,
     sessions: () => handlerCtx.backend.sessions(state.repos),
   });
   const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
@@ -256,8 +264,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       .tick()
       .then((snapshot) => {
         if (stopped || !client.connected) return false;
-        const stamped = { ...snapshot, scan: registeredScan };
-        const status = fitStatus(stamped);
+        const status = fitStatus(snapshot);
         if (status.tr !== undefined && !trimWarned) {
           // Once: the condition is structural (too many exclaves for the bound),
           // not transient, and the fix is a schema change rather than a retry.
@@ -284,7 +291,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     key,
     buildInfo,
     handle: createHandler(handlerCtx),
-    onRegister: sampleNow,
+    onRegister: (info): void => {
+      registered = candidates.get(info) ?? registered;
+      sampleNow();
+    },
     onConnect: (): void => {
       updateRuntime(true);
       if (announcePending && source !== null) {

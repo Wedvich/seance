@@ -22,12 +22,29 @@ import type { MetricsStore, Sample } from "./metrics-store.ts";
  *
  * A field the host can't answer is absent, never a guess: the first tick has
  * no cpu or I/O delta, macOS has no exec-free I/O counters, and a tmux outage
- * drops `sess` for the tick. `scan` is the sender's to add — only it knows
- * which register blob the exclave indexes refer to.
+ * drops `sess` for the tick. A collector that fails drops its field for the
+ * tick, never repeating its last average.
  */
-export type Snapshot = Omit<MachineStatus, "scan">;
+export type Snapshot = MachineStatus;
 
 export const SMOOTHING_MS = 120_000;
+
+/**
+ * How far past now a cached `fetchedAtMs` may sit. Readers take the newest
+ * observation per account, so one far-future stamp would pin that account's
+ * quota until the clock caught up.
+ */
+export const QUOTA_CLOCK_SKEW_MS = 60_000;
+
+/**
+ * The last register blob's `scannedAt` and the exclave list that blob carries,
+ * as one value: a status's `scan` and every index in it come from one read, so
+ * no tick can pair one scan's indexes with another scan's stamp.
+ */
+export interface Registered {
+  readonly scan: number;
+  readonly exclaves: ExclaveScan;
+}
 
 /** Cumulative counters and totals read off the host; the OS is the one boundary a test replaces. */
 export interface HostProbe {
@@ -44,14 +61,19 @@ export interface TelemetrySources {
   readonly machine: string;
   /** Volumes a clone lands on; the worst one is reported. */
   readonly diskPaths: readonly string[];
-  /** Read each tick: the register blob's current list, which `sess` and `quota` index into. */
-  readonly exclaves: () => ExclaveScan;
+  /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
+  readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
   readonly probe?: HostProbe;
 }
 
 export interface Telemetry {
-  /** One sample: measures, smooths, stores, and returns the snapshot. Overlapping calls share one. */
+  /**
+   * One sample: measures, smooths, stores, and returns the snapshot. An
+   * overlapping call shares the one in flight when both read the same
+   * `registered`; otherwise it runs after it, so a status sent after a
+   * register carries that register's stamp.
+   */
   readonly tick: (nowMs?: number) => Promise<Snapshot>;
   readonly latest: () => Snapshot | null;
 }
@@ -63,14 +85,17 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
     readonly cpu: ReturnType<HostProbe["cpu"]>;
     readonly io: Awaited<ReturnType<HostProbe["diskIo"]>>;
   } | null = null;
-  const smoothed = { cpu: null as number | null, mem: null as number | null, disk: null as number | null };
+  // Each average remembers when it last took a reading, so the weight after a
+  // failed collector reflects the whole gap, not one tick.
+  type Average = { readonly value: number; readonly atMs: number } | null;
+  const smoothed: { cpu: Average; mem: Average; disk: Average } = { cpu: null, mem: null, disk: null };
   let latest: Snapshot | null = null;
-  let inFlight: Promise<Snapshot> | null = null;
+  let inFlight: { readonly registered: Registered; readonly snapshot: Promise<Snapshot> } | null = null;
   const quotaReader = cachedQuotaReader();
 
   // Each collector fails alone: one field absent, never the tick.
-  const sample = async (nowMs: number): Promise<Snapshot> => {
-    const scan = sources.exclaves();
+  const sample = async (registered: Registered, nowMs: number): Promise<Snapshot> => {
+    const scan = registered.exclaves;
     const [cpu, memory, disks, io, sessions, quota] = await Promise.all([
       Promise.try(probe.cpu).catch(() => null),
       probe.memory().catch(() => null),
@@ -80,18 +105,20 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
         (list) => list,
         () => null,
       ),
-      Promise.all(scan.exclaves.map((exclave, x) => quotaReader(exclave.configFile, x))),
+      Promise.all(scan.exclaves.map((exclave, x) => quotaReader(exclave.configFile, x, nowMs))),
     ]);
     const dtMs = previous === null ? 0 : nowMs - previous.atMs;
     // Time-aware weight rather than a fixed alpha: a laptop back from sleep
     // sees one huge interval and resets to the new reading instead of
     // trusting a two-day-old average for the next four ticks.
-    const alpha = dtMs <= 0 ? 1 : Math.min(1, dtMs / SMOOTHING_MS);
     const smooth = (key: keyof typeof smoothed, value: number | null): number | null => {
-      if (value === null) return smoothed[key];
+      if (value === null) return null;
       const prior = smoothed[key];
-      smoothed[key] = prior === null ? value : prior + alpha * (value - prior);
-      return smoothed[key];
+      const gapMs = prior === null ? 0 : nowMs - prior.atMs;
+      const alpha = gapMs <= 0 ? 1 : Math.min(1, gapMs / SMOOTHING_MS);
+      const next = prior === null ? value : prior.value + alpha * (value - prior.value);
+      smoothed[key] = { value: next, atMs: nowMs };
+      return next;
     };
 
     const cpuNow = cpuPercent(previous?.cpu ?? null, cpu);
@@ -111,6 +138,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
     const observations = quota.filter((q): q is QuotaObservation => q !== null);
     const snapshot: Snapshot = {
       at,
+      scan: registered.scan,
       ...field("cpu", cpuPct),
       ...field("mem", memPct),
       ...field("disk", diskPct),
@@ -155,11 +183,20 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
 
   return {
     tick: (nowMs = Date.now()): Promise<Snapshot> => {
-      if (inFlight !== null) return inFlight;
-      inFlight = sample(nowMs).finally(() => {
-        inFlight = null;
-      });
-      return inFlight;
+      const registered = sources.registered();
+      if (inFlight?.registered === registered) return inFlight.snapshot;
+      // Queued behind the one in flight, never beside it: the cpu and I/O
+      // deltas and the averages assume one sample at a time.
+      const before = inFlight?.snapshot.catch(() => null);
+      const run = before === undefined ? sample(registered, nowMs) : before.then(() => sample(registered, nowMs));
+      const current = {
+        registered,
+        snapshot: run.finally(() => {
+          if (inFlight === current) inFlight = null;
+        }),
+      };
+      inFlight = current;
+      return current.snapshot;
     },
     latest: () => latest,
   };
@@ -223,9 +260,9 @@ function countSessions(sessions: readonly SessionEntry[], scan: ExclaveScan): re
  * history and runs to megabytes, while the block read from it changes only when
  * Claude Code refreshes it — not worth a parse per exclave per tick.
  */
-function cachedQuotaReader(): (file: string, x: number) => Promise<QuotaObservation | null> {
+function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promise<QuotaObservation | null> {
   const memo = new Map<string, { readonly key: string; readonly quota: QuotaObservation | null }>();
-  return async (file, x) => {
+  return async (file, x, nowMs) => {
     const info = await statFile(file).catch(() => null);
     if (info === null) {
       memo.delete(file);
@@ -233,7 +270,7 @@ function cachedQuotaReader(): (file: string, x: number) => Promise<QuotaObservat
     }
     const key = `${info.mtimeMs}:${info.size}`;
     const hit = memo.get(file);
-    const quota = hit?.key === key ? hit.quota : await readCachedQuota(file, x);
+    const quota = hit?.key === key ? hit.quota : await readCachedQuota(file, x, nowMs);
     memo.set(file, { key, quota });
     return quota === null ? null : { ...quota, x };
   };
@@ -248,9 +285,14 @@ function cachedQuotaReader(): (file: string, x: number) => Promise<QuotaObservat
  * read, and M1 has
  * no other source (session reports are M2, the OAuth poll M4). An exclave no
  * session has run in has no observation — absent, so readers fall back to
- * another daemon's view of the same account.
+ * another daemon's view of the same account. A stamp past `nowMs` is capped
+ * at `QUOTA_CLOCK_SKEW_MS` ahead of it.
  */
-export async function readCachedQuota(file: string, x: number): Promise<QuotaObservation | null> {
+export async function readCachedQuota(
+  file: string,
+  x: number,
+  nowMs: number = Date.now(),
+): Promise<QuotaObservation | null> {
   let config: unknown;
   try {
     config = JSON.parse(await readFile(file, "utf8"));
@@ -269,7 +311,7 @@ export async function readCachedQuota(file: string, x: number): Promise<QuotaObs
   return {
     x,
     s: "cache",
-    at: Math.floor(fetched / 1000),
+    at: Math.floor(Math.min(fetched, nowMs + QUOTA_CLOCK_SKEW_MS) / 1000),
     ...(five?.pct === undefined ? {} : { h: five.pct }),
     ...(seven?.pct === undefined ? {} : { d: seven.pct }),
     ...(five?.resetsAt === undefined ? {} : { hr: five.resetsAt }),
