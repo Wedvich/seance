@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   APP_ID,
+  generateIdentitySeed,
+  identityFromSeed,
   importPsk,
   METRIC_NAMES,
   open,
@@ -22,6 +24,7 @@ import {
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { MetricsStore, type Sample } from "../src/metrics-store.ts";
+import { RelayClient } from "../src/relay-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { tmux } from "../src/tmux.ts";
 import {
@@ -333,6 +336,41 @@ describe("daemon ↔ relay integration", () => {
       daemon.stop();
       first.stop();
       process.env["SEANCE_STATE_DIR"] = join(base, "state");
+    }
+  });
+
+  // The boot rescan's re-register can leave while a status is being sealed,
+  // and a status landing behind it is the one the relay keeps. So the check
+  // has to run after the seal, in the turn that sends — the timing CI hit.
+  test("sendStatus asks whether a status is still current after sealing it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const identity = await identityFromSeed(generateIdentitySeed());
+    const client = new RelayClient({
+      url: relay.url,
+      bearerToken: TOKEN,
+      identity,
+      key: appKey,
+      buildInfo: () =>
+        seal(
+          appKey,
+          { to: APP_ID, from: identity.deviceId },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
+        ),
+      handle: () => Promise.resolve(null),
+    });
+    client.start();
+    try {
+      await relay.registers.next();
+      let current = true;
+      const stale = client.sendStatus({ at: 1, scan: 1 }, () => current);
+      current = false; // a register left while the seal was awaited
+      expect(await stale).toBe(false);
+      expect(await client.sendStatus({ at: 2, scan: 2 })).toBe(true);
+      // The first in the queue is the second sent: the stale one never left.
+      expect(parseMachineStatus((await open(appKey, await relay.statuses.next())).payload)?.scan).toBe(2);
+    } finally {
+      client.stop();
+      relay.stop();
     }
   });
 
