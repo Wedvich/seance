@@ -2,7 +2,14 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeExclave, exclaveOf, listExclaves, scanExclaves, tagExclaves } from "./exclaves.ts";
+import {
+  claudeConfigTargets,
+  describeExclave,
+  exclaveOf,
+  listExclaves,
+  scanExclaves,
+  tagExclaves,
+} from "./exclaves.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -185,5 +192,26 @@ describe("scanExclaves", () => {
     expect(info).toEqual([
       { id: "default", accountId: "org-1:acct-1", extraUsageEnabled: true, authOk: true, skills: ["alpha"] },
     ]);
+  });
+});
+
+describe("claudeConfigTargets", () => {
+  test("default unsets CLAUDE_CONFIG_DIR, each named exclave sets its own dir", async () => {
+    const home = await makeHome("work\n");
+    const { exclaves } = await listExclaves(home);
+    expect(claudeConfigTargets(exclaves, undefined)).toEqual([
+      { label: "default", configDir: join(home, ".claude"), env: { CLAUDE_CONFIG_DIR: undefined } },
+      { label: "work", configDir: join(home, ".claude-work"), env: { CLAUDE_CONFIG_DIR: join(home, ".claude-work") } },
+    ]);
+  });
+
+  test("an ambient dir is added once, only when no exclave owns it", async () => {
+    const home = await makeHome("work\n");
+    const { exclaves } = await listExclaves(home);
+    expect(claudeConfigTargets(exclaves, join(home, ".claude-work"))).toHaveLength(2);
+    expect(claudeConfigTargets(exclaves, "")).toHaveLength(2);
+    const extra = claudeConfigTargets(exclaves, "/elsewhere/claude");
+    expect(extra.map((t) => t.label)).toEqual(["default", "work", "/elsewhere/claude"]);
+    expect(extra[2]?.env).toEqual({ CLAUDE_CONFIG_DIR: "/elsewhere/claude" });
   });
 });
