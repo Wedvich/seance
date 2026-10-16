@@ -40,7 +40,7 @@ export function DecisionCard(props: { summary: DecisionSummary; title: string; q
           </summary>
           <ul className="decision-lines">
             {summary.others.map((line) => (
-              <Line key={line.where} line={line} quota={quota} />
+              <Line key={line.id} line={line} quota={quota} />
             ))}
           </ul>
         </details>

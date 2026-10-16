@@ -958,6 +958,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(preview.decision.chosen?.deviceId).toBe(stack.deviceId);
       expect(stack.daemon.leader.term()).not.toBeNull();
       expect((await stack.leaderStore.list()).filter((t) => t.body.state === "reserved")).toEqual([]);
+      // A drop leaves the leader as it was, and the form still asks again once back — a
+      // preview the drop failed in flight would otherwise stand until tapped.
+      app.client.reconnect();
+      await app.waitForApp(
+        (state) => state.relay.status === "open" && state.preview?.kind === "ok" && state.preview !== preview,
+        "the preview asked again after the reconnect",
+      );
 
       await app.store.spawn();
       const queued = await app.waitForApp(

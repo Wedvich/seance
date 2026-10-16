@@ -650,7 +650,9 @@ export class RelayClient {
         // received since the send. A silently dead app socket looks exactly like
         // a silent machine from here, and marking on that guess paints every
         // polled machine asleep at once.
-        if (this.#socket === socket && this.#lastFrameAt >= sentAt) this.#markProvenOffline(deviceId);
+        if (this.#socket === socket && this.#lastFrameAt >= sentAt && deviceId !== SCHEDULER_ID) {
+          this.#markProvenOffline(deviceId);
+        }
         reject(new RequestFailure("timeout", `${op} timed out after ${limit}ms`));
       }, limit);
 
@@ -862,7 +864,8 @@ export class RelayClient {
   }
 
   #onUndeliverable(to: string, iv: string, code: string): void {
-    if (code === "offline") this.#markProvenOffline(to);
+    // The scheduler address names no machine: there is nothing to mark.
+    if (code === "offline" && to !== SCHEDULER_ID) this.#markProvenOffline(to);
     const id = this.#idByIv.get(iv);
     // Quoted like every other wire value: `to`, `iv` and `code` are all relay-supplied text.
     this.#wireLog("undeliverable", `iv=${quote(iv)} id=${quote(id ?? "")} to=${quote(to)} code=${quote(code)}`);
@@ -1141,7 +1144,17 @@ export class RelayClient {
     if (scheduler.kind === "unverified") {
       throw new RequestFailure("leader_unverified", `the scheduler nominee ${quote(scheduler.deviceId)} is unverified`);
     }
-    const parsed = parse(await this.request<unknown>(SCHEDULER_ID, op, payload));
+    let reply: unknown;
+    try {
+      reply = await this.request<unknown>(SCHEDULER_ID, op, payload);
+    } catch (err) {
+      // The relay answers `offline` for this address when no leader holds a socket: no machine was asked.
+      if (err instanceof RequestFailure && err.reason === "offline") {
+        throw new RequestFailure("no_leader", "the relay has no leader to route to");
+      }
+      throw err;
+    }
+    const parsed = parse(reply);
     if (parsed === null) this.#wireLog("dropped", `from=${quote(SCHEDULER_ID)} reason=${op}-shape`);
     return parsed;
   }

@@ -2237,11 +2237,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   open into a `Machine` — the rule that already decides which entries render, here deciding who
   is believed to hold the PSK (Scheduler, "Leadership"). The client enforces the same check at
   the source: `routePreview`, `submit` and `queue` throw `leader_unverified` or `no_leader`
-  without sending, so nothing reaches a squatter however the UI is driven. On `auto` the repo
+  without sending, so nothing reaches a squatter however the UI is driven; the relay's `offline`
+  for the scheduler address (no leader socket) comes back as `no_leader` too, and marks no
+  machine offline. On `auto` the repo
   picker lists repos by `origin` across the fleet (a clone's name is machine-local), remembered
   as `PersistedForm.autoRepo` beside `auto` rather than as a sentinel in `machineId`, so leaving
   auto restores the machine picked last. A **placement preview** card asks `route-preview`
-  whenever auto is chosen, its repo changes, or the leader changes or is verified — the
+  whenever auto is chosen, its repo changes, the leader changes or is verified, or the socket
+  comes back from a drop (which can fail a preview in flight while leaving the leader as it was) — the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` holds the wording). The preview leaves out the quota reading
   each candidate was judged on; the queued task's record shows it, its age read as the account

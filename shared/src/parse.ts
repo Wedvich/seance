@@ -18,6 +18,7 @@ import {
   type QueueReply,
   type QuotaBasis,
   type Reason,
+  type Reservation,
   type RoutePreviewReply,
   type SchedulerError,
   type SchedulerOp,
@@ -539,6 +540,12 @@ export function parseDecision(value: unknown): Decision | null {
   return { at: value["at"], chosen, candidates };
 }
 
+function parseReservation(value: unknown): Reservation | null {
+  const target = parseTarget(value);
+  if (target === null || !isRecord(value) || !isFiniteNumber(value["expiresAt"])) return null;
+  return { ...target, expiresAt: value["expiresAt"] };
+}
+
 function parseAssignment(value: unknown): Assignment | null {
   const target = parseTarget(value);
   if (target === null || !isRecord(value)) return null;
@@ -561,7 +568,7 @@ export function parseTask(value: unknown): Task | null {
   const request = parseTaskRequest(spec);
   if (request === null) return null;
   const placed = assignment === undefined ? undefined : parseAssignment(assignment);
-  const reserved = reservation === undefined ? undefined : parseTarget(reservation);
+  const reserved = reservation === undefined ? undefined : parseReservation(reservation);
   const record = decision === undefined ? undefined : parseDecision(decision);
   if (placed === null || reserved === null || record === null) return null;
   if (absentSince !== undefined && !isFiniteNumber(absentSince)) return null;
@@ -571,14 +578,13 @@ export function parseTask(value: unknown): Task | null {
       return null;
     failed = { code: failure["code"], message: failure["message"] };
   }
-  const expiresAt = isRecord(reservation) && isFiniteNumber(reservation["expiresAt"]) ? reservation["expiresAt"] : 0;
   return {
     id,
     state: known,
     createdAt,
     spec: request,
     ...(placed === undefined ? {} : { assignment: placed }),
-    ...(reserved === undefined ? {} : { reservation: { ...reserved, expiresAt } }),
+    ...(reserved === undefined ? {} : { reservation: reserved }),
     ...(record === undefined ? {} : { decision: record }),
     ...(failed === undefined ? {} : { failure: failed }),
     ...(absentSince === undefined ? {} : { absentSince }),

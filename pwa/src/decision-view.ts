@@ -8,6 +8,8 @@ import { formatSeen } from "./view.ts";
  */
 
 export interface DecisionLine {
+  /** `deviceId/exclave`: unique in a record, where `where` is names, which two machines can share. */
+  readonly id: string;
   /** `machine · exclave`, or the machine alone for a daemon that reports no exclaves. */
   readonly where: string;
   readonly outcome: "chosen" | "scored" | "rejected";
@@ -53,6 +55,10 @@ export function reasonText(reason: Reason): string {
     case "cap_reached":
       return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
   }
+}
+
+function lineId(deviceId: string, exclave: string | null): string {
+  return `${deviceId}/${exclave ?? ""}`;
 }
 
 function where(candidate: Candidate): string {
@@ -106,16 +112,17 @@ function line(
   decision: Decision,
   machines: readonly Machine[],
   now: number,
-  best: Score | undefined,
+  winner: Candidate | undefined,
 ): DecisionLine {
   const quota = quotaText(candidate.quota, decision, machines, now);
+  const id = lineId(candidate.deviceId, candidate.exclave);
   if (outcome === "rejected") {
     // Reasons a leader a version ahead minted are dropped at parse: say so rather than show none.
     const why =
       candidate.rejected.length === 0
         ? "rejected for a reason this app can't read — update it"
         : candidate.rejected.map(reasonText).join(", ");
-    return { where: where(candidate), outcome, why, quota };
+    return { id, where: where(candidate), outcome, why, quota };
   }
   const score = candidate.score;
   const scored = score === undefined ? "scored" : scoreText(score);
@@ -123,14 +130,19 @@ function line(
   const why =
     outcome === "chosen"
       ? ["lowest score", scored, spill].filter((part) => part !== null).join(" — ")
-      : [lostBy(scored, score, best), spill].filter((part) => part !== null).join(" — ");
-  return { where: where(candidate), outcome, why, quota };
+      : [lostBy(scored, candidate, winner), spill].filter((part) => part !== null).join(" — ");
+  return { id, where: where(candidate), outcome, why, quota };
 }
 
 /** An exact tie is named as one: `route` breaks it by device id, then exclave, so the record reproduces. */
-function lostBy(scored: string, score: Score | undefined, best: Score | undefined): string {
+function lostBy(scored: string, candidate: Candidate, winner: Candidate | undefined): string {
+  const score = candidate.score;
+  const best = winner?.score;
   if (best === undefined || score === undefined) return scored;
-  if (score.total === best.total) return `tied, ${scored} — a tie goes to the lower device id`;
+  if (score.total === best.total) {
+    const breaker = candidate.deviceId === winner?.deviceId ? "the exclave sorted first" : "the lower device id";
+    return `tied, ${scored} — a tie goes to ${breaker}`;
+  }
   return `scored higher, ${scored} against ${n(best.total)}`;
 }
 
@@ -152,10 +164,9 @@ export function describeDecision(
       : decision.candidates.find(
           (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave && c.score !== undefined,
         );
-  const best = winner?.score;
   const others = decision.candidates
     .filter((c) => c !== winner)
-    .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, best));
+    .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner));
   if (chosen === null) {
     return {
       headline:
@@ -173,7 +184,7 @@ export function describeDecision(
     headline: tense === "would" ? `Would start on ${name}.` : `Placed on ${name}.`,
     chosen:
       winner === undefined
-        ? { where: name, outcome: "chosen", why: "chosen", quota: null }
+        ? { id: lineId(chosen.deviceId, chosen.exclave), where: name, outcome: "chosen", why: "chosen", quota: null }
         : line(winner, "chosen", decision, machines, now, undefined),
     others,
   };

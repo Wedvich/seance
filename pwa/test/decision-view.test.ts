@@ -45,6 +45,7 @@ describe("describeDecision", () => {
     const summary = describeDecision(decision, [machine("mac", "Mac"), machine("wsl", "WSL")], NOW, "would");
     expect(summary.headline).toBe("Would start on Mac · default.");
     expect(summary.chosen).toEqual({
+      id: "mac/default",
       where: "Mac · default",
       outcome: "chosen",
       why: "lowest score — score 1.50 (account 0.25 · load 40% · queue 1)",
@@ -57,6 +58,7 @@ describe("describeDecision", () => {
     expect(summary.headline).toBe("Placed on Mac · default.");
     expect(summary.others).toEqual([
       {
+        id: "wsl/default",
         where: "WSL · default",
         outcome: "scored",
         why: "scored higher, score 2.75 (account 0.25 · load 40% · queue 1) against 1.50",
@@ -64,6 +66,7 @@ describe("describeDecision", () => {
         quota: "quota: session · 2h ago on WSL, asleep",
       },
       {
+        id: "lxc/work",
         where: "LXC · work",
         outcome: "rejected",
         why: "offline, its account's quota has never been observed",
@@ -76,6 +79,14 @@ describe("describeDecision", () => {
     const tied: Decision = { ...decision, candidates: [scored("mac", "Mac", 1.5), scored("wsl", "WSL", 1.5)] };
     expect(describeDecision(tied, [], NOW, "would").others[0]?.why).toBe(
       "tied, score 1.50 (account 0.25 · load 40% · queue 1) — a tie goes to the lower device id",
+    );
+    // Two exclaves of one machine share its device id, so the exclave is what broke it.
+    const sameMachine: Decision = {
+      ...decision,
+      candidates: [scored("mac", "Mac", 1.5), { ...scored("mac", "Mac", 1.5), exclave: "work" }],
+    };
+    expect(describeDecision(sameMachine, [], NOW, "would").others[0]?.why).toBe(
+      "tied, score 1.50 (account 0.25 · load 40% · queue 1) — a tie goes to the exclave sorted first",
     );
   });
 

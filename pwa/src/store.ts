@@ -4,6 +4,7 @@ import type {
   MetricsRequest,
   RepoEntry,
   RescanResponse,
+  SchedulerAvailability,
   SchedulerErrorCode,
   SessionsResponse,
   SpawnClient,
@@ -12,7 +13,7 @@ import type {
   Task,
   TaskRequest,
 } from "@seance/shared";
-import { failureReasonText, RequestFailure, type RelayClient } from "@seance/shared";
+import { failureReasonText, RequestFailure, TASK_REQUEST_LIMITS, type RelayClient } from "@seance/shared";
 import {
   DEFAULT_FORM,
   RANGE_SPANS,
@@ -98,6 +99,14 @@ export const QUEUE_POLLS = 30;
 /** A preview answered `not_ready` (takeover still running) is asked again this often, this many times. */
 const PREVIEW_RETRY_MS = 1_000;
 const PREVIEW_RETRIES = 10;
+
+/**
+ * What would answer a preview: a new leader, or the same one verified at last,
+ * asks again. Never "", which is what a drop resets the last-asked key to.
+ */
+function schedulerKey(scheduler: SchedulerAvailability): string {
+  return scheduler.kind === "none" ? "none" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
+}
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -200,6 +209,9 @@ export class Store {
       // place means nothing ever counts as woken again and the session lists
       // stay at whatever the very first connect saw.
       this.#wokenAt = new Map();
+      // The leader usually survives a drop unchanged, so without this a preview
+      // the drop failed mid-flight would never be asked again on reconnect.
+      this.#previewedLeader = "";
       return;
     }
 
@@ -212,13 +224,7 @@ export class Store {
     // a question the reply is about to answer — leaving nothing to reconcile if the
     // reply is the thing that gets dropped.
     if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
-    // A preview is asked for again when what would answer it changed: a new
-    // leader, or the same one verified at last.
-    const leader =
-      relay.scheduler.kind === "none"
-        ? ""
-        : `${relay.scheduler.kind}:${relay.scheduler.deviceId}:${relay.scheduler.term}`;
-    if (leader !== this.#previewedLeader && this.#state.form.auto) void this.refreshPreview();
+    if (schedulerKey(relay.scheduler) !== this.#previewedLeader && this.#state.form.auto) void this.refreshPreview();
   }
 
   /**
@@ -337,8 +343,7 @@ export class Store {
     // Counted before the patch: clearing the verdict here would otherwise leave
     // its entry behind once the sheet's back had been spent. Settings is not the
     // sheet's to close.
-    const { sheet, verdict } = this.#state;
-    const open = (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
+    const open = this.#sheetAndVerdictOpen();
     this.#patch({ form: { ...this.#state.form, machineId, auto: false }, verdict: null, preview: null });
     if (open > 0) history.go(-open);
   }
@@ -349,11 +354,16 @@ export class Store {
    */
   selectAuto(): void {
     if (!deriveAutoAvailability(this.#state.relay).available) return;
-    const { sheet, verdict } = this.#state;
-    const open = (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
+    const open = this.#sheetAndVerdictOpen();
     this.#patch({ form: { ...this.#state.form, auto: true }, verdict: null });
     if (open > 0) history.go(-open);
     void this.refreshPreview();
+  }
+
+  /** The history entries a machine pick closes. */
+  #sheetAndVerdictOpen(): number {
+    const { sheet, verdict } = this.#state;
+    return (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
   }
 
   /**
@@ -363,9 +373,7 @@ export class Store {
   async refreshPreview(attempt = 0): Promise<void> {
     this.#stopPreviewRetry();
     const { form, relay } = this.#state;
-    const scheduler = relay.scheduler;
-    this.#previewedLeader =
-      scheduler.kind === "none" ? "" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
+    this.#previewedLeader = schedulerKey(relay.scheduler);
     const repo = resolveAutoRepo(autoRepos(relay.machines), form);
     if (!form.auto || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
@@ -643,6 +651,13 @@ export class Store {
     const repo = resolveAutoRepo(autoRepos(relay.machines), form);
     if (repo === null || !deriveAutoAvailability(relay).available || this.#state.spawning) return;
     this.#stopFollowing();
+    // The leader bounds what it holds; past the bound it answers `invalid_request`, whose wording blames versions.
+    const length = form.prompt.trim().length;
+    if (length > TASK_REQUEST_LIMITS.prompt) {
+      const message = `The prompt is ${length} characters; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine.`;
+      this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
+      return;
+    }
     this.#patch({ spawning: true, verdict: null });
     try {
       const reply = await this.#client.submit(this.#taskRequest(repo.origin, true));
