@@ -2711,6 +2711,75 @@ update` refreshes, and the checkout already on the machine is the version the
   format matches bun's), and skips that shard, visibly, where `claude` isn't on
   PATH — which today includes CI.
 
+## Scheduler (`scheduler/`) — library landed 2026-10-16 (M2 item 1)
+
+The plan and what is still ahead live in docs/scheduler.md; this section records what
+exists. So far that is the library alone: nothing hosts it until `daemon/src/leader.ts`
+(M2 item 3), so no spawn is routed yet.
+
+- **A pure library behind two interfaces** (`scheduler/src/ports.ts`). `QueueStore`
+  (`list`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)`, `version_conflict` as
+  a value; a conflict refreshes the one task through `get`) holds plain task bodies — sealing, and M3's version binding, are the adapter's.
+  `Fleet` is the registry with each machine's newest status, live or kept, plus
+  `spawn`/`sessions`/`despawn` to a `deviceId`, with "no answer" as the library's own
+  `unreachable` code beside the daemon's. It owns no timer, socket or clock: the host
+  calls `tick()` on each registry or `status` push and on a 30s timer, so a host that
+  stops calling leaves nothing running. `MemoryQueueStore` is shipped, not a test
+  double: M2's leader runs on it, since the queue is in-memory until M3. The suite's
+  `Fleet` double is `scheduler/test/fixtures.ts`.
+- **Layering is enforced** (`scheduler/test/layering.test.ts`): nothing in `scheduler/`
+  imports `daemon/`, and nothing in `daemon/` imports `scheduler/` but `leader.ts`, by
+  package name or by relative path, static or dynamic. The test also proves the
+  detector catches each forbidden direction, so a regex that silently matches nothing
+  fails too. Moving the scheduler to a fixed box is then two adapters, no library change.
+- **One routing function** (`route.ts`): a task and a snapshot in, a `Decision` out —
+  every (machine, exclave) pair is a candidate, either rejected with _every_ reason that
+  applies or scored with every component, so the record explains the choice and each
+  loser. Reasons are structured codes: `offline`, `status_stale`, `task_id_unsupported`,
+  `exclaves_unknown` (a daemon predating exclaves cannot say which account a spawn
+  bills; an empty list reads the same, since a real daemon always lists `default`, and
+  stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
+  `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
+  `quota_over_line`, `cap_reached`. Skill and stacked-base filters are M4's. Pressure
+  comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
+  passes it; a kept status never answers pressure. Quota comes from
+  every status alike, through `newestQuotaByAccount` and `effectivePct` — the
+  library restates neither rule. An absent `free` is not `disk_low`: the floor guards a
+  disk known to be full, and a host with no statfs answer would otherwise never get work.
+- **Missing quota is unknown, never 0%.** `quota_unknown` when no status carries the
+  account, when its newest observation has no window in it, or when a trimmed status
+  (`isQuotaTrimmed`) from a host of the account does not carry it and nothing newer than
+  that status does. A candidate rejected so has no score at all, rather than one
+  computed at zero — the case where 0% would have won is in the suite.
+- **Score** (lower wins, weights in `SchedulerConfig`): `accountPressure` is
+  `(u/(1-u))²` at projected usage, worst window (5h, 7d, each per-model weekly),
+  multiplied by the share of the window still to run; `machinePressure` is
+  `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
+  0.5 from `TaskSpec.base` (absent until M3's deps fill it); `queuePressure` the
+  in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
+  `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
+  effective reading plus a fixed estimate for this task and each in-flight one billed to
+  the same account; the filter additionally treats a window resetting within 15 min as
+  empty. An exclave with extra usage on is scored past the line and its candidate
+  carries `spill` (M3 shows it, M4 alerts on it); `extraUsageEnabled: null` reads as off.
+  Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
+- **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
+  reserved one at a time — each route sees the reservations before it — and the spawns
+  then run together. A reservation is one store write carrying the decision; an
+  unplaceable task's decision stays in memory (`lastDecision`), so the store sees one
+  write per transition and none per tick. A spawn resolves its reservation once, never
+  with a second spawn: started or `task_running` → `running` on the reported pane; a
+  daemon refusal → `failed`; `unreachable` or a transport error (which may come after the
+  spawn ran) → stays reserved. Past the 120s TTL the machine's `sessions` decide: a
+  session carrying the task id is the spawn that landed, none releases the task to
+  `ready`; an unanswered check waits while the machine is connected and releases once it
+  is not, the daemon's `task_running` being the backstop. The spawn audits as
+  `client=scheduler`. Ticks coalesce: one asked for mid-pass runs once after it.
+- **States are M2's slice** (`task.ts`): `ready → reserved → running ⇄ needs-input →
+done`, `failed`/`cancelled` off-path, one transition table, an illegal move a thrown
+  bug. A session that ends is `done` until M3's done detection; a reserved task refuses
+  `cancel` (`dispatching`) rather than racing its spawn.
+
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on

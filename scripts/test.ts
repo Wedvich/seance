@@ -47,6 +47,7 @@ const SHARDS: readonly Shard[] = [
   { name: "relay", paths: ["relay/"] },
   { name: "pwa", paths: ["pwa/"] },
   { name: "raycast", paths: ["raycast/"] },
+  { name: "scheduler", paths: ["scheduler/"] },
   { name: "scripts", paths: ["scripts/"] },
   { name: "claude-mods", paths: ["claude-mods/tmux-rename"], runner: "claude-plugin" },
 ];

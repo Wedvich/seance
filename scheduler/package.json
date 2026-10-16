@@ -1,0 +1,21 @@
+{
+  "name": "@seance/scheduler",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The scheduler: task state, filter/score routing, reservations and decision records over two adapter interfaces — no I/O of its own",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@seance/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2"
+  }
+}

@@ -1,6 +1,6 @@
 # Séance scheduler — plan
 
-**Status: plan, M1 done, M2 next.** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1 done, M2 in progress (items marked **Landed** under M2 are built).** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists. M1 (visibility: exclaves, telemetry, the `status` frame, the
@@ -109,7 +109,9 @@ table gains rows.
   of its relay is not locked out. Every leader write in M3 carries its term through the same
   check.
 - **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
-version, env }]`, `store-put { key, expect, env, term? }` → `{ version }` or
+version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (what a
+  `version_conflict` refreshes from, so a lost race costs one read, not the whole queue
+  unsealed), `store-put { key, expect, env, term? }` → `{ version }` or
   `version_conflict`, `store-delete { key, expect, term? }`. Values live at their key as
   `{ version, env }`; `version` starts at 1 on create and increments per put. Named for the
   store, not the queue, because tasks are not its only records — who may write is a rule per
@@ -256,7 +258,7 @@ interfaces. Whoever hosts it supplies both; the library never learns which. This
 the placement decision reversible: moving the scheduler to a fixed box later is two new
 adapter implementations (SQLite store, own app-role client) and no change here.
 
-- `QueueStore`: `list()`, `put(id, expect, body)`, `delete(id, expect)` over sealed task
+- `QueueStore`: `list()`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)` over sealed task
   bodies, with `version_conflict` surfaced as a value. Daemon adapter: the relay's `store-*`
   ops, sealing/opening with the daemon's already-imported `CryptoKey`, carrying its term.
 - `Fleet`: a registry + `status` feed, and `spawn`/`sessions`/`despawn` to a `deviceId`.
@@ -409,9 +411,11 @@ queue yet.
 
 **Lands, in order.**
 
-1. `scheduler/` library + in-memory fakes of `QueueStore` and `Fleet`; filter / score /
-   sticky / reserve / record over fixtures. No wire change — depends only on M1's schema. Includes the layering test: nothing in `scheduler/`
-   imports `daemon/`, and nothing in `daemon/` imports `scheduler/` except `leader.ts`.
+1. **Landed 2026-10-16 — recorded in DESIGN.md _Scheduler_.** `scheduler/` library + in-memory
+   fakes of `QueueStore` and `Fleet`; filter / score / sticky / reserve / record over fixtures,
+   and the layering test. No wire change of its own: it reads item 4's `CAPABILITIES.taskId`,
+   `task_running` and `SessionEntry.taskId`, and item 7's `liveStatus`. Not built, as M4's: the
+   skill and stacked-base filters.
 2. **(Landed 2026-10-16.)** Relay leadership — `roles` on `register`, inside the signed message (v2 domain tag);
    nomination as the pure `relay/src/leadership.ts`, called from `hub.ts` on connect, close and
    sweep; `scheduler:term`, `lead`/`follow`,
@@ -489,7 +493,7 @@ the queue.
 
 **Lands, in order.**
 
-1. Relay store — `store-list` / `store-put` / `store-delete` with the per-prefix rules (only
+1. Relay store — `store-list` / `store-get` / `store-put` / `store-delete` with the per-prefix rules (only
    `task:` populated yet), `task:<id>` as `{ version, env }`,
    term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS`, create rate floor.
 2. The at-rest `task` op and version binding — sealed body carries the version its put
@@ -635,6 +639,16 @@ same PR, with the reason.
    account with the most headroom; no cap fails only on unseen use, for one dispatch, until the
    session's own `rate_limits` report corrects it. Revisit with a 7d-only cap (~24h) if
    out-of-fleet use becomes routine.
+8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
+   `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
+   dependency 4, queue 1; sticky bonus 2; per-task estimate 5%; global max 8 in-flight
+   tasks. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
+   are fractions or counts, so the weights put one busy machine, or the farthest base, on
+   the scale of an account near 70%. First guesses, to tune from decision records; nothing
+   observed yet argues for them.
+9. **An unreported `free` is not under the disk floor.** The floor guards a disk known to
+   be full; read as unknown-therefore-filtered, a host with no statfs answer would never
+   get work. Unlike quota, nothing about a missing disk reading makes it the risky choice.
 
 ## Risks / unknowns
 
