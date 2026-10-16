@@ -258,7 +258,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         if (stopped || !client.connected) return false;
         const stamped = { ...snapshot, scan: registeredScan };
         const status = fitStatus(stamped);
-        if (status !== stamped && !trimWarned) {
+        if (status.tr !== undefined && !trimWarned) {
           // Once: the condition is structural (too many exclaves for the bound),
           // not transient, and the fix is a schema change rather than a retry.
           log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");

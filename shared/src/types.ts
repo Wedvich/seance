@@ -397,6 +397,8 @@ export interface QuotaObservation {
  * Payload of the sealed `status` blob (`op: "status"`). Pressure fractions are
  * whole percent, smoothed over ~2 min daemon-side so no reader needs a window
  * of its own. Absent fields are unknown — never null — so the blob stays small.
+ * On the wire it also carries `_`, spaces that pad every status to one sealed
+ * length (`daemon/src/status.ts`); readers ignore it, so it is not declared here.
  *
  * Indexed fields (`sess`, `quota[].x`) refer to the register blob's `exclaves`,
  * and `scan` names which blob: a status whose `scan` disagrees with the
@@ -428,6 +430,13 @@ export interface MachineStatus {
   /** Running sessions per exclave, by index. */
   readonly sess?: readonly number[];
   readonly quota?: readonly QuotaObservation[];
+  /**
+   * Present only when the daemon trimmed this status to fit the relay's
+   * bound: how many quota entries it dropped, from the last exclave down — 0
+   * when only per-model windows or reset stamps went. In a trimmed status an
+   * exclave without an observation is unknown, not unobserved.
+   */
+  readonly tr?: number;
 }
 
 /** Resolutions the daemon's metrics store keeps, seconds — raw, 5-min and hourly tiers. */
