@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS } from "./launch-ledger.ts";
@@ -109,19 +109,15 @@ describe("LaunchLedger", () => {
   // starts right after, put the ledger on disk without it — and report success.
   test("a failed record does not drop an id a concurrent record of it is about to write", async () => {
     const ledger = await LaunchLedger.open(path, () => 1);
-    await ledger.record("before");
-    await chmod(dir, 0o500);
-    try {
-      const first = ledger.record("dup");
-      const second = ledger.record("dup");
-      await expect(first).rejects.toThrow();
-      expect(ledger.ids()).toContain("dup");
-      await expect(second).rejects.toThrow();
-      // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
-      expect(ledger.ids()).toContain("dup");
-    } finally {
-      await chmod(dir, 0o700);
-    }
+    // A directory where the file should be: every write fails at the rename.
+    await mkdir(join(path, "x"), { recursive: true });
+    const first = ledger.record("dup");
+    const second = ledger.record("dup");
+    await expect(first).rejects.toThrow();
+    expect(ledger.ids()).toContain("dup");
+    await expect(second).rejects.toThrow();
+    // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
+    expect(ledger.ids()).toContain("dup");
   });
 
   test("concurrent records all land: writes are serialized, each the whole ledger", async () => {
