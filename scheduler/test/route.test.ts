@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "@seance/shared";
-import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
+import {
+  accountResetAt,
+  DEFAULT_CONFIG,
+  route,
+  type Candidate,
+  type Decision,
+  type SchedulerConfig,
+  type Task,
+} from "../src/index.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
@@ -246,6 +254,90 @@ describe("filter", () => {
     const tasks = [held("x", "b"), held("y", "b", "reserved"), task({ id: "z", state: "done" })];
     const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2 } }));
     expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2 }]);
+  });
+
+  describe("cap_reached scope account", () => {
+    /** Machine `a` with two exclaves on two accounts, both observed and both holding a clone. */
+    const twoAccounts = (): Machine =>
+      machine("a", {
+        exclaves: [exclave("main", "org:a"), exclave("alt", "org:b")],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+
+    test("rejects only the full account's candidates, counting reserved and needs-input tasks", () => {
+      const tasks = [held("x", "a", "reserved"), held("y", "a", "needs-input"), held("z", "a", "awaiting-merge")];
+      const decision = decide([twoAccounts()], { tasks, config: { accountMax: 2 } });
+      const main = decision.candidates.find((c) => c.exclave === "main");
+      expect(main?.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2, scope: "account" }]);
+      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "alt", clone: "app2" });
+    });
+
+    test("a task on a machine gone from the registry has no account to count", () => {
+      const tasks = [held("x", "gone"), held("y", "gone")];
+      expect(only(decide([machine("a")], { tasks, config: { accountMax: 2 } })).rejected).toEqual([]);
+    });
+
+    test("the global cap stays unscoped and sits beside the account's", () => {
+      const tasks = [held("x", "a"), held("y", "a")];
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, accountMax: 2 } }));
+      expect(candidate.rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2 },
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+    });
+  });
+
+  describe("paused", () => {
+    const fleet = [machine("a"), machine("b")];
+
+    test("a whole-queue hold rejects every candidate", () => {
+      const decision = route({
+        task: task(),
+        machines: fleet,
+        tasks: [],
+        now: NOW,
+        config: DEFAULT_CONFIG,
+        holds: [{ until: "resume", at: NOW - 1 }],
+      });
+      expect(decision.chosen).toBeNull();
+      expect(decision.candidates.map((c) => c.rejected)).toEqual([
+        [{ code: "paused", until: "resume", scope: "queue" }],
+        [{ code: "paused", until: "resume", scope: "queue" }],
+      ]);
+    });
+
+    test("an account hold rejects that account's candidates only; an expired reset hold none", () => {
+      const holds = [
+        { account: "org:a", until: "reset", at: NOW - 10, resumeAt: NOW + 1 },
+        { account: "org:b", until: "reset", at: NOW - 10, resumeAt: NOW },
+      ] as const;
+      const decision = route({ task: task(), machines: fleet, tasks: [], now: NOW, config: DEFAULT_CONFIG, holds });
+      expect(decision.chosen?.deviceId).toBe("b");
+      expect(decision.candidates.find((c) => c.deviceId === "a")?.rejected).toEqual([
+        { code: "paused", until: "reset", scope: "account" },
+      ]);
+    });
+  });
+
+  describe("accountResetAt", () => {
+    const resetOf = (quota: ReturnType<typeof obs>): number | null =>
+      accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], NOW, DEFAULT_CONFIG);
+
+    test("over the line: the latest reset among the full windows, not an earlier one that leaves it full", () => {
+      expect(resetOf(obs(0, { h: 10, hr: NOW_S + 3600, d: 95, dr: NOW_S + 86_400 }))).toBe((NOW_S + 86_400) * 1000);
+      expect(resetOf(obs(0, { h: 95, hr: NOW_S + 3600, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 3600) * 1000);
+    });
+
+    test("under the line: the earliest reset still ahead", () => {
+      expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 86_400) * 1000);
+    });
+
+    test("unknown: no reading, a full window with no reset, or every reset past", () => {
+      expect(accountResetAt("org:zz", [machine("a")], NOW, DEFAULT_CONFIG)).toBeNull();
+      expect(resetOf(obs(0, { h: 95, d: 10, dr: NOW_S + 86_400 }))).toBeNull();
+      expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60 }))).toBeNull();
+    });
   });
 
   test("every reason that applies is recorded, not just the first", () => {
