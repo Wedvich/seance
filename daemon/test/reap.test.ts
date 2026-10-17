@@ -417,6 +417,7 @@ describe("reap: worktrees and branches (real git)", () => {
 
   test("an origin that wants credentials fails the fetch fast instead of hanging on a prompt", async () => {
     const server = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       fetch: () => new Response("auth required", { status: 401, headers: { "WWW-Authenticate": 'Basic realm="x"' } }),
     });

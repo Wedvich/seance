@@ -1024,6 +1024,7 @@ describe("heartbeat", () => {
     // relay path; the real relay always pongs at the edge.
     let dials = 0;
     const mute = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       fetch(req, server) {
         if (server.upgrade(req)) return undefined;
@@ -1488,6 +1489,7 @@ describe("registry settle", () => {
   // bound for an abnormal peer that never does.
   test("declares an unpushed registry settled once the bound elapses", async () => {
     const silent = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       fetch(request, server) {
         return server.upgrade(request) ? undefined : new Response("expected a websocket", { status: 400 });
@@ -1532,6 +1534,7 @@ function startHostilePeer(): HostilePeer {
   const received: string[] = [];
   let socket: ServerWebSocket<unknown> | null = null;
   const peerServer = Bun.serve({
+    hostname: "127.0.0.1",
     port: 0,
     fetch(request, server) {
       return server.upgrade(request) ? undefined : new Response("expected a websocket", { status: 400 });
