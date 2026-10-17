@@ -18,7 +18,7 @@ stay as they are; the table says which word each one means.
 | machine | A box running one `seanced`: the unit of presence, pressure and dispatch                                                                                                                                                                                                                                                                            | `deviceId` is its routing key, `MachineInfo` its blob                                       |
 | exclave | A tree at `~/<name>` whose Claude Code config dir is `~/.claude-<name>`, signed into one account; `default` is `~` with `~/.claude`. Séance depends on those three attributes and the `~/.exclaves` contract below, nothing else an exclave carries (git identity, browser profile) is its business. Never "workspace", which is a Bun package here | `exclaves[]` in the register blob, `exclave` on a clone                                     |
 | account | The billed Claude identity an exclave is signed into; the 5h/7d quota attaches here. Never "subscription", which is the plan that account is on, and never the email                                                                                                                                                                                | `accountId` = `organizationUuid:accountUuid`; `account:<hmac>` its record in the store (M4) |
-| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                                                                                                                                        | `tasks.repo`, `RepoEntry.origin`                                                            |
+| repo    | A repository as a logical thing, the same across machines: what a task names. Keyed by normalized `origin`, basename when there is no remote                                                                                                                                                                                                        | `TaskSpec.repo`, `RepoEntry.origin`                                                         |
 | clone   | One machine's checkout of a repo, inside one exclave, under a machine-local, collision-disambiguated name. What `spawn` takes                                                                                                                                                                                                                       | `RepoEntry`, `spawn { repo }` (historical name)                                             |
 | session | One Claude Code process in one tmux pane, spawned in a clone                                                                                                                                                                                                                                                                                        | pane id, `sessions` op                                                                      |
 | task    | A unit of queued work: repo + prompt + spawn opts, with deps and a state. Becomes a session when dispatched                                                                                                                                                                                                                                         | `task:<id>` in the store, `taskId` on spawn                                                 |
@@ -227,134 +227,66 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
 
 ## Scheduler (`scheduler/`)
 
-**A pure library, no I/O of its own.** It owns the task state machine, filter, score,
-stickiness, reservations and decision records over plain inputs, and depends on two small
-interfaces. Whoever hosts it supplies both; the library never learns which. This is what makes
-the placement decision reversible: moving the scheduler to a fixed box later is two new
-adapter implementations (SQLite store, own app-role client) and no change here.
+**A pure library, no I/O of its own**, behind two interfaces the host supplies — `QueueStore`
+and `Fleet` — so the placement decision stays reversible: moving the scheduler to a fixed box
+later is two new adapters (SQLite store, own app-role client) and no change here. M2 built it,
+and DESIGN.md _Scheduler_ is the record of what exists: "The library" for the interfaces,
+routing, states, takeover and `lost`, "The leader" for the daemon hosting it. This section keeps
+only what M3 and M4 change. Labels code comments cite, and where M2's half now lives:
 
-- `QueueStore`: `list()`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)` over sealed task
-  bodies, with `version_conflict` surfaced as a value. Daemon adapter: the relay's `store-*`
-  ops, sealing/opening with the daemon's already-imported `CryptoKey`, carrying its term.
-- `Fleet`: a registry + `status` feed, and `spawn`/`sessions`/`despawn` to a `deviceId`.
-  Daemon adapter: the leader's own long-lived app-role `RelayClient` (`leader.ts`, above;
-  landed).
+- **Routing** (filter, score, stickiness, reserve, record) — DESIGN.md "The library", "One
+  routing function" through "Reserve, then dispatch"; what is ahead is below.
+- **Missing quota is unknown, never 0%** — the DESIGN.md bullet of that name.
+- **Quota freshness** (the observation's, not the status's) — DESIGN.md "One routing
+  function": pressure only from a live, unstale status, quota from every status by its own
+  `at`. Why there is no age cap: _Settled defaults_ 7.
+- **Task states** and **Takeover** — M2's half is DESIGN.md "States are M2's slice",
+  "`lost`" and "Takeover", with `scheduler/src/task.ts` the table that runs; M3's is below.
 
-Tests run the library against in-memory fakes of both; the daemon suite proves the adapters
-against `daemon/test/harness.ts`; the e2e suite proves the store against the real DO.
+**The store adapter (M3 item 3).** M2's leader runs on the library's `MemoryQueueStore`. M3's
+`QueueStore` is `daemon/src/queue-store.ts` over the relay's `store-*` ops. The library still
+sees plain task bodies: the adapter seals and opens each under the daemon's imported key, binds
+it to its version and key (Wire changes, _Version binding_), and carries the term on every
+write. Tests stay layered: the library against in-memory fakes of both interfaces, the adapter
+against `daemon/test/harness.ts`, the store against the real DO in e2e.
 
-**State (in the store, one sealed body per task):** prompt, title, repo (`origin`),
-spawn opts, batch, deps, state, assignment (`deviceId`, pane, `taskId`), reservation
-(`deviceId`, `expiresAt`), decision (every scoring component), lineage. Machines, exclaves,
-resources and quota come from the fleet feed and are persisted nowhere. `settings` and
-`push_subs` are two more sealed keys. A leader change loses only the in-memory view.
+**Records (M3).** One sealed `TaskRecord` per task at `task:<id>`, the pause at `queue:pause`;
+machines, exclaves, pressure and quota come from the fleet feed and are persisted nowhere. A
+leader change then loses only the in-memory view (the absence clock, an unplaced task's latest
+decision). M4's `settings` (_Secrets_) and push subscriptions need prefixes of their own in
+`STORE_PREFIXES`, decided with that item.
 
-**Task states:** `queued → blocked → ready → reserved → running → needs-input ⇄ running →
-awaiting-merge → done` with `failed`, `cancelled` and `lost` off-path. `awaiting-merge` frees the
-concurrency slot (session ended) but keeps `after: merged` dependents blocked. M2 builds the
-slice below (`scheduler/src/task.ts` is the copy that runs; M3 adds `queued`, `blocked` and
-`awaiting-merge`):
+**Task states.** The full lifecycle is `queued → blocked → ready → reserved → running ⇄
+needs-input → awaiting-merge → done`, with `failed`, `cancelled` and `lost` off-path. M2 built the
+slice from `ready`. M3 adds `queued` (an app's create, which the leader admits to `blocked` or
+`ready`), `blocked` (until every dependency edge releases) and `awaiting-merge`, which frees the
+concurrency slot (the session ended) but keeps `after: merged` dependents blocked. The three are
+in the schema already, with no edges until M3 item 4a.
 
-| From                          | To                                                                       | On                                                                                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ready`                       | `reserved`, `cancelled`                                                  | routed and reserved; cancel                                                                                                                                                          |
-| `reserved`                    | `running`, `needs-input`, `done`, `ready`, `lost`, `failed`, `cancelled` | verdict or session event; past the TTL: no session and the ledger's proof → `ready`, no proof → `failed`, check unanswered with the machine gone → `lost`; daemon refusal → `failed` |
-| `running`                     | `needs-input`, `lost`, `done`, `failed`, `cancelled`                     | session event; machine absent past `lostAfterMs` → `lost`                                                                                                                            |
-| `needs-input`                 | `running`, `lost`, `done`, `failed`, `cancelled`                         | as `running`                                                                                                                                                                         |
-| `lost`                        | `running`, `needs-input`, `done`, `ready`, `failed`, `cancelled`         | its own machine: `sessions` or an event it sealed (below); cancel                                                                                                                    |
-| `done`, `failed`, `cancelled` | —                                                                        | terminal                                                                                                                                                                             |
+**Takeover (M3).** M2's reconcile stands. M3 adds the store's half: list the store, open every
+body, and skip and report one that does not decrypt or whose version or id disagrees with its
+key — as the PWA skips registry entries, never fatal — before the reconcile runs.
 
-`lost` (M2 item 3's gap B, closed in item 6; DESIGN.md _Scheduler_, "`lost`"): held until its own
-machine answers, because a machine that only sleeps keeps its session and a re-dispatch would be
-its twin. A session there → `running`. With none, a task that ran → `done`; one lost from
-`reserved` (never confirmed) settles as its reservation would have — `done` if `ended` lists it,
-`ready` only on the machine's ledger proof (`SessionsResponse.ledgerSince`), `failed`
-`dispatch_unconfirmed` without. `cancel` despawns it when its machine is connected and otherwise
-cancels it as it stands, marked `leftRunning` (2026-10-16).
+**Routing, ahead.** Today's cadence, for reference: the leader runs a pass on every change to
+its leg's machine list, after each `submit`, and on a 30s timer that runs for the whole term
+whether or not anything is ready; reservation TTLs and `lost` are checked only inside a pass. A
+task's decision is written with its reservation (one store write) — never after the spawn —
+and an unplaced task's stays in memory. M3 and M4 add:
 
-**Takeover** (on `lead`): list the store, open every body (skip and report non-decrypting or
-version-mismatched ones, as the PWA skips registry entries), then for each `reserved` or
-`running` task ask `sessions` on its machine: a session carrying the `taskId` → `running` with
-that pane; none and the reservation is unexpired → keep waiting; none and expired → release
-and re-route on the machine's ledger proof, `failed` without it. Only then does the loop start dispatching. The reconcile landed with item 3 as
-`Scheduler.takeover()` (DESIGN.md _Scheduler_), which also settles a `running` task whose
-session is gone as `done`; opening and version-checking bodies is M3's store adapter.
+- Filters: the per-account cap (`cap_reached` with `scope: "account"`, M3 item 5) and the
+  per-batch strategy (`sequential` / `parallel(n)` / `auto`, M3 item 4a); `skill absent` (M4,
+  _Skills_: a hard filter when declared or the prompt starts with `/name`); stacked base
+  unpushed and not on this exclave (M4, _Stacking_).
+- Score: `dependencyDistance` gets an input once M3's deps fill `TaskSpec.base`. The Proxmox
+  node view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
+  library reads it as any other pressure.
+- Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
+  deltas per task.
 
-```
-                 registry + status (per machine)        task (sealed body)
-                 exclaves · clones · skills · caps       repo · deps · pin · skill · lineage
-                              │                                   │
-                              ▼                                   ▼
- every clone of the task's   ─┬─► 1 FILTER ──► drop, with a reason ──────────────────────┐
- repo, on any machine         │   offline/stale · no taskId · auth missing · repo absent   │
-                              │   skill absent · pin mismatch · base unpushed             │
-                              │   free disk < 1 GiB · account quota unknown               │
-                              │   account over threshold ∧ credits off · cap reached      │
-                              │                                                           │
-                              └─► 2 SCORE  (lower wins, weights in config)                │
-                                  account_pressure       max(f(5h), g(7d)), ÷ time-to-reset
-                                  machine_pressure       max(cpu, mem, host)              │
-                                  dependency_distance    0 same exclave … 0.5 elsewhere   │
-                                  queue_pressure                                          │
-                                      │                                                   │
-                                      ▼                                                   │
-                                  3 STICKY  lineage owner bonus (continuations only)      │
-                                      │                                                   │
-                                      ▼                                                   ▼
-                                  4 RESERVE ──► store-put ──► spawn { taskId } ──► 5 RECORD decision
-                                  TTL 120s      (one write)   task_running /       chose X because …
-                                                              failure → release    rejected Y because …
-```
-
-**Routing (per ready task, on any state change + a 30s tick while ready tasks exist)**, from
-the latest `status` per machine; a snapshot `isStatusStale` calls stale (older than 90s) counts as unknown and the machine
-is filtered for new work:
-
-1. _Filter_ (structured rejection reasons): machine offline/stale; `taskId` unsupported;
-   free disk under 1 GiB; account quota unknown; exclave auth missing; repo absent in exclave; required skill absent; pin mismatch;
-   stacked base unpushed and not on this exclave; projected account usage over the 90% line (a window resetting within 15 min counts as empty) **and**
-   extra usage disabled; per-account / global cap reached.
-2. _Score_ (lower wins, weights in config):
-   `account_pressure` = max(f(projected 5h), g(projected 7d)), convex, discounted by
-   time-to-reset; `machine_pressure` = max(cpu, mem, host) for LXCs — disk is the filter's
-   floor, never a score;
-   `dependency_distance` (0 same exclave … 0.5 pushed elsewhere); `queue_pressure`.
-3. _Stickiness_: lineage owner bonus; only matters for continuations.
-4. _Reserve_ (one store write) then dispatch with `taskId`; reservation TTL 120s; spawn failure
-   or `task_running` from a stale read both resolve the reservation without a second spawn.
-5. _Record_ the decision with every component; PWA renders "chose X because …, rejected Y
-   because …".
-
-Projected usage counts reservations + running scheduler tasks (fixed per-task estimate in v1,
-tuned later from observed deltas per task). Current usage is read exactly as the PWA's account
-cards read it — the newest observation per account across the fleet, a window past its reset
-counting as 0% — from the one copy of both rules, `newestQuotaByAccount` and `effectivePct` in
-`shared/src/quota.ts`.
-
-**Quota freshness is the observation's, not the status's.** A machine's status answers two
-questions that age differently. Its pressure describes that machine now, so a status
-`isStatusStale` calls stale — and every kept status (Wire changes, _Last `status` kept_), whose
-machine is gone — says nothing about pressure, and the machine is filtered. Its quota
-observations describe an account, which other machines share, each stamped with its own `at`:
-they join the fold from live and kept statuses alike, the newest `at` per account wins, and a
-window past its reset counts as 0% however old the reading. So an account last used on a
-laptop that has since slept keeps that laptop's reading instead of falling back to an older
-one, or to nothing.
-
-An old reading is a _lower bound_: use since — on another machine the fleet would see, or on
-claude.ai, which it would not — only raises it. v1 routes on it as observed and the decision
-record shows its age. No age cap beyond the reset rule (_Settled defaults_ 7).
-
-**Missing quota is unknown, never 0%.** An account is scored only on a reading it actually has.
-It is filtered `quota unknown` when no status, live or kept, carries an observation for it, or
-when a status from a machine hosting it is trimmed (`isQuotaTrimmed`), does not carry it, and
-nothing newer than that status does — trimming may have dropped exactly the reading that said
-the account was full. Reading either case as 0% would route the most work to the account the
-scheduler knows least about.
-
-**Credits spill:** dispatching to an account past the hard threshold with extra usage on
-fires a Web Push ("Spending credits on <account> for <task>" + Pause actions). Re-alerts once per
-account per window, not per task.
+**Credits spill:** dispatching to an account past the hard threshold with extra usage on — a
+candidate the record already marks `spill` — is detected and shown in the PWA from M3 item 5,
+and from M4 fires a Web Push ("Spending credits on <account> for <task>" + Pause actions).
+Re-alerts once per account per window, not per task.
 
 **Done detection:** Linear Done (if linked, poll) or daemon `branch-state merged` → `done`;
 session `ended` without merge → `awaiting-merge` (PR open) or `failed` (no PR, nonzero) —
@@ -403,15 +335,25 @@ read yet.
 ### M2 — routing and leadership (done 2026-10-16)
 
 A PWA spawn on `auto` lands on the machine and exclave the scheduler chose, with the decision
-explained, and the role survives the leading machine going away. Landed as #115 (the library),
-#114 (leadership), #112 (`taskId`), #117 (`leader.ts`), #118 (session events and the mod), #113
-(the kept `status`) and item 6 as #120–#122: the leader answering `queue` and
-`route-preview`, M2's temporary `submit`, and the PWA's `auto`, with item 3's two gaps closed
-along the way (a term the daemon ends itself goes back to the relay; a task on a machine that
-stops answering becomes `lost`). Recorded in DESIGN.md _Scheduler_ (leadership, the leader,
-requests, the library, `lost`), _Wire protocol_ (Layer 2's scheduler ops, the frame table),
-_Local op socket_ ("Session events"), _Presence & identity_ (the kept `status`), _Daemon_ ("Task
-ids"), _PWA_ (`auto`) and _Threat model_ (signed `roles`, leader capture and the reader check).
+explained, and the role survives the leading machine going away. Landed by item ("M2 item N"
+in commits and code comments):
+
+| Item | What                                                                                                                                       | PR        |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| 1    | The `scheduler/` library                                                                                                                   | #115      |
+| 2    | Relay leadership: signed `roles`, nomination, `scheduler:term`, the term fence                                                             | #114      |
+| 3    | `leader.ts`, the scheduler role                                                                                                            | #117      |
+| 4    | `taskId` on `spawn`, `task_running`, `taskId` in `sessions`                                                                                | #112      |
+| 5    | Session events and the `session-events` mod                                                                                                | #118      |
+| 6    | The leader answering `queue` and `route-preview`, closing gap A (part 1); M2's `submit`, closing gap B (part 2); the PWA's `auto` (part 3) | #120–#122 |
+| 7    | The kept `status`                                                                                                                          | #113      |
+
+After it: gaps 1 and 4 (#127), M3's gate (#124), and MCP's `auto` on M2's `submit` (#131).
+Recorded in DESIGN.md _Scheduler_ (leadership, the leader, requests, the library, `lost`),
+_Wire protocol_ (Layer 2's scheduler ops, the frame table), _Local op socket_ ("Session
+events"), _Presence & identity_ (the kept `status`), _Daemon_ ("Task ids"), _PWA_ (`auto`) and
+_Threat model_ (signed `roles`, leader capture and the reader check).
+
 Every exit criterion has a test: two real daemons and an `auto` spawn landing where its record
 says, with the other machine's rejection in it, and a bearer-token holder's squatting socket read
 as "leader unverified" with nothing sent to it (e2e — since M3's gate a squatter is never
@@ -429,14 +371,27 @@ survive), and `submit` is the only way in until M3's `store-put` replaces it. No
 no caps beyond the global max, no pause, no alerts; the PWA polls `queue` for a task's progress
 instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
-A `submit` whose reply is lost cannot be reconciled — the verdict says it may have queued and
-offers no retry. A `lost` task waits for its own machine indefinitely unless cancelled.
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
-`SCHEDULER_LEADERS` allowlist. (Closed 2026-10-16: a reserved task whose machine disconnected
-before answering is now `lost`, not released, and goes back to `ready` only on that machine's
-launch-ledger proof; a `lost` task can be cancelled. DESIGN.md _Scheduler_, "`lost`", and _Local
-op socket_, "Session events".)
+`SCHEDULER_LEADERS` allowlist.
+
+The gaps cited by label elsewhere (A and B were item 3's):
+
+- **Gap A** (closed, item 6 part 1): a term the daemon ended on its own — its leg's token
+  rejected — stayed named at the relay, so `auto` looked available while nothing answered. The
+  daemon now hands the role back (DESIGN.md _Scheduler_, "The leader").
+- **Gap B** (closed, item 6 part 2): a placed task on a machine that stopped answering read
+  `running` forever. It is now `lost` (DESIGN.md _Scheduler_, "The library", "`lost`").
+- **Gap 1** (closed, #127): a reserved task whose machine disconnected before answering went
+  back to `ready`, a possible twin. It is now `lost`, and back to `ready` only on that
+  machine's launch-ledger proof (same bullet, and _Local op socket_, "Session events").
+- **Gap 2** (looked at, open as a watch): terms climbing fast — deploy churn, not a nomination
+  bug (Risks, _Leader churn_).
+- **Gap 3** (open until M3): a `submit` whose reply is lost cannot be reconciled — the verdict
+  says it may have queued and offers no retry. M3's app-minted ids make enqueue idempotent
+  (M3 item 1).
+- **Gap 4** (closed, #127): a `lost` task waited for its own machine indefinitely, with no
+  way to give up on it; it can now be cancelled (DESIGN.md "`lost`").
 
 ### M3 — durable queue
 
@@ -632,14 +587,20 @@ Nothing below is open. An implementer who wants a different value changes this s
 same PR, with the reason.
 
 1. **Leader** = earliest-connected capable daemon on the relay's `SCHEDULER_LEADERS`
-   allowlist, ties by `deviceId`; nomination only, no voting. Capable is signed `roles`; the
+   allowlist, ties by `deviceId`, except that a current leader still eligible keeps the role —
+   even across its own reconnect; nomination only, no voting. Capable is signed `roles`; the
    allowlist is a Worker secret, and unset or empty nominates nobody. Readers still ignore a
    leader whose entry does not open (Risks, _Leader capture_).
 2. **Enqueue needs no leader.** Apps create tasks in the store at `expect: 0`; everything else
-   waits for one. Matters only for old daemons and the ≤ ~90s re-nomination gap, and costs
-   nothing (a token holder could already fill the registry with junk).
+   waits for one. Matters only for old daemons and the re-nomination gap — immediate on a clean
+   close, up to ~150s for a leader that vanishes silently (90s of silence, then up to a 60s
+   sweep, `relay/src/hub.ts`) — and costs nothing (a token holder could already fill the
+   registry with junk).
 3. **Audit** as `origin=relay client=scheduler`, not a new origin — the daemon-side surface is
-   still the relay, and `client` is what already tells the PWA, MCP and Raycast apart.
+   still the relay, and `client` is what already tells the PWA, MCP and Raycast apart. The
+   exception is the leader's own machine, which it reaches in process, not through the relay:
+   `origin=leader client=scheduler`, since a new surface adds an origin (DESIGN.md _Scheduler_,
+   "The leader").
 4. **Quota line: 90% hard, 10% reserved**, either window. Matches the router note's
    `reserve_pct: 10` and the knee of its convex cost, `(u/(1-u))²`: 16 at 80%, 81 at 90%,
    361 at 95% — the score already pushes work away before the line, the filter only adds the
@@ -771,5 +732,6 @@ same PR, with the reason.
   this a short window.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
-  box becomes the rewrite this design exists to avoid. Enforce it the way `raycast/` enforces
-  its layering: a test that fails the build on either import direction.
+  box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces
+  its layering: `scheduler/test/layering.test.ts` fails on either import direction, and proves
+  its detector catches each.
