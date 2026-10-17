@@ -1,28 +1,9 @@
 #!/usr/bin/env bun
-import {
-  cmdDespawn,
-  cmdDoctor,
-  cmdInit,
-  cmdInstall,
-  cmdLink,
-  cmdMcp,
-  cmdMod,
-  cmdPskImport,
-  cmdRaycast,
-  cmdReap,
-  cmdRestart,
-  cmdScan,
-  cmdSessions,
-  cmdSpawn,
-  cmdStatus,
-  cmdUninstall,
-  cmdUnlink,
-} from "./cli.ts";
-import { log } from "./log.ts";
-import { startPowerLoop } from "./power.ts";
+// `session-event`'s is the one static import: it runs two or three times a turn
+// in every Claude session on the machine (the session-events mod, in every
+// exclave), and a static `cli.ts` would load the MCP SDK and zod into each of
+// those runs — 47 ms against 13. Every other command imports what it needs once picked.
 import { cmdSessionEvent } from "./session-event-cli.ts";
-import { startedBySupervisor } from "./service.ts";
-import { startSupervisor } from "./supervise.ts";
 
 const USAGE = `seanced — séance daemon
 
@@ -52,6 +33,12 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
+  const [{ log }, { startPowerLoop }, { startedBySupervisor }, { startSupervisor }] = await Promise.all([
+    import("./log.ts"),
+    import("./power.ts"),
+    import("./service.ts"),
+    import("./supervise.ts"),
+  ]);
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
@@ -68,66 +55,76 @@ async function runForeground(): Promise<void> {
   await new Promise(() => {}); // run until signalled
 }
 
+async function runCommand(command: string, rest: readonly string[]): Promise<void> {
+  const cli = await import("./cli.ts");
+  switch (command) {
+    case "init":
+      await cli.cmdInit();
+      break;
+    case "psk-import":
+      await cli.cmdPskImport();
+      break;
+    case "install":
+      await cli.cmdInstall(rest);
+      break;
+    case "uninstall":
+      await cli.cmdUninstall(rest);
+      break;
+    case "link":
+      await cli.cmdLink(rest);
+      break;
+    case "unlink":
+      await cli.cmdUnlink();
+      break;
+    case "restart":
+      await cli.cmdRestart();
+      break;
+    case "doctor":
+      await cli.cmdDoctor();
+      break;
+    case "status":
+      await cli.cmdStatus();
+      break;
+    case "scan":
+      await cli.cmdScan();
+      break;
+    case "sessions":
+      await cli.cmdSessions();
+      break;
+    case "spawn":
+      await cli.cmdSpawn(rest);
+      break;
+    case "despawn":
+      await cli.cmdDespawn(rest);
+      break;
+    case "reap":
+      await cli.cmdReap(rest);
+      break;
+    case "mcp":
+      await cli.cmdMcp(rest);
+      break;
+    case "mod":
+      await cli.cmdMod(rest);
+      break;
+    case "raycast":
+      await cli.cmdRaycast(rest);
+      break;
+    default:
+      console.error(`unknown command "${command}"\n`);
+      console.log(USAGE);
+      process.exit(1);
+  }
+}
+
 const [command, ...rest] = process.argv.slice(2);
 
 try {
   switch (command) {
-    case undefined:
-      await runForeground();
-      break;
-    case "init":
-      await cmdInit();
-      break;
-    case "psk-import":
-      await cmdPskImport();
-      break;
-    case "install":
-      await cmdInstall(rest);
-      break;
-    case "uninstall":
-      await cmdUninstall(rest);
-      break;
-    case "link":
-      await cmdLink(rest);
-      break;
-    case "unlink":
-      await cmdUnlink();
-      break;
-    case "restart":
-      await cmdRestart();
-      break;
-    case "doctor":
-      await cmdDoctor();
-      break;
-    case "status":
-      await cmdStatus();
-      break;
-    case "scan":
-      await cmdScan();
-      break;
-    case "sessions":
-      await cmdSessions();
-      break;
-    case "spawn":
-      await cmdSpawn(rest);
-      break;
-    case "despawn":
-      await cmdDespawn(rest);
-      break;
-    case "reap":
-      await cmdReap(rest);
-      break;
-    case "mcp":
-      await cmdMcp(rest);
-      break;
-    case "mod":
-      await cmdMod(rest);
-      break;
-    case "raycast":
-      await cmdRaycast(rest);
-      break;
     case "session-event":
       await cmdSessionEvent();
+      break;
+    case undefined:
+      await runForeground();
       break;
     case "help":
     case "--help":
@@ -135,9 +132,7 @@ try {
       console.log(USAGE);
       break;
     default:
-      console.error(`unknown command "${command}"\n`);
-      console.log(USAGE);
-      process.exit(1);
+      await runCommand(command, rest);
   }
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
