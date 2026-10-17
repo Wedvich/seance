@@ -1,11 +1,15 @@
 import {
+  isStoreKey,
   SCHEDULER_ID,
+  STORE_PREFIXES,
   TOKEN_PARAM,
   type AppFrame,
   type DaemonFrame,
   type Envelope,
   type RegistryView,
   type RelayToAppFrame,
+  type StoreReplyFrame,
+  type StoreRequestFrame,
 } from "@seance/shared";
 
 /**
@@ -22,6 +26,18 @@ import {
  * `not_leader`. A daemon's envelope `to: "scheduler"` goes to whichever
  * daemon `lead` last named. Nomination itself is the test's: `lead`/`follow`
  * only send the frames.
+ *
+ * The store ops (scheduler M3) are doubled on the daemon leg, with the rules
+ * a leader's adapter depends on: a write needs the current term from the
+ * leader's own socket (`not_leader` otherwise), `expect` is compared to the
+ * stored version, a delete under `task:` leaves a tombstone that never expires
+ * (a put there is `version_conflict`, a get reads null), a delete under
+ * `queue:` is `forbidden`, a list is ascending by key. `appWrite` stands in
+ * for an app's create, and sends `store-changed` to the leader's socket.
+ * Absent from the store double, against the DO: the size caps and the create
+ * floor, tombstone expiry, app-leg store frames over a socket, and the refusal
+ * log. A test that needs an answer the rules would not give uses
+ * `replyNextStore`.
  *
  * Absent here: `/daemon` vs `/app` path roles (the token's carrier decides),
  * a registry derived from registers, broadcast to app sockets. Three
@@ -110,8 +126,30 @@ export interface TestRelay {
   follow: (deviceId: string) => void;
   /** The term an envelope `from: "scheduler"` must carry; null refuses every one. */
   schedulerTerm: number | null;
+  /** Every store frame a daemon sent, in order — held or answered. */
+  readonly storeFrames: AsyncQueue<StoreRequestFrame>;
+  /** Answer no store frame: a timeout for the sender. */
+  holdStoreReplies: boolean;
+  /**
+   * The next store frame gets this raw reply instead of the rules' answer — a
+   * page (`next`), the wrong kind, an unknown code, a wrong version. One-shot;
+   * several queue.
+   */
+  replyNextStore: (make: (frame: StoreRequestFrame) => unknown) => void;
+  storeRecords: () => ReadonlyMap<string, { readonly version: number; readonly env: Envelope }>;
+  /** A record as the store would hold it, bypassing every rule: junk a token holder could plant. */
+  plantRecord: (key: string, version: number, env: Envelope) => void;
+  /**
+   * An app's create (`expect: 0`, with the tombstone and version rules), then
+   * `store-changed` to the leader's socket if one is named.
+   */
+  appWrite: (key: string, env: Envelope) => { ok: true; version: number } | { ok: false; code: string };
+  /** Closes the daemon's socket from the relay's side, as a drop after a send. */
+  dropDaemon: (deviceId: string) => void;
   stop: () => void;
 }
+
+const refused = (re: string, code: string): StoreReplyFrame => ({ t: "store-refused", re, code });
 
 export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const registers = new AsyncQueue<RegisterFrame>("registers");
@@ -130,6 +168,11 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const registerConnections: number[] = [];
   let registry: readonly RegistryView[] = [];
   let leader: string | null = null;
+  const storeFrames = new AsyncQueue<StoreRequestFrame>("storeFrames");
+  const records = new Map<string, { version: number; env: Envelope }>();
+  /** Key → the version it was deleted at. Never expires here, unlike the DO's. */
+  const tombstones = new Map<string, number>();
+  const storeOverrides: ((frame: StoreRequestFrame) => unknown)[] = [];
 
   const relay: {
     autoPong: boolean;
@@ -137,12 +180,59 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     refuseNextRegisters: number;
     rejectApps: boolean;
     schedulerTerm: number | null;
+    holdStoreReplies: boolean;
   } = {
     autoPong: true,
     refuseRegisters: false,
     refuseNextRegisters: 0,
     rejectApps: false,
     schedulerTerm: null,
+    holdStoreReplies: false,
+  };
+
+  const answerStore = (ws: Bun.ServerWebSocket<Role>, frame: StoreRequestFrame): StoreReplyFrame => {
+    const { id: re } = frame;
+    if (frame.t === "store-list") {
+      const prefix = Object.values(STORE_PREFIXES).find((rule) => rule.prefix === frame.prefix)?.prefix;
+      if (prefix === undefined) return refused(re, "invalid_request");
+      const listed = [...records]
+        .filter(([key]) => key.startsWith(prefix))
+        .toSorted(([a], [b]) => (a < b ? -1 : 1))
+        .map(([key, held]) => ({ key, version: held.version, env: held.env }));
+      return { t: "store-listed", re, records: listed };
+    }
+    if (!isStoreKey(frame.key)) return refused(re, "invalid_request");
+    const { key } = frame;
+    if (frame.t === "store-get") {
+      const held = records.get(key);
+      return {
+        t: "store-record",
+        re,
+        record: held === undefined ? null : { key, version: held.version, env: held.env },
+      };
+    }
+    if (frame.t === "store-delete" && key.startsWith(STORE_PREFIXES.queue.prefix)) return refused(re, "forbidden");
+    // Every prefix here is term-fenced; the term holds only from the socket it was issued to.
+    const holdsTerm =
+      frame.term !== undefined && frame.term === relay.schedulerTerm && leader !== null && daemons.get(leader) === ws;
+    if (!holdsTerm) return refused(re, "not_leader");
+    const stored = records.get(key)?.version ?? 0;
+    if (frame.t === "store-put") {
+      if (tombstones.has(key) || frame.expect !== stored) return refused(re, "version_conflict");
+      records.set(key, { version: frame.expect + 1, env: frame.env });
+      return { t: "store-written", re, version: frame.expect + 1 };
+    }
+    if (stored === 0 || frame.expect !== stored) return refused(re, "version_conflict");
+    records.delete(key);
+    if (key.startsWith(STORE_PREFIXES.task.prefix)) tombstones.set(key, stored);
+    return { t: "store-written", re, version: stored };
+  };
+
+  const onStoreFrame = (ws: Bun.ServerWebSocket<Role>, frame: StoreRequestFrame): void => {
+    storeFrames.push(frame);
+    if (relay.holdStoreReplies) return;
+    const override = storeOverrides.shift();
+    ws.send(JSON.stringify(override === undefined ? answerStore(ws, frame) : override(frame)));
   };
 
   const registryFrame = (): string =>
@@ -182,8 +272,15 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       registers.push(frame);
     } else if (frame.t === "status") {
       statuses.push(frame.env);
+    } else if (
+      frame.t === "store-list" ||
+      frame.t === "store-get" ||
+      frame.t === "store-put" ||
+      frame.t === "store-delete"
+    ) {
+      onStoreFrame(ws, frame);
     } else if (frame.t !== "msg") {
-      // A store frame (scheduler M3): this double has no store until item 3 gives it one.
+      // `lead-proof`: nothing here reads it.
     } else if (frame.env.to === SCHEDULER_ID) {
       if (leader === null) toScheduler.push(frame.env);
       else daemons.get(leader)?.send(JSON.stringify({ t: "msg", env: frame.env }));
@@ -295,6 +392,32 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set schedulerTerm(value: number | null) {
       relay.schedulerTerm = value;
+    },
+    storeFrames,
+    get holdStoreReplies() {
+      return relay.holdStoreReplies;
+    },
+    set holdStoreReplies(value: boolean) {
+      relay.holdStoreReplies = value;
+    },
+    replyNextStore: (make): void => {
+      storeOverrides.push(make);
+    },
+    storeRecords: () => records,
+    plantRecord: (key, version, env): void => {
+      records.set(key, { version, env });
+    },
+    appWrite: (key, env) => {
+      if (!isStoreKey(key)) return { ok: false, code: "invalid_request" };
+      if (tombstones.has(key) || records.has(key)) return { ok: false, code: "version_conflict" };
+      records.set(key, { version: 1, env });
+      if (leader !== null) {
+        daemons.get(leader)?.send(JSON.stringify({ t: "store-changed", key, version: 1 }));
+      }
+      return { ok: true, version: 1 };
+    },
+    dropDaemon: (deviceId): void => {
+      daemons.get(deviceId)?.close(1000, "dropped by the test relay");
     },
     rejectedCount: () => rejected,
     connectionCount: () => connections,
