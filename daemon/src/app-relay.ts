@@ -7,6 +7,7 @@ import {
   type TaskReply,
   type SchedulerEventHandler,
   type RelayState,
+  type ReplayGuard,
   type RequestOp,
   type SubmitReply,
   type TaskRequest,
@@ -215,13 +216,13 @@ export class LazyRelay {
  * The shared app-role client, configured the way every daemon-side consumer
  * needs it. `log` is required rather than defaulted: the default is stdout,
  * which in `seanced mcp` is the protocol channel. `scheduler` makes it the
- * leader's leg for one term (`leader.ts`).
+ * leader's leg for one term (`leader.ts`), under a replay guard that outlives it.
  */
 export function appRelayClient(
   config: Pick<Config, "relayUrl" | "bearerToken">,
   key: CryptoKey,
   log: (line: string) => void,
-  scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler },
+  scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler; readonly guard?: ReplayGuard },
 ): RelayClient {
   return new RelayClient({
     url: appRelayUrl(config.relayUrl),

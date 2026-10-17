@@ -2,6 +2,7 @@ import {
   APP_ID,
   CAPABILITIES,
   importPsk,
+  ReplayGuard,
   seal,
   STATUS_INTERVAL_MS,
   type Envelope,
@@ -113,6 +114,14 @@ function warnRejected(scan: ExclaveScan): void {
  * `sessions` without waiting for the other's spawn.
  */
 const endedTasksByLedger = new Map<string, Promise<EndedTasks>>();
+
+/**
+ * Every envelope `to: "scheduler"` this process opens — each term's leg and the
+ * `not_leader` answer — goes through this one guard. The relay chooses which
+ * term an envelope reaches, so a guard per term, or per reload, would let it
+ * hand an app's `submit` to each in turn and run the one prompt once each.
+ */
+const schedulerGuard = new ReplayGuard();
 
 function endedTasksFor(path: string): Promise<EndedTasks> {
   let tasks = endedTasksByLedger.get(path);
@@ -332,7 +341,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // is built per term over the key imported above, never the broker's.
   const leader = createLeader({
     selfDeviceId: state.deviceId,
-    createRelay: (term, onEvent) => appRelayClient(config, key, (line) => log.info(line), { term, onEvent }),
+    createRelay: (term, onEvent) =>
+      appRelayClient(config, key, (line) => log.info(line), { term, onEvent, guard: schedulerGuard }),
     local: createLocalOps(handlerCtx, "leader"),
     // Late-bound: the client below is built after the leader it hands frames to.
     reply: (to, response) => client.reply(to, response),
@@ -350,6 +360,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     onLead: (term) => leader.lead(term),
     onFollow: () => leader.follow("the relay moved the role elsewhere"),
     onScheduler: (env) => leader.deliver(env),
+    schedulerGuard,
     onRegister: (info): void => {
       registered = candidates.get(info) ?? registered;
       sampleNow();

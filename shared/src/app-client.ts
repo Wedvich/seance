@@ -402,7 +402,7 @@ export class RelayClient {
   readonly #pending = new Map<string, Pending>();
   /** `undeliverable` can only echo the IV, so responses and failures index differently. */
   readonly #idByIv = new Map<string, string>();
-  readonly #guard = new ReplayGuard();
+  readonly #guard: ReplayGuard;
   /**
    * Decrypted `info` by deviceId and envelope IV (`infoCacheKey`); blobs are
    * re-sent verbatim on every push. "unopenable" is a blob sealed with a key this
@@ -492,10 +492,16 @@ export class RelayClient {
      * sent under the old one can go out under the new. `onEvent` takes what
      * daemons send the scheduler unasked (`session-event`): opened and
      * replay-checked like a reply, with the sealing machine's id.
+     *
+     * `guard` is the one replay guard the daemon keeps for scheduler envelopes
+     * across terms. The relay decides which term an envelope reaches, so a
+     * guard per term would let it hand an app's `submit` to each new term in
+     * turn — one prompt run once per term, inside the replay window.
      */
     readonly scheduler?: {
       readonly term: number;
       readonly onEvent?: SchedulerEventHandler;
+      readonly guard?: ReplayGuard;
     };
   }) {
     this.#url = opts.url;
@@ -510,6 +516,7 @@ export class RelayClient {
     this.#log = opts.log ?? ((line) => console.log(line));
     this.#term = opts.scheduler?.term ?? null;
     this.#onEvent = opts.scheduler?.onEvent ?? null;
+    this.#guard = opts.scheduler?.guard ?? new ReplayGuard();
   }
 
   /**
