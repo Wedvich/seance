@@ -36,14 +36,8 @@ import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import type { LocalOps } from "../src/handlers.ts";
-import {
-  boundedQueue,
-  createLeader,
-  MemoryQueueStore,
-  type Leader,
-  type QueueStore,
-  type Task,
-} from "../src/leader.ts";
+import { boundedQueue } from "../src/leader-requests.ts";
+import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
 import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 import { AsyncQueue, startTestRelay, type TestRelay } from "./harness.ts";

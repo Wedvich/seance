@@ -257,7 +257,7 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
 
 /**
  * UTF-8 bytes of payload JSON one scheduler `sessions` reply may carry. The
- * same 4/3 sealing headroom as `QUEUE_REPLY_BUDGET` in `leader.ts`: against
+ * same 4/3 sealing headroom as `QUEUE_REPLY_BUDGET` in `leader-requests.ts`: against
  * `ENVELOPE_MAX_CT_LENGTH`'s 65 536, 44 000 seals to about 58 900. Over it,
  * `RelayClient` answers `too_large` instead, losing `ended` and `ledgerSince`.
  */
@@ -333,7 +333,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
     return guarded(op, body);
   };
   return {
-    // Every caller of these is the scheduler: `leader.ts` is the only one.
+    // Every caller of these is the scheduler: `termFleet` in `leader-adapters.ts` is the only one.
     sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx, true)),
     spawn: (payload) => {
       const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();

@@ -5,12 +5,16 @@ import { describe, expect, test } from "bun:test";
 /**
  * The placement decision is reversible only while the adapter boundary holds
  * (docs/scheduler.md, Risks): the library may not reach into the daemon, and
- * the daemon may reach the library only through `leader.ts`, which hosts it.
- * Either import makes moving the scheduler to a fixed box the rewrite the
- * design exists to avoid, so it fails here rather than in review.
+ * the daemon may reach the library only through the leader's modules, which
+ * host it. Either import makes moving the scheduler to a fixed box the rewrite
+ * the design exists to avoid, so it fails here rather than in review.
  */
 const ROOT = resolve(import.meta.dir, "../..");
-const LEADER = "daemon/src/leader.ts";
+const LEADER_MODULES: ReadonlySet<string> = new Set([
+  "daemon/src/leader.ts",
+  "daemon/src/leader-adapters.ts",
+  "daemon/src/leader-requests.ts",
+]);
 
 /** Every module specifier a source names — static, side-effect, re-export and dynamic. */
 export function specifiers(source: string): string[] {
@@ -33,7 +37,7 @@ export function violations(file: string, source: string): string[] {
   return specifiers(source).filter((specifier) => {
     const to = target(file, specifier);
     if (home === "scheduler") return to === "daemon";
-    if (home === "daemon") return to === "scheduler" && file !== LEADER;
+    if (home === "daemon") return to === "scheduler" && !LEADER_MODULES.has(file);
     return false;
   });
 }
@@ -46,7 +50,7 @@ async function sources(workspace: string): Promise<string[]> {
 }
 
 describe("scheduler ↔ daemon layering", () => {
-  test("nothing in scheduler/ imports daemon/, and only leader.ts in daemon/ imports scheduler/", async () => {
+  test("nothing in scheduler/ imports daemon/, and only the leader's modules in daemon/ import scheduler/", async () => {
     // This file is skipped: its cases below spell forbidden imports out as strings.
     const self = relative(ROOT, import.meta.path);
     const files = [...(await sources("scheduler")), ...(await sources("daemon"))].filter((file) => file !== self);
@@ -68,8 +72,10 @@ describe("scheduler ↔ daemon layering", () => {
     expect(violations("daemon/src/broker.ts", `import type { Fleet } from "@seance/scheduler";`)).toHaveLength(1);
   });
 
-  test("the allowed edges pass: leader.ts hosting the library, either side importing shared", () => {
-    expect(violations(LEADER, `import { Scheduler } from "@seance/scheduler";`)).toEqual([]);
+  test("the allowed edges pass: the leader's modules hosting the library, either side importing shared", () => {
+    for (const file of LEADER_MODULES) {
+      expect(violations(file, `import { Scheduler } from "@seance/scheduler";`)).toEqual([]);
+    }
     expect(violations("scheduler/src/route.ts", `import { effectivePct } from "@seance/shared";`)).toEqual([]);
     expect(violations("daemon/src/run.ts", `import { x } from "./scheduler-ish.ts";`)).toEqual([]);
   });
