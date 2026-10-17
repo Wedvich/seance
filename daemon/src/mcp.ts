@@ -215,10 +215,11 @@ function isAutoRef(ref: string): boolean {
 
 /**
  * Said wherever `auto` is described, because an agent will otherwise take the
- * queue for a backlog. M2's queue is the leader's memory (docs/scheduler.md, M2 gaps).
+ * queue for a backlog. The queue is the relay's store, so a waiting task survives
+ * a leader change (docs/scheduler.md, M3); dependencies and ordering still aren't offered here.
  */
 const AUTO_LIMITS =
-  "The scheduler's queue lives only in the leading daemon's memory: a task still waiting for capacity is lost when leadership changes, and it changes on every relay deploy and every daemon self-update. A task already placed is an ordinary session and survives that. There are no dependencies or ordering between tasks. Do not use auto as a durable backlog — submit only work that should start now.";
+  "The scheduler's queue is held by the relay, so a task still waiting for capacity survives a change of leader (every relay deploy and daemon self-update) and the next leader picks it up. A task already placed is an ordinary session. There are no dependencies or ordering between tasks. Do not use auto as a backlog — submit only work that should start now.";
 
 /** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
 type SchedulerTool = "auto" | "get_queue" | "cancel_task";
@@ -427,7 +428,7 @@ function renderAutoTask(task: Task, machines: readonly Machine[], note: string |
       break;
     default:
       lines.push(
-        "Not placed yet: it waits in the leader's memory for capacity, and a leader change drops it. Check get_queue; if it is gone with no session to show for it, submit again or name a machine.",
+        "Not placed yet: it waits in the relay's queue for capacity, and survives a leader change. Check get_queue; if it is gone with no session to show for it, submit again or name a machine.",
       );
   }
   if (note !== null) lines.push(note);
@@ -540,7 +541,7 @@ async function spawnAuto(
         );
       }
       return errorResult(
-        `task ${id} was queued, then left the leader's queue before it was placed — the leader probably changed, which drops waiting tasks. Check get_sessions before submitting again.`,
+        `task ${id} was queued, then left the queue before it was placed — it may have been cancelled or pruned. Check get_sessions before submitting again.`,
       );
     }
     task = found;
