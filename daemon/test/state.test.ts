@@ -3,7 +3,15 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateIdentitySeed, identityFromSeed, toBase64, type RepoEntry } from "@seance/shared";
-import { loadOrInitState, readState, saveState, writeRuntime, type State } from "../src/state.ts";
+import {
+  loadOrInitState,
+  readRuntime,
+  readState,
+  saveState,
+  writeRuntime,
+  type Runtime,
+  type State,
+} from "../src/state.ts";
 
 let base: string;
 
@@ -60,6 +68,28 @@ describe("state writes", () => {
       expect(state.deviceId).toBe(deviceId);
     }
     expect((await loadOrInitState(path)).deviceId).toBe(deviceId);
+  });
+
+  test("a concurrent reader always finds the running daemon's pid", async () => {
+    const dir = await mkdtemp(join(base, "runtime-"));
+    const path = join(dir, "runtime.json");
+    // The two shapes the daemon alternates between on every drop and reconnect.
+    const down = { pid: process.pid, startedAt: 1, connected: false, connectedSince: null, sha: null };
+    const up = { pid: process.pid, startedAt: 1, connected: true, connectedSince: 2, sha: "f".repeat(40) };
+    await writeRuntime(down, path);
+
+    // A lost read is `livePid` saying no daemon runs, which is the go-ahead for
+    // a CLI to rewrite the cache the daemon owns. Small as the file is, an
+    // in-place write truncates first.
+    const reads: Promise<Runtime | null>[] = [];
+    for (let round = 0; round < 200; round++) {
+      const write = writeRuntime(round % 2 === 0 ? up : down, path);
+      for (let i = 0; i < 8; i++) reads.push(readRuntime(path));
+      await write;
+    }
+
+    const lost = (await Promise.all(reads)).filter((runtime) => runtime?.pid !== process.pid);
+    expect(lost).toEqual([]);
   });
 
   test("overlapping writers leave no temp files behind", async () => {

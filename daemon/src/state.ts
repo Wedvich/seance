@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   fromBase64,
@@ -155,17 +155,16 @@ let tempSeq = 0;
  * a partial file — indistinguishable from corruption, so `loadOrInitState`
  * mints a new deviceId and the machine re-registers as a stranger.
  *
- * The tear needs a payload big enough to split across write syscalls (measured
- * at roughly half a megabyte on macOS, a few thousand repos), which is why
- * `writeRuntime` below stays a plain write.
+ * Size doesn't save a small file: the truncate alone hands a reader an empty
+ * one, so runtime.json comes through here too.
  */
-async function saveStateAtomic(path: string, state: State): Promise<void> {
+async function writeAtomic(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   // Per call, not per process: overlapping writers would otherwise share a temp
   // name, and the loser would rename a file the winner already moved.
   const temp = `${path}.${process.pid}.${tempSeq++}.tmp`;
   try {
-    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: STATE_MODE });
+    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: STATE_MODE });
     await rename(temp, path);
   } catch (err) {
     await unlink(temp).catch(() => {});
@@ -174,7 +173,7 @@ async function saveStateAtomic(path: string, state: State): Promise<void> {
 }
 
 export async function saveState(state: State, path: string = statePath()): Promise<void> {
-  await saveStateAtomic(path, state);
+  await writeAtomic(path, state);
 }
 
 /** Written by the running daemon; read by `seanced status`. */
@@ -187,14 +186,14 @@ export interface Runtime {
   readonly sha?: string | null;
 }
 
-/** Fixed-size and well under one write syscall, so an in-place write cannot be read torn. */
+/**
+ * Atomic like state.json: rewritten on every connect and drop, and read by each
+ * CLI that asks `livePid` before touching the cache — where a torn read means
+ * "no daemon running". The rename also replaces a runtime.json an older daemon
+ * left 0644, since the temp is created at the right mode.
+ */
 export async function writeRuntime(runtime: Runtime, path: string = runtimePath()): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(runtime, null, 2)}\n`, { mode: STATE_MODE });
-  // `mode` only applies where the file is created, so a runtime.json left 0644
-  // by an older daemon would keep it forever; state.json needs no counterpart,
-  // since every save renames a temp created at this mode over it.
-  await chmod(path, STATE_MODE);
+  await writeAtomic(path, runtime);
 }
 
 /** True while that pid is ours and alive — the liveness half of `readRuntime`. */
@@ -218,11 +217,10 @@ export async function livePid(path: string = runtimePath()): Promise<number | nu
   return pidAlive(runtime.pid) ? runtime.pid : null;
 }
 
+/** Through `readFile`, as `parseState` is: one open sees one whole file. */
 export async function readRuntime(path: string = runtimePath()): Promise<Runtime | null> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) return null;
   try {
-    const raw: unknown = await file.json();
+    const raw: unknown = JSON.parse(await readFile(path, "utf8"));
     if (typeof raw === "object" && raw !== null && typeof (raw as Record<string, unknown>)["pid"] === "number") {
       return raw as Runtime;
     }
