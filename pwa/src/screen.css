@@ -268,18 +268,52 @@
   }
 }
 
+.prompt-field {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Shared by the textarea and its backdrop mirror: anything that moves a glyph
+   (font, wrapping, a scrollbar's gutter) must match in both, or the painted
+   text drifts from the caret. */
 .prompt-input {
   flex: 1;
   width: 100%;
+  margin: 0;
   border: 0;
   padding: 0;
   background: transparent;
   resize: none;
   outline: none;
   font-family: var(--serif);
-  font-size: 23px;
+  font-size: 20px;
   line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  scrollbar-gutter: stable;
   color: var(--fg);
+}
+
+.prompt-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The textarea keeps caret, selection and input; its glyphs come from the backdrop. */
+.prompt-text {
+  position: relative;
+  color: transparent;
+  caret-color: var(--fg);
+}
+
+/* Colour only: a weight or padding change would reflow the mirror off the caret. */
+.prompt-skill {
+  background: none;
+  color: var(--acc);
 }
 
 .prompt-input::placeholder {
@@ -297,7 +331,7 @@
 
 /* While picking, the first token is all there is to type, so the card's height
    goes to rows instead of an empty field. */
-.prompt-input-compact {
+.prompt-field-compact {
   flex: none;
 }
 
