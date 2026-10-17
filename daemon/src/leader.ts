@@ -372,6 +372,7 @@ function startTerm(
       demote: (why) => demote({ why, resign: false }),
     }),
     now,
+    onError: report,
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 
