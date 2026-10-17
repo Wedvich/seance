@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseBranchState, parseTaskProgressList, type BranchState, type RepoEntry } from "@seance/shared";
-import { createBranchStates, type BranchStates } from "../src/branch-state.ts";
+import { BRANCH_ENDED_GRACE_MS, createBranchStates, type BranchStates } from "../src/branch-state.ts";
 import { exec } from "../src/exec.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { captureLog, makeGitFixture, type GitFixture } from "./fixtures.ts";
@@ -733,6 +733,296 @@ describe("branch-state emitter", () => {
     expect(delivered.map((s) => [s.taskId, s.at])).toEqual([["t1", 1_000]]);
     await emitter.check();
     expect(delivered).toHaveLength(1);
+    stopAll(w);
+  });
+});
+
+/** A forward-only clock from real time: the cut-off's grace and the fetch window both run on it. */
+function forwardClock(): { readonly now: () => number; readonly advance: (ms: number) => void } {
+  let offset = 0;
+  return {
+    now: () => Date.now() + offset,
+    advance: (ms) => {
+      offset += ms;
+    },
+  };
+}
+
+/** Git processes a pass started, by git's own trace: every one logs its built-in command. */
+async function gitRunsDuring(pass: () => Promise<void>): Promise<number> {
+  seq += 1;
+  const trace = join(base, `trace-${seq}`);
+  process.env["GIT_TRACE"] = trace;
+  try {
+    await pass();
+  } finally {
+    delete process.env["GIT_TRACE"];
+  }
+  const text = await readFile(trace, "utf8").catch(() => "");
+  return text.split("\n").filter((line) => line.includes("trace: built-in: git")).length;
+}
+
+describe("branch-state emitter: the cut-off for ended, quiet tasks", () => {
+  const PAST_GRACE = BRANCH_ENDED_GRACE_MS + 1;
+  test("a never-ahead task whose session ended past the grace runs no git, and a later rename goes unreported", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(new Set()) });
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x"]);
+    // Ended, but within the grace: still read.
+    time.advance(BRANCH_ENDED_GRACE_MS - 60_000);
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    time.advance(60_000);
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states).toHaveLength(1);
+    stopAll(w);
+  });
+
+  test("a live session keeps its task read past the grace, and the clock starts when it ends", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    let live = new Set(["t1"]);
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(live) });
+    await emitter.check();
+    time.advance(2 * PAST_GRACE);
+    await git(path, "branch", "-m", "worktree-a");
+    await emitter.check();
+    live = new Set();
+    await git(path, "branch", "-m", "worktree-b");
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await git(path, "branch", "-m", "worktree-c");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-a", "worktree-b"]);
+    stopAll(w);
+  });
+
+  test("a session seen live again before the cut-off starts a fresh grace", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    let live = new Set<string>();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(live) });
+    await emitter.check();
+    time.advance(BRANCH_ENDED_GRACE_MS - 60_000);
+    live = new Set(["t1"]);
+    await emitter.check();
+    live = new Set();
+    // Past the first end's grace, within the second's.
+    time.advance(120_000);
+    await emitter.check();
+    time.advance(BRANCH_ENDED_GRACE_MS - 60_000);
+    await git(path, "branch", "-m", "worktree-c");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-c"]);
+    time.advance(120_000);
+    await emitter.check();
+    await git(path, "branch", "-m", "worktree-d");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-c"]);
+    stopAll(w);
+  });
+
+  test("a cut-off task whose session registers late is read again, and gets a fresh grace", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    let live = new Set<string>();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(live) });
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    live = new Set(["t1"]);
+    await git(path, "branch", "-m", "worktree-late");
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    expect(w.states.at(-1)).toMatchObject({ branch: "worktree-late" });
+    live = new Set();
+    await emitter.check();
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    stopAll(w);
+  });
+
+  test("an unknown live read leaves a cut-off task skipped", async () => {
+    const w = await world();
+    await launch(w, "t1", "x");
+    const time = forwardClock();
+    let fail = false;
+    const emitter = start(w, {
+      now: time.now,
+      liveTasks: () => (fail ? Promise.reject(new Error("no tmux")) : Promise.resolve(new Set<string>())),
+    });
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    fail = true;
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    stopAll(w);
+  });
+
+  test("a relaunch past the cut-off reads the task again", async () => {
+    const w = await world();
+    const time = forwardClock();
+    // The ledger stamps `siteAt` from the same clock, so the relaunch's can never tie with the first.
+    w.ledger = await LaunchLedger.open(w.ledgerPath, time.now);
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(new Set()) });
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    time.advance(1_000);
+    await w.ledger.startNote("t1", { repo: w.repo.path, path });
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ branch: "worktree-renamed" });
+    stopAll(w);
+  });
+
+  test("a live-session read that hangs cuts nothing off and does not hold the pass up", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    const emitter = start(w, {
+      now: time.now,
+      liveTimeoutMs: 20,
+      liveTasks: () => new Promise<ReadonlySet<string>>(() => {}),
+    });
+    await emitter.check();
+    time.advance(2 * PAST_GRACE);
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-renamed"]);
+    stopAll(w);
+  });
+
+  test("a task in a repo with no origin/HEAD is never judged, so never cut off", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    const emitter = start(w, {
+      now: time.now,
+      repos: () => [{ ...w.repo, defaultBranch: null }],
+      liveTasks: () => Promise.resolve(new Set()),
+    });
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-renamed"]);
+    stopAll(w);
+  });
+
+  test("the grace is an unbroken run of judged checks: an unjudged pass restarts it", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    let listed = true;
+    const emitter = start(w, {
+      now: time.now,
+      repos: () => (listed ? [w.repo] : []),
+      liveTasks: () => Promise.resolve(new Set()),
+    });
+    await emitter.check();
+    // Unjudged across more than the grace.
+    listed = false;
+    time.advance(60_000);
+    await emitter.check();
+    time.advance(2 * PAST_GRACE);
+    await emitter.check();
+    listed = true;
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-renamed"]);
+    // Judging resumed just now: read until a full grace after it.
+    time.advance(BRANCH_ENDED_GRACE_MS - 60_000);
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    time.advance(60_000);
+    expect(await gitRunsDuring(emitter.check)).toBe(0);
+    stopAll(w);
+  });
+
+  test("a failed own-work read is no judgement: the task is not cut off", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a.txt");
+    const tip = await git(path, "rev-parse", "HEAD");
+    // The branch ref survives, its commit does not: every own-work read of the tip fails.
+    await rm(join(w.fixture.repoPath, ".git", "objects", tip.slice(0, 2), tip.slice(2)), { force: true });
+    const time = forwardClock();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(new Set()) });
+    await emitter.check();
+    time.advance(2 * PAST_GRACE);
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    expect(await gitRunsDuring(emitter.check)).toBeGreaterThan(0);
+    expect(w.ledger.notes()[0]?.ahead).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a live-session read that fails cuts nothing off", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const time = forwardClock();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.reject(new Error("no tmux")) });
+    await emitter.check();
+    time.advance(2 * PAST_GRACE);
+    await emitter.check();
+    await git(path, "branch", "-m", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x", "worktree-renamed"]);
+    stopAll(w);
+  });
+
+  test("a task with a PR URL is read past the grace, so a late push and its squash merge are reported", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    await w.ledger.note("t1", { prUrl: "https://example.test/org/myrepo/pull/1" });
+    const time = forwardClock();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(new Set()) });
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await emitter.check();
+    time.advance(PAST_GRACE);
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    await squashMergeOnOrigin(w, "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ branch: "worktree-x", merged: true });
+    stopAll(w);
+  });
+
+  test("a task once seen ahead is read past the grace, so a later push and merge are reported", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a.txt");
+    const time = forwardClock();
+    const emitter = start(w, { now: time.now, liveTasks: () => Promise.resolve(new Set()) });
+    await emitter.check();
+    expect(w.ledger.notes()[0]?.ahead).toBe(true);
+    time.advance(2 * PAST_GRACE);
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    await fastForwardOnOrigin(w, "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ merged: true });
     stopAll(w);
   });
 });

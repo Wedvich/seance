@@ -2,7 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFailure, type ExecResult } from "./exec.ts";
-import { hardenedGit } from "./git-hardened.ts";
+import { hardenedGit, networkEnv, type TerminalProbe } from "./git-hardened.ts";
 
 /** At most one `fetch --prune` per clone per day. */
 export const FETCH_STALE_MS = 24 * 60 * 60 * 1000;
@@ -45,6 +45,7 @@ export async function fetchIfStale(
   now: number,
   staleMs = FETCH_STALE_MS,
   env?: Readonly<Record<string, string | undefined>>,
+  terminal?: TerminalProbe,
 ): Promise<FetchOutcome> {
   if (now - lastPrunedAt < staleMs) return { kind: "fresh" };
   const result = await hardenedGit(
@@ -52,7 +53,7 @@ export async function fetchIfStale(
     ["fetch", "--prune", "--quiet", "origin"],
     FETCH_TIMEOUT_MS,
     undefined,
-    env,
+    await networkEnv(repoPath, env, terminal),
   );
   return result.exitCode === 0
     ? { kind: "fetched" }
@@ -67,8 +68,14 @@ export async function fetchIfStale(
  * Network, so only for a repo with no `origin/HEAD` on disk — about a third of
  * clones — which reap needs to know what "merged" is measured against.
  */
-export async function resolveRemoteHead(repoPath: string): Promise<boolean> {
-  const result = await hardenedGit(repoPath, ["remote", "set-head", "origin", "--auto"], FETCH_TIMEOUT_MS);
+export async function resolveRemoteHead(repoPath: string, terminal?: TerminalProbe): Promise<boolean> {
+  const result = await hardenedGit(
+    repoPath,
+    ["remote", "set-head", "origin", "--auto"],
+    FETCH_TIMEOUT_MS,
+    undefined,
+    await networkEnv(repoPath, {}, terminal),
+  );
   return result.exitCode === 0;
 }
 

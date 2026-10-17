@@ -1857,6 +1857,36 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   paths and not yet merged is checked once a minute (`BRANCH_CHECK_INTERVAL_MS`); a merged one
   never again. Tasks launched before this landed have no site and are not watched. They are M2
   tasks with no `after:` dependents, so nothing waits on them.
+- **Quiet tasks stop being checked an hour after their session ends** (added 2026-10-17). A
+  pass costs a few git runs per task, slow ones on WSL's `/mnt/c`, and most tasks never leave
+  their fresh branch. So a task never seen ahead, never pushed and with no PR URL is skipped,
+  before any git, once no live session has carried it for `BRANCH_ENDED_GRACE_MS` (an hour).
+  "Live" is the rule the `sessions` reply's `ended` uses: a task id some listed session carries
+  (`backend.sessions`, read every pass while a quiet task exists), which also covers a
+  crash that sent no `ended` event and a daemon restart, where the in-memory `ended` events
+  (`EndedTasks`, 30-minute TTL) would not. Why an hour: the work a session leaves is local, so a
+  commit made just before it ended, pushed or not, is read by the next pass a minute later; the
+  rest is for a person who finishes the worktree by hand straight after. Work added later than
+  that is missed, a manual mark-done, against checking every such task for the ledger's week.
+  A session that has not registered yet (no title, no claude: a trust dialog, a startup hang)
+  reads as ended too, the same rule as `sessions.ended`; it resets the clock if it registers
+  within the grace. The clock is an unbroken run of judged checks, not wall time: it starts at the
+  first check after the session was seen ended that judged the task (a default branch to compare
+  with, and the own-work question answered), and the task is cut off once a grace has elapsed
+  since then. Any later check that does not judge it resets the clock, to restart at the next
+  judged one: a repo with no `origin/HEAD`, one the repo list no longer names, a checkout that is
+  not the main one, a failing ref read, a pass that threw, or an own-work read that failed
+  (`holdsOwnWork` answers null: a corrupt or missing object, a git failure) never judge, so such
+  a task is never cut off blind. A failed own-work read still counts as no work for the verdicts
+  (no `merged` gate weakens) and is never memoized. The state is in memory and keyed by the launch
+  (`siteAt`): a restart or a relaunch starts it over. Nothing is sticky: a cut-off task whose id
+  appears among the live sessions again (one that registers late, past the grace) drops its entry
+  and is checked again with a fresh clock, so the error is always toward checking more, and
+  `backend.sessions` is read every pass while any quiet task exists. That read is raced
+  against a 5 s timeout (`BRANCH_LIVE_READ_TIMEOUT_MS`): a hung tmux, like a failed read, cuts
+  nothing new off that pass and does not hold the pass up. A task ever seen ahead or pushed, or
+  with a PR URL, is checked as before, whatever its session does: a missed `merged` costs a
+  manual mark-done. None of the gates below change.
 - **The branch is read live.** Each pass asks the worktree what it has checked out
   (`git -C <worktree> symbolic-ref`, run with the main clone as cwd because `Bun.spawn` throws
   on a cwd that is gone), so a `git branch -m` shows up on the next pass. The last-seen name
@@ -1922,9 +1952,10 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   fetch first"), through reap's guarded git (hooks and fsmonitor
   off, no prompt, 30 s timeout) with `GCM_INTERACTIVE=never` added unless the environment sets it,
   because Git Credential Manager ignores `GIT_TERMINAL_PROMPT` and can raise a GUI on WSL or
-  Windows. A failed fetch is quiet: the pass judges by the refs on disk, which only makes fewer
-  things look merged, and one warning is logged when a repo goes from fetching to failing: the repo
-  name and the exit code or "timed out", never git's stderr, which can carry a remote URL with
+  Windows, and with ssh in `BatchMode` as reap's fetch has it (Reap, **Network**). A failed
+  fetch is quiet: the pass judges by the refs on disk, which only makes fewer things look
+  merged, and one warning is logged when a repo goes from fetching to failing: the repo name
+  and the exit code or "timed out", never git's stderr, which can carry a remote URL with
   credentials (reap prints its own, to the operator's terminal). Because
   a failed fetch leaves that record alone, the repo then backs off in memory (the window, doubling
   to an hour) instead of retrying every 60 s pass. Concurrent fetches from reap and the emitter can
@@ -1967,17 +1998,23 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   library learns of a merge on the leader's own machine only through `progress`.
 - **Decided tails.**
   - A PR closed without merging keeps its repo fetched every five minutes until the ledger evicts the
-    task (7 days or 128 launches). An earlier cut-off, say a day after the session ended, is a
-    follow-up.
+    task (7 days or 128 launches): it has a PR URL, so the quiet-task cut-off above never applies,
+    and nothing the daemon sees tells a closed PR from one awaiting review.
   - A task whose work landed without ever being pushed to `origin` (a fork remote, a cherry-pick by
     hand) never reads as merged and needs a manual mark-done. Without the gate a fresh branch reads
     as merged and settles `done` wrongly, which is far worse.
   - A branch made, pushed and fast-forward-merged entirely while the daemon was down was never seen
     ahead and is not reported merged. A squash or rebase merge is still caught, by the pushed evidence.
-  - A foreground `seanced run` with an SSH remote whose key needs a passphrase can prompt on the
-    terminal every five minutes; under launchd or systemd the fetch fails quietly with no tty. Reap and
-    Claude Code's own fetch share this. Left as is, a follow-up.
-  - A repo on `/mnt/c` under WSL makes each git call slow; the pass is bounded by tracked tasks only.
+  - An SSH remote whose key needs a passphrase and is not in an agent fails the fetch (BatchMode)
+    rather than prompting, so a foreground `seanced run` judges by stale refs until the key is
+    loaded. A service, which has no terminal, is left as it was. Under a user's own
+    `core.sshCommand`, `GIT_SSH_COMMAND`, `GIT_SSH` or a non-OpenSSH `ssh.variant` no BatchMode is
+    added, and a prompt there is theirs to configure away. The terminal check is once per process
+    (memoized): a backgrounded `seanced run &` whose terminal later closes keeps BatchMode, which
+    fails a prompting fetch instead of hanging it; a service never reads a terminal at all.
+  - A repo on `/mnt/c` under WSL makes each git call slow; the pass is bounded by the tracked tasks
+    that are not cut off: those that ever held work, and quiet ones within their hour (or never
+    judged, which keeps them checked).
 - **Rejected.** Re-sending every task's state on a cadence (docs/scheduler.md's 2026-10-17 decision):
   it is load for a state the ledger and `progress` already carry, and a leader that missed one reads it
   back anyway. Reading an upstream (`%(upstream:track)`, `branch.<b>.merge`): `--no-track` branches
@@ -2231,7 +2268,9 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   the fetch" rejection in the next bullet). Before launch, `base-fetch.ts`
   runs `git fetch origin +refs/heads/<default>:refs/remotes/origin/<default>`
   in the clone: 5s timeout, through `git-hardened.ts` (reap's runner: hooks
-  and fsmonitor off, no prompt, ignored stdin). The process group is what times
+  and fsmonitor off, no prompt, ignored stdin), with ssh in BatchMode on reap's
+  terms (Reap, **Network**: a terminal only, so a service spawn pays no probe).
+  The process group is what times
   out (`exec`'s `killGroup`). Killing git alone left its `ssh` or
   `git-remote-https` holding the output pipes, so the result waited out the
   transport's own connect timeout, whatever the cap said. Evidence: four spawns on one
@@ -2845,13 +2884,38 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   separate file, not `state.json`, because a CLI reap and the daemon would both
   rewrite the identity file. It must not hang on credentials: stdin ignored,
   `GIT_TERMINAL_PROMPT=0`, a 30s timeout; a failure is reported and the run
-  judges by stale refs, which only ever makes fewer things look merged. A repo
+  judges by stale refs, which only ever makes fewer things look merged. ssh
+  ignores `GIT_TERMINAL_PROMPT` and would ask for a key's passphrase on the
+  terminal of a foreground run, so the network calls add
+  `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` (`sshBatchEnv` in `git-hardened.ts`,
+  which every network fetch opts into: reap's, the branch-state emitter's and
+  the spawn's base fetch; plumbing calls never pay its probe): it fails instead,
+  and a key in an agent still works. Terminal-only: a launchd or systemd
+  service has no controlling terminal (`/dev/tty` cannot be opened, checked
+  once per process) and cannot prompt anyway, and Apple's OpenSSH may read a
+  `UseKeychain` passphrase inside the very prompt loop BatchMode disables, so
+  adding it there could break fetches that work today. Only when the user
+  chose no ssh: git takes `GIT_SSH_COMMAND` over `core.sshCommand` over
+  `GIT_SSH`, so setting it, or passing `-c core.sshCommand`, would silently
+  replace theirs. It is added only when the environment has neither
+  `GIT_SSH_COMMAND` nor `GIT_SSH`, `GIT_SSH_VARIANT` is unset, `ssh` or `auto`,
+  and one `git config --get-regexp '^(core\.sshcommand|ssh\.variant)$'`, run
+  in the repo with the fetch's own env so includes and config overrides count,
+  finds no `core.sshCommand` (any value, empty included) and no `ssh.variant`
+  other than `ssh` or `auto` (a putty or plink variant would read `-o` as
+  something else; `GIT_SSH_VARIANT` outranks `ssh.variant`, so the config is read only
+  when the environment sets none): exit 1 is none set; any other answer leaves the env alone.
+  That probe is one more spawn, run only when a fetch really goes to the
+  network (past the staleness check) and a terminal is attached. It runs for
+  an HTTPS remote too: skipping by URL would be unsound, since
+  `url.<base>.insteadOf` can rewrite one to ssh. Windows has no `/dev/tty`,
+  so it reads as no terminal there. A repo
   with no `origin/HEAD` on disk (about a third) gets `git remote set-head origin
 --auto`, bounded the same way, since "merged" needs something to measure
   against; still none, and the repo is skipped and named. The branch-state
   emitter (Scheduler, "Branch state") is the other fetcher, through the same guarded
   `fetchIfStale` with a 5-minute window, its own in-memory record of its
-  last prune, and `GCM_INTERACTIVE=never`.
+  last prune, and `GCM_INTERACTIVE=never`, BatchMode included.
 - **Repo-local config executes.** Reap is the first thing to run git in every
   scanned repo, and git runs what a repo's config says. `core.fsmonitor` (a hook,
   or a daemon per worktree) and hooks (`reference-transaction` fires on the
