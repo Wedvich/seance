@@ -276,8 +276,9 @@ export type RegistryView = RegistryEntry & {
 /**
  * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
  * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
- * put. Not built yet: no relay accepts these frames before M3 item 1, and no
- * client sends them before item 2. Plaintext Layer 1 frames, not ops — the
+ * put. No relay accepts these frames before M3 item 1; the app sends
+ * `store-list`, `store-get` and `store-put` (`RelayClient`, item 2), and nothing
+ * sends `store-delete` yet. Plaintext Layer 1 frames, not ops — the
  * relay itself answers them — so a request carries its own `id` (a routing id,
  * `ROUTING_ID_PATTERN`; a UUID fits) and the reply echoes it as `re`. Who may write
  * is a rule per key prefix (`STORE_PREFIXES`); reads are anyone's, since the
@@ -506,8 +507,9 @@ export interface StoreChangedFrame {
  * beat, the leader's `lead-proof` and the store's records. Opened through `openAtRest`, never the replay
  * guard, and never accepted on a live routing path — one op per kind, so a
  * stored record can stand in neither for a request nor for another kind of
- * record. `task` and `pause-state` are sealed to SCHEDULER_ID, and by nobody
- * yet (M3 item 2).
+ * record. `task` and `pause-state` are sealed to SCHEDULER_ID: `task` by
+ * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by nobody yet
+ * (M3 item 5).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -1549,10 +1551,12 @@ export interface TaskRecord extends VersionBound {
 }
 
 /**
- * Why a stored record was not read: `unopenable`, it did not decrypt or its
- * `op` was not the slot's (`openAtRest`); `malformed`, its body failed the
- * parser; the rest are `bindTaskRecord`'s rules. A reader skips and reports
- * such a record and never deletes it on its own: after a PSK rotation every
+ * Why a stored record was not read: `unopenable`, it did not decrypt, its
+ * `op` was not the slot's (`openAtRest`) or it was not sealed to SCHEDULER_ID
+ * (`openTaskRecord`); `malformed`, its body failed the parser; `key_mismatch`
+ * also covers a listing key outside `task:` or listed twice
+ * (`openTaskListing`); the rest are `bindTaskRecord`'s rules. A reader skips
+ * and reports such a record and never deletes it on its own: after a PSK rotation every
  * record is `unopenable`, and deleting them would wipe the queue.
  */
 export const RECORD_UNREADABLE_REASONS = [

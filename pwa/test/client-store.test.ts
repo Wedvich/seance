@@ -21,6 +21,7 @@ import {
 } from "@seance/shared";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { pollUntil } from "./poll.ts";
 
 const TOKEN = "test-bearer-token";
 let key: CryptoKey;
@@ -120,15 +121,6 @@ function startDouble(): StoreDouble {
   };
   doubles.push(double);
   return double;
-}
-
-async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (ready()) return;
-    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
-    await Bun.sleep(5);
-  }
 }
 
 async function connect(double: StoreDouble, storeTimeoutMs = 5_000): Promise<RelayClient> {
