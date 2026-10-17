@@ -28,8 +28,8 @@ import { log } from "./log.ts";
  * The scheduler role (docs/scheduler.md, "`leader.ts`"; DESIGN.md, Scheduler):
  * the term lifecycle and the daemon's entry to it. With its store and fleet
  * adapters (`leader-adapters.ts`) and its app-request handlers
- * (`leader-requests.ts`), the only modules in the daemon that import
- * `scheduler/` — the layering test enforces it — so the library can move to a
+ * (`leader-requests.ts`), the only daemon modules that import `scheduler/`
+ * — `LEADER_MODULES` in the layering test enforces it — so the library can move to a
  * fixed box behind two new adapters.
  *
  * One term is one run: `lead { term }` builds an app-role leg of its own, the

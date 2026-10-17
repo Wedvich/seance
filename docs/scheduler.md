@@ -623,7 +623,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
 own, not inside its wave. The one exception is item 6, which deletes M2's `submit` shapes from
 both — a deletion in the last wave, so it races nothing. `relay/src/hub.ts` and `leadership.ts`
 are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adapters.ts` are item 3's, with
-`scheduler/test/layering.test.ts`; `leader-requests.ts` (the request handlers) goes 5 → 6. `scheduler/src/scheduler.ts` goes
+`scheduler/test/layering.test.ts` (`leader.ts` then goes to 6 for `queue-changed`); `leader-requests.ts` (the request handlers) goes 5 → 6. `scheduler/src/scheduler.ts` goes
 4a → 5. `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
 `daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
 harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. PR 0 touched

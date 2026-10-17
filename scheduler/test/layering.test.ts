@@ -70,6 +70,8 @@ describe("scheduler ↔ daemon layering", () => {
     expect(violations("daemon/src/run.ts", `import { Scheduler } from "@seance/scheduler";`)).toHaveLength(1);
     expect(violations("daemon/test/x.test.ts", `export * from "../../scheduler/src/index.ts";`)).toHaveLength(1);
     expect(violations("daemon/src/broker.ts", `import type { Fleet } from "@seance/scheduler";`)).toHaveLength(1);
+    // Membership is by exact path: a leader-named file outside the set is still refused.
+    expect(violations("daemon/src/leader-extra.ts", `import { Scheduler } from "@seance/scheduler";`)).toHaveLength(1);
   });
 
   test("the allowed edges pass: the leader's modules hosting the library, either side importing shared", () => {

@@ -319,7 +319,7 @@ export interface LocalOps {
 }
 
 /**
- * The leader reaching its own machine (`leader.ts`): the same validation,
+ * The leader reaching its own machine (`termFleet` in `leader-adapters.ts`): the same validation,
  * backend and audit lines as `createHandler`, under the caller's origin. No
  * `Plain` goes in, so nothing but these three ops can be asked for.
  */
