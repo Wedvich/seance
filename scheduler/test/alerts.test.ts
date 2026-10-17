@@ -58,18 +58,18 @@ describe("needs-input escalation", () => {
     const from = { deviceId: "a", pane };
 
     await scheduler.onSession(task.id, "needs-input", from);
-    // Create, reserve, run, needs-input: the stamp costs no write of its own.
-    expect(await stored(store, task.id)).toMatchObject({ version: 4, body: { needsInputSince: NOW } });
+    // Create, admit, reserve, run, needs-input: the stamp costs no write of its own.
+    expect(await stored(store, task.id)).toMatchObject({ version: 5, body: { needsInputSince: NOW } });
 
     clock.now = NOW + 29 * MINUTE;
     await pass(scheduler, fleet, clock.now);
-    expect((await stored(store, task.id)).version).toBe(4);
+    expect((await stored(store, task.id)).version).toBe(5);
     expect(alerts).toEqual([]);
 
     clock.now = NOW + 30 * MINUTE;
     await pass(scheduler, fleet, clock.now);
     expect(await stored(store, task.id)).toMatchObject({
-      version: 5,
+      version: 6,
       body: { state: "needs-input", needsInputSince: NOW, escalated: true },
     });
     expect(alerts).toHaveLength(1);
