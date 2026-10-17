@@ -968,10 +968,11 @@ describe("leader in the daemon", () => {
     }
   });
 
-  test("a valid branch-state reaches the leader quietly; a malformed one is dropped and logged", async () => {
+  test("a valid branch-state reaches the leader quietly; a malformed one and one from an app are dropped", async () => {
     const relay = startTestRelay(TOKEN);
     // `captureLog` hands its lines back only at the end; this one is readable while the test waits on a line.
     const seen: string[] = [];
+    const droppedSoFar = (): number => seen.filter((line) => line.includes('dropped op="branch-state"')).length;
     const lines = await captureLog(async () => {
       const capture = console.log;
       console.log = (...args: unknown[]): void => {
@@ -982,18 +983,21 @@ describe("leader in the daemon", () => {
       try {
         relay.lead(deviceId, 1);
         await daemon.leader.settled();
-        const send = async (payload: unknown): Promise<void> => {
+        const send = async (from: string, payload: unknown): Promise<void> => {
           const env = await seal(
             key,
-            { to: SCHEDULER_ID, from: "b" },
+            { to: SCHEDULER_ID, from },
             { id: crypto.randomUUID(), ts: Date.now(), op: "branch-state", payload },
           );
           relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
         };
         const valid = { taskId: "t-1", repo: "example.test/org/r", branch: "worktree-x", pushed: true, merged: false };
-        await send({ ...valid, at: Date.now() });
-        await send({ ...valid, pushed: "yes", at: Date.now() });
-        await pollUntil(() => seen.some((line) => line.includes("dropped op=")), "the malformed branch-state to drop");
+        await send("b", { ...valid, at: Date.now() });
+        await send("b", { ...valid, pushed: "yes", at: Date.now() });
+        await send(APP_ID, { ...valid, at: Date.now() });
+        // Handled in order: once the last drop is logged, the valid one ahead of it was handled too.
+        await send("b", { ...valid, pushed: "sentinel", at: Date.now() });
+        await pollUntil(() => droppedSoFar() >= 3, "the malformed, app and sentinel branch-states to drop");
       } finally {
         console.log = capture;
         daemon.stop();
@@ -1001,8 +1005,9 @@ describe("leader in the daemon", () => {
       }
     });
     const dropped = lines.filter((line) => line.includes('dropped op="branch-state"'));
-    expect(dropped).toHaveLength(1);
-    expect(dropped[0]).toContain("not a session event or branch state");
+    expect(dropped).toHaveLength(3);
+    expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
+    for (const line of dropped) expect(line).toContain("not a session event or branch state");
   });
 
   test("with no term running, an app's scheduler request is answered not_leader from this machine", async () => {

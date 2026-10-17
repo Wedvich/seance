@@ -149,7 +149,7 @@ export interface Leader {
   /**
    * A `branch-state` from this machine, in process (`run.ts`), as `onSession`
    * is; other machines' arrive through the term's leg. `from` is the sealing
-   * daemon. A sink until the library takes branch state in (M3 item 3).
+   * daemon (one sealed `from: "app"` is dropped). A sink until the library takes branch state in (M3 item 3).
    */
   readonly onBranchState: (state: BranchState, from: string) => void;
   /** The term being run, or null while following. */
@@ -496,7 +496,8 @@ function startTerm(
       onRequest(plain, plain.op, from).catch(report);
       return;
     }
-    if (plain.op === "branch-state") {
+    // Only a daemon observes branches: an app's would let any holder of the PSK settle a task done.
+    if (plain.op === "branch-state" && from !== APP_ID) {
       const branchState = parseBranchState(plain.payload);
       if (branchState !== null) {
         onBranchState(branchState, from);
