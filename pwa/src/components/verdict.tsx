@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import type { Machine, Task } from "@seance/shared";
+import { isRouted, isSettled, type Machine, type Task } from "@seance/shared";
 import { describeDecision, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
 import { failureBody } from "../view.ts";
@@ -48,8 +48,31 @@ function queuedBody(task: Task): string {
 
 function describe(verdict: Verdict, machineName: string, machines: readonly Machine[], now: number): Content {
   if (verdict.kind === "queued") {
-    const { task } = verdict;
-    const settled = !["queued", "blocked", "ready", "reserved"].includes(task.state);
+    const { task, follow } = verdict;
+    const settled = isSettled(task.state);
+    if (follow?.kind === "gone") {
+      // Reserved, its spawn may have been out when the leader let it go; ready, nothing was started.
+      const started = task.state === "reserved";
+      return {
+        glyph: started ? "?" : "!",
+        glyphClass: started ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
+        headline: "The scheduler no longer holds it.",
+        body: started
+          ? "It was starting on a machine when the leader let it go, so it may be running. Look for its session before trying again."
+          : "The leader probably changed, which drops tasks still waiting for a machine. Nothing was started.",
+        detail: null,
+        primary: { label: "Start another", onClick: "another" },
+        showBack: true,
+      };
+    }
+    const stale =
+      follow === undefined
+        ? ""
+        : follow.kind === "refused"
+          ? ` Stopped following it: ${follow.message}`
+          : follow.kind === "unanswered"
+            ? " The scheduler stopped answering, so this may be out of date."
+            : " This screen has stopped checking, so it may have moved on since.";
     return {
       // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.
       glyph: task.state === "failed" ? "!" : task.state === "lost" ? "?" : settled ? "✓" : "…",
@@ -60,7 +83,7 @@ function describe(verdict: Verdict, machineName: string, machines: readonly Mach
             ? "verdict-glyph"
             : "verdict-glyph verdict-glyph-muted",
       headline: taskHeadline(task, machines, now),
-      body: queuedBody(task),
+      body: `${queuedBody(task)}${stale}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
       primary: { label: "Start another", onClick: "another" },
       showBack: true,
@@ -198,7 +221,7 @@ export function VerdictView(props: {
   const { verdict, machineName, machines, now, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
   const content = describe(verdict, machineName, machines, now);
   const decision = verdict.kind === "queued" ? verdict.task.decision : undefined;
-  const placed = verdict.kind === "queued" && verdict.task.state !== "ready";
+  const placed = verdict.kind === "queued" && isRouted(verdict.task.state);
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 

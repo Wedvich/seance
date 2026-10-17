@@ -1,4 +1,4 @@
-import { REPLAY_WINDOW_MS, TRANSPORT_ERROR_CODES, type SessionState, type TaskFailureCode } from "@seance/shared";
+import { isTransportError, REPLAY_WINDOW_MS, type SessionState, type TaskFailureCode } from "@seance/shared";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import {
   UNDELIVERED,
@@ -674,6 +674,6 @@ function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Task | nul
     return advance(task, "running", { assignment: assignmentOf(at, { id: "id" in reply ? reply.id : undefined }) });
   }
   if (reply.code === UNDELIVERED) return advance(task, "ready");
-  if (reply.code === UNREACHABLE || TRANSPORT_ERROR_CODES.some((code) => code === reply.code)) return null;
+  if (reply.code === UNREACHABLE || isTransportError(reply.code)) return null;
   return advance(task, "failed", { failure: { code: reply.code, message: reply.message } });
 }

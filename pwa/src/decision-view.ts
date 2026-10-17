@@ -1,4 +1,12 @@
-import type { Candidate, Decision, Machine, QuotaBasis, Reason, Score, Task } from "@seance/shared";
+import {
+  reasonText,
+  type Candidate,
+  type Decision,
+  type Machine,
+  type QuotaBasis,
+  type Score,
+  type Task,
+} from "@seance/shared";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -23,38 +31,6 @@ export interface DecisionSummary {
   readonly chosen: DecisionLine | null;
   /** Scored losers first, best first, then the rejected — the record's own order. */
   readonly others: readonly DecisionLine[];
-}
-
-/** One clause per code, all of them: the record carries every reason that applied, and so does the line. */
-export function reasonText(reason: Reason): string {
-  switch (reason.code) {
-    case "offline":
-      return "offline";
-    case "status_stale":
-      return "no fresh status, so its load is unknown";
-    case "task_id_unsupported":
-      return "its daemon predates task ids";
-    case "exclaves_unknown":
-      return "its daemon reports no exclaves";
-    case "disk_low":
-      return `disk nearly full (${reason.freeMib} MiB free)`;
-    case "pressure_unknown":
-      return "it reports no CPU or memory load";
-    case "pin_mismatch":
-      return reason.field === "deviceId" ? "not the pinned machine" : "not the pinned exclave";
-    case "repo_absent":
-      return "no clone of this repo there";
-    case "auth_missing":
-      return "not signed in";
-    case "quota_unknown":
-      return reason.why === "trimmed"
-        ? "its account's quota was trimmed from the latest status"
-        : "its account's quota has never been observed";
-    case "quota_over_line":
-      return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
-    case "cap_reached":
-      return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
-  }
 }
 
 function lineId(deviceId: string, exclave: string | null): string {

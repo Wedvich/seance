@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Candidate, Decision, Machine, Reason, Task } from "@seance/shared";
-import { describeDecision, reasonText, taskHeadline } from "../src/decision-view.ts";
+import { reasonText, type Candidate, type Decision, type Machine, type Reason, type Task } from "@seance/shared";
+import { describeDecision, taskHeadline } from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
