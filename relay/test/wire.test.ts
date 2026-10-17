@@ -8,6 +8,8 @@ import {
   PROTOCOL_VERSION,
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
+  STORE_CREATE_MAX_CT_LENGTH,
+  STORE_MAX_CT_LENGTH,
   base64Length,
   importPsk,
   seal,
@@ -195,5 +197,120 @@ describe("parseAppFrame", () => {
     for (const term of [-1, 1.5, "3", null, 2 ** 53]) {
       expect(parseAppFrame(JSON.stringify({ t: "msg", env: scheduled, term }))).toBeNull();
     }
+  });
+});
+
+/** The same frame through each leg's parser. */
+const both = (frame: Record<string, unknown>): readonly unknown[] => [
+  parseDaemonFrame(JSON.stringify(frame)),
+  parseAppFrame(JSON.stringify(frame)),
+];
+
+describe("store frames", () => {
+  const sealed = (ct = "Y2lwaGVydGV4dA=="): Record<string, unknown> => env({ to: SCHEDULER_ID, from: "device-1", ct });
+  const frames = {
+    list: { t: "store-list", id: "r1", prefix: "task:" },
+    get: { t: "store-get", id: "r2", key: "task:t-1" },
+    put: { t: "store-put", id: "r3", key: "task:t-1", expect: 0, env: sealed() },
+    delete: { t: "store-delete", id: "r4", key: "task:t-1", expect: 2 },
+  };
+  test("each of the four parses on both legs", () => {
+    for (const frame of Object.values(frames)) {
+      for (const parsed of both(frame)) expect(parsed).toMatchObject({ t: frame["t"], id: frame["id"] });
+    }
+  });
+
+  test("a term is the daemon leg's alone: kept there, stripped from an app frame", () => {
+    for (const frame of [frames.put, frames.delete]) {
+      const withTerm = JSON.stringify({ ...frame, term: 4 });
+      expect(parseDaemonFrame(withTerm)).toMatchObject({ term: 4 });
+      expect(parseAppFrame(withTerm)).not.toHaveProperty("term");
+      expect(parseDaemonFrame(JSON.stringify(frame))).not.toHaveProperty("term");
+    }
+    // An invalid one is the daemon leg's malformed field; the app leg never reads it.
+    const bad = JSON.stringify({ ...frames.put, term: -1 });
+    expect(parseDaemonFrame(bad)).toMatchObject({ t: "store-rejected", id: "r3", code: "invalid_request" });
+    expect(parseAppFrame(bad)).toMatchObject({ t: "store-put" });
+  });
+
+  test("no usable id means nothing to answer: null, never a rejection", () => {
+    for (const id of [undefined, "", "a".repeat(65), "bad id!", 7, null]) {
+      for (const frame of Object.values(frames)) {
+        for (const parsed of both({ ...frame, id })) expect(parsed).toBeNull();
+      }
+    }
+  });
+
+  test("a bad key is invalid_request, under get, put and delete", () => {
+    const keys = ["device:x", "task:", "task:a:b", "account:x", `task:${"a".repeat(65)}`, "scheduler:term", "", 3];
+    for (const key of keys) {
+      for (const frame of [frames.get, frames.put, frames.delete]) {
+        for (const parsed of both({ ...frame, key })) {
+          expect(parsed).toMatchObject({ t: "store-rejected", id: frame["id"], code: "invalid_request" });
+        }
+      }
+    }
+  });
+
+  test("a list prefix must be a known one", () => {
+    for (const prefix of ["account:", "device:", "task", "", undefined, 1]) {
+      for (const parsed of both({ ...frames.list, prefix })) {
+        expect(parsed).toMatchObject({ t: "store-rejected", code: "invalid_request" });
+      }
+    }
+    expect(parseAppFrame(JSON.stringify({ ...frames.list, prefix: "queue:" }))).toMatchObject({ prefix: "queue:" });
+  });
+
+  test("expect is a safe non-negative integer", () => {
+    for (const expectValue of [-1, 1.5, "1", 2 ** 53, null, undefined]) {
+      for (const frame of [frames.put, frames.delete]) {
+        for (const parsed of both({ ...frame, expect: expectValue })) {
+          expect(parsed).toMatchObject({ t: "store-rejected", code: "invalid_request" });
+        }
+      }
+    }
+  });
+
+  test("a malformed env is invalid_request", () => {
+    for (const bad of [undefined, null, "x", {}, env({ ct: "" }), env({ iv: "" }), env({ to: "bad to!" })]) {
+      for (const parsed of both({ ...frames.put, env: bad })) {
+        expect(parsed).toMatchObject({ t: "store-rejected", id: "r3", code: "invalid_request" });
+      }
+    }
+  });
+
+  test("past the ciphertext bound is too_large: a create's is tighter than an overwrite's", () => {
+    const put = (expectValue: number, length: number): Record<string, unknown> => ({
+      ...frames.put,
+      expect: expectValue,
+      env: sealed("A".repeat(length)),
+    });
+    const tooLarge = { t: "store-rejected", id: "r3", code: "too_large" };
+    for (const parsed of both(put(0, STORE_CREATE_MAX_CT_LENGTH + 1))) expect(parsed).toMatchObject(tooLarge);
+    for (const parsed of both(put(1, STORE_MAX_CT_LENGTH + 1))) expect(parsed).toMatchObject(tooLarge);
+    // Far past the envelope cap: still a size answer, not a malformed frame.
+    for (const parsed of both(put(1, 1024 * 1024))) expect(parsed).toMatchObject(tooLarge);
+    // A create may not use an overwrite's room.
+    for (const parsed of both(put(0, STORE_MAX_CT_LENGTH))) expect(parsed).toMatchObject(tooLarge);
+  });
+
+  test("at exactly each bound the frame parses", () => {
+    const put = (expectValue: number, length: number): Record<string, unknown> => ({
+      ...frames.put,
+      expect: expectValue,
+      env: sealed("A".repeat(length)),
+    });
+    for (const parsed of both(put(0, STORE_CREATE_MAX_CT_LENGTH))) expect(parsed).toMatchObject({ t: "store-put" });
+    for (const parsed of both(put(1, STORE_MAX_CT_LENGTH))) expect(parsed).toMatchObject({ t: "store-put" });
+  });
+
+  test("a list's unknown fields are ignored: a relay without paging answers the whole prefix", () => {
+    for (const parsed of both({ ...frames.list, after: "task:z" })) {
+      expect(parsed).toEqual({ t: "store-list", id: "r1", prefix: "task:" });
+    }
+  });
+
+  test("an unknown store type is dropped", () => {
+    for (const parsed of both({ t: "store-move", id: "r1", key: "task:t-1" })) expect(parsed).toBeNull();
   });
 });
