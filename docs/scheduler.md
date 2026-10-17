@@ -95,7 +95,10 @@ and long-lived, not the broker's idle-closing `LazyRelay` (Daemon changes, `lead
 ## Wire changes
 
 All shapes land in `shared/src/types.ts` first (schema of record); DESIGN.md's frame→module
-table gains rows.
+table gains rows. **M3's are there now** (M3 PR 0): the store frames and their limits, the
+`task` and `pause-state` records, the widened task model, the new scheduler ops,
+`queue-changed` and `branch-state`. Read the types for any M3 shape — the sketches below are the
+reasoning, `types.ts` is the record, and where they differ `types.ts` wins.
 
 **Relay (`hub.ts`, `wire.ts`, `index.ts`)**
 
@@ -195,7 +198,7 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
 term, `not_ready` during takeover. M2 adds a temporary `submit` (a `TaskRequest` →
 `Scheduler.submit`), because its queue is in memory on the leader and there is no store to
-`store-put` into; M3 item 1 removes it. `enqueue` is _not_ a
+`store-put` into; M3 item 6 removes it, with the PWA's move to `store-put`. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling.
@@ -451,28 +454,72 @@ nominated while a listed one is, an unset list nominates nobody (`scheduler: nul
 role (`leadership.test.ts`); and end to end, a squatter is never nominated while a listed seed
 without the PSK reads "leader unverified" and is sent nothing (e2e).
 
-**Lands, in order.**
+**Lands as** (cut approved by the owner, 2026-10-16): a schema PR, then three waves. Each
+wave's PRs run in parallel; a wave starts once the one before it has merged.
 
-1. Relay store — `store-list` / `store-get` / `store-put` / `store-delete` with the per-prefix rules (only
-   `task:` populated yet), `task:<id>` as `{ version, env }`,
-   term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS`, create rate floor.
-   **Removes M2's `submit` op** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS` in
-   `shared/src/types.ts`; the `submit` case in `leader.ts`): the app's `store-put` at `expect: 0`
-   replaces it, and the PWA's `auto` moves to that in item 6.
-   **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
-   task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
-   `version_conflict` there means the first put landed — the client reads it as queued, never as
-   a failure, and never mints a second id for the same submission. That is why M2's `submit`
-   got no interim fix (a client-chosen id on `submit` would be deleted by this item days later);
-   until then a lost `submit` reply stays "may have queued", with no retry.
-2. The at-rest `task` op and version binding — sealed body carries the version its put
-   produces; readers open without the `ReplayGuard` and reject a mismatch.
-3. `QueueStore` adapter on those ops; takeover reconciliation against `sessions`.
-4. Task states, batches, hand-declared deps (`after: opened` / `merged`), done detection via
-   `branch-state`, `awaiting-merge`.
-5. Caps (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
-   credits-spill detection (logged and shown in the PWA; the push alert is M4).
-6. PWA queue — enqueue, cancel, mark-done, pause; `queue-changed` push.
+- **PR 0 — schema.** Every M3 wire and record shape in `shared/src/types.ts`, with its
+  `parse.ts` validator and tests, and no behaviour change. What it decided where this plan was
+  silent is in the type comments; the ones that shape later PRs:
+  - Store frames are Layer 1 plaintext (the relay answers them), so each carries a client `id`
+    and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
+    `store-refused` with a `STORE_ERROR_CODES` code.
+  - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
+    `task:` prefix lists in 4 MiB. Paging stays possible without a break — `after` on the request,
+    which an older relay ignores and answers whole, and `next` on the reply, which today's
+    clients refuse rather than read a page as the whole queue.
+  - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
+    registry push carries it), so no app frame has one: overwrite and delete are the leader's
+    verified socket's, never a token holder's who copied the term.
+  - `store-changed { key, version }`: the relay nudges the leader's daemon socket after any write
+    the leader did not make, so an app's enqueue reaches a running leader without the leader
+    polling the store.
+  - A second prefix, `queue:` (one key, `queue:pause`, leader-only and term-fenced), so a pause
+    survives leader changes, which are routine. `account:` stays reserved for M4.
+  - A reader binds a task record to its key twice: the sealed `version` to the relay's, and the
+    sealed `task.id` to the key's id — without the second, a token holder could re-file a task's
+    version-1 blob under a fresh key and have it run twice.
+  - **Tombstones** (owner, 2026-10-17). Version binding cannot see a deleted key re-created from
+    its own authentic version-1 blob, so a finished task the leader pruned could be put back and
+    run again. A delete under a prefix apps may create into leaves the key and its last version
+    for `STORE_TOMBSTONE_MS` (30 days); a put there is `version_conflict`, and tombstones count
+    toward no cap. They expire, so the leader also admits no `queued` task whose sealed
+    `createdAt` is older than the same 30 days. Normal use leaves ~2 MB of tombstones a year;
+    junk deleted at the create floor is bounded by that floor over 30 days.
+  - An app creates a task only as `queued`; the leader admits it to `blocked` or `ready`.
+- **Wave 1**, in parallel:
+  - **1. Relay store** — `relay/src/store.ts`, with `hub.ts` and `wire.ts`: the four frames, the
+    per-prefix rules, term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS` /
+    `MAX_RECORDS`, `STORE_MAX_CT_LENGTH`, the create rate floor, tombstones and their expiry,
+    `store-changed`. The only M3 PR that touches `hub.ts`.
+    **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
+    task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
+    `version_conflict` there means the first put landed — the client reads it as queued, never as
+    a failure, and never mints a second id for the same submission. That is why M2's `submit`
+    got no interim fix; until item 6 a lost `submit` reply stays "may have queued", with no retry.
+  - **2. The at-rest `task` op and version binding** — sealing in `shared/src/crypto.ts`, the
+    app-client's store methods in `shared/src/app-client.ts`; readers open without the
+    `ReplayGuard` and reject a mismatched version or id.
+  - **4a. The library's M3 states**, batches, hand-declared deps (`after: opened` / `merged`), done
+    detection from `branch-state` and `awaiting-merge`, against `MemoryQueueStore`
+    (`scheduler/`).
+  - **4b. The daemon's `branch-state` emitter.**
+- **Wave 2**, in parallel:
+  - **3. The `QueueStore` adapter** on the store ops (new `daemon/src/queue-store.ts`, wired in
+    `leader.ts`); takeover reconciliation over opened, version-checked bodies.
+  - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
+    credits-spill detection (logged and shown in the PWA; the push alert is M4).
+- **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
+  **Removes M2's `submit`** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS`,
+  `parseSubmitReply`; the `submit` case in `leader.ts`). Moved here from item 1, where the plan
+  first put it: the PWA's `auto` sends `submit` until this item gives it `store-put`, so dropping
+  the op with the store would leave `auto` broken for every PR in between.
+
+**Who edits what** — the collision map that makes the waves parallel: `shared/src/types.ts` is
+PR 0's alone (a later PR that finds a shape missing changes it in a PR of its own, not inside
+its wave); `relay/src/hub.ts` is item 1's alone; `daemon/src/leader.ts` goes 3 → 5 → 6, one per
+wave; `scheduler/src/scheduler.ts` goes 4a → 5. PR 0 touched `leader.ts` (a `not supported yet`
+answer for the four new ops, so they are refused rather than met with silence), `task.ts` (the
+three states with no edges) and the PWA's state wording, only as the widened types forced.
 
 **Exit.**
 
@@ -624,6 +671,13 @@ same PR, with the reason.
     enough that a forgotten machine's task stops reading `running` the same session. Recoverable
     either way: the machine's own `sessions` settles it when it returns, so a short bound costs a
     label, never a twin.
+11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
+    (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 32 KiB (`STORE_MAX_CT_LENGTH`), and
+    `task:` holds 128 (`MAX_TASKS`), so the whole queue lists in one frame with no paging. A task
+    names its work ("implement this Linear issue, and here are the details") and the session
+    gathers the rest with tools; 8K characters is far more than that takes. A direct spawn is
+    not bound by it. Measured: at the prompt limit in two-byte characters a record still holds a
+    15-candidate decision; past what the record holds, the leader trims the stored decision.
 
 ## Risks / unknowns
 
@@ -631,7 +685,8 @@ same PR, with the reason.
   delete registry entries, which DESIGN.md calls harmless because the daemon rebuilds them.
   Queued tasks are not rebuilt: a token holder can list the queue (ciphertext) and create junk
   (the leader skips what doesn't decrypt, as the PWA does for the registry). It still cannot
-  read a prompt, forge a task, or roll one back (version binding). Accepted: what is lost is a
+  read a prompt, forge a task, roll one back (version binding), or replay a deleted one
+  (tombstones and the 30-day admit rule, M3 PR 0). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
   exists (rotate). DESIGN.md's "destroys nothing that exists" paragraph gets this caveat.
   M4's account records add a smaller one: being app-writable, a token holder can delete an

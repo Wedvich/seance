@@ -1,4 +1,30 @@
 import {
+  BRANCH_MAX_LENGTH,
+  DEP_AFTER,
+  DONE_SIGNALS,
+  MAX_PAUSE_HOLDS,
+  PAUSE_UNTIL,
+  STORE_KEY_PATTERN,
+  TASK_SPEC_LIMITS,
+  type BatchMembership,
+  type BatchStrategy,
+  type BranchState,
+  type LinearLink,
+  type PauseHold,
+  type PauseRecord,
+  type PauseReply,
+  type PauseRequest,
+  type Placement,
+  type QueueChanged,
+  type ResumeRequest,
+  type StoreChangedFrame,
+  type StoreRecord,
+  type StoreReplyFrame,
+  type TaskDep,
+  type TaskRecord,
+  type TaskRef,
+  type TaskReply,
+  type TaskSpec,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -426,6 +452,86 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+/** A machine or exclave name as a spec carries it: a key, so non-empty. */
+function isPlacementField(value: unknown): value is string {
+  return isBoundedString(value, TASK_SPEC_LIMITS.placement) && value !== "";
+}
+
+function parsePlacement(value: unknown): Placement | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, exclave } = value;
+  return isPlacementField(deviceId) && isPlacementField(exclave) ? { deviceId, exclave } : null;
+}
+
+function parsePin(value: unknown): TaskSpec["pin"] | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, exclave } = value;
+  if (deviceId !== undefined && !isPlacementField(deviceId)) return null;
+  if (exclave !== undefined && !isPlacementField(exclave)) return null;
+  return { ...(deviceId === undefined ? {} : { deviceId }), ...(exclave === undefined ? {} : { exclave }) };
+}
+
+function parseBatchStrategy(value: unknown): BatchStrategy | null {
+  if (!isRecord(value)) return null;
+  const { mode, max } = value;
+  if (mode === "sequential" || mode === "auto") return { mode };
+  if (mode !== "parallel" || !isUint(max) || max < 1 || max > TASK_SPEC_LIMITS.parallel) return null;
+  return { mode, max };
+}
+
+function parseBatch(value: unknown): BatchMembership | null {
+  if (!isRecord(value)) return null;
+  const { id, index } = value;
+  const strategy = parseBatchStrategy(value["strategy"]);
+  return isTaskId(id) && isUint(index) && strategy !== null ? { id, index, strategy } : null;
+}
+
+function parseDep(value: unknown): TaskDep | null {
+  if (!isRecord(value) || !isTaskId(value["task"])) return null;
+  const after = DEP_AFTER.find((a) => a === value["after"]);
+  return after === undefined ? null : { task: value["task"], after };
+}
+
+function parseLinear(value: unknown): LinearLink | null {
+  if (!isRecord(value)) return null;
+  const { issue } = value;
+  if (!isBoundedString(issue, TASK_SPEC_LIMITS.linearIssue) || issue === "") return null;
+  if (value["url"] === undefined) return { issue };
+  const url = httpsUrl(value["url"]);
+  return url === null ? null : { issue, url };
+}
+
+/**
+ * A whole spec, as a task record carries it at rest. An app seals it, and the
+ * leader acts on it — routes, spawns, holds dependents on it — so it is held to
+ * `parseTaskRequest`'s rule: every field checked and bounded, the result built
+ * field by field. A malformed optional field nulls the spec, never drops
+ * silently: a task without the pin or deps it was given would run where, or
+ * before, it must not.
+ */
+export function parseTaskSpec(value: unknown): TaskSpec | null {
+  const request = parseTaskRequest(value);
+  if (request === null || !isRecord(value)) return null;
+  const { pin, lineage, base, batch, deps, linear } = value;
+  const pinned = pin === undefined ? undefined : parsePin(pin);
+  const continues = lineage === undefined ? undefined : parsePlacement(lineage);
+  const builds = base === undefined ? undefined : parsePlacement(base);
+  const member = batch === undefined ? undefined : parseBatch(batch);
+  const edges = deps === undefined ? undefined : parseList(deps, parseDep);
+  const issue = linear === undefined ? undefined : parseLinear(linear);
+  if (pinned === null || continues === null || builds === null || member === null || issue === null) return null;
+  if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
+  return {
+    ...request,
+    ...(pinned === undefined ? {} : { pin: pinned }),
+    ...(continues === undefined ? {} : { lineage: continues }),
+    ...(builds === undefined ? {} : { base: builds }),
+    ...(member === undefined ? {} : { batch: member }),
+    ...(edges === undefined ? {} : { deps: edges }),
+    ...(issue === undefined ? {} : { linear: issue }),
+  };
+}
+
 function parseTarget(value: unknown): Target | null {
   if (!isRecord(value)) return null;
   const { deviceId, exclave, clone } = value;
@@ -466,8 +572,10 @@ function parseReason(value: unknown): Reason | null {
       return typeof window === "string" && isFiniteNumber(projectedPct) ? { code, window, projectedPct } : null;
     }
     case "cap_reached": {
-      const { inFlight, max } = value;
-      return isUint(inFlight) && isUint(max) ? { code, inFlight, max } : null;
+      const { inFlight, max, scope } = value;
+      if (!isUint(inFlight) || !isUint(max)) return null;
+      if (scope === undefined) return { code, inFlight, max };
+      return scope === "global" || scope === "account" ? { code, inFlight, max, scope } : null;
     }
     default:
       return null;
@@ -554,10 +662,35 @@ function parseAssignment(value: unknown): Assignment | null {
   return { ...target, ...(window === undefined ? {} : { window }), ...(pane === undefined ? {} : { pane }) };
 }
 
+function isOptionalFinite(value: unknown): value is number | undefined {
+  return value === undefined || isFiniteNumber(value);
+}
+
+/** The PR, branch and done fields M3 adds, checked as one group; null when any is malformed. */
+function parseTaskProgress(value: Record<string, unknown>): Partial<Task> | null {
+  const { prUrl, branch, pushed, doneBy, needsInputSince, escalated } = value;
+  const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
+  if (url === null) return null;
+  if (branch !== undefined && (!isBoundedString(branch, BRANCH_MAX_LENGTH) || branch === "")) return null;
+  if (pushed !== undefined && pushed !== true) return null;
+  const signal = doneBy === undefined ? undefined : DONE_SIGNALS.find((s) => s === doneBy);
+  if (doneBy !== undefined && signal === undefined) return null;
+  if (!isOptionalFinite(needsInputSince) || (escalated !== undefined && escalated !== true)) return null;
+  return {
+    ...(url === undefined ? {} : { prUrl: url }),
+    ...(branch === undefined ? {} : { branch }),
+    ...(pushed === undefined ? {} : { pushed }),
+    ...(signal === undefined ? {} : { doneBy: signal }),
+    ...(needsInputSince === undefined ? {} : { needsInputSince }),
+    ...(escalated === undefined ? {} : { escalated }),
+  };
+}
+
 /**
- * A task as `queue` and `submit` carry it — the fields the app shows. A state
- * this build does not know nulls the task: it cannot say what the task is
- * doing, and guessing would be worse than leaving it out.
+ * A task as `queue`, `cancel`, `mark-done` and `submit` carry it, and as its
+ * record holds it at rest. A state this build does not know nulls the task: it
+ * cannot say what the task is doing, and guessing would be worse than leaving
+ * it out.
  */
 export function parseTask(value: unknown): Task | null {
   if (!isRecord(value)) return null;
@@ -574,17 +707,16 @@ export function parseTask(value: unknown): Task | null {
     reservedAt,
     leftRunning,
   } = value;
-  if (typeof id !== "string" || !isFiniteNumber(createdAt)) return null;
+  if (!isTaskId(id) || !isFiniteNumber(createdAt)) return null;
   const known = TASK_STATES.find((s) => s === state);
-  if (known === undefined || !isRecord(spec)) return null;
-  const request = parseTaskRequest(spec);
-  if (request === null) return null;
+  if (known === undefined) return null;
+  const parsedSpec = parseTaskSpec(spec);
+  if (parsedSpec === null) return null;
   const placed = assignment === undefined ? undefined : parseAssignment(assignment);
   const reserved = reservation === undefined ? undefined : parseReservation(reservation);
   const record = decision === undefined ? undefined : parseDecision(decision);
   if (placed === null || reserved === null || record === null) return null;
-  if (absentSince !== undefined && !isFiniteNumber(absentSince)) return null;
-  if (reservedAt !== undefined && !isFiniteNumber(reservedAt)) return null;
+  if (!isOptionalFinite(absentSince) || !isOptionalFinite(reservedAt)) return null;
   if (leftRunning !== undefined && leftRunning !== true) return null;
   let failed: Task["failure"];
   if (failure !== undefined) {
@@ -592,11 +724,13 @@ export function parseTask(value: unknown): Task | null {
       return null;
     failed = { code: failure["code"], message: failure["message"] };
   }
+  const progress = parseTaskProgress(value);
+  if (progress === null) return null;
   return {
     id,
     state: known,
     createdAt,
-    spec: request,
+    spec: parsedSpec,
     ...(placed === undefined ? {} : { assignment: placed }),
     ...(reserved === undefined ? {} : { reservation: reserved }),
     ...(record === undefined ? {} : { decision: record }),
@@ -604,7 +738,77 @@ export function parseTask(value: unknown): Task | null {
     ...(absentSince === undefined ? {} : { absentSince }),
     ...(reservedAt === undefined ? {} : { reservedAt }),
     ...(leftRunning === undefined ? {} : { leftRunning }),
+    ...progress,
   };
+}
+
+/** A version `store-put` can produce: creates are 1, so 0 is no record's. */
+function isVersion(value: unknown): value is number {
+  return isUint(value) && value >= 1;
+}
+
+/**
+ * The opened body of a `task:<id>` record — shape only. Binding it to its key
+ * (the relay's version, the key's id) is the reader's, beside `openAtRest`
+ * (`TaskRecord`).
+ */
+export function parseTaskRecord(value: unknown): TaskRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const task = parseTask(value["task"]);
+  return task === null ? null : { version: value["version"], task };
+}
+
+/** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
+const ACCOUNT_ID_MAX_LENGTH = 128;
+
+function isAccountId(value: unknown): value is string {
+  return isBoundedString(value, ACCOUNT_ID_MAX_LENGTH) && value !== "";
+}
+
+function parsePauseHold(value: unknown): PauseHold | null {
+  if (!isRecord(value) || !isFiniteNumber(value["at"])) return null;
+  const { account, resumeAt } = value;
+  const until = PAUSE_UNTIL.find((u) => u === value["until"]);
+  if (until === undefined || (account !== undefined && !isAccountId(account))) return null;
+  const hold = { until, at: value["at"], ...(account === undefined ? {} : { account }) };
+  // A reset hold lifts at a time, on an account; a resume hold has neither clock nor need of one.
+  if (until === "resume") return resumeAt === undefined ? hold : null;
+  return account !== undefined && isFiniteNumber(resumeAt) ? { ...hold, resumeAt } : null;
+}
+
+function parseHolds(value: unknown): readonly PauseHold[] | null {
+  const holds = parseList(value, parsePauseHold);
+  return holds === null || holds.length > MAX_PAUSE_HOLDS ? null : holds;
+}
+
+/** The opened body of `queue:pause` — shape only, as `parseTaskRecord`. */
+export function parsePauseRecord(value: unknown): PauseRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const holds = parseHolds(value["holds"]);
+  return holds === null ? null : { version: value["version"], holds };
+}
+
+/** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
+export function parseTaskRef(value: unknown): TaskRef | null {
+  return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
+}
+
+/** `pause`, at the leader. `reset` without an account is malformed: it would be no account's reset. */
+export function parsePauseRequest(value: unknown): PauseRequest | null {
+  if (!isRecord(value)) return null;
+  const until = PAUSE_UNTIL.find((u) => u === value["until"]);
+  const { account } = value;
+  if (until === undefined || (account !== undefined && !isAccountId(account))) return null;
+  if (until === "reset" && account === undefined) return null;
+  return { until, ...(account === undefined ? {} : { account }) };
+}
+
+/** `resume`, at the leader. */
+export function parseResumeRequest(value: unknown): ResumeRequest | null {
+  if (!isRecord(value)) return null;
+  const { account } = value;
+  if (account === undefined) return {};
+  return isAccountId(account) ? { account } : null;
 }
 
 /** A scheduler refusal; an unknown code is no refusal this build can word, so the reply is unreadable. */
@@ -619,7 +823,91 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   if (!isRecord(value) || !isFiniteNumber(value["at"]) || !Array.isArray(value["tasks"])) return null;
   // Lenient per task, as the registry is per entry: one a leader ahead wrote must not hide the rest.
   const tasks = value["tasks"].map(parseTask).filter((task) => task !== null);
-  return { tasks, at: value["at"] };
+  // Strict, unlike a task: an unread hold would show a paused queue as running.
+  const holds = value["holds"] === undefined ? undefined : parseHolds(value["holds"]);
+  if (holds === null) return null;
+  return { tasks, at: value["at"], ...(holds === undefined ? {} : { holds }) };
+}
+
+/** `cancel` and `mark-done` replies. */
+export function parseTaskReply(value: unknown): TaskReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const task = isRecord(value) ? parseTask(value["task"]) : null;
+  return task === null ? null : { task };
+}
+
+/** `pause` and `resume` replies. */
+export function parsePauseReply(value: unknown): PauseReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const holds = isRecord(value) ? parseHolds(value["holds"]) : null;
+  return holds === null ? null : { holds };
+}
+
+/** The leader's nudge. It carries nothing to act on but its stamp: an app re-fetches `queue`. */
+export function parseQueueChanged(value: unknown): QueueChanged | null {
+  return isRecord(value) && isFiniteNumber(value["at"]) ? { at: value["at"] } : null;
+}
+
+/**
+ * The leader's check on a forwarded `branch-state`, as `parseSessionEvent` is:
+ * the sealer is a PSK holder that bound the task id itself, so this is skew and
+ * bug hygiene. `merged` moves a task to `done` and releases its dependents, so
+ * both booleans must be booleans, never truthy.
+ */
+export function parseBranchState(value: unknown): BranchState | null {
+  if (!isRecord(value)) return null;
+  const { taskId, repo, branch, pushed, merged, at } = value;
+  if (!isTaskId(taskId) || !isBoundedString(repo, TASK_REQUEST_LIMITS.repo) || repo === "") return null;
+  if (!isBoundedString(branch, BRANCH_MAX_LENGTH) || branch === "") return null;
+  if (typeof pushed !== "boolean" || typeof merged !== "boolean" || !isFiniteNumber(at)) return null;
+  return { taskId, repo, branch, pushed, merged, at };
+}
+
+export function isStoreKey(value: unknown): value is string {
+  return typeof value === "string" && STORE_KEY_PATTERN.test(value);
+}
+
+function parseStoreRecord(value: unknown): StoreRecord | null {
+  if (!isRecord(value) || !isStoreKey(value["key"]) || !isVersion(value["version"])) return null;
+  const env = parseEnvelope(value["env"]);
+  return env === null ? null : { key: value["key"], version: value["version"], env };
+}
+
+/**
+ * A relay's answer to a store frame, on either leg. The relay is untrusted
+ * (DESIGN.md, threat model, relay compromise) and a page it sends lands in a
+ * reconcile, so a malformed record nulls the page rather than shortening it — a
+ * task missing from a takeover's list is a task the new leader never runs.
+ * A refusal keeps its code raw (`StoreReplyFrame`).
+ */
+export function parseStoreReply(value: unknown): StoreReplyFrame | null {
+  if (!isRecord(value) || typeof value["re"] !== "string") return null;
+  const re = value["re"];
+  switch (value["t"]) {
+    case "store-listed": {
+      // A `next` would mean a page, which this build cannot continue: unreadable, never a short queue.
+      if (value["next"] !== undefined) return null;
+      const records = parseList(value["records"], parseStoreRecord);
+      return records === null ? null : { t: "store-listed", re, records };
+    }
+    case "store-record": {
+      if (value["record"] === null) return { t: "store-record", re, record: null };
+      const record = parseStoreRecord(value["record"]);
+      return record === null ? null : { t: "store-record", re, record };
+    }
+    case "store-written":
+      return isUint(value["version"]) ? { t: "store-written", re, version: value["version"] } : null;
+    case "store-refused":
+      return typeof value["code"] === "string" ? { t: "store-refused", re, code: value["code"] } : null;
+    default:
+      return null;
+  }
+}
+
+export function parseStoreChanged(value: unknown): StoreChangedFrame | null {
+  if (!isRecord(value) || value["t"] !== "store-changed") return null;
+  const { key, version } = value;
+  return isStoreKey(key) && isUint(version) ? { t: "store-changed", key, version } : null;
 }
 
 export function parseRoutePreviewReply(value: unknown): RoutePreviewReply | null {

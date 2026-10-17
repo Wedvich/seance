@@ -1,23 +1,58 @@
 import { describe, expect, test } from "bun:test";
+import { importPsk, seal, toBase64 } from "./crypto.ts";
 import {
   isMetricsRequest,
+  isStoreKey,
+  parseBranchState,
+  parseDecision,
   parseExclaveList,
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
   parseMetricsResponse,
+  parsePauseRecord,
+  parsePauseReply,
+  parsePauseRequest,
+  parseQueueChanged,
+  parseQueueReply,
   parseRepoEntry,
+  parseResumeRequest,
+  parseStoreChanged,
+  parseStoreReply,
+  parseTask,
+  parseTaskRecord,
+  parseTaskRef,
+  parseTaskReply,
   parseTaskRequest,
+  parseTaskSpec,
 } from "./parse.ts";
 import {
+  BRANCH_MAX_LENGTH,
+  MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
   METRICS_MAX_POINTS,
+  MAX_TASKS,
+  OP_TIMEOUT_MS,
+  STORE_KEY_ID_MAX_LENGTH,
+  STORE_MAX_CT_LENGTH,
+  STORE_PREFIXES,
   TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
+  type BranchState,
+  type Candidate,
   type MachineStatus,
   type MetricsSeries,
+  type PauseHold,
   type QuotaObservation,
+  type Reason,
+  type SchedulerError,
+  type StoreRecord,
+  type StoreReplyFrame,
+  type Task,
+  type TaskDep,
   type TaskRequest,
+  type TaskSpec,
 } from "./types.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
@@ -287,5 +322,331 @@ describe("parseTaskRequest", () => {
       expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit) })).not.toBeNull();
       expect(parseTaskRequest({ ...minimal, [field]: "x".repeat(limit + 1) })).toBeNull();
     }
+  });
+});
+
+function deps(n: number): readonly TaskDep[] {
+  return Array.from({ length: n }, (_, i) => ({ task: `t-${i}`, after: "opened" }));
+}
+
+describe("parseTaskSpec", () => {
+  const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it" };
+  const full: TaskSpec = {
+    ...request,
+    pin: { exclave: "work" },
+    lineage: { deviceId: "dev-a", exclave: "default" },
+    base: { deviceId: "dev-b", exclave: "work" },
+    batch: { id: "batch-1", index: 2, strategy: { mode: "parallel", max: 3 } },
+    deps: [
+      { task: "t-1", after: "opened" },
+      { task: "t-2", after: "merged" },
+    ],
+    linear: { issue: "ENG-123", url: "https://linear.app/acme/issue/ENG-123" },
+  };
+
+  test("a whole spec round-trips, and fields it does not know stay behind", () => {
+    expect(parseTaskSpec(full)).toEqual(full);
+    expect(parseTaskSpec({ ...request, taskId: "x", skill: "y" })).toEqual(request);
+    for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
+      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
+    }
+  });
+
+  test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
+    for (const bad of [
+      { ...full, pin: { exclave: "" } },
+      { ...full, lineage: { deviceId: "dev-a" } },
+      { ...full, batch: { ...full.batch, id: "has space" } },
+      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
+      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel + 1 } } },
+      { ...full, batch: { ...full.batch, strategy: { mode: "round-robin" } } },
+      { ...full, deps: [{ task: "t-1", after: "pushed" }] },
+      { ...full, deps: [{ task: "t 1", after: "opened" }] },
+      { ...full, deps: [{ task: "t-1", after: "opened" }, null] },
+      { ...full, linear: { issue: "" } },
+      { ...full, linear: { issue: "ENG-1", url: "http://linear.app/x" } },
+      { ...full, repo: "" },
+    ]) {
+      expect(parseTaskSpec(bad)).toBeNull();
+    }
+  });
+
+  test("deps are bounded, the limit itself allowed", () => {
+    expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps) })).not.toBeNull();
+    expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps + 1) })).toBeNull();
+  });
+});
+
+describe("tasks and their records", () => {
+  const task: Task = {
+    id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "awaiting-merge",
+    createdAt: 1_700_000_000_000,
+    prUrl: "https://github.com/acme/app/pull/7",
+    branch: "worktree-fix-it",
+    pushed: true,
+    needsInputSince: 1_700_000_100_000,
+    escalated: true,
+  };
+
+  test("M3's states and progress fields round-trip", () => {
+    expect(parseTask(task)).toEqual(task);
+    for (const state of ["queued", "blocked"] as const) expect(parseTask({ ...task, state })?.state).toBe(state);
+    expect(parseTask({ ...task, state: "done", doneBy: "manual" })?.doneBy).toBe("manual");
+  });
+
+  test("a progress field that is not exactly its shape nulls the task", () => {
+    for (const bad of [
+      { ...task, prUrl: "javascript:alert(1)" },
+      { ...task, branch: "" },
+      { ...task, branch: "b".repeat(BRANCH_MAX_LENGTH + 1) },
+      { ...task, pushed: false },
+      { ...task, escalated: 1 },
+      { ...task, doneBy: "linear" },
+      { ...task, needsInputSince: "soon" },
+      { ...task, id: "task/with-slash" },
+      { ...task, state: "paused" },
+    ]) {
+      expect(parseTask(bad)).toBeNull();
+    }
+  });
+
+  test("a record names the version its put produced; 0 is no record's", () => {
+    expect(parseTaskRecord({ version: 3, task })).toEqual({ version: 3, task });
+    expect(parseTaskRecord({ version: 0, task })).toBeNull();
+    expect(parseTaskRecord({ version: 1.5, task })).toBeNull();
+    expect(parseTaskRecord({ task })).toBeNull();
+    expect(parseTaskRecord({ version: 1, task: { ...task, state: "paused" } })).toBeNull();
+  });
+
+  test("a per-account cap survives the decision record; an unknown scope drops the reason, not the candidate", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const reason: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
+    expect(parseDecision(decision({ ...reason, scope: "batch" }))?.candidates[0]?.rejected).toEqual([]);
+    const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+    expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
+  });
+});
+
+describe("pause", () => {
+  const forever: PauseHold = { until: "resume", at: 1 };
+  const untilReset: PauseHold = { until: "reset", account: "org:acct", at: 1, resumeAt: 2 };
+
+  test("a request: `reset` is an account's, `resume` may hold the whole queue", () => {
+    expect(parsePauseRequest({ until: "resume" })).toEqual({ until: "resume" });
+    expect(parsePauseRequest({ until: "reset", account: "org:acct", extra: 1 })).toEqual({
+      until: "reset",
+      account: "org:acct",
+    });
+    expect(parsePauseRequest({ until: "reset" })).toBeNull();
+    expect(parsePauseRequest({ until: "tomorrow" })).toBeNull();
+    expect(parsePauseRequest({ until: "resume", account: "" })).toBeNull();
+    expect(parseResumeRequest({})).toEqual({});
+    expect(parseResumeRequest({ account: "org:acct" })).toEqual({ account: "org:acct" });
+    expect(parseResumeRequest({ account: 7 })).toBeNull();
+  });
+
+  test("a held reset carries the time it lifts; a held resume carries none", () => {
+    expect(parsePauseRecord({ version: 1, holds: [forever, untilReset] })).toEqual({
+      version: 1,
+      holds: [forever, untilReset],
+    });
+    for (const bad of [
+      { until: "reset", account: "org:acct", at: 1 },
+      { until: "reset", at: 1, resumeAt: 2 },
+      { ...forever, resumeAt: 2 },
+    ]) {
+      expect(parsePauseRecord({ version: 1, holds: [bad] })).toBeNull();
+    }
+  });
+
+  test("holds are bounded, and one unreadable hold nulls them all", () => {
+    expect(
+      parsePauseRecord({ version: 1, holds: Array.from({ length: MAX_PAUSE_HOLDS }, () => forever) }),
+    ).not.toBeNull();
+    expect(
+      parsePauseRecord({ version: 1, holds: Array.from({ length: MAX_PAUSE_HOLDS + 1 }, () => forever) }),
+    ).toBeNull();
+    expect(parsePauseReply({ holds: [forever, { until: "resume" }] })).toBeNull();
+    expect(parsePauseReply({ holds: [untilReset] })).toEqual({ holds: [untilReset] });
+  });
+});
+
+describe("scheduler ops", () => {
+  const task: Task = {
+    id: "t-1",
+    spec: { repo: "github.com/acme/app", mode: "here" },
+    state: "cancelled",
+    createdAt: 1,
+  };
+
+  test("cancel and mark-done name one task and carry nothing else on", () => {
+    expect(parseTaskRef({ taskId: "t-1", state: "done" })).toEqual({ taskId: "t-1" });
+    expect(parseTaskRef({ taskId: "t 1" })).toBeNull();
+    expect(parseTaskRef({})).toBeNull();
+  });
+
+  test("their replies are the task, or a refusal this build can word", () => {
+    expect(parseTaskReply({ task })).toEqual({ task });
+    const refusal: SchedulerError = { ok: false, code: "dispatching", message: "starting" };
+    expect(parseTaskReply(refusal)).toEqual(refusal);
+    expect(parseTaskReply({ ok: false, code: "nope", message: "?" })).toBeNull();
+    expect(parseTaskReply({ task: { ...task, state: "paused" } })).toBeNull();
+  });
+
+  test("queue carries holds when the leader has them; an unread hold is an unread reply", () => {
+    expect(parseQueueReply({ tasks: [task], at: 5 })).toEqual({ tasks: [task], at: 5 });
+    const holds: readonly PauseHold[] = [{ until: "resume", at: 1 }];
+    expect(parseQueueReply({ tasks: [], at: 5, holds })).toEqual({ tasks: [], at: 5, holds });
+    expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
+  });
+
+  test("queue-changed is a stamp and nothing else", () => {
+    expect(parseQueueChanged({ at: 9, tasks: ["t-1"] })).toEqual({ at: 9 });
+    expect(parseQueueChanged({})).toBeNull();
+  });
+
+  test("cancel's deadline clears the despawn it may wait on", () => {
+    expect(OP_TIMEOUT_MS.cancel).toBeGreaterThan(OP_TIMEOUT_MS.despawn);
+  });
+});
+
+describe("parseBranchState", () => {
+  const event: BranchState = {
+    taskId: "t-1",
+    repo: "github.com/acme/app",
+    branch: "worktree-fix-it",
+    pushed: true,
+    merged: false,
+    at: 1_700_000_000_000,
+  };
+
+  test("round-trips, dropping anything it does not know", () => {
+    expect(parseBranchState({ ...event, prUrl: "https://x" })).toEqual(event);
+  });
+
+  test("merged releases dependents, so the booleans must be booleans and the names bounded", () => {
+    for (const bad of [
+      { ...event, merged: "yes" },
+      { ...event, pushed: 1 },
+      { ...event, branch: "" },
+      { ...event, branch: "b".repeat(BRANCH_MAX_LENGTH + 1) },
+      { ...event, repo: "" },
+      { ...event, taskId: "t;1" },
+      { ...event, at: Number.NaN },
+    ]) {
+      expect(parseBranchState(bad)).toBeNull();
+    }
+  });
+});
+
+describe("store", () => {
+  const env = { v: 1, to: "scheduler", from: "app", iv: "aXY=", ct: "Y3Q=" };
+  const record: StoreRecord = { key: "task:t-1", version: 2, env };
+
+  test("a task at the prompt limit, two bytes a character, with a 15-candidate decision, seals into one record", async () => {
+    const id = "A".repeat(43);
+    const candidate: Candidate = {
+      deviceId: id,
+      machine: "macbook-pro",
+      exclave: "default",
+      clone: "seance",
+      rejected: [],
+      score: {
+        components: { accountPressure: 0.123456789, machinePressure: 0.25, dependencyDistance: 0.5, queuePressure: 3 },
+        sticky: 0,
+        total: 1.987654321,
+      },
+      quota: { observedAt: 1_760_000_000, observer: id, source: "session" },
+    };
+    const task: Task = {
+      id: crypto.randomUUID(),
+      spec: {
+        repo: "github.com/acme/app",
+        mode: "worktree",
+        prompt: "ø".repeat(TASK_REQUEST_LIMITS.prompt),
+        title: "t".repeat(TASK_REQUEST_LIMITS.title),
+      },
+      state: "reserved",
+      createdAt: 1_760_000_000_000,
+      reservation: { deviceId: id, exclave: "default", clone: "seance", expiresAt: 1_760_000_120_000 },
+      decision: { at: 1_760_000_000_000, chosen: null, candidates: Array.from({ length: 15 }, () => candidate) },
+    };
+    const key = await importPsk(toBase64(new Uint8Array(32)));
+    const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+    const sealed = await seal(key, { to: "scheduler", from: "app" }, plain);
+    expect(sealed.ct.length).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+    // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
+    expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {
+    for (const { prefix } of Object.values(STORE_PREFIXES)) expect(isStoreKey(`${prefix}x`)).toBe(true);
+    expect(isStoreKey(`task:${"a".repeat(STORE_KEY_ID_MAX_LENGTH)}`)).toBe(true);
+    for (const bad of [
+      `task:${"a".repeat(STORE_KEY_ID_MAX_LENGTH + 1)}`,
+      "task:",
+      "task:a:b",
+      "task:a/b",
+      "account:abc",
+      "device:abc",
+      "scheduler:term",
+      "TASK:a",
+      7,
+    ]) {
+      expect(isStoreKey(bad)).toBe(false);
+    }
+  });
+
+  test("each reply kind round-trips", () => {
+    const replies: readonly StoreReplyFrame[] = [
+      { t: "store-listed", re: "r1", records: [record] },
+      { t: "store-record", re: "r2", record },
+      { t: "store-record", re: "r2", record: null },
+      { t: "store-written", re: "r3", version: 1 },
+      { t: "store-refused", re: "r4", code: "version_conflict" },
+    ];
+    for (const reply of replies) {
+      expect(parseStoreReply(reply)).toEqual(reply);
+    }
+  });
+
+  test("one unreadable record nulls the list — a takeover must not miss a task", () => {
+    for (const bad of [
+      { ...record, version: 0 },
+      { ...record, key: "task:a b" },
+      { ...record, env: { ...env, ct: 1 } },
+    ]) {
+      expect(parseStoreReply({ t: "store-listed", re: "r1", records: [record, bad] })).toBeNull();
+      expect(parseStoreReply({ t: "store-record", re: "r2", record: bad })).toBeNull();
+    }
+  });
+
+  test("a paged list is refused, never read as the whole queue — so paging can come later", () => {
+    expect(parseStoreReply({ t: "store-listed", re: "r1", records: [record], next: "task:t-1" })).toBeNull();
+  });
+
+  test("a refusal keeps a code minted later, so the request settles instead of timing out", () => {
+    expect(parseStoreReply({ t: "store-refused", re: "r", code: "tombstoned" })).toEqual({
+      t: "store-refused",
+      re: "r",
+      code: "tombstoned",
+    });
+    expect(parseStoreReply({ t: "store-refused", re: "r" })).toBeNull();
+    expect(parseStoreReply({ t: "store-written", version: 1 })).toBeNull();
+    expect(parseStoreReply({ t: "store-moved", re: "r" })).toBeNull();
+  });
+
+  test("store-changed names a key and its version, 0 when it was deleted", () => {
+    expect(parseStoreChanged({ t: "store-changed", key: "task:t-1", version: 0 })).toEqual({
+      t: "store-changed",
+      key: "task:t-1",
+      version: 0,
+    });
+    expect(parseStoreChanged({ t: "store-changed", key: "task:t-1", version: -1 })).toBeNull();
+    expect(parseStoreChanged({ t: "store-changed", key: "nope", version: 1 })).toBeNull();
   });
 });

@@ -18,6 +18,10 @@ interface Content {
 /** What the person can do next about a task the scheduler holds, by its state. */
 function queuedBody(task: Task): string {
   switch (task.state) {
+    case "queued":
+      return "It is in the queue. The scheduler picks it up as soon as one is running. Nothing is running yet.";
+    case "blocked":
+      return "It waits for the tasks it depends on. Nothing is running yet.";
     case "ready":
       return "The scheduler holds it and places it as soon as a machine can take it. Nothing is running yet.";
     case "reserved":
@@ -27,6 +31,8 @@ function queuedBody(task: Task): string {
       return "Open Claude on your phone and continue the session from there.";
     case "lost":
       return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back.";
+    case "awaiting-merge":
+      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does.";
     case "done":
       return "The session ended.";
     case "failed":
@@ -43,7 +49,7 @@ function queuedBody(task: Task): string {
 function describe(verdict: Verdict, machineName: string, machines: readonly Machine[], now: number): Content {
   if (verdict.kind === "queued") {
     const { task } = verdict;
-    const settled = task.state !== "ready" && task.state !== "reserved";
+    const settled = !["queued", "blocked", "ready", "reserved"].includes(task.state);
     return {
       // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.
       glyph: task.state === "failed" ? "!" : task.state === "lost" ? "?" : settled ? "✓" : "…",

@@ -80,6 +80,12 @@ const SCHEDULER_ERRORS: Record<SchedulerErrorCode, string> = {
   not_ready: "The scheduler is still taking over. Try again in a moment.",
   invalid_request: "The scheduler refused the request. Update seanced and the app to matching versions.",
   queue_full: "The scheduler already holds as many unfinished tasks as it will take.",
+  task_not_found: "The scheduler holds no such task.",
+  dispatching: "The task is starting on a machine right now. Try again in a moment.",
+  finished: "The task has already finished.",
+  despawn_failed: "Its machine refused to end the session. Nothing changed.",
+  conflict: "The task changed while this was on its way. Try again.",
+  reset_unknown: "No quota reading says when that account resets, so it can't be paused until then.",
   internal_error: "The scheduler hit an error.",
   too_large: "The scheduler's answer was too large to send back.",
 };

@@ -25,12 +25,18 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * spawn confirmed: with no session it is `ready` again only when the machine's
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
  * is legal for that task alone, and `advance` refuses it for any other.
+ *
+ * M3's `queued`, `blocked` and `awaiting-merge` are in the schema already but
+ * have no edges yet: nothing enters or leaves them until M3 item 4 does.
  */
 export const TRANSITIONS = {
+  queued: [],
+  blocked: [],
   ready: ["reserved", "cancelled"],
   reserved: ["running", "needs-input", "done", "ready", "lost", "failed", "cancelled"],
   running: ["needs-input", "lost", "done", "failed", "cancelled"],
   "needs-input": ["running", "lost", "done", "failed", "cancelled"],
+  "awaiting-merge": [],
   lost: ["running", "needs-input", "done", "ready", "failed", "cancelled"],
   done: [],
   failed: [],

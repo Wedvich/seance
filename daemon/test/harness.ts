@@ -179,6 +179,8 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       registers.push(frame);
     } else if (frame.t === "status") {
       statuses.push(frame.env);
+    } else if (frame.t !== "msg") {
+      // A store frame (scheduler M3): this double has no store until item 3 gives it one.
     } else if (frame.env.to === SCHEDULER_ID) {
       if (leader !== null) daemons.get(leader)?.send(JSON.stringify({ t: "msg", env: frame.env }));
     } else {
