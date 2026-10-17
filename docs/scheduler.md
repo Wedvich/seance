@@ -177,7 +177,8 @@ task's PR URL, branch, `pushed` and `merged` in `progress` (`TaskProgress`, M3; 
 and no standing traffic). A new leader reads it on takeover, and again when a machine holding
 a task it waits on comes back, so a gap can neither settle a task that ended with an open PR
 as `done` nor hold an `after: merged` dependent past a merge. In a reply the daemon trimmed to
-fit (`progressTrimmed`) a task with no entry is unknown and waits for a later read. The
+fit (`progressTrimmed`) a task with no entry settles by the PR its record already holds, and
+with none is unknown and waits for a later read (DESIGN.md, "Done detection"). The
 session and task ids in a `session-event` are the daemon's own, from its pane map, never copied
 from what the mod sent (DESIGN.md, Local op socket, "Session events"). The plan's `skill` field
 was left out: nothing reads it before M4's skill filter.
@@ -482,7 +483,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
   - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
-    `sequential` is 1 and also holds a member until every held lower `index` is over).
+    `sequential` is 1 and also holds a member until every held lower `index` is over —
+    `batch_order`, its own reason, since the 4a follow-up).
   - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
     `QueueChanged.tasks`.
 - **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
@@ -541,12 +543,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     own `store_full`. Per pass, because an app's `store_full` never reaches the leader; gated,
     because a prune can race a create naming the finished task it deletes, and leader changes
     are routine (a deviation from "after takeover"; the gate narrows that race, it does not close
-    it). Left open: no
-    `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
-    never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
-    for it is a schema PR of its own. And M2's `submit` still creates `ready`, which
+    it). Its schema follow-up landed beside it: `queue_expired` fails a task `queued` past
+    `STORE_TOMBSTONE_MS` (and its dependents), and `batch_order` words a `sequential` order
+    hold. Left open: M2's `submit` still creates `ready`, which
     `bindTaskRecord` refuses at version 1 (`created_unqueued`): item 3's adapter must not meet
-    a `submit` create, so `submit` goes or creates `queued` before it lands.
+    a `submit` create, so `submit` goes or creates `queued` before it lands (a precondition
+    on item 3's own bullet).
   - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show
     only after a fetch, and `reap` — the one thing that fetches — is off by default, so the
     emitter fetches on a cadence of its own; the launch ledger holds ids and times, no worktree
@@ -570,11 +572,19 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     leader's handler both drop `prUrl` before `onSession`); `e2e/harness.ts` no longer injecting
     `MemoryQueueStore`; and a store double in `daemon/test/harness.ts` — term fence, tombstones,
     `store-changed` — for the adapter's daemon tests.
+    **Precondition: `submit` must not create `ready` through this adapter.** M2's
+    `Scheduler.submit` creates its task `ready`, and `bindTaskRecord` refuses a version-1
+    record that is not `queued` (`created_unqueued`), so once the adapter backs the leader every
+    `submit` would write a record no reader keeps. Item 6 removes `submit`, but it lands after
+    this item; so this item makes `submit` create `queued` (admission moves it on in the same
+    pass) or lands only after item 6.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
     credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
     handlers after the split.
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
-  **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
+  Batch creation must refuse a spec whose `batch.index` is past `TASK_SPEC_LIMITS.batchIndex`
+  (= `MAX_TASKS`) at submit time: `parseBatch` bounds it, and a spec past it makes the whole record
+  unreadable. **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
   `SubmitReply`, `MAX_ACTIVE_TASKS`, the `queue_full` code and its wording, `parseSubmitReply`,
   the `submit` methods on `RelayClient`, `AppRelay` and `daemon/src/fleet.ts`'s scheduler, the
   leader's `submit` case with `KEEP_FINISHED`, and `Scheduler.submit` (with `newId` unless

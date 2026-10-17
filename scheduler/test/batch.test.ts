@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { BatchStrategy } from "@seance/shared";
+import { TASK_SPEC_LIMITS, type BatchStrategy } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task, type TaskSpec } from "../src/index.ts";
 import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
 
-/** Batches (M3 item 4a): a strategy's bound as `cap_reached` scope `batch`, and members routed in index order. */
+/** Batches (M3 item 4a): a strategy's bound as `cap_reached` scope `batch`, and members routed in index order (`batch_order`). */
 
 const FLEET = ["a", "b", "c", "d"].map((id) => machine(id));
 
@@ -106,16 +106,19 @@ describe("batches", () => {
   describe("sequential enforces index order, not whichever member routes first", () => {
     const sequential = { mode: "sequential" } as const;
 
-    test("an unroutable index 0 holds index 1", async () => {
+    test("an unroutable lower index holds the next, and the hold names the nearest one", async () => {
       const { fleet, scheduler, member } = setup();
-      await member("first", 0, sequential, {}, { repo: "github.com/acme/elsewhere" });
-      await member("second", 1, sequential);
+      const elsewhere = { repo: "github.com/acme/elsewhere" };
+      await member("first", 0, sequential, {}, elsewhere);
+      await member("second", 1, sequential, {}, elsewhere);
+      await member("third", 2, sequential);
       await scheduler.load();
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual([]);
-      expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual(
-        expect.objectContaining({ code: "cap_reached", scope: "batch" }),
-      );
+      // Nothing of the batch is in flight, so the hold says what it waits on, not a cap.
+      const rejected = scheduler.lastDecision("third")?.candidates[0]?.rejected;
+      expect(rejected).toContainEqual({ code: "batch_order", index: 1 });
+      expect(rejected?.some((r) => r.code === "cap_reached")).toBe(false);
     });
 
     test("a lower index not in the store holds nothing: gaps, 1-based numbering and pruned members never wedge a batch", async () => {
@@ -136,10 +139,10 @@ describe("batches", () => {
       expect(dispatched(fleet)).toEqual(["second"]);
     });
 
-    test("a huge index routes promptly: the hold costs the members, not the index", async () => {
+    test("an index at the bound is readable and routes: the hold costs the members, not the index", async () => {
       const { fleet, scheduler, member } = setup();
       await member("first", 0, sequential);
-      await member("last", Number.MAX_SAFE_INTEGER, sequential);
+      await member("last", TASK_SPEC_LIMITS.batchIndex, sequential);
       await scheduler.load();
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual(["first"]);
@@ -175,6 +178,10 @@ describe("batches", () => {
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual([]);
       expect(scheduler.task("first")?.state).toBe("blocked");
+      expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual({
+        code: "batch_order",
+        index: 0,
+      });
     });
 
     test("a lower index finished in any state releases the next", async () => {

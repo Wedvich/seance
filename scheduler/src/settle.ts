@@ -140,6 +140,18 @@ function progressOf(reply: SessionsAnswer, taskId: string): TaskProgress | undef
   return reply.progress?.find((p) => p.taskId === taskId);
 }
 
+/**
+ * Whether an ended session cannot be settled yet: the reply was trimmed, it has
+ * no entry for the task, and the record holds no PR — settling then would guess
+ * "no PR" and call it `done`. A PR the record already holds is proof enough for
+ * `awaiting-merge`, which frees the slot; a later read still settles a merge.
+ * Without it the task keeps its slot until an untrimmed read (DESIGN.md, "Done
+ * detection").
+ */
+function unknownEnd(task: Task, entry: TaskProgress | undefined, reply: SessionsAnswer): boolean {
+  return entry === undefined && reply.progressTrimmed !== undefined && task.prUrl === undefined;
+}
+
 function changed(before: Task, after: Task): Task | null {
   return after === before ? null : after;
 }
@@ -173,10 +185,9 @@ function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Tas
  * id is the task still running (a `lost` one runs again, on the pane listed
  * now), with its `progress` applied; none is a session that ended while nobody
  * listened — settled by its PR as `ended` settles one, whether or not `ended`
- * still remembers it. In a trimmed reply a task with no `progress` entry is
- * unknown, and waits for a later read rather than read as PR-less. A `lost`
- * task never confirmed is not placed but a reservation its machine kept, and
- * settles as one.
+ * still remembers it, unless a trimmed reply leaves that unknown
+ * (`unknownEnd`). A `lost` task never confirmed is not placed but a
+ * reservation its machine kept, and settles as one.
  */
 function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
   const { assignment } = task;
@@ -184,7 +195,7 @@ function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
   const entry = progressOf(reply, task.id);
   const session = reply.sessions.find((s) => s.taskId === task.id);
   if (session === undefined) {
-    if (entry === undefined && reply.progressTrimmed !== undefined) return null;
+    if (unknownEnd(task, entry, reply)) return null;
     return ended(task, entry);
   }
   const live =
@@ -211,7 +222,7 @@ function settleUnconfirmed(task: Task, target: Target, reply: SessionsAnswer): T
     return progressed(advance(task, "running", { assignment: assignmentOf(target, session) }), entry);
   }
   if (reply.ended?.includes(task.id) === true) {
-    if (entry === undefined && reply.progressTrimmed !== undefined) return null;
+    if (unknownEnd(task, entry, reply)) return null;
     return ended(task, entry, { assignment: targetOf(target) });
   }
   if (provesNeverLanded(reply, task.reservedAt)) return advance(task, "ready");

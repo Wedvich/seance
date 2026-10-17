@@ -1,8 +1,11 @@
 import {
   SCHEDULER_ERROR_CODES,
+  STORE_TOMBSTONE_MS,
+  TASK_FAILURE_CODES,
   TRANSPORT_ERROR_CODES,
   type Reason,
   type SchedulerErrorCode,
+  type TaskFailureCode,
   type TransportErrorCode,
 } from "./types.ts";
 
@@ -80,11 +83,31 @@ export function reasonText(reason: Reason): string {
         return `${reason.inFlight} of ${reason.max} auto tasks already in flight on its account`;
       if (reason.scope === "batch") return `${reason.inFlight} of ${reason.max} of its batch already in flight`;
       return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
+    case "batch_order":
+      return `its batch runs in order, and it waits for batch member #${reason.index}, earlier in its order`;
     case "paused": {
       const why = reason.until === "reset" ? "until its quota resets" : "until resumed";
       return reason.scope === "account" ? `its account is paused ${why}` : `the queue is paused ${why}`;
     }
   }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Every scheduler-set failure worded, as for error codes. */
+const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
+  dispatch_unconfirmed:
+    "its machine could not say whether the session started, so the scheduler will not start it again",
+  dependency_failed: "a task it depends on failed or was cancelled",
+  dependency_missing: "a task it depends on is not in the queue",
+  dependency_cycle: "its dependencies wait on each other in a loop",
+  queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
+};
+
+/** A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later. */
+export function taskFailureText(code: string): string | null {
+  const known = TASK_FAILURE_CODES.find((c) => c === code);
+  return known === undefined ? null : TASK_FAILURE_TEXT[known];
 }
 
 /** A clause shown on its own: capitalized and closed. */

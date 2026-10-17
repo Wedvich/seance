@@ -1108,8 +1108,8 @@ export interface SessionsResponse {
   /**
    * Present only when the daemon dropped entries from `progress` to fit the
    * reply in one envelope, oldest first: how many. In a trimmed reply a task
-   * with no entry is unknown, not progress-free, and a reader waits for a later
-   * read rather than settle it.
+   * with no entry is unknown, not progress-free: a reader settles it by the PR
+   * its record holds, and with none waits for a later read.
    */
   readonly progressTrimmed?: number;
 }
@@ -1323,12 +1323,17 @@ export interface LinearLink {
   readonly url?: string;
 }
 
-/** Bounds on `TaskSpec`'s M3 fields, beside `TASK_REQUEST_LIMITS`. */
+/**
+ * Bounds on `TaskSpec`'s M3 fields, beside `TASK_REQUEST_LIMITS`. `batchIndex`
+ * is `MAX_TASKS`, inclusive: the store holds no more task records, so no batch
+ * held at once has more members, and inclusive admits 1-based numbering.
+ */
 export const TASK_SPEC_LIMITS = {
   deps: 16,
   parallel: 16,
   linearIssue: 64,
   placement: ROUTING_ID_MAX_LENGTH,
+  batchIndex: MAX_TASKS,
 } as const;
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
@@ -1399,6 +1404,12 @@ export type Reason =
       readonly max: number;
       readonly scope?: "global" | "account" | "batch";
     }
+  /**
+   * A `sequential` batch member held for order: the member at `index`, the
+   * nearest lower one the scheduler holds, has not ended yet — running, or
+   * still `blocked` or unroutable itself.
+   */
+  | { readonly code: "batch_order"; readonly index: number }
   /**
    * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
    * account. M3 item 5; no leader sets it yet.
@@ -1499,7 +1510,11 @@ export interface Task {
   readonly prUrl?: string;
   /** Its branch, from its machine's `branch-state`. */
   readonly branch?: string;
-  /** Its branch's upstream held its tip at the last `branch-state`. */
+  /**
+   * Its branch's upstream held its tip. Per branch: a report naming another
+   * branch clears it, and within one it never goes back. A `merged` verdict is
+   * believed only of a branch seen pushed (`scheduler/src/done.ts`).
+   */
   readonly pushed?: true;
   /** With `done`: which signal settled it (docs/scheduler.md, "Done detection"). */
   readonly doneBy?: DoneSignal;
@@ -1544,7 +1559,7 @@ export interface VersionBound {
  * A leader also admits no `queued` task whose `createdAt` is more than
  * `STORE_TOMBSTONE_MS` old: past that its key's tombstone may be gone, and only
  * the age still refuses the blob put back. That one is the admission's, not the
- * reader's — the record still reads, to be failed and pruned.
+ * reader's — the record still reads, to be failed `queue_expired` and pruned.
  */
 export interface TaskRecord extends VersionBound {
   readonly task: Task;
@@ -1600,14 +1615,17 @@ export interface PauseRecord extends VersionBound {
  * later, could neither show the session nor prove it never started (an older
  * daemon, or a ledger pruned past the reservation). Terminal: re-dispatching
  * could start a twin. `dependency_failed`, `dependency_missing` and
- * `dependency_cycle`: an edge that can never release (`TaskDep`; M3, not set
- * yet).
+ * `dependency_cycle`: an edge that can never release (`TaskDep`), set at
+ * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be
+ * a pruned task's blob put back (`TaskRecord`); failed rather than held, so
+ * its dependents fail too and it can be pruned.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
   "dependency_failed",
   "dependency_missing",
   "dependency_cycle",
+  "queue_expired",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];

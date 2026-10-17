@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { isRouted, isSettled, type Machine, type Task } from "@seance/shared";
 import { describeDecision, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
-import { failureBody } from "../view.ts";
+import { failedBody, failureBody } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 
 interface Content {
@@ -36,9 +36,7 @@ function queuedBody(task: Task): string {
     case "done":
       return "The session ended.";
     case "failed":
-      return task.failure?.code === "dispatch_unconfirmed"
-        ? "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another."
-        : "The machine refused the spawn. Nothing is running.";
+      return failedBody(task.failure?.code);
     case "cancelled":
       return task.leftRunning === true
         ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."

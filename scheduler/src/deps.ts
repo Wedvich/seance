@@ -38,7 +38,8 @@ export function released(pred: Task, after: DepAfter): boolean {
 /**
  * A `queued` task past this age is never admitted: its key's tombstone may be
  * gone, so it may be a pruned task's authentic version-1 blob put back
- * (`TaskRecord`). It stays `queued` — no failure code says why yet.
+ * (`TaskRecord`). `admission` fails it `queue_expired`, so its dependents fail
+ * with it and pruning can take it.
  */
 export function isExpired(task: Task, now: number): boolean {
   return task.state === "queued" && now - task.createdAt > STORE_TOMBSTONE_MS;
@@ -57,7 +58,7 @@ export function admission(
   now: number,
 ): ReadonlyMap<string, Admission> {
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  const waiting = tasks.filter((t) => (t.state === "queued" || t.state === "blocked") && !isExpired(t, now));
+  const waiting = tasks.filter((t) => t.state === "queued" || t.state === "blocked");
   const out = new Map<string, Admission>();
   const failed = new Set<string>();
   const fail = (task: Task, code: TaskFailureCode, message: string): void => {
@@ -65,10 +66,17 @@ export function admission(
     failed.add(task.id);
   };
 
-  const loops = cycles(tasks);
+  for (const task of waiting) {
+    if (isExpired(task, now)) fail(task, "queue_expired", "it was queued too long ago to be admitted");
+  }
+
+  // A task failed above is finished for the loop check, so its loop-mates fail `dependency_failed` below, not `dependency_cycle`.
+  const loops = cycles(tasks.filter((t) => !failed.has(t.id)));
   for (const task of waiting) {
     const loop = loops.get(task.id);
-    if (loop !== undefined) fail(task, "dependency_cycle", `its dependencies loop: ${loop.join(" → ")}`);
+    if (loop !== undefined && !failed.has(task.id)) {
+      fail(task, "dependency_cycle", `its dependencies loop: ${loop.join(" → ")}`);
+    }
   }
 
   const judge = (task: Task): Judgement => {

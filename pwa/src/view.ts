@@ -1,4 +1,4 @@
-import { isSpawnErrorCode } from "@seance/shared";
+import { isSpawnErrorCode, sentence, taskFailureText } from "@seance/shared";
 import type { Machine, RelayState, RepoEntry } from "@seance/shared";
 import {
   EFFORT_LABELS,
@@ -513,4 +513,15 @@ export function deriveView(state: AppState, now: number): ViewModel {
     autoAvailability: deriveAutoAvailability(state.relay),
     auto: auto ? { repo: autoRepo, repos } : null,
   };
+}
+
+export function failedBody(code: string | undefined): string {
+  if (code === "dispatch_unconfirmed") {
+    return "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another.";
+  }
+  // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
+  const scheduler = code === undefined ? null : taskFailureText(code);
+  return scheduler === null
+    ? "The machine refused the spawn. Nothing is running."
+    : `${sentence(scheduler)} Nothing is running.`;
 }
