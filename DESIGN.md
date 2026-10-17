@@ -3091,12 +3091,20 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   reaches the socket through `seanced session-event` (JSON on stdin). A hooks module
   runs with no Node and no sockets of its own, so it runs that command through
   `$.process.run`. The command is silent, always exits 0, and waits for the daemon's
-  one-line answer before exiting: the binding below needs the sender alive. Startup
-  is ~65 ms, fire-and-forget from the mod's side.
+  one-line answer before exiting: the binding below needs the sender alive. It runs
+  two or three times a turn in every session on the machine, so `main.ts` dispatches it
+  before loading anything else of the CLI (`cli.ts` pulls in the MCP SDK and zod), and the
+  command imports the frame constants from `session-event-frame.ts`, not the daemon side:
+  11 ms a run on macOS where loading the whole CLI took 47 ms, against 5 ms for a bare
+  `bun -e 0`. Fire-and-forget from the mod's side, and skipped there when `TMUX_PANE`
+  is unset: such a session is in no pane the daemon could bind it to, so every report
+  would be `unbound` (below) at the cost of a Bun start and the daemon's tmux and
+  parent-walk reads. The daemon still binds every report that does arrive.
 - **Ingest-only.** The handler stores (session quota, the ended-task memory) and
   forwards (to the leader). It never spawns, despawns or runs a command shaped by
   a frame. Its only subprocesses are fixed-argv reads: `tmux list-panes`, and on
-  macOS `ps -Ao pid=,ppid=` for the parent walk. No frame field reaches any argv.
+  macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
+  No frame field reaches any argv.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
@@ -3108,7 +3116,11 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   on macOS. The macOS path is documented in `<sys/un.h>` since 10.8 but not
   tested by hand; CI's macOS leg runs the suite that exercises it. Both record the
   pid at `connect(2)`. The daemon walks that pid's parents (`/proc/<pid>/stat` on
-  Linux, one `ps` on macOS, at most 32 hops) to the first `pane_pid` of a live pane.
+  Linux, `proc_pidinfo(PROC_PIDTBSDINFO)` through `bun:ffi` on macOS, at most 32 hops)
+  to the first `pane_pid` of a live pane. On macOS that is 0.3 µs a hop where the one
+  `ps` it replaced took 20 ms and grew with the process count; `ps` stays the fallback
+  where the symbol will not load, and for a hop `proc_pidinfo` refuses (another user's
+  process, such as a `sudo` between pane and peer), which `ps` can read.
   The session (the pane id), the task (the pane's `@seance-task`, the tag spawn writes
   and `task_running` reads) and the exclave (the pane's path through `exclaveOf`) all
   come from that pane. The `taskId`, `session` and `exclave` a frame might carry are

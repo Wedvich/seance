@@ -96,14 +96,55 @@ export function parsePsParents(text: string): ReadonlyMap<number, number> {
   return parents;
 }
 
+/** `proc_pidinfo`'s flavor for struct proc_bsdinfo (<sys/proc_info.h>): 136 bytes, `pbi_ppid` a uint32 at 16. */
+const PROC_PIDTBSDINFO = 3;
+const BSDINFO_BYTES = 136;
+const BSDINFO_PPID_OFFSET = 16;
+
+function loadProcPidInfo() {
+  if (process.platform !== "darwin") return null;
+  try {
+    const { symbols } = dlopen("/usr/lib/libSystem.B.dylib", {
+      proc_pidinfo: {
+        args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32],
+        returns: FFIType.i32,
+      },
+    });
+    return symbols.proc_pidinfo;
+  } catch {
+    return null;
+  }
+}
+
+/** Undefined until first asked; null once the call will not load, which is then never retried. */
+let procPidInfo: ReturnType<typeof loadProcPidInfo> | undefined;
+
+/**
+ * macOS's parent of `pid` from the kernel's own record, exec-free — what `ps`
+ * reads too, for one process instead of all. Null when gone or unreadable, and
+ * undefined where the call will not load, so the caller falls back to `ps`.
+ */
+export function bsdParent(pid: number): number | null | undefined {
+  if (procPidInfo === undefined) procPidInfo = loadProcPidInfo();
+  if (procPidInfo === null) return undefined;
+  const info = new Uint8Array(BSDINFO_BYTES);
+  try {
+    // Anything short of the whole struct is a failure: 0 for a pid gone or not ours to read.
+    if (procPidInfo(pid, PROC_PIDTBSDINFO, 0, ptr(info), BSDINFO_BYTES) !== BSDINFO_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return new DataView(info.buffer).getUint32(BSDINFO_PPID_OFFSET, true);
+}
+
 /** Bounded: a pid reused mid-walk could close a loop. */
 const MAX_DEPTH = 32;
 
 /**
  * The first of `pid` and its ancestors that `targets` holds — the pane whose
- * process tree the peer runs in. Linux reads `/proc` per hop, exec-free; macOS
- * has no `/proc`, so one fixed-argv `ps` lists every parent at once. Nothing a
- * peer sent reaches either.
+ * process tree the peer runs in. Linux reads `/proc` per hop and macOS asks
+ * `proc_pidinfo` per hop, both exec-free; where that will not load, one
+ * fixed-argv `ps` lists every parent at once. Nothing a peer sent reaches any.
  */
 export async function ancestorIn<T>(pid: number, targets: ReadonlyMap<number, T>): Promise<T | null> {
   const parentOf = await parentLookup();
@@ -127,6 +168,30 @@ async function parentLookup(): Promise<(pid: number) => Promise<number | null>> 
       }
     };
   }
+  // 0.3 µs a hop against 20 ms for a `ps` that lists every process on the machine.
+  if (bsdParent(process.pid) === undefined) return psParents();
+  // `proc_pidinfo` refuses another user's process, which `ps` reads: a `sudo` between
+  // pane and peer would otherwise end the walk where it used to carry on.
+  let listing: Promise<(pid: number) => Promise<number | null>> | null = null;
+  return async (pid) => {
+    const parent = bsdParent(pid);
+    if (typeof parent === "number") return parent;
+    // A pid gone is gone to `ps` too: only a refused hop is worth listing every process for.
+    return exists(pid) ? (await (listing ??= psParents()))(pid) : null;
+  };
+}
+
+/** Signal 0 sends nothing: EPERM is a live process that is not ours, ESRCH one that is gone. */
+function exists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err instanceof Error && "code" in err && err.code === "EPERM";
+  }
+}
+
+async function psParents(): Promise<(pid: number) => Promise<number | null>> {
   const listed = await exec(["ps", "-Ao", "pid=,ppid="]).catch(() => null);
   const parents = listed === null || listed.exitCode !== 0 ? new Map<number, number>() : parsePsParents(listed.stdout);
   return async (pid) => parents.get(pid) ?? null;
