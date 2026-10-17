@@ -657,7 +657,10 @@ export interface ExclaveInfo {
   readonly extraUsageEnabled: boolean | null;
   /** The config dir holds a signed-in account. */
   readonly authOk: boolean;
-  /** User-level skill names under the config dir — informational until M4's skill filter. */
+  /**
+   * User-level skill names: entries under `<configDir>/skills/` holding a
+   * `SKILL.md` (symlinks followed). Read with the scan, served from the blob.
+   */
   readonly skills: readonly string[];
 }
 

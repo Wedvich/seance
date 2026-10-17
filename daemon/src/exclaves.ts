@@ -138,17 +138,29 @@ async function readAccount(file: string): Promise<Account | typeof UNPARSABLE> {
   };
 }
 
-/** Skill names are directory names under `<configDir>/skills/` — what `/skill` resolves. */
+/**
+ * Skill names are the entries under `<configDir>/skills/` that hold a `SKILL.md`
+ * — what `/skill` resolves. `stat` follows symlinks, so a dotfiles-managed link
+ * counts when its target is a skill dir and a dangling one drops out with the
+ * stray dirs (a sync folder, a half-removed skill) that would otherwise be
+ * advertised as names nothing answers to.
+ */
 async function listSkills(dir: string): Promise<readonly string[]> {
+  let names: readonly string[];
   try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((e) => (e.isDirectory() || e.isSymbolicLink()) && !e.name.startsWith("."))
-      .map((e) => e.name)
-      .toSorted();
+    names = await readdir(dir);
   } catch {
     return [];
   }
+  const candidates = names.filter((name) => !name.startsWith("."));
+  const isSkill = await Promise.all(
+    candidates.map((name) =>
+      stat(join(dir, name, "SKILL.md"))
+        .then((info) => info.isFile())
+        .catch(() => false),
+    ),
+  );
+  return candidates.filter((_, i) => isSkill[i]).toSorted();
 }
 
 /** `previous` is the last scan's `info`, matched by id, so a torn read keeps that exclave's account. */

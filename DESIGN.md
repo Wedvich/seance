@@ -2403,7 +2403,9 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   outside it) and, per exclave, what its config dir says (`MachineInfo.exclaves`:
   `accountId` = `organizationUuid:accountUuid`, `email` and the extra-usage flag from
   `.claude.json`'s `oauthAccount`, `authOk` = that object's presence, `skills` =
-  directory names under `skills/`). `.claude.json` sits in the config dir only
+  the entries under `skills/` that hold a `SKILL.md` — directories, or symlinks
+  resolving to one, dotfiles skipped; tightened 2026-10-17, since a sync folder or
+  a dangling dotfiles link otherwise went out as a name nothing answers to). `.claude.json` sits in the config dir only
   when `CLAUDE_CONFIG_DIR` is set: `default` runs without it, so its file is
   `~/.claude.json`, and a `~/.claude/.claude.json` beside it is a stub that once
   read every `default` as signed out. Every running session rewrites its
@@ -3144,6 +3146,19 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the field lost. CLEAR also blurs the textarea — an empty field is nothing to
   type into, and on a phone the keyboard should go with the text — while UNDO
   focuses it again, caret at the end, so the draft can be picked back up.
+- **A `/` first in the prompt opens a skill picker** (scheduler M4, _Skills_, 2026-10-17). It
+  lists the union of skill names across every machine and exclave — `MachineInfo.exclaves[].skills`
+  from the register blobs the app already holds, offline machines included — so it needs no
+  leader and works on a direct pick as on `auto`. Names only, no descriptions and no
+  machine list: the blob carries every name to every app, and descriptions would grow it per
+  skill; placement is the M4 routing filter's job, so the list stays a plain union. Like Claude Code's picker it
+  completes the first token only (open while the prompt is `/` plus no whitespace), matching
+  prefix first then substring, and picking writes `/name ` with the space. It sits inline under
+  the textarea, which collapses to one line meanwhile, rather than in an overlay the on-screen
+  keyboard could cover; it opens from the prompt text, never focus, and its rows take
+  `pointerdown` without default so a tap neither blurs the field nor drops the keyboard. With
+  matches, Enter and Tab pick and never spawn; with none it says the name goes as typed and the
+  keys behave as without it — an unknown name is not an error (M4's routing filter, still open, will let it pass).
 
 ## MCP server (`seanced mcp`) — designed 2026-08-03
 

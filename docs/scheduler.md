@@ -44,7 +44,7 @@ stay as they are; the table says which word each one means.
 | Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                                                                                                                                         |
 | Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader; the relay keeps the last one with the registry entry when the socket goes (M2), so quota outlives a sleeping observer. History stays on each daemon behind a `metrics` op; neither the relay nor the scheduler stores history |
 | At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                                                                                                                                             |
-| Skills            | Hard filter when declared or prompt starts with `/name`; otherwise informational (+ PWA autocomplete)                                                                                                                                                                                                                                                                                       |
+| Skills            | Hard filter on a declared or `/name` skill the fleet's inventory knows (unknown names pass); PWA autocompletes from it                                                                                                                                                                                                                                                                      |
 | Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                                                                                                                                     |
 | Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                                                                                                                                       |
 | Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                                                                                                                                      |
@@ -298,7 +298,8 @@ and an unplaced task's stays in memory. M3 and M4 add:
 
 - Filters: the per-account cap (`cap_reached` with `scope: "account"`, M3 item 5; the per-batch
   bound landed with item 4a, DESIGN.md "Batches"); `skill absent` (M4,
-  _Skills_: a hard filter when declared or the prompt starts with `/name`); stacked base
+  _Skills_: a hard filter when declared or the prompt starts with `/name`, and only for a name the
+  fleet's inventory knows); stacked base
   unpushed and not on this exclave (M4, _Stacking_).
 - Score: `dependencyDistance` gets an input once M3's deps fill `TaskSpec.base`. The Proxmox
   node view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
@@ -663,7 +664,22 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
 - **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an idle exclave's
   quota refreshes within `staleAfter`; a failing endpoint is quiet.
-- **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete.
+- **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
+  - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
+    and served from the blob, never per request. Tightened to directories (or symlinks
+    resolving to one) holding a `SKILL.md`, so a stray dir or a dangling dotfiles link stops
+    advertising a skill — landed with the autocomplete (PR #167).
+  - _Filter_ (open): only a name somewhere in the fleet's inventory restricts — to the exclaves
+    that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
+    anything the inventory skips; cost: a typo routes anywhere rather than failing.
+  - _Autocomplete_ — **DONE (PR #167)**: union of names across machines and exclaves, from data
+    the PWA already holds — needs no leader, which is why it landed before the filter. Names
+    only, no descriptions (blob size; revisit if wanted).
+  - _Out of scope for now_: plugin skills (`plugin:name`, under `plugins/`) and legacy
+    `commands/*.md` — both pass the filter as unknown names.
+  - _Required, not yet built_: project skills (`<repo>/.claude/skills/`) belong to a clone,
+    not an exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until
+    then a project-only skill is unknown and passes.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
 - **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk

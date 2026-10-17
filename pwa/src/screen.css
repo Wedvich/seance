@@ -293,6 +293,83 @@
   border-color: var(--acc);
 }
 
+/* ---- skill picker ---- */
+
+/* While picking, the first token is all there is to type, so the card's height
+   goes to rows instead of an empty field. */
+.prompt-input-compact {
+  flex: none;
+}
+
+/*
+ * Inline under the textarea, never a fixed overlay: the on-screen keyboard
+ * shrinks the viewport, and this stays in the flow above it. The dvh bound
+ * keeps it short enough to sit beside the field with the keyboard up.
+ */
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(234px, 40dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 -8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.skill-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: none;
+  width: 100%;
+  min-height: 48px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  min-width: 0;
+}
+
+.skill-item-active {
+  background: var(--sur2);
+}
+
+.skill-item:not(.skill-item-none):active {
+  background: color-mix(in oklab, var(--sur2) 88%, var(--fg));
+}
+
+.skill-name {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 15px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 500 is the heaviest Fira Code fonts.css ships; anything above is synthesized. */
+.skill-name b {
+  font-weight: 500;
+}
+
+.skill-sub {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--fg2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-item-none .skill-name {
+  color: var(--fg2);
+}
+
 /* ---- banner ---- */
 
 .banner {

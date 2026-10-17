@@ -25,6 +25,14 @@ async function makeHome(exclavesFile?: string): Promise<string> {
   return home;
 }
 
+/** A skill as Claude Code resolves one: a dir under `<configDir>/skills/` holding a `SKILL.md`. */
+async function skill(configDir: string, name: string): Promise<string> {
+  const dir = join(configDir, "skills", name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "SKILL.md"), `---\nname: ${name}\n---\n`);
+  return dir;
+}
+
 async function writeClaudeJson(configDir: string, content: unknown): Promise<void> {
   await mkdir(configDir, { recursive: true });
   await writeFile(join(configDir, ".claude.json"), typeof content === "string" ? content : JSON.stringify(content));
@@ -72,10 +80,8 @@ describe("describeExclave", () => {
   test("reads account ids, email and the extra-usage flag, never the rest", async () => {
     const home = await makeHome();
     await writeClaudeJson(join(home, ".claude-work"), { oauthAccount: account, cachedUsageUtilization: {} });
-    await mkdir(join(home, ".claude-work", "skills", "dataviz"), { recursive: true });
-    await mkdir(join(home, ".claude-work", "skills", ".hidden"), { recursive: true });
-    await writeFile(join(home, ".claude-work", "skills", "README.md"), "");
-    await mkdir(join(home, ".claude-work", "skills", "alpha"), { recursive: true });
+    await skill(join(home, ".claude-work"), "dataviz");
+    await skill(join(home, ".claude-work"), "alpha");
     const info = await describeExclave(named(home, "work"));
     expect(info).toEqual({
       id: "work",
@@ -85,6 +91,35 @@ describe("describeExclave", () => {
       authOk: true,
       skills: ["alpha", "dataviz"],
     });
+  });
+
+  test("a skill is a dir, or a symlink to one, holding a SKILL.md; everything else is skipped", async () => {
+    const home = await makeHome();
+    const configDir = join(home, ".claude-work");
+    const skills = join(configDir, "skills");
+    await skill(configDir, "kept");
+    await skill(configDir, ".hidden");
+    // A dotfiles checkout elsewhere, linked in — counted through the link.
+    const target = await skill(join(home, "dotfiles"), "linked");
+    await symlink(target, join(skills, "linked"));
+    await symlink(join(home, "dotfiles", "skills", "gone"), join(skills, "dangling"));
+    await mkdir(join(skills, "synced"));
+    await writeFile(join(skills, "synced", "notes.md"), "");
+    await mkdir(join(skills, "odd", "SKILL.md"), { recursive: true });
+    await writeFile(join(skills, "README.md"), "");
+    const info = await describeExclave(named(home, "work"));
+    expect(info.skills).toEqual(["kept", "linked"]);
+  });
+
+  test("a SKILL.md that is a symlink to a regular file counts: stat follows it", async () => {
+    const home = await makeHome();
+    const configDir = join(home, ".claude-work");
+    const dir = join(configDir, "skills", "linked-md");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(home, "real-skill.md"), "");
+    await symlink(join(home, "real-skill.md"), join(dir, "SKILL.md"));
+    const info = await describeExclave(named(home, "work"));
+    expect(info.skills).toEqual(["linked-md"]);
   });
 
   test("signed out: no config dir, unparsable json, or no oauthAccount", async () => {
@@ -102,7 +137,7 @@ describe("describeExclave", () => {
     await writeClaudeJson(join(home, ".claude-busy"), { oauthAccount: account });
     const first = await scanExclaves(home);
     await writeClaudeJson(join(home, ".claude-busy"), '{"oauthAccount": {"organizationUuid": "or');
-    await mkdir(join(home, ".claude-busy", "skills", "alpha"), { recursive: true });
+    await skill(join(home, ".claude-busy"), "alpha");
     const torn = await scanExclaves(home, first.info);
     expect(torn.info[1]).toEqual({
       id: "busy",
@@ -210,7 +245,7 @@ describe("scanExclaves", () => {
     const home = await makeHome();
     await writeFile(join(home, ".claude.json"), JSON.stringify({ oauthAccount: account }));
     await writeClaudeJson(join(home, ".claude"), { numStartups: 1 });
-    await mkdir(join(home, ".claude", "skills", "alpha"), { recursive: true });
+    await skill(join(home, ".claude"), "alpha");
     const { info } = await scanExclaves(home);
     expect(info).toEqual([
       {
