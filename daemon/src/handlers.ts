@@ -24,8 +24,8 @@ import {
   type SpawnOrigin,
 } from "./audit.ts";
 import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
-import type { LaunchSite } from "./launch-ledger.ts";
 import { log } from "./log.ts";
+import type { SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
   readonly backend: SessionBackend;
@@ -55,7 +55,7 @@ export interface HandlerContext {
 /** What the handlers need of `EndedTasks` (`session-events.ts`). */
 export interface TaskLaunches {
   /** Write-ahead: throws when the task cannot be recorded, and the spawn then must not run. */
-  readonly launch: (taskId: string) => Promise<(launched: boolean, site?: LaunchSite) => Promise<void>>;
+  readonly launch: (taskId: string) => Promise<SettleLaunch>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
@@ -117,7 +117,7 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
   await audit.request(payload);
-  let settle: ((launched: boolean, site?: LaunchSite) => Promise<void>) | undefined;
+  let settle: SettleLaunch | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
     try {
       settle = await ctx.tasks.launch(payload.taskId);
@@ -140,12 +140,13 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
       outcome = await ctx.backend.spawn(payload, repos);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
+      // Neither it nor a crash starts a note: the earlier launch's stays.
       await settle?.(!(err instanceof SpawnFailure) || err.code === "task_running");
       throw err;
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     const entry = payload.mode === "worktree" ? repos.find((r) => r.name === payload.repo) : undefined;
-    await settle?.(true, entry === undefined ? undefined : { repo: entry.path, worktree: outcome.path });
+    await settle?.(true, entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } });
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a

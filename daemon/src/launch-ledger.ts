@@ -73,6 +73,12 @@ export interface NotedTask extends TaskNote {
   readonly taskId: string;
   /** Last change, never refreshed by an unchanged pass. */
   readonly at: number;
+  /**
+   * When the note's site was set (`startNote`, or `note` with a new path), never moved by a later change:
+   * of two tasks naming one path, the newer site owns it. Ledger order cannot say — a re-recorded id moves
+   * to the end. Absent on a note from before this field: the oldest.
+   */
+  readonly siteAt?: number;
 }
 
 interface LedgerFile {
@@ -94,7 +100,7 @@ function boundedText(value: unknown, max: number): string | undefined {
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
 function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   if (!isRecord(raw)) return null;
-  const { taskId, at, repo, path, branch, tip, ahead, pushed, merged, prUrl } = raw;
+  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, prUrl } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
   const pathText = boundedText(path, PATH_MAX_LENGTH);
@@ -104,6 +110,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   return {
     taskId,
     at,
+    ...(typeof siteAt === "number" && Number.isFinite(siteAt) ? { siteAt } : {}),
     ...(repoText === undefined ? {} : { repo: repoText }),
     ...(pathText === undefined ? {} : { path: pathText }),
     ...(branchText === undefined ? {} : { branch: branchText }),
@@ -158,6 +165,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
   return {
     taskId,
     at: base?.at ?? 0,
+    ...(base?.siteAt === undefined ? {} : { siteAt: base.siteAt }),
     ...(patch.repo !== undefined ? { repo: patch.repo } : base?.repo !== undefined ? { repo: base.repo } : {}),
     ...(patch.path !== undefined ? { path: patch.path } : base?.path !== undefined ? { path: base.path } : {}),
     ...(patch.branch !== undefined
@@ -305,10 +313,12 @@ export class LaunchLedger {
   async note(taskId: string, patch: TaskNote): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
     const old = this.#notes.get(taskId);
-    const base = patch.path !== undefined && patch.path !== old?.path ? undefined : old;
+    const resited = patch.path !== undefined && patch.path !== old?.path;
+    const base = resited ? undefined : old;
     const next = mergeNote(taskId, base, patch);
     if (old !== undefined && base !== undefined && sameNote(old, next)) return;
-    this.#notes.set(taskId, { ...next, at: this.#now() });
+    const stamp = this.#now();
+    this.#notes.set(taskId, { ...next, at: stamp, ...(resited ? { siteAt: stamp } : {}) });
     try {
       await this.#persist();
     } catch (err) {
@@ -317,17 +327,32 @@ export class LaunchLedger {
   }
 
   /**
-   * A launch of this id landed: its note starts afresh — `{repo, path}` for a
+   * A new launch of this id landed — never a refused or crashed one, whose
+   * earlier note stays: its note starts afresh — `{repo, path}` for a
    * worktree launch, nothing for `here` — whatever an earlier launch of the id
    * left. Sticky `ahead`/`pushed`/`merged` and the PR URL describe a worktree
    * that no longer is this task's; carried over, they could settle it merged.
+   * `prUrl` is one the new session reported while its spawn was still in
+   * flight, which the mod sends once: it belongs to the new launch.
    * Best-effort like `note`.
    */
-  async startNote(taskId: string, site?: { readonly repo: string; readonly path: string }): Promise<void> {
+  async startNote(
+    taskId: string,
+    site?: { readonly repo: string; readonly path: string },
+    prUrl?: string,
+  ): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
-    if (site === undefined) {
+    if (site === undefined && prUrl === undefined) {
       if (!this.#notes.delete(taskId)) return;
-    } else this.#notes.set(taskId, { taskId, at: this.#now(), repo: site.repo, path: site.path });
+    } else {
+      const at = this.#now();
+      this.#notes.set(taskId, {
+        taskId,
+        at,
+        ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
+        ...(prUrl === undefined ? {} : { prUrl }),
+      });
+    }
     try {
       await this.#persist();
     } catch (err) {

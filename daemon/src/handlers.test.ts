@@ -291,8 +291,23 @@ describe("a task's launch is recorded before it runs", () => {
     expect(reply.ended).toEqual(["t-1"]);
   });
 
-  test("a refusal leaves the ledger; task_running and a crash keep it", async () => {
-    const tasks = new EndedTasks(LaunchLedger.memory());
+  test("a refusal leaves the ledger; task_running and a crash keep it, and the note of the launch they left", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    // The earlier launch's progress, PR URL included: the mod sends it once, so wiping it loses it for good.
+    for (const id of ["dup", "crashed"]) {
+      await ledger.record(id);
+      await ledger.note(id, {
+        repo: "/r",
+        path: `/r/.claude/worktrees/${id}`,
+        branch: `worktree-${id}`,
+        ahead: true,
+        pushed: true,
+        prUrl: "https://example.test/org/r/pull/1",
+      });
+    }
+    const before = ledger.notes();
+    expect(before).toHaveLength(2);
     await createHandler({ ...ctx, backend: failing(new SpawnFailure("repo_not_found", "gone")), tasks })(
       spawnTask("refused"),
     );
@@ -301,6 +316,7 @@ describe("a task's launch is recorded before it runs", () => {
     );
     await createHandler({ ...ctx, backend: failing(new Error("boom")), tasks })(spawnTask("crashed"));
     expect((await sessionsOf(createHandler({ ...ctx, tasks }))).ended).toEqual(["dup", "crashed"]);
+    expect(ledger.notes()).toEqual(before);
   });
 
   test("the scheduler's sessions reply waits for a spawn in flight, so the task is never in neither list", async () => {

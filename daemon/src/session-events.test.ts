@@ -110,24 +110,59 @@ describe("EndedTasks", () => {
     const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
     await (
       await ended.launch("t1")
-    )(true, site);
+    )(true, { site });
     await ledger.note("t1", { branch: "worktree-x", ahead: true, pushed: true, prUrl: "https://x.test/1" });
     // The same id relaunched to the same path: nothing of the first attempt carries over.
     await (
       await ended.launch("t1")
-    )(true, site);
+    )(true, { site });
     expect(ledger.notes()).toEqual([expect.objectContaining({ taskId: "t1", repo: "/r", path: site.worktree })]);
     expect(ledger.notes()[0]).not.toHaveProperty("ahead");
     expect(ledger.notes()[0]).not.toHaveProperty("prUrl");
     await (
       await ended.launch("t1")
-    )(true);
+    )(true, {});
     expect(ledger.notes()).toEqual([]);
-    await ledger.note("t1", { repo: "/r", path: site.worktree });
+  });
+
+  test("a launch that did not land keeps the earlier launch's note: not launched, a refusal that ran, or a crash", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
     await (
       await ended.launch("t1")
-    )(false, site);
-    expect(ledger.notes()).toHaveLength(1);
+    )(true, { site });
+    await ledger.note("t1", { branch: "worktree-x", ahead: true, pushed: true, prUrl: "https://x.test/1" });
+    const before = ledger.notes();
+    await (
+      await ended.launch("t1")
+    )(false);
+    // `launched` without `landed`: task_running, or a crash.
+    await (
+      await ended.launch("t1")
+    )(true);
+    expect(ledger.notes()).toEqual(before);
+  });
+
+  test("a PR URL a session reports while its launch is in flight survives the fresh note", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    await ledger.note("t1", { prUrl: "https://x.test/old" });
+    const settle = await ended.launch("t1");
+    await ended.notePr("t1", "https://x.test/new");
+    await settle(true, { site });
+    expect(ledger.notes()).toEqual([
+      expect.objectContaining({ taskId: "t1", path: site.worktree, prUrl: "https://x.test/new" }),
+    ]);
+    // Not carried to the next launch, which starts with none.
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    expect(ledger.notes()[0]).not.toHaveProperty("prUrl");
   });
 
   test("ended events are bounded by age and by count", () => {

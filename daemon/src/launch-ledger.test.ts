@@ -163,7 +163,41 @@ describe("LaunchLedger progress notes", () => {
 
     const reopened = await LaunchLedger.open(path, () => 300);
     expect(reopened.notes()).toEqual([
-      { taskId: "t1", at: 200, repo: "/r", path: "/w", branch: "worktree-x", tip: TIP, ahead: true, pushed: true },
+      {
+        taskId: "t1",
+        at: 200,
+        siteAt: 200,
+        repo: "/r",
+        path: "/w",
+        branch: "worktree-x",
+        tip: TIP,
+        ahead: true,
+        pushed: true,
+      },
+    ]);
+  });
+
+  test("siteAt is read leniently: a note without one, or with a bad one, is the oldest, never dropped", async () => {
+    const file = {
+      v: 1,
+      since: 1,
+      tasks: [
+        ["a", 10],
+        ["b", 20],
+        ["c", 30],
+      ],
+      progress: [
+        { taskId: "a", at: 5, path: "/w" },
+        { taskId: "b", at: 6, path: "/w", siteAt: "later" },
+        { taskId: "c", at: 7, path: "/w", siteAt: 9 },
+      ],
+    };
+    await writeFile(path, JSON.stringify(file));
+    const notes = (await LaunchLedger.open(path, () => 100)).notes();
+    expect(notes.map((n) => [n.taskId, n.siteAt])).toEqual([
+      ["a", undefined],
+      ["b", undefined],
+      ["c", 9],
     ]);
   });
 
@@ -258,7 +292,11 @@ describe("LaunchLedger progress notes", () => {
 
     clock.now = 4;
     await ledger.note("t1", { repo: "/r", path: "/w2" });
-    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 4, repo: "/r", path: "/w2" });
+    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 4, siteAt: 4, repo: "/r", path: "/w2" });
+    // The site's age survives later changes: ownership of a path goes by it.
+    clock.now = 6;
+    await ledger.note("t1", { branch: "c" });
+    expect(ledger.notes()[0]).toMatchObject({ at: 6, siteAt: 4 });
   });
 
   test("a landed relaunch starts the note afresh, to the same path or none, and only for a launched id", async () => {
@@ -275,12 +313,23 @@ describe("LaunchLedger progress notes", () => {
     };
     await ledger.note("t1", worked);
     await ledger.startNote("t1", { repo: "/r", path: "/w" });
-    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, repo: "/r", path: "/w" }]);
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, siteAt: 5, repo: "/r", path: "/w" }]);
 
     await ledger.note("t1", worked);
     await ledger.startNote("t1");
     expect(ledger.notes()).toEqual([]);
     expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("progress");
+
+    // A PR URL its session reported while the spawn ran is the new launch's, whatever the old note said.
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1", { repo: "/r", path: "/w" }, "https://x.test/2");
+    expect(ledger.notes()).toEqual([
+      { taskId: "t1", at: 5, siteAt: 5, repo: "/r", path: "/w", prUrl: "https://x.test/2" },
+    ]);
+    await ledger.startNote("t1", undefined, "https://x.test/3");
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, prUrl: "https://x.test/3" }]);
+    await ledger.startNote("t1");
+    expect(ledger.notes()).toEqual([]);
 
     await ledger.startNote("ghost", { repo: "/r", path: "/w" });
     expect(ledger.notes()).toEqual([]);

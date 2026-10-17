@@ -193,11 +193,14 @@ export const ENDED_MAX = 128;
 
 /**
  * What `EndedTasks.launch` hands back: told whether the spawn launched, and
- * only then is the launch over. `site` is where a worktree-mode launch landed,
- * noted before the launch counts as over so a `sessions` waiting on `settled`
- * sees it.
+ * only then is the launch over. `launched` is about the id (a launch that may
+ * have run is not retracted); `landed` is passed only by a spawn that
+ * succeeded, and only that starts the task's note afresh — a refusal such as
+ * `task_running`, or a crash, leaves the earlier launch's note alone. `site`
+ * is where a worktree-mode launch landed, noted before the launch counts as
+ * over so a `sessions` waiting on `settled` sees it.
  */
-export type SettleLaunch = (launched: boolean, site?: LaunchSite) => Promise<void>;
+export type SettleLaunch = (launched: boolean, landed?: { readonly site?: LaunchSite }) => Promise<void>;
 
 /**
  * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
@@ -220,6 +223,8 @@ interface Launches {
   open: number;
   retractable: boolean;
   landed: boolean;
+  /** Newest PR URL a session reported while one of them was in flight: the landed launch's note keeps it. */
+  prUrl?: string;
 }
 
 export class EndedTasks {
@@ -267,10 +272,13 @@ export class EndedTasks {
       await finish();
       throw err;
     }
-    return async (launched, site) => {
+    return async (launched, landed) => {
       if (launched) launches.landed = true;
       try {
-        if (launched) await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree });
+        const site = landed?.site;
+        if (launched && landed !== undefined) {
+          await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
+        }
       } finally {
         await finish();
       }
@@ -279,6 +287,8 @@ export class EndedTasks {
 
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
   notePr(taskId: string, prUrl: string): Promise<void> {
+    const launches = this.#launches.get(taskId);
+    if (launches !== undefined) launches.prUrl = prUrl;
     return this.#ledger.note(taskId, { prUrl });
   }
 
