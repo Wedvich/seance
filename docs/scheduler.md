@@ -664,21 +664,22 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
 - **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an idle exclave's
   quota refreshes within `staleAfter`; a failing endpoint is quiet.
-- **Skills** — settled 2026-10-17:
-  - _Inventory._ M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan and
-    served from the blob, never per request. Tightened to directories (or symlinks resolving to
-    one) holding a `SKILL.md`.
-  - _Filter_ (open). Only a name somewhere in the fleet's inventory restricts — to the exclaves
-    that have it (`skill_absent` on the rest). An unknown name passes, covering built-ins and
+- **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
+  - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
+    and served from the blob, never per request. Tightened to directories (or symlinks
+    resolving to one) holding a `SKILL.md`, so a stray dir or a dangling dotfiles link stops
+    advertising a skill — landed with the autocomplete (PR #TBD).
+  - _Filter_ (open): only a name somewhere in the fleet's inventory restricts — to the exclaves
+    that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
     anything the inventory skips; cost: a typo routes anywhere rather than failing.
-  - _Autocomplete_ — **DONE (PR #TBD)**. Union of names across machines and exclaves, from data
-    the PWA already holds — needs no leader. Names only, no descriptions (blob size; revisit if
-    wanted).
-  - _Out of scope for now._ Plugin skills (`plugin:name`, under `plugins/`) and legacy
+  - _Autocomplete_ — **DONE (PR #TBD)**: union of names across machines and exclaves, from data
+    the PWA already holds — needs no leader, which is why it landed before the filter. Names
+    only, no descriptions (blob size; revisit if wanted).
+  - _Out of scope for now_: plugin skills (`plugin:name`, under `plugins/`) and legacy
     `commands/*.md` — both pass the filter as unknown names.
-  - _Required, not yet built._ Project skills (`<repo>/.claude/skills/`) belong to a clone, not an
-    exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until then a
-    project-only skill is unknown and passes.
+  - _Required, not yet built_: project skills (`<repo>/.claude/skills/`) belong to a clone,
+    not an exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until
+    then a project-only skill is unknown and passes.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
 - **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
