@@ -14,6 +14,7 @@ const LEADER_MODULES: ReadonlySet<string> = new Set([
   "daemon/src/leader.ts",
   "daemon/src/leader-adapters.ts",
   "daemon/src/leader-requests.ts",
+  "daemon/src/queue-store.ts",
 ]);
 
 /** Every module specifier a source names — static, side-effect, re-export and dynamic. */

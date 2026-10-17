@@ -8,10 +8,11 @@ import type {
   RepoEntry,
   SessionEntry,
 } from "@seance/shared";
-import { CAPABILITIES } from "@seance/shared";
+import { bindTaskRecord, CAPABILITIES, STORE_PREFIXES } from "@seance/shared";
 import {
   UNREACHABLE,
   type Fleet,
+  type QueueStore,
   type Unreachable,
   type TaskSessionsReply,
   type TaskSpawnReply,
@@ -156,3 +157,29 @@ export class FakeFleet implements Fleet {
 }
 
 export const unreachable: Unreachable = { ok: false, code: UNREACHABLE, message: "no answer" };
+
+/**
+ * The store a `Scheduler` under test writes through: every put must pass the
+ * rules each reader applies to an opened record (`bindTaskRecord`), as the
+ * relay-backed adapter enforces on read. A test seeds through the raw store,
+ * which may hold what no leader writes; only the library's own writes are held
+ * to the readers' rules, and a bad one throws here instead of reading back
+ * unreadable in production.
+ */
+export function readerChecked(store: QueueStore, now: () => number): QueueStore {
+  return {
+    list: () => store.list(),
+    get: (id) => store.get(id),
+    put: (id, expect, body) => {
+      const key = `${STORE_PREFIXES.task.prefix}${id}`;
+      const version = expect + 1;
+      const bound = bindTaskRecord({ version, task: body }, { key, version }, now());
+      if (typeof bound === "string")
+        throw new Error(`the library wrote a task no reader opens: ${key} v${version} (${bound})`);
+      return store.put(id, expect, body);
+    },
+    delete: (id, expect) => store.delete(id, expect),
+    getPause: () => store.getPause(),
+    putPause: (expect, holds) => store.putPause(expect, holds),
+  };
+}

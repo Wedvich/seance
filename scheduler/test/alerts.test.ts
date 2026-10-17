@@ -10,7 +10,7 @@ import {
 } from "../src/index.ts";
 import { escalation, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import { exclave, FakeFleet, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
@@ -26,7 +26,7 @@ function setup(
   let n = 0;
   const make = (): Scheduler =>
     new Scheduler({
-      store,
+      store: readerChecked(store, () => clock.now),
       fleet,
       config,
       now: () => clock.now,
@@ -58,18 +58,18 @@ describe("needs-input escalation", () => {
     const from = { deviceId: "a", pane };
 
     await scheduler.onSession(task.id, "needs-input", from);
-    // Create, reserve, run, needs-input: the stamp costs no write of its own.
-    expect(await stored(store, task.id)).toMatchObject({ version: 4, body: { needsInputSince: NOW } });
+    // Create, admit, reserve, run, needs-input: the stamp costs no write of its own.
+    expect(await stored(store, task.id)).toMatchObject({ version: 5, body: { needsInputSince: NOW } });
 
     clock.now = NOW + 29 * MINUTE;
     await pass(scheduler, fleet, clock.now);
-    expect((await stored(store, task.id)).version).toBe(4);
+    expect((await stored(store, task.id)).version).toBe(5);
     expect(alerts).toEqual([]);
 
     clock.now = NOW + 30 * MINUTE;
     await pass(scheduler, fleet, clock.now);
     expect(await stored(store, task.id)).toMatchObject({
-      version: 5,
+      version: 6,
       body: { state: "needs-input", needsInputSince: NOW, escalated: true },
     });
     expect(alerts).toHaveLength(1);

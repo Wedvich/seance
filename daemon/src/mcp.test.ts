@@ -861,7 +861,7 @@ describe("spawn_session on auto", () => {
     expect(fake.requests.some((r) => r.op === "spawn")).toBe(false);
   });
 
-  test("a task no machine can take yet answers at once, warning it lives only in the leader's memory", async () => {
+  test("a task no machine can take yet answers at once, saying it waits in the relay's queue", async () => {
     const waiting = task({ decision: { at: 5_000, chosen: null, candidates: decision.candidates.slice(1) } });
     const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [waiting], at: 6_000 }]);
     const { text, error } = await callAuto(fake);
@@ -869,15 +869,18 @@ describe("spawn_session on auto", () => {
     expect(text).toContain(
       "task t-1: ready\ndecision: no candidate can take it now; MacBook Pro/default: not signed in",
     );
-    expect(text).toContain("a leader change drops it");
+    expect(text).toContain("it waits in the relay's queue for capacity, and survives a leader change");
     expect(fake.requests.filter((r) => r.op === "queue")).toHaveLength(1);
   });
 
-  test("a task that leaves the queue before it is placed says the leader probably changed", async () => {
+  test("a task that leaves the queue before it is placed names a mixed-fleet leader, not a cancel or a prune", async () => {
     const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [], at: 6_000 }]);
     const { text, error } = await callAuto(fake);
     expect(error).toBe(true);
-    expect(text).toContain("left the leader's queue before it was placed");
+    expect(text).toContain("left the queue before it was placed");
+    expect(text).toContain("a leader still running an older seanced took over");
+    // A cancelled task stays visible and only a finished one is pruned, so neither can be the cause.
+    expect(text).not.toMatch(/cancelled|pruned/u);
   });
 
   test("a task pushed out of a full queue view is not reported as dropped", async () => {
@@ -885,7 +888,7 @@ describe("spawn_session on auto", () => {
     const fake = leaderRelay(() => ({ task: task() }), [{ tasks: newer, at: 6_000 }]);
     const { text, error } = await callAuto(fake);
     expect(error).toBe(false);
-    expect(text).not.toContain("left the leader's queue");
+    expect(text).not.toContain("left the queue");
     expect(text).toContain("pushed it out of the queue's view");
   });
 
@@ -1107,15 +1110,15 @@ describe("get_queue", () => {
     lazyBusy.stop();
   });
 
-  test("both scheduler tools tell the agent the queue is not a durable backlog", async () => {
+  test("both scheduler tools tell the agent the queue survives a leader change but is not a backlog", async () => {
     const lazy = new LazyRelay({ create: () => fakeRelay([]) });
     const client = await connectedClient(lazy);
     const { tools } = await client.listTools();
     for (const name of ["spawn_session", "get_queue"]) {
       const description = tools.find((tool) => tool.name === name)?.description ?? "";
-      expect(description).toContain("lives only in the leading daemon's memory");
-      expect(description).toContain("every relay deploy and every daemon self-update");
-      expect(description).toContain("Do not use auto as a durable backlog");
+      expect(description).toContain("is held by the relay");
+      expect(description).toContain("survives a change of leader (every relay deploy and daemon self-update)");
+      expect(description).toContain("Do not use auto as a backlog");
     }
     expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
     lazy.stop();

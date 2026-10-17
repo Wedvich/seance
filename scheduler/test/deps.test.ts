@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEP_MISSING_GRACE_MS, STORE_TOMBSTONE_MS, type TaskDep } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { prunable } from "../src/prune.ts";
-import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
  * Admission and hand-declared dependencies (M3 item 4a, PR 0b's semantics),
@@ -16,7 +16,7 @@ const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as con
 function setup(fleet = new FakeFleet([machine("a")])) {
   const clock = { now: NOW };
   const store = new MemoryQueueStore({ now: () => clock.now });
-  const scheduler = new Scheduler({ store, fleet, now: () => clock.now });
+  const scheduler = new Scheduler({ store: readerChecked(store, () => clock.now), fleet, now: () => clock.now });
   async function put(id: string, fields: Partial<Task> = {}): Promise<void> {
     const write = await store.put(id, 0, { id, spec: spec(), state: "queued", createdAt: clock.now, ...fields });
     if (!write.ok) throw new Error(`put ${id}: ${write.code}`);

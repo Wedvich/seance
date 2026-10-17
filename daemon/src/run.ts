@@ -27,7 +27,7 @@ import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from ".
 import { appRelayClient } from "./app-relay.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
-import { createLeader, type Leader, type LeaderOpts } from "./leader.ts";
+import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
@@ -93,8 +93,15 @@ export interface RunOpts {
    * main.ts passes `{}`.
    */
   readonly selfUpdate?: SelfUpdateOpts;
-  /** The scheduler role's store and tick cadence; tests seed the one and shorten the other. */
-  readonly leader?: Pick<LeaderOpts, "store" | "tickIntervalMs">;
+  /**
+   * Tests seed one store across terms and shorten the tick; absent, the leader
+   * runs on the relay store.
+   */
+  readonly leader?: {
+    readonly store?: QueueStore;
+    readonly tickIntervalMs?: number;
+    readonly takeoverRetryMs?: number;
+  };
   /** Tests only: the branch-state emitter's intervals, which are constants in production. */
   readonly branchState?: Pick<BranchStateDeps, "intervalMs" | "fetchStaleMs">;
 }
@@ -363,7 +370,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // Late-bound: the client below is built after the leader it hands frames to.
     reply: (to, response) => client.reply(to, response),
     resign: () => void client.resign(),
-    ...opts.leader,
+    // Production leads on the relay store, over this daemon's own socket (the
+    // term fence is that socket); tests seed one store across terms instead.
+    ...(opts.leader?.store !== undefined
+      ? { store: opts.leader.store }
+      : { storeLeg: { store: (frame) => client.store(frame) }, key }),
+    ...(opts.leader?.tickIntervalMs === undefined ? {} : { tickIntervalMs: opts.leader.tickIntervalMs }),
+    ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
   });
 
   const client = new RelayClient({
@@ -376,6 +389,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     onLead: (term) => leader.lead(term),
     onFollow: () => leader.follow("the relay moved the role elsewhere"),
     onScheduler: (env) => leader.deliver(env),
+    onStoreChanged: (storeKey, version) => leader.onStoreChanged(storeKey, version),
     schedulerGuard,
     onRegister: (info): void => {
       registered = candidates.get(info) ?? registered;
@@ -475,7 +489,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // relay routes to whoever leads now.
     forward: (event) => {
       if (leader.term() !== null) {
-        void leader.onSession(event.taskId, event.state, { deviceId: state.deviceId, pane: event.session });
+        void leader.onSession(
+          event.taskId,
+          event.state,
+          { deviceId: state.deviceId, pane: event.session },
+          event.prUrl,
+        );
         return;
       }
       void client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));

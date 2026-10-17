@@ -11,6 +11,7 @@ import {
   type Unreachable,
 } from "@seance/scheduler";
 import {
+  parseTaskProgressList,
   quote,
   RequestFailure,
   type DespawnResponse,
@@ -24,7 +25,8 @@ import type { LocalOps } from "./handlers.ts";
 
 /**
  * The scheduler term's two adapters onto the library's ports (`leader.ts` runs
- * the term): the store the term writes through and the `Fleet` over its leg.
+ * the term): the fence the term's store writes through — over the relay store
+ * of `queue-store.ts` — and the `Fleet` over its leg.
  */
 
 function unreachable(message: string): Unreachable {
@@ -56,10 +58,25 @@ export function fencedStore(inner: QueueStore, term: number, live: () => boolean
 
 function sessionsOf(reply: SessionsResponse | ErrorResponse | NoAnswer): TaskSessionsReply {
   if ("ok" in reply) return reply;
-  const { sessions, ended, ledgerSince } = reply;
+  const { sessions, ended, ledgerSince, progress, progressTrimmed } = reply;
   // A proof that does not parse proves nothing: the task then fails rather than risk a twin.
   const proof = typeof ledgerSince === "number" && Number.isFinite(ledgerSince) ? { ledgerSince } : {};
-  return { ok: true, sessions, ...(ended === undefined ? {} : { ended }), ...proof };
+  // A remote daemon's payload is untrusted until parsed. A list that does not
+  // parse marks the reply trimmed, as a daemon's own trim does (DESIGN.md, "Done detection").
+  const parsed = progress === undefined ? undefined : parseTaskProgressList(progress);
+  const trimmed =
+    typeof progressTrimmed === "number" && Number.isSafeInteger(progressTrimmed) && progressTrimmed >= 0
+      ? progressTrimmed
+      : undefined;
+  const trimmedBy = parsed === null ? Math.max(trimmed ?? 0, 1) : trimmed;
+  return {
+    ok: true,
+    sessions,
+    ...(ended === undefined ? {} : { ended }),
+    ...proof,
+    ...(parsed === undefined || parsed === null ? {} : { progress: parsed }),
+    ...(trimmedBy === undefined ? {} : { progressTrimmed: trimmedBy }),
+  };
 }
 
 export interface TermFleetOpts {
