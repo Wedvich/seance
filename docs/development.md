@@ -113,15 +113,16 @@ a production change.
   what stand between a skipped deploy and a deploy that reports success having
   shipped nothing.
 
-- **claude-mods** — each mod under `claude-mods/`, run by `claude plugin test <dir>`
-  rather than bun: a mod's tests import `claude-code/testing`, which only Claude Code
+- **claude-mods** — one shard per mod under `claude-mods/` (`MOD_FOLDERS` in
+  `scripts/test.ts`), since `claude plugin test <dir>` takes one folder per call. Run by
+  it rather than bun: a mod's tests import `claude-code/testing`, which only Claude Code
   provides. The kit stands in for the engine (`mock.env`, a `process.run` hook in place
   of tmux), so nothing real is touched. Skipped, and named as skipped in the total,
   where `claude` isn't on PATH — CI included. `claude plugin validate <dir>` is the
   quick check of what the engine will load.
 
 No Cloudflare account is needed anywhere and no real `claude` outside the
-claude-mods shard; `tmux` and `git` are.
+claude-mods shards; `tmux` and `git` are.
 
 ## Reproducing a flaky test
 
