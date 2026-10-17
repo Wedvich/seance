@@ -947,6 +947,18 @@ describe("auto", () => {
         { id: leaderId, ts: Date.now(), op: "machine-info", payload: machineInfo(leaderId) },
       );
       leader.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+      // Its entry opens, but only the term sealed under the key makes it a leader.
+      const { term } = await leader.waitFor<{ t: "lead"; term: number }>("lead");
+      await waitFor(
+        (s) => s.scheduler.kind === "unverified" && s.machines.some((m) => m.deviceId === leaderId),
+        "proofless",
+      );
+      const proof = await seal(
+        key,
+        { to: APP_ID, from: leaderId },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term } },
+      );
+      leader.send({ t: "lead-proof", term, env: proof });
       await waitFor((s) => s.scheduler.kind === "ready", "the real leader verified");
       const asked = client.routePreview(request);
       const { env } = await leader.waitFor<Msg>("msg");

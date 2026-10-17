@@ -907,7 +907,7 @@ describe("scheduler leadership", () => {
   beforeAll(async () => {
     // Same settle as the sweep suite: the previous suite's dispose() just ran.
     await Bun.sleep(500);
-    listed.push(...(await Promise.all(Array.from({ length: 14 }, () => newDeviceId()))));
+    listed.push(...(await Promise.all(Array.from({ length: 16 }, () => newDeviceId()))));
     padded = await newDeviceId();
     const junk = ["", "  ", "not an id!", "x".repeat(65), SCHEDULER_ID, APP_ID];
     hub = await startRelay(TOKEN, {
@@ -1135,6 +1135,46 @@ describe("scheduler leadership", () => {
     expect(await first.daemon.waitClosed()).toBe(1000);
     await nextRegistry(app, (frame) => frame.scheduler?.deviceId === leaderId && frame.scheduler.term === term + 1);
     await other.daemon.expectNo("lead");
+
+    await leave(app, redialed, leaderId);
+    await leave(app, other.daemon, otherId);
+    app.close();
+  });
+
+  // The relay cannot read a proof, so it keeps one only where a real leader's
+  // would come from: that leader's own socket, under the current term, first
+  // one wins. Whether it opens, and names that term, is the app's check.
+  test("a lead proof rides the push only from the leader's socket under its term, once; a new term starts without one", async () => {
+    const app = await connectApp(hub);
+    const leaderId = listedId();
+    const otherId = listedId();
+    const first = await join(app, leaderId, { roles: SCHEDULER });
+    const { term } = await first.daemon.waitFor<LeadFrame>("lead");
+    const other = await join(app, otherId, { roles: SCHEDULER });
+    expect(other.registry.scheduler).toEqual({ deviceId: leaderId, term });
+
+    const proof = envelope(APP_ID, leaderId);
+    // Another machine's, another term's, or sealed somewhere but the app: none is kept.
+    other.daemon.send({ t: "lead-proof", term, env: envelope(APP_ID, otherId) });
+    first.daemon.send({ t: "lead-proof", term: term + 1, env: envelope(APP_ID, leaderId) });
+    first.daemon.send({ t: "lead-proof", term, env: envelope(otherId, leaderId) });
+    first.daemon.send({ t: "lead-proof", term, env: proof });
+    const proven = await nextRegistry(app, (frame) => frame.scheduler?.proof !== undefined);
+    expect(proven.scheduler).toEqual({ deviceId: leaderId, term, proof });
+
+    // A second one is not kept either: the next push still carries the first.
+    first.daemon.send({ t: "lead-proof", term, env: envelope(APP_ID, leaderId) });
+    const late = await connectApp(hub);
+    expect((await late.waitFor<RegistryFrame>("registry")).scheduler).toEqual({ deviceId: leaderId, term, proof });
+    late.close();
+
+    const redialed = await connectDaemon(hub);
+    heartbeat(redialed);
+    quiet(first.daemon);
+    redialed.send(await register(leaderId, { roles: SCHEDULER }));
+    expect(await redialed.waitFor<LeadFrame>("lead")).toEqual({ t: "lead", term: term + 1 });
+    const next = await nextRegistry(app, (frame) => frame.scheduler?.term === term + 1);
+    expect(next.scheduler).toEqual({ deviceId: leaderId, term: term + 1 });
 
     await leave(app, redialed, leaderId);
     await leave(app, other.daemon, otherId);

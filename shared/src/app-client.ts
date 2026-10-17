@@ -34,6 +34,7 @@ import {
 import {
   isRecord,
   parseEnvelope,
+  parseLeadProof,
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
@@ -144,10 +145,11 @@ export interface Machine {
 
 /**
  * Who would answer `auto` (DESIGN.md, Scheduler, "Leadership"). `unverified`
- * is a leader the relay nominated whose registry entry did not become a
- * `Machine` — its `info` not sealed `from` its own id under this key — which is
- * what a bearer-token holder squatting the role looks like. Treated as no
- * leader: nothing is sent to it.
+ * is a leader the relay nominated that has not shown it holds this key: its
+ * registry entry did not become a `Machine`, or the push carries no
+ * `lead-proof` sealed `from` it for the current term. The second is what a
+ * token holder using a listed machine's seed looks like, even when it registers
+ * that machine's own `info` blob. Treated as no leader: nothing is sent to it.
  */
 export type SchedulerAvailability =
   | { readonly kind: "none" }
@@ -267,12 +269,17 @@ function parseRegistryView(value: unknown): RegistryView | null {
   };
 }
 
-/** Lenient like an entry's status: a malformed field costs `auto`, never the push. Absent is a relay that predates leadership. */
+/**
+ * Lenient like an entry's status: a malformed field costs `auto`, never the
+ * push. Absent is a relay that predates leadership; a malformed proof is no
+ * proof, which reads as unverified.
+ */
 function parseLeader(value: unknown): SchedulerLeader | null {
   if (!isRecord(value)) return null;
   const { deviceId, term } = value;
-  if (typeof deviceId !== "string" || typeof term !== "number" || !Number.isSafeInteger(term)) return null;
-  return { deviceId, term };
+  if (typeof deviceId !== "string" || typeof term !== "number" || !Number.isSafeInteger(term) || term < 0) return null;
+  const proof = value["proof"] === undefined ? null : parseEnvelope(value["proof"]);
+  return { deviceId, term, ...(proof === null ? {} : { proof }) };
 }
 
 /**
@@ -383,6 +390,13 @@ function infoCacheKey(entry: RegistryView): string {
 
 type InfoCacheHit = MachineInfo | "unopenable" | "skewed" | "unbound";
 
+/** The last `lead-proof` opened, by iv: who sealed it and the term it names (null: it did not open or parse). */
+interface LeadProofHit {
+  readonly iv: string;
+  readonly from: string;
+  readonly term: number | null;
+}
+
 /** The latest `status` envelope per machine, decrypted once per iv; null is one that did not open or parse. */
 interface StatusHit {
   readonly iv: string;
@@ -444,6 +458,8 @@ export class RelayClient {
   #entries: readonly RegistryView[] = [];
   /** The leader the last push named, before it is checked against the entries that opened. */
   #leader: SchedulerLeader | null = null;
+  /** The leader's proof, opened once per iv: every push re-sends it. */
+  #leadProof: LeadProofHit | null = null;
   #state: RelayState = INITIAL_STATE;
   #socket: WebSocket | null = null;
   #attempt = 0;
@@ -962,6 +978,7 @@ export class RelayClient {
     }
     this.#statuses = statuses;
     await Promise.all([
+      this.#decryptLeadProof(leader),
       ...entries.map((entry) => this.#decryptInfo(entry)),
       ...entries.flatMap((entry) =>
         entry.status === undefined ? [] : [this.#decryptStatus(entry.deviceId, entry.status)],
@@ -1050,6 +1067,26 @@ export class RelayClient {
     this.#statuses.set(deviceId, { iv: env.iv, status });
   }
 
+  /**
+   * Opened at rest like `status`: the relay re-sends the same envelope on
+   * every push. Whether it binds the nominee and the term is asked in
+   * `#schedulerAvailability`, against the leader the push named.
+   */
+  async #decryptLeadProof(leader: SchedulerLeader | null): Promise<void> {
+    const env = leader?.proof;
+    if (env === undefined || this.#leadProof?.iv === env.iv) return;
+    let term: number | null = null;
+    try {
+      const plain = await openAtRest(this.#key, env, "lead-proof");
+      term = parseLeadProof(plain.payload)?.term ?? null;
+      if (term === null) this.#wireLog("dropped", `from=${quote(env.from)} reason=lead-proof-shape`);
+    } catch (err) {
+      if (err instanceof OpMismatchError) this.#wireLog("dropped", `from=${quote(env.from)} reason=lead-proof-op`);
+      // Otherwise not sealed under this key: unverified, which the state says.
+    }
+    this.#leadProof = { iv: env.iv, from: env.from, term };
+  }
+
   #rebuildMachines(extra: Partial<RelayState> = {}): void {
     const previous = this.#state.machines;
     // Keyed, not positional: the relay lists entries in lexicographic deviceId
@@ -1134,15 +1171,25 @@ export class RelayClient {
 
   /**
    * The relay's nominee is believed only when its own entry opened into a
-   * `Machine`: the rule that decides which entries become machines is the one
-   * that says the nominee holds the PSK, which the relay cannot check (DESIGN.md,
-   * Scheduler, "Leadership"). Same object back while nothing moved.
+   * `Machine` and it sealed a `lead-proof` for this very term: the relay cannot
+   * check that the nominee holds the PSK (DESIGN.md, Scheduler, "Leadership").
+   * The entry alone is not enough — its `info` blob is the machine's own, which
+   * anyone holding the bearer token can read off a push and register again
+   * under a stolen seed — but a term minted after the socket was taken is one
+   * the machine was never told, so no proof for it exists. Same object back
+   * while nothing moved.
    */
   #schedulerAvailability(machines: readonly Machine[]): SchedulerAvailability {
     const leader = this.#leader;
     const prior = this.#state.scheduler;
     if (leader === null) return NO_SCHEDULER;
-    const kind = machines.some((m) => m.deviceId === leader.deviceId) ? "ready" : "unverified";
+    const proof = this.#leadProof;
+    const proven =
+      leader.proof !== undefined &&
+      proof?.iv === leader.proof.iv &&
+      proof.from === leader.deviceId &&
+      proof.term === leader.term;
+    const kind = proven && machines.some((m) => m.deviceId === leader.deviceId) ? "ready" : "unverified";
     if (prior.kind === kind && prior.deviceId === leader.deviceId && prior.term === leader.term) return prior;
     return { kind, deviceId: leader.deviceId, term: leader.term };
   }

@@ -9,6 +9,7 @@ import {
   type BatchMembership,
   type BatchStrategy,
   type BranchState,
+  type LeadProof,
   type LinearLink,
   type PauseHold,
   type PauseRecord,
@@ -841,6 +842,13 @@ export function parsePauseReply(value: unknown): PauseReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const holds = isRecord(value) ? parseHolds(value["holds"]) : null;
   return holds === null ? null : { holds };
+}
+
+/** A `lead-proof` payload. The term is the relay's counter, so never negative. */
+export function parseLeadProof(value: unknown): LeadProof | null {
+  if (!isRecord(value)) return null;
+  const { term } = value;
+  return typeof term === "number" && Number.isSafeInteger(term) && term >= 0 ? { term } : null;
 }
 
 /** The leader's nudge. It carries nothing to act on but its stamp: an app re-fetches `queue`. */

@@ -37,6 +37,8 @@ interface LeaderRecord {
   readonly deviceId: string | null;
   /** The leader socket's accept time: a new socket under the same id is a new term. */
   readonly connectedAt: number | null;
+  /** The first `lead-proof` that socket sent under this term; a new term starts without one. */
+  readonly proof?: Envelope;
 }
 
 const NO_LEADER: LeaderRecord = { term: 0, deviceId: null, connectedAt: null };
@@ -286,6 +288,10 @@ export class Hub implements DurableObject {
       this.#status(ws, deviceId, frame.env);
       return;
     }
+    if (frame.t === "lead-proof") {
+      await this.#leadProof(ws, deviceId, frame.term, frame.env);
+      return;
+    }
     await this.#route(frame.env, ws, "daemon");
   }
 
@@ -321,6 +327,38 @@ export class Hub implements DurableObject {
     // activity record the blind relay exists not to keep (DESIGN.md, threat
     // model item 3). Failures alone carry no such clock.
     if (failures.length > 0) wireLog("status", env, failSuffix(failures));
+  }
+
+  /**
+   * Keeps the nominee's sealed answer to `lead` beside the record, for apps to
+   * check (DESIGN.md, Scheduler, "Leadership"). The relay cannot read it, so
+   * what it checks is only what it can: the frame comes from the leader's own
+   * socket under the current term. The first one per term is kept — one write
+   * and one push per term, however often a socket sends — and a later term
+   * starts without one, since `#renominate` writes a fresh record.
+   */
+  async #leadProof(ws: WebSocket, deviceId: string, term: number, env: Envelope): Promise<void> {
+    if (env.to !== APP_ID) {
+      wireLog("dropped", env, " reason=lead-proof-not-app");
+      return;
+    }
+    const record = await this.#leaderRecord();
+    const socketAt = (ws.deserializeAttachment() as SocketAttachment | null)?.connectedAt;
+    if (record.deviceId !== deviceId || record.connectedAt !== socketAt || record.term !== term) {
+      wireLog("dropped", env, ` reason=lead-proof-not-leader term=${term}`);
+      return;
+    }
+    if (record.proof !== undefined) {
+      wireLog("dropped", env, ` reason=lead-proof-held term=${term}`);
+      return;
+    }
+    try {
+      await this.#ctx.storage.put(LEADER_KEY, { ...record, proof: env } satisfies LeaderRecord);
+    } catch (err) {
+      console.log(`failed to persist ${LEADER_KEY}: ${String(err)}`);
+      return;
+    }
+    await this.#pushRegistry();
   }
 
   async #onAppMessage(ws: WebSocket, text: string): Promise<void> {
@@ -697,8 +735,9 @@ export class Hub implements DurableObject {
 
   /** Only a connected leader is one: a record a relay restart left behind names nobody routable. */
   async #schedulerView(live: ReadonlyMap<string, SocketAttachment>): Promise<SchedulerLeader | null> {
-    const { deviceId, term } = await this.#leaderRecord();
-    return deviceId !== null && live.has(deviceId) ? { deviceId, term } : null;
+    const { deviceId, term, proof } = await this.#leaderRecord();
+    if (deviceId === null || !live.has(deviceId)) return null;
+    return { deviceId, term, ...(proof === undefined ? {} : { proof }) };
   }
 
   /**
