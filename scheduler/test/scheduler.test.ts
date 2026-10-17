@@ -12,6 +12,7 @@ import {
   MemoryQueueStore,
   Scheduler,
   SCHEDULER_CLIENT,
+  StoreRevoked,
   UNDELIVERED,
   type StoredTask,
   type StoreWrite,
@@ -1181,6 +1182,8 @@ describe("writes to one task never race", () => {
   });
 });
 
+const FAILURES: readonly Error[] = [new Error("socket gone"), new StoreRevoked("not_leader")];
+
 describe("submit", () => {
   test("creates its task queued at version 1, passing bindTaskRecord, and returns it admitted", async () => {
     const puts: { expect: number; body: Task }[] = [];
@@ -1220,8 +1223,58 @@ describe("submit", () => {
   test("a create whose reply was lost and never landed rejects", async () => {
     const { store, scheduler } = setup();
     store.failNext({ code: "indeterminate" });
-    await expect(scheduler.submit(spec())).rejects.toThrow("indeterminate");
+    await expect(scheduler.submit(spec())).rejects.toThrow("may have been stored");
     expect(await store.list()).toEqual([]);
+  });
+
+  test("a create whose reply was lost and whose read-back fails says the task may have been stored", async () => {
+    for (const failure of FAILURES) {
+      class Blind extends MemoryQueueStore {
+        override get(): ReturnType<MemoryQueueStore["get"]> {
+          return Promise.reject(failure);
+        }
+      }
+      const store = new Blind();
+      store.failNext({ code: "indeterminate", commit: true });
+      const errors: unknown[] = [];
+      const scheduler = new Scheduler({
+        store,
+        fleet: new FakeFleet([machine("a")]),
+        now: () => NOW,
+        newId: () => "t1",
+        onError: (err) => errors.push(err),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one store per case
+      await expect(scheduler.submit(spec())).rejects.toThrow("may have been stored");
+      // A revoked term still reaches the host, which ends it; another failure is not a fault.
+      expect(errors).toEqual(failure instanceof StoreRevoked ? [failure] : []);
+    }
+  });
+
+  test("an admit that fails once the create landed does not reject: the task is stored, so a resubmit would run it twice", async () => {
+    for (const failure of FAILURES) {
+      class AdmitFails extends MemoryQueueStore {
+        override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+          if (body.state === "ready") return Promise.reject(failure);
+          return super.put(id, version, body);
+        }
+      }
+      const store = new AdmitFails();
+      const errors: unknown[] = [];
+      const scheduler = new Scheduler({
+        store,
+        fleet: new FakeFleet([machine("a")]),
+        now: () => NOW,
+        newId: () => "t1",
+        onError: (err) => errors.push(err),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one store per case
+      const task = await scheduler.submit(spec());
+      expect(task.state).toBe("queued");
+      expect(errors).toEqual([failure]);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      expect((await store.get("t1"))?.body?.state).toBe("queued");
+    }
   });
 
   test("every other refusal still throws", async () => {

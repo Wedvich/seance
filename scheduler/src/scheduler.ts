@@ -16,6 +16,7 @@ import { admission, named } from "./deps.ts";
 import { branchChange } from "./done.ts";
 import { activeHolds, sameHolds, withHold, withoutHold } from "./pause.ts";
 import {
+  StoreRevoked,
   type Fleet,
   type QueueStore,
   type StoredPause,
@@ -297,7 +298,11 @@ export class Scheduler {
    * the PWA's `auto` verdict read. A full store is pruned once and the create
    * tried again. A create the store never answered may have landed, and the
    * leader's own write raises no `store-changed`: it is read back, or a later
-   * leader would run an orphan the caller then resubmits.
+   * leader would run an orphan the caller then resubmits. Where even the read
+   * fails the error says so, because the caller must check the queue before it
+   * submits again. Once the create has landed this never rejects: the admit
+   * write is a later pass's to retry, and a caller told "failed" would submit
+   * the work twice.
    */
   async submit(spec: TaskSpec): Promise<Task> {
     const task: Task = { id: this.#newId(), spec, state: "queued", createdAt: this.#now() };
@@ -306,9 +311,16 @@ export class Scheduler {
       await this.prune();
       write = await this.#create(task);
     }
-    if (!write.ok) throw new Error(`task ${task.id} was not stored (${write.code})`);
+    if (!write.ok) {
+      throw new Error(
+        write.code === "indeterminate"
+          ? `task ${task.id} may have been stored: the store never answered the create or the read-back (check the queue before submitting again)`
+          : `task ${task.id} was not stored (${write.code})`,
+      );
+    }
     this.#held.set(task.id, { version: write.version, task });
-    await this.#admit();
+    // `StoreRevoked` still reaches the host through `onError`, which ends the term.
+    await this.#admit().catch(this.#onError);
     return this.#held.get(task.id)?.task ?? task;
   }
 
@@ -316,7 +328,11 @@ export class Scheduler {
   async #create(task: Task): Promise<StoreWrite> {
     const write = await this.#store.put(task.id, 0, task);
     if (write.ok || write.code !== "indeterminate") return write;
-    const entry = await this.#store.get(task.id).catch(() => null);
+    const entry = await this.#store.get(task.id).catch((err: unknown) => {
+      // A revoked term must still end; any other read failure leaves the create indeterminate.
+      if (err instanceof StoreRevoked) this.#onError(err);
+      return null;
+    });
     if (entry !== null && entry.reason === undefined && entry.version === 1 && entry.body.id === task.id) {
       return { ok: true, version: 1 };
     }
