@@ -66,7 +66,9 @@ green:
   scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
   queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
   this stays green in CI while failing every local run. Link rather than copy, and exec it once in
-  setup — `makeClaudeStub` shows both and carries the measurements.
+  setup — `makeClaudeStub` shows both and carries the measurements. Setup means `beforeAll`: a stub
+  written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes per-test paths in
+  by env instead).
 - A private tmux server still loads the developer's own `~/.tmux.conf` — product code boots it, and
   only `-f` skips the file — so local runs get its default-shell, hooks and `automatic-rename-format`
   while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,9 @@ const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
  * anywhere in the command would make every install assertion below fail.
  */
 const NAME = "seance-raycast-test";
+
+/** Exits a stub before it records anything: the setup exec that pays the first-exec scan. */
+const WARM_FLAG = "--stub-warm";
 
 /**
  * `raycast install/uninstall` through the real CLI, as a subprocess. What this
@@ -37,47 +40,38 @@ const recorded = async (file: string): Promise<readonly string[]> => {
 };
 
 describe("seanced raycast install/uninstall through the CLI", () => {
+  let base: string;
+  let stubs: string;
   let root: string;
   let home: string;
   let checkout: string;
   let workspace: string;
-  let bin: string;
   let rayArgv: string;
   let bunArgv: string;
   let npmArgv: string;
   let openArgv: string;
-  let rayTemplate: string;
   let env: Record<string, string | undefined>;
 
   const extensionDir = (): string => join(home, ".config", "raycast", "extensions", NAME);
   const buildArgv = ["build", "-e", "dist", "-o", "dist", "--non-interactive", "--exit-on-error"];
   const rayPath = (): string => join(workspace, "node_modules", ".bin", "ray");
+  const stub = (name: string): string => join(stubs, name);
 
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "seance-raycast-cli-"));
-    home = join(root, "home");
-    checkout = join(root, "checkout");
-    workspace = join(checkout, "raycast");
-    bin = join(root, "bin");
-    rayArgv = join(root, "ray-argv");
-    bunArgv = join(root, "bun-argv");
-    npmArgv = join(root, "npm-argv");
-    openArgv = join(root, "open-argv");
-    rayTemplate = join(root, "ray-template");
-    await mkdir(bin, { recursive: true });
-    await mkdir(join(workspace, "node_modules", ".bin"), { recursive: true });
-    // Satisfies the presence probe without the real app, the way raycast.test.ts's
-    // doctor cases do.
-    await mkdir(join(home, "Applications", "Raycast.app"), { recursive: true });
-    await Bun.write(join(workspace, "package.json"), JSON.stringify({ name: NAME }));
-
-    // `ray develop` never exits; it imports, prints its ready line, and then
-    // watches until SIGINT — at which point it removes cli.pid and dev.log,
-    // leaves the rest imported, and exits 1. All of that is load-bearing.
-    await Bun.write(
-      rayTemplate,
-      `#!/bin/sh
-printf '%s\\n' "$@" >> "${rayArgv}"
+  // Written and exec'd once here, never per test: macOS scans every
+  // never-executed file on its first exec, one at a time machine-wide, and
+  // `install` runs three stubs. Fresh ones per test put three queued scans
+  // inside every install's 15s — ~11s each behind a busy queue. Tests reach the
+  // stubs by PATH or by hard link (the scanned inode); what differs per test
+  // comes in through STUB_ROOT, so no test rewrites a stub.
+  beforeAll(async () => {
+    base = await mkdtemp(join(tmpdir(), "seance-raycast-cli-"));
+    stubs = join(base, "stubs");
+    await mkdir(join(stubs, "bin"), { recursive: true });
+    const scripts: Readonly<Record<string, string>> = {
+      // `ray develop` never exits; it imports, prints its ready line, and then
+      // watches until SIGINT — at which point it removes cli.pid and dev.log,
+      // leaves the rest imported, and exits 1. All of that is load-bearing.
+      ray: `printf '%s\\n' "$@" >> "$STUB_ROOT/ray-argv"
 [ "$1" = "develop" ] || exit 0
 EXT="$HOME/.config/raycast/extensions/${NAME}"
 mkdir -p "$EXT"
@@ -89,43 +83,71 @@ trap 'rm -f "$EXT/cli.pid" "$EXT/dev.log"; exit 1' INT
 echo "ready - built extension successfully"
 while : ; do sleep 0.1; done
 `,
-    );
-    await Bun.write(rayPath(), await readFile(rayTemplate, "utf8"));
-    await chmod(rayPath(), 0o755);
-
-    // Only consulted for its version: @raycast/api's engine floor is the sole
-    // thing about node this command cares about.
-    await Bun.write(join(bin, "node"), '#!/bin/sh\n[ "$1" = "--version" ] && echo v22.22.2\nexit 0\n');
-    // Stands in for the workspace install, and records where it ran.
-    await Bun.write(
-      join(bin, "bun"),
-      `#!/bin/sh
-printf '%s\\n' "$@" >> "${bunArgv}"
-pwd >> "${bunArgv}"
-mkdir -p "${join(workspace, "node_modules", ".bin")}"
-cp "${rayTemplate}" "${rayPath()}"
-chmod 755 "${rayPath()}"
+      // Builds and prints the marker, but imports nothing.
+      "ray-hollow": `[ "$1" = "develop" ] || exit 0
+echo "ready - built extension successfully"
+while : ; do sleep 0.1; done
+`,
+      // Only consulted for its version: @raycast/api's engine floor is the sole
+      // thing about node this command cares about.
+      "bin/node": '[ "$1" = "--version" ] && echo v22.22.2\nexit 0\n',
+      // Stands in for the workspace install, and records where it ran.
+      "bin/bun": `printf '%s\\n' "$@" >> "$STUB_ROOT/bun-argv"
+pwd >> "$STUB_ROOT/bun-argv"
+mkdir -p "$STUB_ROOT/checkout/raycast/node_modules/.bin"
+ln -f "${stub("ray")}" "$STUB_ROOT/checkout/raycast/node_modules/.bin/ray"
 exit 0
 `,
+      // Never npm: `workspace:*` is not an npm spec, and npm would flatten the
+      // isolated linker tree. Its absence is asserted, so it has to be reachable.
+      "bin/npm": `printf '%s\\n' "$@" >> "$STUB_ROOT/npm-argv"\nexit 0\n`,
+      // The preflight: "Raycast is already running", so the command never reaches
+      // `open`. Both stubbed — a test suite must not start the real app.
+      "bin/pgrep": "exit 0\n",
+      "bin/open": `printf '%s\\n' "$@" >> "$STUB_ROOT/open-argv"\nexit 0\n`,
+    };
+    // At once, not in turn: the scans queue together, so setup waits out the
+    // queue about once rather than once per stub.
+    await Promise.all(
+      Object.entries(scripts).map(async ([name, body]) => {
+        // The flag exits before anything is recorded, so warming leaves no trace.
+        await Bun.write(stub(name), `#!/bin/sh\n[ "$1" = ${WARM_FLAG} ] && exit 0\n${body}`);
+        await chmod(stub(name), 0o755);
+        await Bun.spawn([stub(name), WARM_FLAG]).exited;
+      }),
     );
-    // Never npm: `workspace:*` is not an npm spec, and npm would flatten the
-    // isolated linker tree. Its absence is asserted, so it has to be reachable.
-    await Bun.write(join(bin, "npm"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${npmArgv}"\nexit 0\n`);
-    // The preflight: "Raycast is already running", so the command never reaches
-    // `open`. Both stubbed — a test suite must not start the real app.
-    await Bun.write(join(bin, "pgrep"), "#!/bin/sh\nexit 0\n");
-    await Bun.write(join(bin, "open"), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${openArgv}"\nexit 0\n`);
-    for (const name of ["node", "bun", "npm", "pgrep", "open"]) await chmod(join(bin, name), 0o755);
+  });
+
+  afterAll(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(base, "test-"));
+    home = join(root, "home");
+    checkout = join(root, "checkout");
+    workspace = join(checkout, "raycast");
+    rayArgv = join(root, "ray-argv");
+    bunArgv = join(root, "bun-argv");
+    npmArgv = join(root, "npm-argv");
+    openArgv = join(root, "open-argv");
+    await mkdir(join(workspace, "node_modules", ".bin"), { recursive: true });
+    // Satisfies the presence probe without the real app, the way raycast.test.ts's
+    // doctor cases do.
+    await mkdir(join(home, "Applications", "Raycast.app"), { recursive: true });
+    await Bun.write(join(workspace, "package.json"), JSON.stringify({ name: NAME }));
+    await link(stub("ray"), rayPath());
 
     env = {
       ...process.env,
       HOME: home,
+      STUB_ROOT: root,
       SEANCE_RAYCAST_DIR: workspace,
       // Everything below is stubbed binaries and fs work against this HOME, so
       // it runs everywhere; the platform gate would otherwise refuse first.
       SEANCE_RAYCAST_ANY_PLATFORM: "1",
       // /usr/bin and /bin are real on purpose: every stub above is a shell script.
-      PATH: [bin, "/usr/bin", "/bin", dirname(process.execPath)].join(delimiter),
+      PATH: [join(stubs, "bin"), "/usr/bin", "/bin", dirname(process.execPath)].join(delimiter),
     };
   });
 
@@ -190,15 +212,9 @@ exit 0
   // The marker only shortens the wait; the directory is the proof. Printing the
   // success line off a marker alone is the one lie this command could tell.
   test("install that builds but imports nothing warns instead of claiming success", async () => {
-    await Bun.write(
-      rayPath(),
-      `#!/bin/sh
-[ "$1" = "develop" ] || exit 0
-echo "ready - built extension successfully"
-while : ; do sleep 0.1; done
-`,
-    );
-    await chmod(rayPath(), 0o755);
+    // Relinked, never written through: the link there is the suite's own `ray`.
+    await rm(rayPath());
+    await link(stub("ray-hollow"), rayPath());
 
     const { out, err, code } = await run("install");
     expect(code).toBe(1);
