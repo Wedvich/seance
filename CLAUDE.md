@@ -149,7 +149,9 @@ green:
   the same three remote ops — DESIGN.md's "Fleet broker" is the record, and any widening of it,
   including running it on other daemons, is the same kind of change. The socket's third frame
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
-  bound to the sender's pane by its kernel-reported peer pid, never by a field it sends.
+  bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
+  frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
+  one connection whose pid came back null.
   Giving it any act, or taking a session or task id from the frame, is the same kind of
   change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
