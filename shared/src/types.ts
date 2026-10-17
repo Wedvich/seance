@@ -276,7 +276,7 @@ export type RegistryView = RegistryEntry & {
 /**
  * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
  * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
- * put. No relay accepts these frames before M3 item 1; the app sends
+ * put, ruled by `relay/src/store.ts` (item 1); the app sends
  * `store-list`, `store-get` and `store-put` (`RelayClient`, item 2), and nothing
  * sends `store-delete` yet. Plaintext Layer 1 frames, not ops — the
  * relay itself answers them — so a request carries its own `id` (a routing id,
@@ -359,8 +359,9 @@ export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
  * create. The leader prunes finished tasks to keep room; a record it cannot read
  * it reports and never deletes on its own — after a PSK rotation that would be
  * the whole queue — so clearing junk is a person's act. With
- * `STORE_MAX_CT_LENGTH`, a full prefix lists in 5 MiB: Cloudflare caps a
- * received WebSocket message at 32 MiB and states no cap on a sent one.
+ * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; whether Cloudflare
+ * sends a DO message that large is unverified (DESIGN.md, "The store", _Send
+ * size_, which holds the arithmetic), and paging is the fix if it does not.
  */
 export const MAX_TASKS = 128;
 
@@ -383,7 +384,12 @@ export const STORE_TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
 export const STORE_CREATE_WINDOW_MS = 60_000;
 export const MAX_STORE_CREATES_PER_WINDOW = 60;
 
-/** Client-side deadline for a store reply — a backstop, as `OP_TIMEOUT_MS` is: the relay answers every store frame it can parse. */
+/**
+ * Client-side deadline for a store reply. The relay answers every store frame it
+ * can parse, except on a storage throw or a reply the socket refused: then it
+ * sends nothing, and this timeout reads the outcome as indeterminate
+ * (DESIGN.md, "The store").
+ */
 export const STORE_TIMEOUT_MS = 10_000;
 
 export interface StoreListFrame {
