@@ -50,14 +50,69 @@ const SCHEMA = `
   ).join("")}
 `;
 
+const UPSERT_SERIES =
+  "INSERT INTO series (metric, labels) VALUES (?, ?) ON CONFLICT DO UPDATE SET metric = metric RETURNING id";
+
 /**
- * `PRAGMA user_version` this code's tiers are at. Version 1 keyed them
- * time-first: every rollup, prune and query is a range on `ts`, and a
- * series-first key turned each rollup into a full scan plus a sort, ~3 ms and
- * ~150 KiB of WAL a tick. Below it the tiers are dropped, not migrated —
- * their history only began 2026-10-15, and `IF NOT EXISTS` would keep the old key.
+ * Entry `n` takes a store at `PRAGMA user_version` n to n + 1, all of them in
+ * the one transaction that opens it, before `SCHEMA` runs; one that needs the
+ * tables creates them itself. History is migrated, never dropped, from version
+ * 1 on: the hourly tier is kept forever, and each drop would cost all of it.
  */
-const SCHEMA_VERSION = 1;
+const MIGRATIONS: readonly ((db: Database) => void)[] = [
+  // 0 → 1: tiers keyed time-first, since every rollup, prune and query is a
+  // range on `ts`, and a series-first key turned each rollup into a full scan
+  // plus a sort, ~3 ms and ~150 KiB of WAL a tick. Dropped, not migrated: their
+  // history only began 2026-10-15, and `IF NOT EXISTS` would keep the old key.
+  (db) => {
+    for (const step of METRICS_STEPS) db.exec(`DROP TABLE IF EXISTS ${TIERS[step]}`);
+  },
+  // 1 → 2: no `machine` label. The store is its machine's alone, so the label
+  // said nothing, and a rename split every series in two.
+  (db) => foldLabel(db, "machine"),
+];
+
+const SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * Moves every series carrying `label` into the series without it, then
+ * re-rolls each tier from the one below. Where two series held the same
+ * bucket — the one a rename or the label's removal fell in — the merge can only
+ * average the two averages, and the re-roll replaces that with the true one
+ * wherever the tier below still holds the whole bucket.
+ */
+function foldLabel(db: Database, label: string): void {
+  db.exec(SCHEMA);
+  const labelled = db
+    .query<{ id: number; metric: string; labels: string }, [string]>(
+      "SELECT id, metric, labels FROM series WHERE json_extract(labels, ?) IS NOT NULL",
+    )
+    .all(`$.${label}`);
+  if (labelled.length === 0) return;
+  const upsert = db.query<{ id: number }, [string, string]>(UPSERT_SERIES);
+  for (const { id, metric, labels } of labelled) {
+    const { [label]: _, ...rest } = parseLabels(labels);
+    const into = upsert.get(metric, labelKey(rest));
+    if (into === null) continue;
+    for (const step of METRICS_STEPS) {
+      const tier = TIERS[step];
+      db.query<void, [number, number]>(
+        `INSERT INTO ${tier} (series, ts, value) SELECT ?1, ts, value FROM ${tier} WHERE series = ?2
+         ON CONFLICT (ts, series) DO UPDATE SET value = (value + excluded.value) / 2`,
+      ).run(into.id, id);
+      db.query<void, [number]>(`DELETE FROM ${tier} WHERE series = ?`).run(id);
+    }
+    db.query<void, [number]>("DELETE FROM series WHERE id = ?").run(id);
+  }
+  for (const [from, to, step] of [
+    ["raw", "m5", 300],
+    ["m5", "h1", 3600],
+  ] as const) {
+    const oldest = db.query<{ ts: number | null }, []>(`SELECT min(ts) AS ts FROM ${from}`).get()?.ts ?? null;
+    // From the first bucket the tier below holds whole, as `write` re-rolls.
+    if (oldest !== null) db.query<void, [number]>(rollupSql(from, to, step)).run(bucketAfter(oldest, step));
+  }
+}
 
 interface PointRow {
   readonly metric: string;
@@ -103,15 +158,11 @@ export class MetricsStore {
     db.exec("PRAGMA synchronous = NORMAL");
     db.transaction(() => {
       const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
-      if (version < SCHEMA_VERSION) {
-        for (const step of METRICS_STEPS) db.exec(`DROP TABLE IF EXISTS ${TIERS[step]}`);
-        db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      }
+      for (const migrate of MIGRATIONS.slice(version)) migrate(db);
+      if (version < SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec(SCHEMA);
     })();
-    this.#seriesId = db.query<{ id: number }, [string, string]>(
-      "INSERT INTO series (metric, labels) VALUES (?, ?) ON CONFLICT DO UPDATE SET metric = metric RETURNING id",
-    );
+    this.#seriesId = db.query<{ id: number }, [string, string]>(UPSERT_SERIES);
     // OR IGNORE: a quota observation is stamped at its fetch time, and the
     // same cached reading comes back every tick until Claude Code refreshes it.
     this.#insertRaw = db.query<void, [number, number, number]>(

@@ -284,7 +284,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   };
 
   const telemetry = createTelemetry(metrics, {
-    machine: config.name,
     diskPaths: config.repoRoots,
     registered: () => registered,
     sessions: () => handlerCtx.backend.sessions(state.repos),

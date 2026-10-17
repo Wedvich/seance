@@ -239,6 +239,7 @@ describe("MetricsStore", () => {
     store.close();
 
     const db = new Database(path, { readonly: true });
+    expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2);
     for (const tier of ["raw", "m5", "h1"]) {
       const pk = db.query<{ name: string }, []>(`PRAGMA index_list(${tier})`).all();
       expect(pk.map((index) => index.name)).toEqual([`sqlite_autoindex_${tier}_1`]);
@@ -246,5 +247,44 @@ describe("MetricsStore", () => {
       expect(columns.map((column) => column.name)).toEqual(["ts", "series"]);
     }
     db.close();
+  });
+
+  // A machine renamed "Windows WSL" → "WSL" mid-bucket, then updated to a
+  // daemon that writes no `machine` label: one history, kept whole.
+  test("a version-1 store folds its machine-labelled series into the unlabelled ones, history intact", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-metrics-"));
+    cleanups.push(dir);
+    const path = join(dir, "metrics.sqlite");
+    const at = (metric: string, labels: Record<string, string>, offsets: number[], value: number): Sample[] =>
+      offsets.map((offset) => ({ metric, labels, ts: NOW + offset, value }));
+    const v1 = await MetricsStore.open(path);
+    v1.write(
+      [
+        ...at("cpu_pct", { machine: "Windows WSL" }, [0, 30, 60], 10),
+        ...at("cpu_pct", { machine: "WSL" }, [90, 120, 150, 180, 210, 240, 270], 40),
+        ...at("cpu_pct", {}, [300], 70),
+        ...at("sessions", { machine: "WSL", exclave: "work" }, [0], 2),
+      ],
+      NOW + 300,
+    );
+    v1.close();
+    const rewind = new Database(path);
+    rewind.exec("PRAGMA user_version = 1");
+    rewind.close();
+
+    const store = await MetricsStore.open(path);
+    expect(
+      store.query({ from: NOW, to: NOW + 300, step: 30 }).map((s) => [s.metric, s.labels, s.points.length]),
+    ).toEqual([
+      ["cpu_pct", {}, 11],
+      ["sessions", { exclave: "work" }, 1],
+    ]);
+    // Re-rolled from raw: ten samples' mean, not the two series' averages averaged (25).
+    expect(store.query({ from: NOW, to: NOW + 300, step: 300, names: ["cpu_pct"] })[0]?.points).toEqual([
+      [NOW, 31],
+      [NOW + 300, 70],
+    ]);
+    expect(store.query({ from: NOW, to: NOW, step: 3600, names: ["cpu_pct"] })[0]?.points).toEqual([[NOW, 50.5]]);
+    store.close();
   });
 });

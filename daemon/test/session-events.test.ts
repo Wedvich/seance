@@ -286,7 +286,6 @@ describe("rate limits", () => {
     expect(forwarded.length).toBe(before);
 
     const telemetry = createTelemetry(MetricsStore.memory(), {
-      machine: "test",
       diskPaths: [base],
       registered: () => ({ scan: 1, exclaves: scan }),
       sessions: () => Promise.resolve([]),
