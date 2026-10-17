@@ -24,6 +24,7 @@ import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import {
   buildMcpServer,
+  decisionText,
   isLocalRef,
   resolveOrigin,
   type McpServerOpts,
@@ -729,6 +730,20 @@ const decision: Decision = {
 function task(overrides: Partial<Task> = {}): Task {
   return { id: "t-1", spec: { repo: ORIGIN, mode: "worktree" }, state: "ready", createdAt: 4_000, ...overrides };
 }
+
+describe("decisionText", () => {
+  test("a record the leader cut says how many candidates it left out, after the ones it kept", () => {
+    expect(decisionText({ ...decision, candidates: decision.candidates.slice(0, 1), trimmed: 3 })).toBe(
+      "chose Linux Box/work (lowest score, 0.30); 3 more candidates not shown",
+    );
+    expect(decisionText({ ...decision, trimmed: 1 })).toBe(
+      "chose Linux Box/work (lowest score, 0.30); MacBook Pro/default: not signed in; 1 more candidate not shown",
+    );
+    expect(decisionText({ at: 5_000, chosen: null, candidates: [], trimmed: 4 })).toBe(
+      "no candidate can take it now; 4 more candidates not shown",
+    );
+  });
+});
 
 const running = task({
   state: "running",

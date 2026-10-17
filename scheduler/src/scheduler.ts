@@ -595,13 +595,23 @@ function capped(decision: Decision): Decision {
 function trimmed(task: Task): Task {
   const { decision } = task;
   if (decision === undefined) return task;
+  const cut = winnerOnly(decision);
+  return cut === decision ? task : { ...task, decision: cut };
+}
+
+/**
+ * The winner's candidate alone, the rest added to `trimmed`: still where and
+ * why, without the losers that make a record grow with the fleet. Unchanged
+ * when there is nothing to cut.
+ */
+export function winnerOnly(decision: Decision): Decision {
   const { chosen } = decision;
   const kept = decision.candidates.filter(
     (c) => chosen !== null && c.deviceId === chosen.deviceId && c.exclave === chosen.exclave,
   );
   const cut = decision.candidates.length - kept.length;
-  if (cut === 0) return task;
-  return { ...task, decision: { ...decision, candidates: kept, trimmed: (decision.trimmed ?? 0) + cut } };
+  if (cut === 0) return decision;
+  return { ...decision, candidates: kept, trimmed: (decision.trimmed ?? 0) + cut };
 }
 
 /** What a settle reads besides the task and the machine's answer. */

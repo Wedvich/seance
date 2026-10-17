@@ -30,6 +30,7 @@ export function DecisionCard(props: {
   age?: string;
 }): JSX.Element {
   const { summary, title, quota, age } = props;
+  const others = summary.others.length + (summary.omitted?.count ?? 0);
   return (
     <section className="decision card" aria-label={title}>
       <span className="label">
@@ -42,15 +43,16 @@ export function DecisionCard(props: {
           <Line line={summary.chosen} quota={quota} />
         </ul>
       )}
-      {summary.others.length > 0 && (
+      {others > 0 && (
         <details className="decision-others" open={summary.chosen === null}>
           <summary>
-            {summary.others.length} other {summary.others.length === 1 ? "candidate" : "candidates"}
+            {others} other {others === 1 ? "candidate" : "candidates"}
           </summary>
           <ul className="decision-lines">
             {summary.others.map((line) => (
               <Line key={line.id} line={line} quota={quota} />
             ))}
+            {summary.omitted !== null && <li className="decision-omitted">{summary.omitted.text}</li>}
           </ul>
         </details>
       )}

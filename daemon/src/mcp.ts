@@ -326,7 +326,11 @@ export function decisionText(decision: Decision): string {
       const lost = chosen === null ? "scored but not chosen" : "scored higher";
       return `${candidateWhere(c)}: ${lost}, ${c.score.total.toFixed(2)}`;
     });
-  return others.length === 0 ? head : `${head}; ${others.join("; ")}`;
+  // Cut from this copy (`Decision.trimmed`): the list above is partial, not every loser.
+  const cut = decision.trimmed ?? 0;
+  const omitted = cut === 0 ? [] : [`${cut} more ${cut === 1 ? "candidate" : "candidates"} not shown`];
+  const tail = [...others, ...omitted];
+  return tail.length === 0 ? head : `${head}; ${tail.join("; ")}`;
 }
 
 interface TaskPlacement {

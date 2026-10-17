@@ -31,6 +31,14 @@ export interface DecisionSummary {
   readonly chosen: DecisionLine | null;
   /** Scored losers first, best first, then the rejected — the record's own order. */
   readonly others: readonly DecisionLine[];
+  /** Candidates the leader cut from this copy (`Decision.trimmed`): `others` is then partial. */
+  readonly omitted: { readonly count: number; readonly text: string } | null;
+}
+
+function omittedOf(decision: Decision): DecisionSummary["omitted"] {
+  const count = decision.trimmed ?? 0;
+  if (count === 0) return null;
+  return { count, text: `${count} more not shown — left out to keep the record small` };
 }
 
 function lineId(deviceId: string, exclave: string | null): string {
@@ -143,16 +151,19 @@ export function describeDecision(
   const others = decision.candidates
     .filter((c) => c !== winner)
     .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner));
+  const omitted = omittedOf(decision);
   if (chosen === null) {
     return {
       headline:
-        decision.candidates.length === 0
+        // A record cut to nothing still had candidates: it is a full fleet, not an empty one.
+        decision.candidates.length === 0 && omitted === null
           ? "No machine is registered to take it."
           : tense === "would"
             ? "No machine can take it right now."
             : "Waiting — no machine can take it yet.",
       chosen: null,
       others,
+      omitted,
     };
   }
   const name = winner === undefined ? chosen.deviceId : where(winner);
@@ -163,6 +174,7 @@ export function describeDecision(
         ? { id: lineId(chosen.deviceId, chosen.exclave), where: name, outcome: "chosen", why: "chosen", quota: null }
         : line(winner, "chosen", decision, machines, now, undefined),
     others,
+    omitted,
   };
 }
 

@@ -1530,3 +1530,9 @@
 .decision-others[open] > summary {
   margin-bottom: 6px;
 }
+
+.decision-omitted {
+  padding-left: 12px;
+  font-size: 13px;
+  color: var(--fg2);
+}
