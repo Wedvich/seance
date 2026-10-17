@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  AT_REST_OPS,
   DAEMON_ROLES,
   ENVELOPE_MAX_CT_LENGTH,
   HEARTBEAT_INTERVAL_MS,
@@ -17,6 +18,7 @@ import {
   type Envelope,
   type ErrorResponse,
   type Identity,
+  type LeadProof,
   type MachineStatus,
   type OpName,
   type Plain,
@@ -360,6 +362,7 @@ export class RelayClient {
         return;
       }
       log.info(`relay says lead term=${frame.term}`);
+      void this.#proveLead(frame.term);
       this.#opts.onLead?.(frame.term);
       return;
     }
@@ -376,6 +379,27 @@ export class RelayClient {
       return;
     }
     await this.#onEnvelope(frame.env);
+  }
+
+  /**
+   * Answers `lead` with the term sealed under the PSK, which the relay carries
+   * to apps beside the nomination. It is what makes a nominee verifiable: a
+   * token holder with this machine's seed can register its `info` blob, but
+   * the relay mints a new term when it takes this socket's route, and only a
+   * PSK holder can seal one (DESIGN.md, Scheduler, "Leadership"). Sent on the
+   * socket that heard `lead`, since the relay keeps a proof only from the
+   * leader's own socket under the current term.
+   */
+  async #proveLead(term: number): Promise<void> {
+    const ws = this.#ws;
+    const payload: LeadProof = { term };
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: AT_REST_OPS.leadProof, payload };
+    const env = await seal(this.#opts.key, { to: APP_ID, from: this.#opts.identity.deviceId }, plain);
+    if (ws === null || this.#ws !== ws || !this.connected) {
+      log.warn(`scheduler: lead proof for term=${term} unsent — the socket that heard lead is gone`);
+      return;
+    }
+    ws.send(JSON.stringify({ t: "lead-proof", term, env } satisfies DaemonFrame));
   }
 
   async #onEnvelope(env: Envelope): Promise<void> {

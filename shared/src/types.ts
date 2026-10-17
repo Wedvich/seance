@@ -103,6 +103,14 @@ export type DaemonFrame =
    * accounts, never its pressure. DESIGN.md, Presence & identity.
    */
   | { readonly t: "status"; readonly env: Envelope }
+  /**
+   * The nominee's answer to `lead`: `env` is a `LeadProof` for `term` (op
+   * `lead-proof`, sealed to APP_ID). The relay cannot read it; it keeps the
+   * first one the leader's own socket sends under the current term and carries
+   * it in the registry push (`SchedulerLeader.proof`), where apps check it.
+   * DESIGN.md, Scheduler, "Leadership".
+   */
+  | { readonly t: "lead-proof"; readonly term: number; readonly env: Envelope }
   /** The leader's store client (M3); writes to a term-fenced prefix carry its term. */
   | StoreRequestFrame;
 
@@ -156,6 +164,21 @@ export type UndeliverableCode = "offline" | "unknown" | "not_leader";
  */
 export interface SchedulerLeader {
   readonly deviceId: string;
+  readonly term: number;
+  /**
+   * The leader's `lead-proof` for this term, once its socket has sent one.
+   * What an app believes the nominee by: a token holder with a listed
+   * machine's seed can register that machine's own `info` blob, but cannot
+   * seal a proof for a term the relay minted after taking the socket from it.
+   */
+  readonly proof?: Envelope;
+}
+
+/**
+ * The payload of a `lead-proof` envelope: the term the relay told this daemon
+ * it leads. Sealed `from` the daemon's own id, so it binds machine and term.
+ */
+export interface LeadProof {
   readonly term: number;
 }
 
@@ -444,7 +467,7 @@ export interface StoreChangedFrame {
 
 /**
  * Ops sealed as data at rest rather than sent: the register blob, the `status`
- * beat and the store's records. Opened through `openAtRest`, never the replay
+ * beat, the leader's `lead-proof` and the store's records. Opened through `openAtRest`, never the replay
  * guard, and never accepted on a live routing path — one op per kind, so a
  * stored record can stand in neither for a request nor for another kind of
  * record. `task` and `pause-state` are sealed to SCHEDULER_ID.
@@ -452,6 +475,7 @@ export interface StoreChangedFrame {
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
   status: "status",
+  leadProof: "lead-proof",
   task: "task",
   pauseState: "pause-state",
 } as const;

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   DAEMON_ROLES,
   liveStatus,
+  SCHEDULER_ID,
+  signRegister,
   newestQuotaByAccount,
   type RegistryView,
   type RelayToAppFrame,
@@ -14,6 +16,7 @@ import {
 } from "@seance/shared";
 import { deregisterMachine } from "../daemon/src/deregister.ts";
 import { exec } from "../daemon/src/exec.ts";
+import { identityOfState, readState } from "../daemon/src/state.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "../daemon/test/fixtures.ts";
 import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
@@ -675,12 +678,14 @@ describe("two daemons ↔ relay ↔ app", () => {
 });
 
 /**
- * The leader the latest registry push named, read off a bare app socket: the
- * app's RelayClient does not model leadership yet (M2 item 6).
+ * The latest registry push as a bearer-token holder reads it, off a bare app
+ * socket: the raw leader record (with its proof) and entries the app's
+ * RelayClient only shows once they open.
  */
 function watchLeader(): {
   readonly current: () => SchedulerLeader | null;
   readonly connected: (deviceId: string) => boolean;
+  readonly entry: (deviceId: string) => RegistryView | undefined;
   readonly close: () => void;
 } {
   const url = new URL(wsUrl(stack.relay, "/app"));
@@ -695,6 +700,7 @@ function watchLeader(): {
   return {
     current: () => latest?.scheduler ?? null,
     connected: (deviceId) => latest?.entries.some((entry) => entry.deviceId === deviceId && entry.connected) === true,
+    entry: (deviceId) => latest?.entries.find((entry) => entry.deviceId === deviceId),
     close: () => ws.close(),
   };
 }
@@ -725,7 +731,7 @@ describe("scheduler leadership ↔ real daemons", () => {
       down = false;
       // The first daemon is back, and connected later: it follows.
       await pollUntil(() => watch.connected(stack.deviceId), "the restarted daemon to reconnect", 10_000);
-      expect(watch.current()).toEqual({ deviceId: second.deviceId, term: handedOver });
+      expect(watch.current()).toMatchObject({ deviceId: second.deviceId, term: handedOver });
       await pollUntil(
         async () => (await Bun.file(second.log).text()).includes(`relay says lead term=${handedOver}`),
         "the second daemon to log its lead",
@@ -1140,6 +1146,89 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     } finally {
       squatter?.close();
       stolen?.close();
+      if (down) await stack.restartDaemon();
+      app.stop();
+      watch.close();
+    }
+  }, 60_000);
+
+  // The gap the entry check left: a listed machine's own seed, copied out with
+  // the bearer token but not the PSK, registering that machine's own `info`
+  // blob read off any push. The entry opens, so only the lead proof tells the
+  // thief apart: the relay minted a term the machine never heard, and the proof
+  // it sealed for an older one, replayed, names the wrong term.
+  test("a stolen seed registering the machine's own info blob, and replaying its last proof, reads as leader unverified", async () => {
+    const app = startApp(stack, { auto: true });
+    const watch = watchLeader();
+    let thief: Awaited<ReturnType<typeof connectDaemon>> | null = null;
+    let down = false;
+    try {
+      await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && state.relay.scheduler.deviceId === stack.deviceId,
+        "the suite's daemon verified as leader",
+      );
+      await pollUntil(() => watch.current()?.proof !== undefined, "the leader's proof in the raw push");
+      const info = watch.entry(stack.deviceId)?.info;
+      const replayed = watch.current()?.proof;
+      if (info === undefined || replayed === undefined) throw new Error("unreachable");
+      // The suite's daemon keeps its state under this process's SEANCE_STATE_DIR.
+      const state = await readState();
+      if (state === null) throw new Error("the suite's daemon has no state.json");
+      const seed = await identityOfState(state);
+
+      // Down, so it cannot redial and take its route back mid-test.
+      stack.daemon.stop();
+      down = true;
+      await app.waitForApp((s) => s.relay.scheduler.kind === "none", "no leader while the daemon is down");
+      thief = await connectDaemon(stack.relay);
+      const ts = Date.now();
+      const roles = [DAEMON_ROLES.scheduler];
+      thief.send({
+        t: "register",
+        deviceId: stack.deviceId,
+        info,
+        key: seed.publicKey,
+        ts,
+        sig: await signRegister(seed, ts, roles),
+        roles,
+      });
+      const { term } = await thief.waitFor<{ t: "lead"; term: number }>("lead");
+      thief.send({ t: "lead-proof", term, env: replayed });
+      await pollUntil(
+        () => watch.current()?.term === term && watch.current()?.proof?.iv === replayed.iv,
+        "the replayed proof kept under the thief's term",
+      );
+      // The entry opened — the machine reads as itself, connected — and still the leader is not believed.
+      const seen = await app.waitForApp(
+        (s) => s.relay.scheduler.kind !== "none" && s.relay.scheduler.term === term,
+        "the thief's term in the app",
+      );
+      expect(ownMachine(seen, stack.deviceId)?.connected).toBe(true);
+      expect(seen.relay.scheduler).toEqual({ kind: "unverified", deviceId: stack.deviceId, term });
+      await expect(app.client.queue()).rejects.toMatchObject({ reason: "leader_unverified" });
+      // It holds the machine's route, so the app's own polls of that machine reach it
+      // sealed; what must not is anything for the scheduler.
+      const reached: string[] = [];
+      for (;;) {
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- drained one frame at a time
+          reached.push((await thief.waitFor<{ t: "msg"; env: { to: string } }>("msg", 500)).env.to);
+        } catch {
+          break;
+        }
+      }
+      expect(reached).not.toContain(SCHEDULER_ID);
+
+      thief.close();
+      await stack.restartDaemon();
+      down = false;
+      const back = await app.waitForApp(
+        (s) => s.relay.scheduler.kind === "ready" && s.relay.scheduler.deviceId === stack.deviceId,
+        "the real daemon proving a term of its own",
+      );
+      expect(back.relay.scheduler.kind === "ready" ? back.relay.scheduler.term : 0).toBeGreaterThan(term);
+    } finally {
+      thief?.close();
       if (down) await stack.restartDaemon();
       app.stop();
       watch.close();

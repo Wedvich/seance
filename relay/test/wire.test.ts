@@ -9,9 +9,11 @@ import {
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   base64Length,
+  importPsk,
+  seal,
   type Envelope,
 } from "@seance/shared";
-import { parseAppFrame, parseDaemonFrame, parseEnvelope } from "../src/wire.ts";
+import { LEAD_PROOF_MAX_CT_LENGTH, parseAppFrame, parseDaemonFrame, parseEnvelope } from "../src/wire.ts";
 
 const env = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   v: PROTOCOL_VERSION,
@@ -143,6 +145,36 @@ describe("status frames", () => {
 
   test("an app socket cannot send one", () => {
     expect(parseAppFrame(JSON.stringify({ t: "status", env: env({ to: APP_ID, from: "device-1" }) }))).toBeNull();
+  });
+});
+
+describe("lead-proof frames", () => {
+  test("a term and a small bounded envelope; a real proof, at the longest term, fits", async () => {
+    const key = await importPsk(btoa(String.fromCharCode(...new Uint8Array(32))));
+    const real = await seal(
+      key,
+      { to: APP_ID, from: "x".repeat(64) },
+      { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term: Number.MAX_SAFE_INTEGER } },
+    );
+    expect(real.ct.length).toBeLessThanOrEqual(LEAD_PROOF_MAX_CT_LENGTH);
+    const fits: Envelope = {
+      v: PROTOCOL_VERSION,
+      to: APP_ID,
+      from: "device-1",
+      iv: "cmFuZG9taXZieXRl",
+      ct: "A".repeat(LEAD_PROOF_MAX_CT_LENGTH),
+    };
+    expect(parseDaemonFrame(JSON.stringify({ t: "lead-proof", term: 3, env: fits }))).toEqual({
+      t: "lead-proof",
+      term: 3,
+      env: fits,
+    });
+    const over = env({ to: APP_ID, from: "device-1", ct: "A".repeat(LEAD_PROOF_MAX_CT_LENGTH + 1) });
+    expect(parseDaemonFrame(JSON.stringify({ t: "lead-proof", term: 3, env: over }))).toBeNull();
+    for (const term of [-1, 1.5, "3", undefined]) {
+      expect(parseDaemonFrame(JSON.stringify({ t: "lead-proof", term, env: fits }))).toBeNull();
+    }
+    expect(parseAppFrame(JSON.stringify({ t: "lead-proof", term: 3, env: fits }))).toBeNull();
   });
 });
 

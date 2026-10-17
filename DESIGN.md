@@ -309,13 +309,20 @@ Séance's noise is cover for a real intruder.
    Cloudflare account or put a Worker secret on it can list an id of their
    choosing — the same party who could already replace the relay outright, so
    no new principal — and a seed copied out of a listed machine's `state.json`
-   signs as that machine. Neither yields the PSK. M2's reader check stays as
-   the tripwire for that case: apps treat a leader whose entry does not open
-   as no leader, so a stolen seed without the PSK reads "leader unverified",
-   the PWA greys `auto`, and the app-role client refuses to send it anything.
-   What it holds is the term, so it can keep `auto` unavailable — and, once the
-   store lands, act on the queue as the leader may — until its socket goes or
-   its id leaves the list. Daemons cannot make the reader check — they never
+   signs as that machine. Neither yields the PSK. The lead proof is the
+   tripwire for that case (Scheduler, "Leadership"): apps believe a nominee only
+   when its entry opens and it sealed a `lead-proof` for the pushed term, so a
+   stolen seed without the PSK reads "leader unverified", the PWA greys `auto`,
+   and the app-role client refuses to send it anything. Until 2026-10-17 the
+   check was only that the entry opened, and the thief could pass it by
+   registering the machine's own `info` blob, read off any push. What the thief
+   still holds is the term, so it can keep `auto` unavailable — and, once the
+   store lands, act on the queue as the leader may: the relay fences M3's store
+   writes on the term, not on the proof it cannot read, so a stolen listed seed
+   could delete what the term may delete. M3's store design has to carry that.
+   It lasts until the thief's socket goes or its id leaves the list. The same
+   registration also re-files the machine's own older `status` beats, which
+   open and bind as the machine's (item 4). Daemons cannot check the proof — they never
    see the registry — but all they send the scheduler is fire-and-forget
    `session-event`s, sealed under the PSK, so such a leader learns their timing
    and nothing else.
@@ -444,11 +451,12 @@ nothing checked it. The last is the gap they leave.
   `relay/src` from reaching the envelope crypto or a payload parser — the first
   readable payload would make the relay's logs an activity timeline.
 - **A blob opened outside the replay guard is bound by its AAD `from` and
-  checked for its `op`.** `machine-info` and `status` are data at rest — the
-  relay re-sends the same envelope on every push — so no guard sees them, and
-  only `from` says which machine a blob describes and only `op` which kind of
-  blob it is: payload shape would let a `status` (or M3's `task`) stand in for
-  whatever its slot expects. Both go through `openAtRest`
+  checked for its `op`.** `machine-info`, `status` and the leader's
+  `lead-proof` are data at rest — the relay re-sends the same envelope on every
+  push — so no guard sees them, and only `from` says which machine a blob
+  describes and only `op` which kind of blob it is: payload shape would let a
+  `status` (or M3's `task`) stand in for whatever its slot expects. All go
+  through `openAtRest`
   (`shared/src/crypto.ts`), which throws unless `plain.op` is the one asked for.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
@@ -699,6 +707,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `register`                                                               | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                      |
 | `lead` / `follow`                                                        | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                       | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                     |
+| `lead-proof` (daemon→relay, op `lead-proof` at rest)                     | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                         | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                             |
 | `msg` (→`"scheduler"`)                                                   | any app or daemon                                                                                                                                  | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader` |
 | ops `queue` / `route-preview` / `submit` / `cancel`                      | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/store.ts`, and `daemon/src/mcp.ts` for `submit`, `queue` and `cancel`    | `daemon/src/leader.ts` (`answer`, payload through `parseTaskRequest` or `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                                                                                 |
 | `msg` (`from: "scheduler"`, `term`)                                      | the leader's app-role leg: `daemon/src/leader.ts` over `shared/src/app-client.ts` built with `scheduler: { term }`                                 | fenced by `relay/src/hub.ts` `#holdsTerm` — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                                                                                  |
@@ -706,7 +715,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `msg` (daemon→app)                                                       | `daemon/src/relay-client.ts`                                                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                      |
 | `msg` (→`"machines"` broadcast)                                          | any PSK holder                                                                                                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                       |
 | op `update-available`                                                    | `daemon/src/run.ts` via `broadcast()`                                                                                                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                        |
-| `registry`                                                               | `relay/src/hub.ts` (with `scheduler: { deviceId, term } \| null`)                                                                                  | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened                                                                                                                                                                                                              |
+| `registry`                                                               | `relay/src/hub.ts` (with `scheduler: { deviceId, term, proof? } \| null`)                                                                          | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened and its `proof` opens as its `lead-proof` for this term                                                                                                                                                      |
 | `undeliverable`                                                          | `relay/src/hub.ts`                                                                                                                                 | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                             |
 | `forget`                                                                 | `shared/src/app-client.ts`                                                                                                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                |
 | `forget-refused`                                                         | `relay/src/hub.ts`                                                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                    |
@@ -1059,8 +1068,8 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   connected longest on every redial. Its suite (`relay/test/leadership.test.ts`) needs no workerd.
   `hub.ts` calls it from exactly three places — after a register, a socket close and a sweep — in
   `#renominate`, and nowhere decides leadership itself.
-- **`scheduler:term`** is one DO storage record, `{ term, deviceId, connectedAt }`. Every change
-  bumps `term` and writes once: a new leader, no leader, or the same leader on a new socket (the
+- **`scheduler:term`** is one DO storage record, `{ term, deviceId, connectedAt, proof? }`. Every
+  change bumps `term` and writes once, with no `proof`: a new leader, no leader, or the same leader on a new socket (the
   daemon behind it may have restarted, and whatever its old socket still had in flight belongs to
   the old term). A close or sweep that changes nothing costs one read. The term is monotonic for
   the life of the DO, so a term a demoted leader holds can never come round again. On a change
@@ -1082,10 +1091,30 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   stranger; `from: "app"` envelopes are untouched and ignore `term`. M3's term-fenced store writes
   need more than this check (`#holdsTerm`): the term is public, so a write must also arrive on the
   leader's own daemon socket, never from a token holder who copied the term (M3 PR 0).
-- **The registry push carries `scheduler: { deviceId, term } | null`**, frame-level beside
+- **The registry push carries `scheduler: { deviceId, term, proof? } | null`**, frame-level beside
   `entries`, so an app can grey out `auto` without a round trip. Null unless the recorded leader is
   connected: a record a relay restart left behind names nobody routable until the next register
   re-nominates.
+- **A nominee proves its term; apps believe nothing else** (M2 review, 2026-10-17). The reader
+  check this replaced asked only whether the nominee's registry entry opened into a `Machine`.
+  That is no proof of the PSK: the entry's `info` blob is the machine's own, readable off any push
+  by a bearer-token holder, so a thief with a listed machine's seed (`state.json`) and the token
+  could register under that id carrying it — the relay supersedes the live socket — and read as
+  `ready`. Now every daemon answers `lead { term }` by sealing `{ term }` as op `lead-proof`,
+  `from` its own id `to: "app"`, and sending it as a `lead-proof` frame on the socket that heard
+  `lead` (`#proveLead` in `daemon/src/relay-client.ts`). The relay, which cannot read it, keeps the
+  first one the leader's own socket (`connectedAt` matching the record) sends under the current
+  term on the `scheduler:term` record — one write and one push per term, however often a socket
+  sends — and carries it as `scheduler.proof`; a new term starts without one. The app opens it at
+  rest (`openAtRest`, op `lead-proof`), and reads the nominee as `ready` only when its entry opened
+  _and_ the proof was sealed `from` the nominee for exactly the pushed term. Taking a socket mints a
+  term the machine was never told, so no proof for it exists; the last one it did seal, replayed,
+  names the wrong term. Between a `lead` and its proof an app reads the new leader as `unverified`
+  for one round trip. Cost: a daemon or relay that predates the proof leaves every nominee
+  `unverified`, so `auto` waits for both to update — fail closed. Rejected: a challenge the app
+  sends the nominee (a round trip per app per term, and a timeout where the proof is a push);
+  carrying the term in the `status` beat (the beat is floored per socket, so the proof would lag a
+  `lead` by up to 30s, and a thief can replay an older beat — Threat model, item 3).
 - **Only allowlisted ids lead** (M3 gate, owner, 2026-10-16). Anyone with the bearer token can
   mint an id, sign `roles` and hold a socket, and connected-longest would win; under M2 only the
   reader check stood against that. `SCHEDULER_LEADERS` — comma-separated device ids, a Worker
@@ -1101,7 +1130,7 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   current leader taken off the list loses the role at the next re-nomination; since putting a
   secret rolls a new relay version, every socket reconnects then anyway. A register that is
   capable but unlisted logs as such, the operator's one hint for "auto is unavailable". The
-  reader check stays as the tripwire for a listed seed stolen without the PSK (Threat model,
+  lead proof (above) is the tripwire for a listed seed stolen without the PSK (Threat model,
   item 3). Cost: a new leader-capable machine is a `wrangler secret put` with its id read off
   `seanced doctor`, which rolls the relay and drops every socket once. No relay op exposes the
   list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var

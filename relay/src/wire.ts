@@ -29,6 +29,13 @@ const MAX_IV_LENGTH = 32;
 const SAFE_ID = /^[A-Za-z0-9._-]+$/u;
 
 /**
+ * A `lead-proof` seals one small fixed-shape payload (`{ term }` plus the
+ * envelope's id, ts and op), about 160 base64 chars; this leaves headroom
+ * without letting it carry anything else into the leader record.
+ */
+export const LEAD_PROOF_MAX_CT_LENGTH = 512;
+
+/**
  * A register's key and signature are fixed-size for the one algorithm in use,
  * so the bound is exact: anything else is refused here, before the digest and
  * the verify in `#register` are paid for.
@@ -129,6 +136,11 @@ export function parseDaemonFrame(text: string): Exclude<DaemonFrame, StoreReques
     // the socket's identity), not in a storage value.
     const env = parseEnvelope(value["env"], STATUS_MAX_CT_LENGTH);
     return env === null ? null : { t: "status", env };
+  }
+  if (value["t"] === "lead-proof") {
+    const env = parseEnvelope(value["env"], LEAD_PROOF_MAX_CT_LENGTH);
+    const term = value["term"];
+    return env === null || !isTerm(term) ? null : { t: "lead-proof", term, env };
   }
   return null;
 }
