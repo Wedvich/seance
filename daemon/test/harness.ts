@@ -193,6 +193,11 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   };
 
   const server = Bun.serve<Role>({
+    // The address every client dials. Bun's default is the dual-stack [::], and
+    // on macOS another process's SO_REUSEADDR bind of 127.0.0.1 on the same port
+    // (a VS Code helper, a dev server) is allowed on top of it and wins every
+    // 127.0.0.1 dial; an exact bind makes that second bind fail instead.
+    hostname: "127.0.0.1",
     port,
     fetch(req, srv) {
       // The app carries the token in the query (a browser cannot set a header on a WebSocket).

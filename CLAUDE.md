@@ -72,6 +72,11 @@ green:
   while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
   as `spawn.ts` does) rather than reading its automatic name, which on macOS is whatever tmux caught
   mid-exec (`kernel_task`, `tmux`, `""`).
+- A test server binds the address it is dialed at — `hostname: "127.0.0.1"` on every `Bun.serve`.
+  Bun's default is the dual-stack `[::]`, and macOS lets another process's `SO_REUSEADDR` bind of
+  `127.0.0.1` on the same port (a VS Code helper, a dev server) sit on top of it and take every
+  `127.0.0.1` dial; the client then retries into the wrong server until its wait times out.
+  `daemon/test/harness.test.ts` holds the relay double to it.
 - `daemon/test/harness.ts` is a throwaway relay double with behaviors _inverted_ from the real DO
   (its header comment says which). Never treat it as a reference for relay behavior — DESIGN.md's
   wire protocol section is the spec.
