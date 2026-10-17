@@ -224,10 +224,23 @@ export type SettleLaunch = (launched: boolean) => Promise<void>;
  * and a pane stuck before it registered all read as ran-and-ended, never as
  * never-started.
  */
+/**
+ * The launches of one task id in flight together. Only the first can find the
+ * id unrecorded, and only once none of them landed may it be retracted: two
+ * spawns of one id (a duplicate dispatch) must not let the one that failed
+ * take back the one that ran.
+ */
+interface Launches {
+  open: number;
+  retractable: boolean;
+  landed: boolean;
+}
+
 export class EndedTasks {
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
+  readonly #launches = new Map<string, Launches>();
   readonly #now: () => number;
 
   constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now) {
@@ -240,28 +253,37 @@ export class EndedTasks {
    * throws when it cannot be — the spawn must then not run. The launch counts
    * as in flight, holding every `sessions` reply back (`settled`), until the
    * returned function is told how it went; one that never launched leaves the
-   * ledger again, unless an earlier launch put it there.
+   * ledger again, unless an earlier launch put it there or another launch of
+   * the same id, in flight beside it, ran.
    */
   async launch(taskId: string): Promise<SettleLaunch> {
     const over = Promise.withResolvers<void>();
     this.#inFlight.add(over.promise);
-    const finish = (): void => {
-      this.#inFlight.delete(over.promise);
-      over.resolve();
+    const launches = this.#launches.get(taskId) ?? { open: 0, retractable: false, landed: false };
+    this.#launches.set(taskId, launches);
+    launches.open += 1;
+    // Retracted before the launch stops counting as in flight, so no `sessions` reply sees it half-done.
+    const finish = async (): Promise<void> => {
+      try {
+        launches.open -= 1;
+        if (launches.open > 0) return;
+        this.#launches.delete(taskId);
+        if (launches.retractable && !launches.landed) await this.#ledger.retract(taskId);
+      } finally {
+        this.#inFlight.delete(over.promise);
+        over.resolve();
+      }
     };
-    let fresh: boolean;
     try {
-      fresh = await this.#ledger.record(taskId);
+      if (await this.#ledger.record(taskId)) launches.retractable = true;
     } catch (err) {
-      finish();
+      // Nothing launched under this call; a retraction the others earned still happens.
+      await finish();
       throw err;
     }
     return async (launched) => {
-      try {
-        if (!launched && fresh) await this.#ledger.retract(taskId);
-      } finally {
-        finish();
-      }
+      if (launched) launches.landed = true;
+      await finish();
     };
   }
 

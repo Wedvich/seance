@@ -137,6 +137,28 @@ describe("EndedTasks", () => {
     expect(ended.report(new Set()).ended).toEqual(["dup"]);
   });
 
+  // A duplicate dispatch: two spawns of one task id at once. Only the first
+  // finds the id unrecorded; whichever fails, the one that ran stays.
+  test("two launches of one id in flight: one that failed never retracts one that ran, in either order", async () => {
+    for (const failedFirst of [true, false]) {
+      const ended = new EndedTasks(LaunchLedger.memory());
+      const [a, b] = await Promise.all([ended.launch("dup"), ended.launch("dup")]);
+      if (failedFirst) {
+        await a(false);
+        await b(true);
+      } else {
+        await b(true);
+        await a(false);
+      }
+      expect(ended.report(new Set()).ended).toEqual(["dup"]);
+    }
+    const ended = new EndedTasks(LaunchLedger.memory());
+    const [a, b] = await Promise.all([ended.launch("none"), ended.launch("none")]);
+    await a(false);
+    await b(false);
+    expect(ended.report(new Set()).ended).toEqual([]);
+  });
+
   test("settled waits for every launch in flight, one begun while waiting included", async () => {
     const ended = new EndedTasks(LaunchLedger.memory());
     const first = await ended.launch("a");

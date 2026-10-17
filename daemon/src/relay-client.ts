@@ -357,7 +357,7 @@ export class RelayClient {
     // Plaintext relay assertions, acted on by `leader.ts`; the term it runs
     // under is what the relay fences every scheduler send on.
     if (frame.t === "lead") {
-      if (typeof frame.term !== "number" || !Number.isSafeInteger(frame.term)) {
+      if (typeof frame.term !== "number" || !Number.isSafeInteger(frame.term) || frame.term < 0) {
         log.warn("dropped lead frame without a term");
         return;
       }

@@ -3,7 +3,7 @@ import { isDeviceId } from "./wire.ts";
 
 /**
  * Scheduler nomination, kept apart from `hub.ts` so it reproduces over plain
- * inputs with no workerd (DESIGN.md, "Scheduler leadership"). Nomination is the
+ * inputs with no workerd (DESIGN.md, Scheduler, "Leadership"). Nomination is the
  * only election: the relay decides, daemons never vote.
  */
 export interface Candidate {

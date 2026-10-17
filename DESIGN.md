@@ -238,7 +238,11 @@ Séance's noise is cover for a real intruder.
    only its drops (`status-not-app`, `status-rate`) and failed fan-out sends:
    a `wire status … apps=N` line per beat once made Workers logs a 30s
    timeline of when an app was open, which a Logpush sink would have carried
-   off Cloudflare too. The token also
+   off Cloudflare too. Daemon→scheduler traffic follows the same rule (M2
+   review, 2026-10-17): it is mostly `session-event`s, one per busy, idle or
+   needs-input turn, so a `wire deliver` line each was a per-machine timeline
+   of when every session worked. Only a failed send is logged; the drop with
+   no leader nominated is the steady state and is not logged either. The token also
    bought slightly more than stated: `register` overwrote by `deviceId`, so a
    holder could blank a real machine's entry until it re-registered
    (T1565.001) — closed by self-certifying ids below, since a register for an
@@ -568,9 +572,15 @@ The Durable Object persists a machine registry:
   2026-10-16, scheduler M2; M1 had it go with the socket): when a daemon socket
   closes or is swept, the put that already writes the entry's `lastSeen` also
   keeps that socket's last `status` envelope in the entry (`#leftBy` in
-  `relay/src/hub.ts`) — unless a newer socket for the id superseded it, whose
-  register already cleared the old blob's snapshot — and the registry push carries it for the offline machine
-  as for a live one. No new write, op or signature: the envelope is the one the
+  `relay/src/hub.ts`), and the registry push carries it for the offline machine
+  as for a live one. A socket a newer register superseded writes nothing back,
+  whichever closes first: the register marks it `superseded` on its attachment
+  and drops its snapshot, and from then on it keeps no status, sends none, and
+  is no route, presence or nomination candidate (M2 review, 2026-10-17). The
+  rule used to be "keep unless a newer socket for the id is listed", which a
+  zombie defeated — a slept machine never completes the supersede's close, so
+  its sweep can run after its successor has come and gone, and it wrote its
+  older snapshot over the one the successor kept. No new write, op or signature: the envelope is the one the
   verified socket sent, sealed `from` its own id, so a bearer-token holder
   cannot plant one. A `register` clears it, since it
   indexes the blob that register replaces. Kept means quota, never pressure: an
@@ -3118,12 +3128,19 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   Three rules keep that true. `ended` is reckoned against the reply's own `sessions`, not
   a second tmux read a session could end between — which also lists a tagged pane still
   on a startup dialog, which `sessions` does not, as ended: `done` is a wrong label, a
-  re-dispatch would be a twin. A `sessions` reply waits for any launch in flight. And the
+  re-dispatch would be a twin. A `sessions` reply waits for any launch in flight; two
+  launches of one id in flight together (a duplicate dispatch) are counted per id, so the
+  one that failed never retracts the one that ran, and a failed write never drops an id
+  a concurrent record of it is about to write. And the
   ledger is bounded with `since` moving past each entry it drops: at most 128 entries
   (eviction comes only from this machine's own launches, while the task awaiting proof
   is one whose machine was away, so the count outlasts any absence and the reply stays a
   few KiB) and a week of age (a laptop shut for one). A fresh install starts `since` at
-  the file's creation; a missing or corrupt file is a fresh one, never a crash. One
+  the file's creation; a missing or corrupt file is a fresh one, never a crash. A fresh
+  ledger's `since` is never earlier than the state directory's mtime: every write
+  renames into it, so the mtime is at or after the last launch a lost ledger held, and a
+  clock still behind at boot (no RTC, NTP not yet synced) would otherwise date the fresh
+  ledger before launches it never saw — and prove them never landed. One
   ledger per file per process (`run.ts`), so a config reload's overlapping daemon cannot
   overwrite the other's launches. Not the `@seance-task` record, which "Task ids"
   rejected keeping in a file: that one must die with its pane; this is history, read only

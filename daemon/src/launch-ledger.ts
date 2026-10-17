@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isRecord, isTaskId } from "@seance/shared";
 import { log } from "./log.ts";
@@ -52,6 +52,14 @@ function parseLedger(raw: unknown): LedgerFile | null {
   return { v: LEDGER_VERSION, since, tasks: entries };
 }
 
+async function freshSince(path: string, now: () => number): Promise<number> {
+  const dirMtime = await stat(dirname(path)).then(
+    (info) => Math.floor(info.mtimeMs) + 1,
+    () => 0,
+  );
+  return Math.max(now(), dirMtime);
+}
+
 let tempSeq = 0;
 
 export class LaunchLedger {
@@ -59,13 +67,15 @@ export class LaunchLedger {
   readonly #now: () => number;
   /** Insertion order is age order: a re-recorded id moves to the end. */
   readonly #tasks: Map<string, number>;
+  /** Records of each id not yet on disk or failed: a failure deletes the id only when it is the last. */
+  readonly #recording = new Map<string, number>();
   #since: number;
   #writing: Promise<unknown> = Promise.resolve();
 
-  private constructor(path: string | null, now: () => number, file: LedgerFile | null) {
+  private constructor(path: string | null, now: () => number, since: number, file: LedgerFile | null) {
     this.#path = path;
     this.#now = now;
-    this.#since = file?.since ?? now();
+    this.#since = file?.since ?? since;
     this.#tasks = new Map(file?.tasks ?? []);
   }
 
@@ -73,6 +83,12 @@ export class LaunchLedger {
    * Never throws. A missing file is a fresh ledger, complete from now; so is a
    * corrupt one, which can prove nothing about what came before — it is
    * replaced on the next write.
+   *
+   * "Now" is never earlier than the state directory's mtime: every write
+   * renames into it, so the mtime is at or after the last launch the lost
+   * ledger held, by the clock that recorded it. A clock still behind at boot (no
+   * RTC, NTP not yet synced) would otherwise date a fresh ledger before
+   * launches it never saw, and its `since` would prove them never happened.
    */
   static async open(path: string = launchLedgerPath(), now: () => number = Date.now): Promise<LaunchLedger> {
     let text: string;
@@ -83,7 +99,7 @@ export class LaunchLedger {
       if (code !== "ENOENT") {
         log.warn(`launch ledger at ${path} unreadable (${String(err)}) — starting it afresh`);
       }
-      return new LaunchLedger(path, now, null);
+      return new LaunchLedger(path, now, await freshSince(path, now), null);
     }
     let parsed: LedgerFile | null = null;
     try {
@@ -92,12 +108,12 @@ export class LaunchLedger {
       // Falls through to the warning below.
     }
     if (parsed === null) log.warn(`launch ledger at ${path} is corrupt — starting it afresh`);
-    return new LaunchLedger(path, now, parsed);
+    return new LaunchLedger(path, now, parsed === null ? await freshSince(path, now) : 0, parsed);
   }
 
   /** No file: for tests and a host that keeps none. Proves only what this process saw. */
   static memory(now: () => number = Date.now): LaunchLedger {
-    return new LaunchLedger(null, now, null);
+    return new LaunchLedger(null, now, now(), null);
   }
 
   /** From here on the ledger lists every launch. */
@@ -121,11 +137,20 @@ export class LaunchLedger {
     this.#tasks.delete(taskId);
     this.#tasks.set(taskId, this.#now());
     this.#evict();
+    this.#recording.set(taskId, (this.#recording.get(taskId) ?? 0) + 1);
     try {
       await this.#persist();
     } catch (err) {
-      if (fresh) this.#tasks.delete(taskId);
+      // Not while another record of the id waits on its own write, which would
+      // then put the ledger on disk without it and report success. If that one
+      // fails too, the id stays in memory with nothing launched: it reads as
+      // ran-and-ended, never as never-started.
+      if (fresh && this.#recording.get(taskId) === 1) this.#tasks.delete(taskId);
       throw err;
+    } finally {
+      const left = (this.#recording.get(taskId) ?? 1) - 1;
+      if (left === 0) this.#recording.delete(taskId);
+      else this.#recording.set(taskId, left);
     }
     return fresh;
   }
