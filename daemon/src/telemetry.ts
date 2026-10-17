@@ -81,7 +81,6 @@ export interface CpuTimes {
 }
 
 export interface TelemetrySources {
-  readonly machine: string;
   /** Volumes a clone lands on; the worst one is reported. */
   readonly diskPaths: readonly string[];
   /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
@@ -182,21 +181,20 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
       ...(observations.length === 0 ? {} : { quota: observations }),
     };
 
-    const machine = sources.machine;
+    // No `machine` label: the store is this machine's alone, and a rename would split every series.
     const samples: Sample[] = [];
-    const gauge = (metric: string, value: number | null, labels: Record<string, string>): void => {
+    const gauge = (metric: string, value: number | null, labels: Record<string, string> = {}): void => {
       if (value !== null) samples.push({ metric, labels, ts: at, value });
     };
-    const host = { machine };
-    gauge(METRIC_NAMES.cpu, cpuPct, host);
-    gauge(METRIC_NAMES.mem, memPct, host);
-    gauge(METRIC_NAMES.disk, diskPct, host);
-    gauge(METRIC_NAMES.free, freeMib, host);
-    gauge(METRIC_NAMES.rd, rates?.rd ?? null, host);
-    gauge(METRIC_NAMES.wr, rates?.wr ?? null, host);
+    gauge(METRIC_NAMES.cpu, cpuPct);
+    gauge(METRIC_NAMES.mem, memPct);
+    gauge(METRIC_NAMES.disk, diskPct);
+    gauge(METRIC_NAMES.free, freeMib);
+    gauge(METRIC_NAMES.rd, rates?.rd ?? null);
+    gauge(METRIC_NAMES.wr, rates?.wr ?? null);
     sess?.forEach((count, x) => {
       const exclave = scan.exclaves[x];
-      if (exclave !== undefined) gauge(METRIC_NAMES.sess, count, { machine, exclave: exclave.id });
+      if (exclave !== undefined) gauge(METRIC_NAMES.sess, count, { exclave: exclave.id });
     });
     // Each source at its own stamp, not the merged one: the cache's per-model
     // windows must not land in the history at a session report's time.
@@ -205,7 +203,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
       const exclave = scan.exclaves[q.x];
       if (exclave === undefined) continue;
       const account = scan.info[q.x]?.accountId ?? null;
-      const labels = { machine, exclave: exclave.id, ...(account === null ? {} : { account }) };
+      const labels = { exclave: exclave.id, ...(account === null ? {} : { account }) };
       if (q.h !== undefined) samples.push({ metric: METRIC_NAMES.h, labels, ts: q.at, value: q.h });
       if (q.d !== undefined) samples.push({ metric: METRIC_NAMES.d, labels, ts: q.at, value: q.d });
       for (const window of q.w ?? []) {

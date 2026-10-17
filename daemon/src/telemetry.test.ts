@@ -105,7 +105,6 @@ describe("createTelemetry", () => {
     const store = MetricsStore.memory();
     const sessions = [session(join(home, "work", "repo")), session(join(home, "work", "other")), session("/srv/x")];
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [join(home, "a"), join(home, "b")],
       registered: registeredOf(home),
       sessions: async () => sessions,
@@ -138,19 +137,20 @@ describe("createTelemetry", () => {
     const series = store.query({ from: 0, to: T0 / 1000, step: 30 });
     const named = (metric: string): typeof series => series.filter((s) => s.metric === metric);
     expect(named(METRIC_NAMES.cpu)).toEqual([]);
-    expect(named(METRIC_NAMES.mem)[0]?.points).toEqual([[T0 / 1000, 75]]);
+    // Unlabelled: renaming the machine must not split its history.
+    expect(named(METRIC_NAMES.mem)).toEqual([{ metric: METRIC_NAMES.mem, labels: {}, points: [[T0 / 1000, 75]] }]);
     expect(named(METRIC_NAMES.sess).map((s) => [s.labels, s.points[0]?.[1]])).toEqual([
-      [{ exclave: "default", machine: "mac" }, 1],
-      [{ exclave: "work", machine: "mac" }, 2],
+      [{ exclave: "default" }, 1],
+      [{ exclave: "work" }, 2],
     ]);
     expect(named(METRIC_NAMES.w)).toEqual([
       {
         metric: METRIC_NAMES.w,
-        labels: { account: "org:acct", exclave: "work", machine: "mac", model: "Fable" },
+        labels: { account: "org:acct", exclave: "work", model: "Fable" },
         points: [[(T0 - 60_000) / 1000, 25]],
       },
     ]);
-    expect(named(METRIC_NAMES.h)[0]?.labels).toEqual({ account: "org:acct", exclave: "work", machine: "mac" });
+    expect(named(METRIC_NAMES.h)[0]?.labels).toEqual({ account: "org:acct", exclave: "work" });
     store.close();
   });
 
@@ -160,7 +160,6 @@ describe("createTelemetry", () => {
     const probe = fakeProbe();
     let available = 4 * GiB;
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [home],
       registered: registeredOf(home),
       sessions: async () => [],
@@ -183,7 +182,6 @@ describe("createTelemetry", () => {
     const home = await makeHome();
     const store = MetricsStore.memory();
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [join(home, "missing")],
       registered: registeredOf(home),
       sessions: async () => {
@@ -210,7 +208,6 @@ describe("createTelemetry", () => {
     await writeFile(file, JSON.stringify({ cachedUsageUtilization: cached }));
     const store = MetricsStore.memory();
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [],
       registered: registeredOf(home),
       sessions: async () => [],
@@ -231,7 +228,6 @@ describe("createTelemetry", () => {
     const store = MetricsStore.memory();
     const gate = Promise.withResolvers<readonly SessionEntry[]>();
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [],
       registered: registeredOf(home),
       sessions: () => gate.promise,
@@ -260,7 +256,6 @@ describe("createTelemetry", () => {
     let registered = before;
     const gate = Promise.withResolvers<readonly SessionEntry[]>();
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [],
       registered: () => registered,
       sessions: () => gate.promise,
@@ -288,7 +283,6 @@ describe("createTelemetry", () => {
       counters.idle += 2 * ms * (1 - busyShare);
     };
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [],
       registered: registeredOf(home),
       sessions: async () => [],
@@ -319,7 +313,6 @@ describe("createTelemetry", () => {
     const store = MetricsStore.memory();
     const readings: (number | Error)[] = [4 * GiB, new Error("EIO"), 16 * GiB];
     const telemetry = createTelemetry(store, {
-      machine: "mac",
       diskPaths: [],
       registered: registeredOf(home),
       sessions: async () => [],
