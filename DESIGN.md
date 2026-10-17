@@ -1607,8 +1607,10 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   state.json's write atomic (tmp + rename) load-bearing — the outgoing daemon's
   background rescan can be writing while the incoming one reads, and a torn
   read is indistinguishable from corruption, which mints a new identity and
-  re-registers the machine as a stranger. runtime.json stays an in-place write:
-  it is fixed-size and cannot tear. One accepted gap, found 2026-07-31 while
+  re-registers the machine as a stranger. runtime.json takes the same tmp +
+  rename: small as it is, an in-place write truncates first, and a reader in
+  between gets an empty file — `livePid` then says no daemon runs (measured at
+  ~13% of reads racing a rewrite, 2026-10-17). One accepted gap, found 2026-07-31 while
   chasing a flaky test: macOS brings an `fs.watch` FSEvents stream up
   asynchronously, so an edit landing in the window between `watch()` returning
   and the stream going live is dropped outright — never delivered, so no
