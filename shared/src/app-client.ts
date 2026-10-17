@@ -9,6 +9,7 @@ import {
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_PREFIXES,
+  STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
   TOKEN_PARAM,
   type AppStoreRequestFrame,
@@ -533,7 +534,7 @@ export class RelayClient {
   #stopped = false;
 
   readonly #timeouts: Partial<Record<RequestOp, number>>;
-  readonly #storeTimeoutMs: number;
+  readonly #storeTimeoutMs: number | undefined;
   readonly #createSocket: (url: string) => WebSocket;
   readonly #settleMs: number;
   readonly #registrySettleMs: number;
@@ -551,7 +552,7 @@ export class RelayClient {
     readonly key: CryptoKey;
     /** Per-op overrides for OP_TIMEOUT_MS; tests use it to avoid real 10s waits. */
     readonly timeouts?: Partial<Record<RequestOp, number>>;
-    /** Override for STORE_TIMEOUT_MS; tests use it to avoid a real 10s wait. */
+    /** Override for STORE_TIMEOUT_MS and STORE_LIST_TIMEOUT_MS; tests use it to avoid real waits. */
     readonly storeTimeoutMs?: number;
     /** Socket construction, injected so tests can pass runtime-specific options. */
     readonly createSocket?: (url: string) => WebSocket;
@@ -587,7 +588,7 @@ export class RelayClient {
     this.#token = opts.token;
     this.#key = opts.key;
     this.#timeouts = opts.timeouts ?? {};
-    this.#storeTimeoutMs = opts.storeTimeoutMs ?? STORE_TIMEOUT_MS;
+    this.#storeTimeoutMs = opts.storeTimeoutMs;
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
     this.#settleMs = opts.settleMs ?? SETTLE_MS;
     this.#registrySettleMs = opts.registrySettleMs ?? REGISTRY_SETTLE_MS;
@@ -1364,7 +1365,7 @@ export class RelayClient {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay"));
     }
     return new Promise<StoreReplyFrame | null>((resolve, reject) => {
-      const limit = this.#storeTimeoutMs;
+      const limit = this.#storeTimeoutMs ?? (frame.t === "store-list" ? STORE_LIST_TIMEOUT_MS : STORE_TIMEOUT_MS);
       const timer = setTimeout(() => {
         this.#wireLog("timeout", `id=${quote(frame.id)} t=${frame.t} after=${limit}ms`);
         this.#storePending.delete(frame.id);
@@ -1380,7 +1381,15 @@ export class RelayClient {
           else reject(result.error);
         },
       });
-      socket.send(JSON.stringify(frame));
+      try {
+        socket.send(JSON.stringify(frame));
+      } catch (err) {
+        // A frame never sent gets no reply, so its timer would only report a spurious timeout.
+        clearTimeout(timer);
+        this.#storePending.delete(frame.id);
+        reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`));
+        return;
+      }
       this.#wireLog("send", `id=${quote(frame.id)} t=${frame.t}`);
     });
   }

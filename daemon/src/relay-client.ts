@@ -14,6 +14,7 @@ import {
   ReplayGuard,
   RequestFailure,
   SCHEDULER_ID,
+  STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
   open,
   quote,
@@ -35,14 +36,6 @@ import {
   type StoreRequestFrame,
 } from "@seance/shared";
 import { log } from "./log.ts";
-
-/**
- * A full `store-list` is `MAX_TASKS` records of up to `STORE_MAX_CT_LENGTH`
- * each, one frame of about 5.2 MB; `STORE_TIMEOUT_MS` is sized for a single
- * record. Measured at 100-250 ms on a good link, so this is slack for a slow
- * one — a takeover that times out here retries, but never lists faster.
- */
-const STORE_LIST_TIMEOUT_MS = 30_000;
 
 export interface RelayClientOpts {
   readonly url: string;
