@@ -512,7 +512,7 @@ describe("leader requests", () => {
     expect(audits).toContainEqual(expect.stringContaining(`op=resume id="${ids["resume"]}" ok`));
   });
 
-  test("a pause past the hold limit is invalid_request and a revoked store is internal_error, each audited with its account", async () => {
+  test("a pause past the hold limit is invalid_request, and a revoked store is not_leader and ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
     const store = new MemoryQueueStore();
@@ -541,8 +541,9 @@ describe("leader requests", () => {
         store.failNext({ code: "revoked" });
         expect(await ask("revoked", "pause", { until: "resume" })).toMatchObject({
           ok: false,
-          code: "internal_error",
+          code: "not_leader",
         });
+        expect(leader.term()).toBeNull();
       } finally {
         leader.stop();
         relay.stop();
