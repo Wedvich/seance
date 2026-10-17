@@ -242,7 +242,18 @@ Séance's noise is cover for a real intruder.
    review, 2026-10-17): it is mostly `session-event`s, one per busy, idle or
    needs-input turn, so a `wire deliver` line each was a per-machine timeline
    of when every session worked. Only a failed send is logged; the drop with
-   no leader nominated is the steady state and is not logged either. The token also
+   no leader nominated is the steady state and is not logged either. Two more
+   things ride the same feed in plaintext. Every push carries the leader's
+   `deviceId` and `term` beside its sealed proof (Scheduler, "Leadership"): which
+   machine leads, and — since every leader reconnect bumps the term — a counter
+   of how often the leader's socket dropped, which tracks when that machine
+   slept and woke. And once M3's store lands, `store-list` hands a
+   holder every task key, its version and so its write count; polled, the
+   versions' movement is a timeline of when the queue was worked, and a
+   record's ciphertext length varies with its state and prompt unless it is
+   padded as `status` is. Both are the metadata class the relay already sees
+   (docs/scheduler.md, "Storing the queue"); recorded so neither is mistaken
+   for something the seal hides. The token also
    bought slightly more than stated: `register` overwrote by `deviceId`, so a
    holder could blank a real machine's entry until it re-registered
    (T1565.001) — closed by self-certifying ids below, since a register for an
@@ -256,10 +267,12 @@ Séance's noise is cover for a real intruder.
    holder; rotating the token does. They keep the cost finite. The rate limit
    is per socket, so it bounds one connection's spend, not an attacker's total.
    Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
-   ≤64 KiB, so a register can never reach the DO's 128 KiB value limit as an
-   unhandled throw. `deviceId` has no shape of its own beyond those bounds —
-   it is the base64url SHA-256 of the daemon's public key (43 characters), and
-   the hub checks that, not the parser.
+   ≤64 KiB, so a register can never reach the DO's value limit as an unhandled
+   throw (2 MB per value on the SQLite backend this DO is declared with —
+   `new_sqlite_classes`; this was first written against the KV backend's 128
+   KiB). `deviceId` has no shape of its own beyond those bounds — it is the
+   base64url SHA-256 of the daemon's public key (43 characters), and the hub
+   checks that, not the parser.
    Two sharper reads of the same verb, closed 2026-08-16. **Blob-swap
    misdirection** (T1036): an `/app` socket is handed every machine's `info`
    blob on its first push, and `register` pairs a blob with an id of the
@@ -353,8 +366,32 @@ Séance's noise is cover for a real intruder.
    clock widens the window. A relay can also replay or withhold a `status`: the
    app binds one to its register blob through `scan`, and that stamp can stay
    fixed for hours (it moves only on a re-register), so an old beat replays
-   cleanly within one register period. Its freshness rests on the daemon's `at`
-   — the age the Machines screen shows — and so on the same clock.
+   cleanly within one register period. For a machine that is offline that
+   period has no end — the relay keeps its last beat until the next register
+   (Presence & identity), days for a laptop left shut — so any beat it ever
+   sent under its current blob replays as its kept status indefinitely. Its
+   freshness rests on the daemon's `at` — the age the Machines screen shows —
+   and so on the same clock.
+   The scheduler adds three things a compromised relay can do that a token
+   holder cannot (added 2026-10-17, M2 review). **It can make any daemon
+   lead**: `SCHEDULER_LEADERS` is enforced only by the relay, so a relay that
+   ignores it can nominate any connected daemon, and the lead proof — which
+   binds a term to a PSK holder, not to the list — then verifies. Every daemon
+   holds the PSK and runs the same code, so what it buys is a choice of which
+   machine dispatches, not a new principal. **It decides which daemon an
+   envelope `to: "scheduler"` reaches**, so it can hand one app request to two
+   leaders in turn, inside the replay window, and each runs it once (Security
+   model, "Routing fields bound as AAD"). **It can roll back or resurrect M3's
+   store records**: the sealed version binding and the tombstones stop a token
+   holder writing through the relay's own checks, not the relay, which holds
+   every version it ever stored and decides what `store-list` and `store-get`
+   return. A reader binds a record's sealed `version` to the one the relay
+   reports, so a relay that serves an old blob with its old version passes;
+   and a relay that ignores its tombstones can re-create a deleted task from
+   its own authentic version-1 blob, which the 30-day admit rule bounds only
+   by age. All three are availability and integrity of the queue's _order_,
+   inside the accepted "replay or withhold" class: none forges a task, reads a
+   prompt or spawns anything no PSK holder asked for.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -442,7 +479,9 @@ nothing checked it. The last is the gap they leave.
 - **Files at rest are owner-only.** `config.json` and the sealed PSK blobs
   already were; the audit log, `state.json` and `runtime.json` were 0644 by
   umask alone, and they hold repo paths, device ids and window titles (which,
-  unlike the prompt, are logged verbatim). `metrics.sqlite` and its `-wal` and
+  unlike the prompt, are logged verbatim). `launched.json`, the launch ledger
+  (task ids and launch times, Local op socket, "Session events"), is written
+  0600 the same way, temp file first. `metrics.sqlite` and its `-wal` and
   `-shm` join them: the database is created as an empty 0600 file before SQLite
   opens it, and SQLite gives the files it spawns the database's mode. All
   created at 0600 rather than

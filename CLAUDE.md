@@ -138,7 +138,10 @@ green:
   `from: "app"`, parsed by `parseTaskRequest`, and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `submit` into
-  each. Don't let changes drift from them.
+  each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
+  disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
+  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed. Don't
+  let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
