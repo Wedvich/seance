@@ -547,7 +547,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `STORE_TOMBSTONE_MS` (and its dependents), and `batch_order` words a `sequential` order
     hold. Left open: M2's `submit` still creates `ready`, which
     `bindTaskRecord` refuses at version 1 (`created_unqueued`): item 3's adapter must not meet
-    a `submit` create, so `submit` goes or creates `queued` before it lands.
+    a `submit` create, so `submit` goes or creates `queued` before it lands (a precondition
+    on item 3's own bullet).
   - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show
     only after a fetch, and `reap` — the one thing that fetches — is off by default, so the
     emitter fetches on a cadence of its own; the launch ledger holds ids and times, no worktree
@@ -571,6 +572,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     leader's handler both drop `prUrl` before `onSession`); `e2e/harness.ts` no longer injecting
     `MemoryQueueStore`; and a store double in `daemon/test/harness.ts` — term fence, tombstones,
     `store-changed` — for the adapter's daemon tests.
+    **Precondition: `submit` must not create `ready` through this adapter.** M2's
+    `Scheduler.submit` creates its task `ready`, and `bindTaskRecord` refuses a version-1
+    record that is not `queued` (`created_unqueued`), so once the adapter backs the leader every
+    `submit` would write a record no reader keeps. Item 6 removes `submit`, but it lands after
+    this item; so this item makes `submit` create `queued` (admission moves it on in the same
+    pass) or lands only after item 6.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
     credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
     handlers after the split.
