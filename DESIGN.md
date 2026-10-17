@@ -460,7 +460,8 @@ nothing checked it. The last is the gap they leave.
   (`shared/src/crypto.ts`), which throws unless `plain.op` is the one asked for.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
-  runs under. The session, task and exclave come from that pane, never from the
+  runs under; the frame's own `pane` decides only on a host that can name no peer
+  at all, never for one connection whose pid the kernel did not give. The session, task and exclave come from that pane, never from the
   frame, and a PR URL survives only as `https:`. The handler stores and forwards
   and nothing else: no spawn, despawn or command shaped by a frame. The residual,
   one same-uid process mislabelling another session's state on its own machine, is
@@ -3045,11 +3046,23 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   silently remove the feature on exactly the host nobody tested. When the kernel
   did name a peer and the walk finds no pane, the event is dropped. It never falls
   back to the claim.
+- **The fallback is per host, never per connection** (M2 review, 2026-10-17). It used
+  to apply whenever one connection's pid came back null, on any host — and macOS's
+  `LOCAL_PEERPID` fails once the peer has closed (reproduced: 2 of 20 fast
+  clients), so a sender that wrote its frame and exited at once reached the fallback
+  on a host that names every other connection, and picked any pane it liked. Now the
+  frame's `pane` is consulted only where `peerPidSupported()` says the host can name
+  no peer at all; where it can, a connection the kernel named no pid for is answered
+  `unbound`. A real session's CLI waits for its reply, so it is never that sender.
+  The binding also rests on `socket.fd`, a field Bun leaves undocumented: an upgrade
+  that dropped it would refuse every event. So the daemon probes at start
+  (`peerBindingProblem`: a self-connect over a throwaway unix socket must yield an
+  accepted fd and the kernel must name this process on it) and warns if it fails.
 - **What this leaves (threat model).** A same-uid process can still move another
   session's scheduler state on its own machine. It can `tmux send-keys` into that
   pane and have the session report whatever it likes. It can also set
   `@seance-task` on its own pane to another task's id (pane options are same-uid
-  writable). Without peer pids, it can simply name the pane. Each of these needs
+  writable). On a host with no peer pids at all, it can simply name the pane. Each of these needs
   what already controls that session outright (it can `kill-pane` it), and none
   reaches another machine. The leader also takes an event only for a task placed
   on the machine that sealed it (below). So the residual is one same-uid process

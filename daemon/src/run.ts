@@ -35,7 +35,7 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { createSessionEvents, EndedTasks, listPanePids, SessionQuota } from "./session-events.ts";
+import { createSessionEvents, EndedTasks, listPanePids, peerBindingProblem, SessionQuota } from "./session-events.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type Registered } from "./telemetry.ts";
@@ -440,8 +440,15 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   // Where the kernel cannot name a socket's peer, an event's pane is its own
   // claim — said once, since it changes what an event can be trusted to mean.
+  // Where it can, binding still rests on a field Bun leaves undocumented; a
+  // failed probe means every event will be refused, and this line is why.
   if (!peerPidSupported()) {
     log.warn("local socket: this host reports no peer pid — session events are bound by the pane they name");
+  } else {
+    void peerBindingProblem().then((problem) => {
+      if (problem === null) return;
+      log.warn(`local socket: peer binding failed its probe (${problem}) — every session event will be refused`);
+    });
   }
   const sessionEvents = createSessionEvents({
     panes: listPanePids,

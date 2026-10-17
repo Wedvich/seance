@@ -8,10 +8,13 @@ import {
   type SessionEvent,
   type SessionState,
 } from "@seance/shared";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { log } from "./log.ts";
-import { ancestorIn } from "./peer.ts";
+import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -25,9 +28,12 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * Every field of a frame is untrusted. The run directory admits any process of
  * this user, and every session is this user, so a frame could name any pane or
  * task. None is taken from it: the pane is the one the kernel-reported peer
- * pid runs under, and the task and exclave come from that pane. Only where the
- * host cannot name a peer (`peer.ts`) does the frame's own `pane` decide, and
- * that is the residual the threat model records.
+ * pid runs under, and the task and exclave come from that pane. Only on a host
+ * that cannot name any peer (`peerPidSupported`) does the frame's own `pane`
+ * decide, and that is the residual the threat model records. On one that can,
+ * a connection whose pid the kernel did not give is refused, never bound by
+ * its claim: macOS's LOCAL_PEERPID fails once the peer has closed, so a sender
+ * that writes and exits fast would otherwise pick its own pane.
  *
  * Like a broker frame, never a `Plain` and never an `OpName`: no `op`, no `id`,
  * no `ts`, so it cannot arrive from the relay, no op rides in as one, and a
@@ -51,7 +57,7 @@ export interface SessionEventFrame {
   readonly state?: SessionState;
   readonly prUrl?: string;
   readonly rateLimits?: readonly RateLimitReport[];
-  /** `$TMUX_PANE` as the session saw it — consulted only where no peer pid is to be had. */
+  /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
 }
 
@@ -295,6 +301,50 @@ export class EndedTasks {
   }
 }
 
+const PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * Whether peer binding works end to end on this runtime: a self-connect over a
+ * throwaway unix socket must hand the accepted side an fd (`socketFd`, which
+ * reads a field Bun leaves undocumented) and the kernel must name this process
+ * on it. Null when it does; otherwise what failed. Where the host names peers
+ * but this fails, every event is refused — the probe is what says why, at
+ * start, instead of a stream of `unbound` replies after a Bun upgrade.
+ */
+export async function peerBindingProblem(): Promise<string | null> {
+  if (!peerPidSupported()) return null;
+  const dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
+  const accepted = Promise.withResolvers<number | null>();
+  try {
+    const server = Bun.listen<undefined>({
+      unix: join(dir, "probe.sock"),
+      socket: {
+        open: (sock) => {
+          const fd = socketFd(sock);
+          accepted.resolve(fd < 0 ? null : peerPid(fd));
+        },
+        data: () => {},
+      },
+    });
+    try {
+      const client = await Bun.connect<undefined>({ unix: join(dir, "probe.sock"), socket: { data: () => {} } });
+      const timer = setTimeout(() => accepted.resolve(-1), PROBE_TIMEOUT_MS);
+      const pid = await accepted.promise;
+      clearTimeout(timer);
+      client.end();
+      if (pid === -1) return "the probe connection was never accepted";
+      if (pid === null) return "Bun gave the accepted socket no fd, or the kernel named no peer on it";
+      return pid === process.pid ? null : `the kernel named pid ${pid} for this process's own connection`;
+    } finally {
+      server.stop(true);
+    }
+  } catch (err) {
+    return `the probe socket failed: ${String(err)}`;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 /** At most one event per session per this window (docs/scheduler.md, "Daemon → scheduler"). */
 export const COALESCE_MS = 5_000;
 
@@ -307,6 +357,8 @@ export interface SessionEventDeps {
   readonly ended: EndedTasks;
   readonly now?: () => number;
   readonly coalesceMs?: number;
+  /** Whether this host can name a peer at all; `peerPidSupported` unless a test stands in for another host. */
+  readonly hostNamesPeers?: () => boolean;
 }
 
 export interface SessionEvents {
@@ -358,7 +410,11 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     );
   };
 
+  const hostNamesPeers = deps.hostNamesPeers ?? peerPidSupported;
+
   const bind = async (frame: SessionEventFrame, peer: number | null): Promise<BoundPane | null> => {
+    // Per host, never per connection: a sender the kernel could not name here is refused.
+    if (peer === null && hostNamesPeers()) return null;
     const live = (await deps.panes()).filter((pane) => !pane.dead);
     if (peer === null) return live.find((pane) => pane.id === frame.pane) ?? null;
     return ancestorIn(peer, new Map(live.map((pane) => [pane.pid, pane])));
