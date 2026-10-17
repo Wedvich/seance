@@ -286,10 +286,10 @@ export class EndedTasks {
   }
 
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
-  notePr(taskId: string, prUrl: string): Promise<void> {
+  async notePr(taskId: string, prUrl: string): Promise<void> {
     const launches = this.#launches.get(taskId);
     if (launches !== undefined) launches.prUrl = prUrl;
-    return this.#ledger.note(taskId, { prUrl });
+    await this.#ledger.note(taskId, { prUrl });
   }
 
   /** `SessionsResponse.progress`: what the ledger holds of each launched task's PR and branch. */

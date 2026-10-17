@@ -309,14 +309,19 @@ export class LaunchLedger {
    * relaunch under the same id and starts the note afresh; otherwise `ahead`,
    * `pushed` and `merged` never clear. `at` moves only on a change, so an
    * unchanged pass costs no write. Never touches `since` or the ids.
+   *
+   * `under` pins the launch the patch was computed for: a relaunch that landed
+   * meanwhile moved `siteAt`, and the old launch's state must not seed the new
+   * note. False when the patch was refused (unknown id, or stale `under`).
    */
-  async note(taskId: string, patch: TaskNote): Promise<void> {
-    if (!this.#tasks.has(taskId)) return;
+  async note(taskId: string, patch: TaskNote, under?: { readonly siteAt: number | undefined }): Promise<boolean> {
+    if (!this.#tasks.has(taskId)) return false;
     const old = this.#notes.get(taskId);
+    if (under !== undefined && old?.siteAt !== under.siteAt) return false;
     const resited = patch.path !== undefined && patch.path !== old?.path;
     const base = resited ? undefined : old;
     const next = mergeNote(taskId, base, patch);
-    if (old !== undefined && base !== undefined && sameNote(old, next)) return;
+    if (old !== undefined && base !== undefined && sameNote(old, next)) return true;
     const stamp = this.#now();
     this.#notes.set(taskId, { ...next, at: stamp, ...(resited ? { siteAt: stamp } : {}) });
     try {
@@ -324,6 +329,7 @@ export class LaunchLedger {
     } catch (err) {
       log.warn(`launch ledger: could not record task progress (${String(err)})`);
     }
+    return true;
   }
 
   /**

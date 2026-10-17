@@ -335,6 +335,20 @@ describe("LaunchLedger progress notes", () => {
     expect(ledger.notes()).toEqual([]);
   });
 
+  test("a patch pinned to a launch is refused once a relaunch moved siteAt", async () => {
+    let clock = 5;
+    const ledger = await LaunchLedger.open(path, () => clock);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    clock = 9;
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    expect(await ledger.note("t1", { branch: "old", pushed: true }, { siteAt: 5 })).toBe(false);
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 9, siteAt: 9, repo: "/r", path: "/w" }]);
+    expect(await ledger.note("t1", { branch: "new" }, { siteAt: 9 })).toBe(true);
+    expect(ledger.notes()[0]?.branch).toBe("new");
+    expect(await ledger.note("ghost", { branch: "x" })).toBe(false);
+  });
+
   test("a failed write resolves, and the note stays in memory", async () => {
     const ledger = await LaunchLedger.open(path, () => 1);
     await ledger.record("t1");

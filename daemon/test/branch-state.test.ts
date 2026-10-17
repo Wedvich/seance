@@ -691,9 +691,10 @@ describe("branch-state emitter", () => {
     await launch(w, "t1", "x");
     const real = w.ledger.note.bind(w.ledger);
     let first: BranchStates | undefined;
-    w.ledger.note = async (taskId, patch) => {
-      await real(taskId, patch);
+    w.ledger.note = async (taskId, patch, under) => {
+      const applied = await real(taskId, patch, under);
       first?.stop();
+      return applied;
     };
     first = start(w, { emit: () => Promise.resolve(true) });
     // The constructor's pass is the one that notes and is stopped under it.

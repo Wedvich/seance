@@ -1916,7 +1916,9 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   finds the emitter stopped after the note was written keeps its state there instead of losing it.
   An entry whose task has left the ledger is dropped, and so is one computed under an earlier launch
   of a relaunched id: it carries the `siteAt` it was computed under and is dropped when the note's
-  differs, or a stale `pushed` would reach the leader after the relaunch. The memory dies with the process: a state
+  differs, or a stale `pushed` would reach the leader after the relaunch. A pass's own note write
+  is pinned the same way: `note()` refuses a patch whose `siteAt` is no longer the note's, so a
+  pass that judged the old launch cannot seed the relaunch's fresh note. The memory dies with the process: a state
   noted but never sent when the process exits is recovered only through `progress`, which the
   leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of

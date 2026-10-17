@@ -281,14 +281,20 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     const reportable = branch !== note.branch || (livePushed && note.pushed !== true) || merged;
     const recordable = reportable || (liveAhead && (note.ahead !== true || tip !== note.tip));
     if (!recordable || stopped) return;
-    await deps.ledger.note(note.taskId, {
-      branch,
-      // Only a tip with own work: it is what a later pass judges once the local branch is reset or gone.
-      ...(liveAhead ? { tip } : {}),
-      ...(ahead ? { ahead: true } : {}),
-      ...(livePushed ? { pushed: true } : {}),
-      ...(merged ? { merged: true } : {}),
-    });
+    const applied = await deps.ledger.note(
+      note.taskId,
+      {
+        branch,
+        // Only a tip with own work: it is what a later pass judges once the local branch is reset or gone.
+        ...(liveAhead ? { tip } : {}),
+        ...(ahead ? { ahead: true } : {}),
+        ...(livePushed ? { pushed: true } : {}),
+        ...(merged ? { merged: true } : {}),
+      },
+      // A relaunch that landed mid-pass owns the note now; this pass judged the old launch.
+      { siteAt: note.siteAt },
+    );
+    if (!applied) return;
     const origin = ctx.repo.origin;
     if (!reportable || origin === undefined || origin === "" || origin.length > 512) return;
     // Past a stop `send` keeps it: the note is written, so no later pass would report it again.
