@@ -690,7 +690,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `register`                                                               | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                      |
 | `lead` / `follow`                                                        | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                       | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                     |
 | `msg` (→`"scheduler"`)                                                   | any app or daemon                                                                                                                                  | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader` |
-| ops `queue` / `route-preview` / `submit`                                 | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/store.ts`, and `daemon/src/mcp.ts` for `submit` and `queue`              | `daemon/src/leader.ts` (`answer`, payload through `parseTaskRequest`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                                                                                                   |
+| ops `queue` / `route-preview` / `submit` / `cancel`                      | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/store.ts`, and `daemon/src/mcp.ts` for `submit`, `queue` and `cancel`    | `daemon/src/leader.ts` (`answer`, payload through `parseTaskRequest` or `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                                                                                 |
 | `msg` (`from: "scheduler"`, `term`)                                      | the leader's app-role leg: `daemon/src/leader.ts` over `shared/src/app-client.ts` built with `scheduler: { term }`                                 | fenced by `relay/src/hub.ts` `#holdsTerm` — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                                                                                  |
 | `msg` (app→daemon)                                                       | `shared/src/app-client.ts`                                                                                                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                        |
 | `msg` (daemon→app)                                                       | `daemon/src/relay-client.ts`                                                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                      |
@@ -713,7 +713,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/store.ts` (item 1)                                                                                                                      | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client (item 2) and the queue store (item 3)                                                                                                                                                                                                                 |
 | `store-changed` — M3                                                     | `relay/src/hub.ts`, to the leader's daemon socket after a write it did not make (item 1)                                                           | `daemon/src/relay-client.ts` → `daemon/src/leader.ts` (item 3), via `parseStoreChanged`                                                                                                                                                                                                                                                |
 | records `task` / `pause-state` (at rest) — M3                            | sealed by the app-client (item 2) and the queue store (item 3)                                                                                     | opened with `openAtRest`, then `parseTaskRecord` / `parsePauseRecord` and the version and id binding (items 2–3)                                                                                                                                                                                                                       |
-| ops `cancel` / `mark-done` / `pause` / `resume` — M3                     | an app via `shared/src/app-client.ts` (item 6)                                                                                                     | `daemon/src/leader.ts` `answer` — `invalid_request` "this leader does not handle <op> yet" until items 5 and 6                                                                                                                                                                                                                         |
+| ops `mark-done` / `pause` / `resume` — M3                                | an app via `shared/src/app-client.ts` (item 6)                                                                                                     | `daemon/src/leader.ts` `answer` — `invalid_request` "this leader does not handle <op> yet" until items 5 and 6                                                                                                                                                                                                                         |
 | op `queue-changed` (→`"app"`) — M3                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"` (item 6)                                                                          | `shared/src/app-client.ts`, via `parseQueueChanged` (item 6)                                                                                                                                                                                                                                                                           |
 | op `branch-state` (→`"scheduler"`) — M3                                  | the daemon's emitter (item 4b) via `sendToScheduler()`                                                                                             | `daemon/src/leader.ts`, via `parseBranchState` (item 4a's library, wired in item 3)                                                                                                                                                                                                                                                    |
 
@@ -882,6 +882,16 @@ send error that caused it.
   wake-driven session refresh keys on `lastSeen`, not the `connected` flag, so
   a mark clearing is not a "wake" — otherwise a machine answering slower than
   its op timeout enters a permanent mark → clear → re-poll flap loop.
+- **A request that never left is told from one that did** (`FailureReason`,
+  `shared/src/app-client.ts`; split 2026-10-17). `disconnected` is a request
+  refused before the send — no open socket, or the socket died while it was
+  being sealed — so it certainly did not land. `dropped` is one already on the
+  wire when the socket closed or the client stopped: like `timeout`, it may have
+  landed. They shared `disconnected` before, worded "before the request went
+  out" for both, so a submit lost after the send read as never sent while the
+  PWA still called it may-have-queued. Every surface words the pair through
+  `failureReasonText`, and the leader's `Fleet` reads `disconnected` as never
+  delivered (Scheduler, "The leader").
 - **`iv` is also the cross-tier debug join key**, for the same reason it carries
   `undeliverable`: it is the only per-message identifier a blind relay can name.
   All three tiers emit `wire <event> iv=… ` lines through one `quote()` in
@@ -994,6 +1004,9 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   finished ones first, since nothing else ever deletes from that memory. M3 replaces it with the
   app sealing the task and `store-put`ting it at `expect: 0`, which queues with no leader up, and
   removes the op (docs/scheduler.md, M3).
+- `cancel { taskId }` (`TaskRef`) → `{ task }` (`TaskResponse`), the task as it now stands:
+  `Scheduler.cancel`, so a running one is despawned on its machine first (Scheduler, "The
+  leader"). M3 keeps it; only its PWA button waits for item 6.
 - `mark-done`, `pause`, `resume` — M3's, in the schema since M3 PR 0 but refused until M3 items
   5 and 6 land their handlers: the leader answers `invalid_request` "this leader does not handle
   <op> yet", so an app reads a refusal rather than a timeout that looks like a dead leader.
@@ -1125,8 +1138,8 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   interval rather than left as a term that holds the role and runs nothing. Only then do the first tick and the timer run;
   after it, every change to the leg's machine list ticks, and ticks coalesce in the library.
 - **The term rides every write and dispatch.** Dispatches carry it on the frame, where the relay
-  fences them. Writes go through a store wrapper that refuses once the term has ended, so a pass
-  still awaiting a verdict cannot write into the store the next term reads; M3's term-fenced
+  fences them. Writes go through a store wrapper that refuses once the term has ended, so a
+  verdict landing after its term cannot write into the store the next term reads; M3's term-fenced
   `store-put` replaces it at the relay. The store itself outlives terms, as the relay's will: M2's
   is the library's `MemoryQueueStore`, one per `startDaemon` handle (`createLeader` in `run.ts`),
   so a daemon demoted and re-promoted reconciles what it left. It is not one per process: a
@@ -1155,13 +1168,32 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   daemon's own state writes nothing the term fence exists to stop. Every reply is
   `T | SchedulerError` (`SCHEDULER_ERROR_CODES`): `invalid_request`, `not_ready` while takeover
   runs (the queue is the store's unreconciled view until then), `queue_full` (`submit` past
-  `MAX_ACTIVE_TASKS`), `internal_error` when the handler throws, and `not_leader` (below). `queue`
+  `MAX_ACTIVE_TASKS`), `cancel`'s own (`task_not_found`, `dispatching`, `finished`,
+  `despawn_failed`, `conflict`), `internal_error` when the handler throws, and `not_leader`
+  (below). `queue`
   replies with the newest `QUEUE_MAX_TASKS` tasks, prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
   its latest decision — placed or not — since a decision grows with the fleet and the reply must
   fit one envelope. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
   reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) queues the request and
   ticks at once, so the task is placed without waiting for the 30s timer; the scheduler mints the
-  task id, never the app.
+  task id, never the app. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
+  count and the submit it admits sit either side of awaits, so two arriving together would
+  otherwise both pass it. `cancel` (`TaskRef`) is `Scheduler.cancel` (_The library_, below),
+  answered with the task as it now stands (`TaskResponse`), and ticks, since a cancelled task
+  frees its slot. Before 2026-10-17 it answered `invalid_request` with the M3 ops, so a `lost`
+  task could not be cleared at all. **Both are audited** (`queueAudit` in `audit.ts`) as
+  `audit queue origin=relay op=submit|cancel id=<request> task=<task>` and `ok` or `refused
+code=…`: the request id finds the app's side, and the task id joins the line to the
+  `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
+  the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
+  the relay; the despawn a cancel sends audits on its target as any scheduler dispatch does.
+- **What never arrived is told from what may have.** The term's `Fleet` maps a request the
+  relay provably did not deliver — `offline`, `unknown`, `refused`, or `disconnected`, which
+  never left the leg — to the library's `undelivered`, so a spawn the relay could not route
+  goes back to `ready` and is placed elsewhere by the next pass, instead of sitting out its
+  TTL and then `lost` until a machine that never received it returns. A timeout, or the
+  socket closing after the send (`dropped`), is `unreachable`: it may have landed. `not_leader`
+  never arrived either, but it ends the term, whose fenced store refuses the verdict.
 - **No term is a `not_leader` answer, never silence.** The relay routes `to: "scheduler"` on its
   record, which can still name a daemon whose term ended (after a relay restart, or while a
   resign below is in flight), and a request left to time out reads as a dead machine. So
@@ -1202,10 +1234,11 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   (`list`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)`, `version_conflict` as
   a value; a conflict refreshes the one task through `get`) holds plain task bodies — sealing, and M3's version binding, are the adapter's.
   `Fleet` is the registry with each machine's newest status, live or kept, plus
-  `spawn`/`sessions`/`despawn` to a `deviceId`, with "no answer" as the library's own
-  `unreachable` code beside the daemon's. It owns no timer, socket or clock: the host
-  calls `tick()` on each registry or `status` push and on a 30s timer, so a host that
-  stops calling leaves nothing running. `MemoryQueueStore` is shipped, not a test
+  `spawn`/`sessions`/`despawn` to a `deviceId`, with two codes of the library's own
+  beside the daemon's: `unreachable` (no answer, so it may have run) and `undelivered`
+  (provably never reached the machine, so it did not). It owns no timer, socket or clock:
+  the host calls `tick()` on each registry or `status` push and on a 30s timer, so a host
+  that stops calling leaves nothing running but the spawns already sent. `MemoryQueueStore` is shipped, not a test
   double: M2's leader runs on it, since the queue is in-memory until M3. The suite's
   `Fleet` double is `scheduler/test/fixtures.ts`.
 - **Layering is enforced** (`scheduler/test/layering.test.ts`): nothing in `scheduler/`
@@ -1248,13 +1281,19 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   carries `spill` (M3 shows it, M4 alerts on it); `extraUsageEnabled: null` reads as off.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
-  reserved one at a time — each route sees the reservations before it — and the spawns
-  then run together. A reservation is one store write carrying the decision; an
-  unplaceable task's decision stays in memory (`lastDecision`), so the store sees one
-  write per transition and none per tick. A spawn resolves its reservation once, never
-  with a second spawn: started or `task_running` → `running` on the reported pane; a
-  daemon refusal → `failed`; `unreachable` or a transport error (which may come after the
-  spawn ran) → stays reserved. Past the 120s TTL the machine's `sessions` decide: a
+  reserved one at a time — each route sees the reservations before it. A reservation is
+  one store write carrying the decision; an unplaceable task's decision stays in memory
+  (`lastDecision`), so the store sees one write per transition and none per tick. **The
+  pass never awaits a spawn** (M2 review, 2026-10-17): each is launched and tracked, so one
+  machine slow to answer (a spawn's 90s timeout) holds no other placement, TTL or absence
+  check behind it, and one that throws cuts no pass short — its fault goes to the host's
+  `onError`. A verdict applies only to the reservation it answers (same machine, same
+  expiry), and a reservation whose spawn is still out skips the TTL check below, its
+  verdict being the better answer; `drain()` waits for ticks and spawns alike. A spawn
+  resolves its reservation once, never with a second spawn: started or `task_running` →
+  `running` on the reported pane; `undelivered` → `ready` at once, routed afresh by the
+  next pass, since nothing can have run; a daemon refusal → `failed`; `unreachable` or a
+  transport error (which may come after the spawn ran) → stays reserved. Past the 120s TTL the machine's `sessions` decide: a
   session carrying the task id is the spawn that landed; the task id in the reply's
   `ended` is one that landed and already finished, so `done`; neither releases the task to
   `ready` **only on the machine's proof** — its `ledgerSince` at least the replay window
@@ -1279,6 +1318,25 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   the daemon's `task_running` could not catch it, the first session being gone
   already (Local op socket, "Session events"). The spawn audits as
   `client=scheduler`. Ticks coalesce: one asked for mid-pass runs once after it.
+- **One write at a time per task** (M2 review, 2026-10-17). Every change goes through one
+  path, serialized per task id and computed from the copy held when its turn comes, so two
+  writers never race one version: an `ended` event landing while the verdict's write is out
+  applies after it, to what it wrote, where it used to be dropped as a conflict — with M3's
+  relay store that window is a round trip. A version conflict is then a writer outside the
+  process (M3's apps); the held copy is refreshed and the change applied again to what it
+  finds, up to three tries. Each change re-checks the state it acts on, so one that no
+  longer applies (a reservation routed from a snapshot taken before a cancel) declines.
+  The transitions themselves are pure functions of the task and what was observed.
+- **The sweep** (M2 review, 2026-10-17). A running task whose `ended` event never arrived
+  would read `running` forever and hold its slot; after `globalMax` of them `auto` places
+  nothing (`cap_reached`). So once per `sweepIntervalMs` (120s, docs/scheduler.md Settled
+  defaults 12) a pass also reads `sessions` from each connected machine holding a running or
+  `needs-input` task, settled as takeover settles one: no session carrying its id is `done`.
+  It shares the pass's one `sessions` call per machine with the TTL and `lost` checks, and
+  runs before routing, so a slot it frees is used in the same pass. An answer is applied
+  only to a task still where it was when its machine was asked, since one read before an
+  event landed could undo it. Rejected: a sweep every pass, which is one `sessions` per busy
+  machine per status beat; and trusting events alone, which is what left the slot held.
 - **Takeover** (`takeover()`) is `load()` plus one `sessions` read per machine with an
   in-flight or `lost` task, settled before the host's first tick: a reservation as the TTL
   check settles one, except that a session or an `ended` entry carrying its id counts at any
@@ -1291,7 +1349,14 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   a two-step through `running`. An event for a reserved task is one observed
   transition, so it costs one store write, and a `running` written first would record
   a state nobody observed. A session that ends is `done` until M3's done detection; a reserved task refuses
-  `cancel` (`dispatching`) rather than racing its spawn.
+  `cancel` (`dispatching`) rather than racing its spawn. `cancel`'s other answers derive
+  from the table, not a list beside it: a finished task is `finished`, and a state with no
+  cancel edge yet (M3's `queued`, `blocked`) is a thrown gap — the leader's
+  `internal_error` — never misread as `finished`. A task that finishes while its despawn
+  is out (its `ended` outran the reply) is answered as the task it now is, not `conflict`.
+  Which states are placed, finished, still waiting and so on is one table shared with the
+  apps (`TASK_PHASES`, `shared/src/task-phase.ts`); `task.ts` derives `PLACED` and
+  `FINISHED` from it.
 - **`lost`: a task whose machine stopped answering for it** (M2 item 3's gap B, closed in item
   6; the reservation half added 2026-10-16). A `running` or `needs-input` task whose machine has
   been absent — not connected, or gone from the registry — for `lostAfterMs` (15 min, Settled
@@ -1316,7 +1381,8 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   `cancel` takes it (gap 4, 2026-10-16): with its machine connected it is despawned as a
   running task is, its pane read from `sessions` when the record has none; with its machine
   away nothing can be despawned, so it is `cancelled` as it stands with `leftRunning` on the
-  record, and the PWA says the session may still be running there. Cancelled is terminal: a
+  record, and the PWA says the session may still be running there. Apps reach it through the
+  leader's `cancel` op and MCP's `cancel_task` (the PWA's button is M3 item 6). Cancelled is terminal: a
   later event or `sessions` reply for it changes nothing. The earlier refusal (`unreachable`)
   left a task the owner had given up on holding its place indefinitely, to protect a session
   the cancel could not reach anyway. Takeover settles `lost` tasks with the running ones.
@@ -1629,9 +1695,10 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   `spawn.ts`) — the relay and the local socket share the process and neither
   queues — so both never pass the check before either has tagged its pane. A
   pane that can't be tagged is killed and the spawn fails `launch_error`:
-  untagged, it is the duplicate the tag exists to prevent. `taskIdOfPane` is
-  the pane → task lookup, for anything that must attribute by pane (M2's
-  `session-event`) rather than by what an event claims. Rejected: a file in
+  untagged, it is the duplicate the tag exists to prevent. The pane → task
+  lookup, for anything that must attribute by pane (M2's `session-event`)
+  rather than by what an event claims, is the same option, read in the
+  binding's own `list-panes` (`session-events.ts`). Rejected: a file in
   `stateDir()` (outlives the pane on a crash, and a tmux server restart leaves
   it naming sessions that are gone, so it needs a sweep the pane option gets
   free); the window name (user-renamable, and the tmux-rename mod renames it);
@@ -2425,9 +2492,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **`auto` is a machine-picker row, and the scheduler is asked only through it** (scheduler M2
   item 6). The row sits above the machines, laid out like them, with a blue dot where a machine
   has its green one (on the MACHINE tile too, once picked). It is greyed with its reason, its dot
-  grey like an offline machine's, unless the relay socket is open and `RelayState.scheduler` is
+  grey like an offline machine's — on the tile as on the row — unless the relay socket is open and `RelayState.scheduler` is
   `ready`: a socket not open reads "Not connected to the relay", `none` reads "No scheduler is
-  leading right now", `unverified` reads "Leader unverified". Unverified is a nominee whose registry entry did not
+  leading right now", `unverified` reads "Leader unverified — it hasn't shown it holds this key". Unverified is a nominee whose registry entry did not
   open into a `Machine` — the rule that already decides which entries render, here deciding who
   is believed to hold the PSK (Scheduler, "Leadership"). The client enforces the same check at
   the source: `routePreview`, `submit` and `queue` throw `leader_unverified` or `no_leader`
@@ -2438,17 +2505,29 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   as `PersistedForm.autoRepo` beside `auto` rather than as a sentinel in `machineId`, so leaving
   auto restores the machine picked last. A **placement preview** card asks `route-preview`
   whenever auto is chosen, its repo changes, the leader changes or is verified, or the socket
-  comes back from a drop (which can fail a preview in flight while leaving the leader as it was).
+  comes back from a drop (which can fail a preview in flight while leaving the leader as it was);
+  and, 500ms after a burst settles, whenever a machine connects or drops or its repo set changes
+  (2026-10-17) — a status beat moves neither, so it asks nothing. The card's label says how old
+  the decision is ("decided 2m ago"): load and quota move under it between asks.
   A preview answered `not_ready` — a term still taking over — is asked again every second, at
   most 10 times, rather than shown as a failure. The card shows the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
-  disclosure (`decision-view.ts` holds the wording). The preview leaves out the quota reading
+  disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
+  refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
   each candidate was judged on; the queued task's record shows it, its age read as the account
   cards read it, observer named and "asleep" when it is. **Queue on auto** sends `submit` (M2 only); the
   verdict shows the task and its decision and re-reads `queue` every 2s, at most 30 times, while
-  the task is `ready` or `reserved` — a poll, because M2 has no `queue-changed` push (M3). A lost
-  `submit` reply says it may have been queued anyway and offers no retry: a second submit would be
-  a second task. Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
+  the task has not settled (`isSettled`, `shared/src/task-phase.ts`) — a poll, because M2 has no
+  `queue-changed` push (M3). Following ends by saying why (2026-10-17): a reply without the task
+  is a leader that no longer holds it — M2's queue is its memory — so the verdict says so, that
+  nothing was started from `ready` or that one may be running from `reserved`; a refusal or an
+  unreadable reply is shown and ends it; a missed poll keeps what was shown and asks again, and
+  only polls that run out on a miss say the screen may be out of date. A reply holding the newest
+  `QUEUE_MAX_TASKS` and not the task is a missed poll, not an absence. A lost `submit` reply
+  (`timeout`, `dropped`, a transport error) says it may have queued anyway and offers no retry:
+  a second submit would be a second task. It points at sessions, not a queue, since this app
+  has no queue view until M3 item 6. One that never left (`disconnected`) says it was not
+  queued. Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
   leader.
 - **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
   header only once there is something to clear — an always-present greyed control
@@ -2529,9 +2608,14 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   which reads as a version mismatch) — except the origin a clone name resolves to, which
   only the fleet can say, so it is bounds-checked once `withFleet` has the registry; `no_leader`/`leader_unverified` read as "auto
   unavailable — name a machine"; every `SchedulerErrorCode` has its own wording; and a
-  lost reply (`timeout`, `disconnected`, an unreadable answer, `too_large`,
+  lost reply (`timeout`, `dropped`, an unreadable answer, `too_large`,
   `internal_error`) is "may have queued — check get_queue and get_sessions before
-  retrying", never a retry, since a second submit is a second task. `"auto"` is matched
+  retrying", never a retry, since a second submit is a second task; `disconnected` never
+  left this process, so it is a plain failure. **`cancel_task`** (added 2026-10-17, with the
+  leader's `cancel`) is the `cancel` op by the task id `get_queue` shows: it answers the task
+  as it now stands, says so when it had already finished, and says a `lost` task cancelled
+  with its machine away (`leftRunning`) may still have a session there to end by hand. Its
+  lost reply is "the cancel may have landed anyway — check get_queue". `"auto"` is matched
   in any case before the local short circuit, so a machine named "auto" is reached by
   `deviceId`. **`repo` on auto** is the `TaskRequest`'s origin, but an agent holds clone
   names from `list_machines`, so either is accepted: an origin exactly, or a clone name
@@ -2896,8 +2980,8 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   tested by hand; CI's macOS leg runs the suite that exercises it. Both record the
   pid at `connect(2)`. The daemon walks that pid's parents (`/proc/<pid>/stat` on
   Linux, one `ps` on macOS, at most 32 hops) to the first `pane_pid` of a live pane.
-  The session (the pane id), the task (the pane's `@seance-task`, the same record
-  `taskIdOfPane` reads) and the exclave (the pane's path through `exclaveOf`) all
+  The session (the pane id), the task (the pane's `@seance-task`, the tag spawn writes
+  and `task_running` reads) and the exclave (the pane's path through `exclaveOf`) all
   come from that pane. The `taskId`, `session` and `exclave` a frame might carry are
   not even parsed. A sender in no pane (outside tmux, a `claude --bg` session) is
   answered `unbound` and dropped.
