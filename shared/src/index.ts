@@ -9,3 +9,4 @@ export * from "./status-reader.ts";
 export * from "./quota.ts";
 export * from "./task-phase.ts";
 export * from "./scheduler-text.ts";
+export * from "./task-record.ts";
