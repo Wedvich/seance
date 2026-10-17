@@ -1,4 +1,4 @@
-import type { Task, TaskState } from "@seance/shared";
+import { statesIn, type Task, type TaskState } from "@seance/shared";
 
 // The task's shapes are wire types — `queue` replies carry them — so they live
 // in the schema of record; this module owns only how a task moves.
@@ -27,7 +27,7 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * is legal for that task alone, and `advance` refuses it for any other.
  *
  * M3's `queued`, `blocked` and `awaiting-merge` are in the schema already but
- * have no edges yet: nothing enters or leaves them until M3 item 4 does.
+ * have no edges yet: nothing enters or leaves them until M3 item 4a does.
  */
 export const TRANSITIONS = {
   queued: [],
@@ -50,7 +50,10 @@ export const TRANSITIONS = {
 export const IN_FLIGHT: readonly TaskState[] = ["reserved", "running", "needs-input"];
 
 /** States with nothing left to happen. */
-export const FINISHED: readonly TaskState[] = ["done", "failed", "cancelled"];
+export const FINISHED: readonly TaskState[] = statesIn("finished");
+
+/** States whose session was placed on a machine and may still be running there. */
+export const PLACED: readonly TaskState[] = statesIn("placed");
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   const allowed: readonly TaskState[] = TRANSITIONS[from];

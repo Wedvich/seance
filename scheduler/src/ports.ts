@@ -25,6 +25,22 @@ export interface Unreachable {
   readonly message: string;
 }
 
+/**
+ * Not a daemon code either: the request provably never reached the machine —
+ * the relay answered that it could not deliver it, or the host never sent it.
+ * Unlike `unreachable`, nothing can have run.
+ */
+export const UNDELIVERED = "undelivered";
+
+export interface Undelivered {
+  readonly ok: false;
+  readonly code: typeof UNDELIVERED;
+  readonly message: string;
+}
+
+/** Every way the host can fail to get a daemon's answer. */
+export type NoAnswer = Unreachable | Undelivered;
+
 export interface StoredTask {
   readonly id: string;
   /** Starts at 1 on create and increments per put; `expect: 0` creates. */
@@ -54,7 +70,7 @@ export interface TaskSpawnRequest extends SpawnRequest {
   readonly taskId: string;
 }
 
-export type TaskSpawnReply = SpawnResponse | ErrorResponse | Unreachable;
+export type TaskSpawnReply = SpawnResponse | ErrorResponse | NoAnswer;
 
 export type TaskSessionsReply =
   | {
@@ -72,7 +88,7 @@ export type TaskSessionsReply =
       readonly ledgerSince?: number;
     }
   | ErrorResponse
-  | Unreachable;
+  | NoAnswer;
 
 export interface Fleet {
   /**
@@ -83,5 +99,5 @@ export interface Fleet {
   machines(): readonly Machine[];
   spawn(deviceId: string, request: TaskSpawnRequest): Promise<TaskSpawnReply>;
   sessions(deviceId: string): Promise<TaskSessionsReply>;
-  despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse | ErrorResponse | Unreachable>;
+  despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse | ErrorResponse | NoAnswer>;
 }

@@ -1,12 +1,20 @@
-import { REPLAY_WINDOW_MS, type SessionState, type TaskFailureCode } from "@seance/shared";
+import { REPLAY_WINDOW_MS, TRANSPORT_ERROR_CODES, type SessionState, type TaskFailureCode } from "@seance/shared";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
-import { UNREACHABLE, type Fleet, type QueueStore, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
+import {
+  UNDELIVERED,
+  UNREACHABLE,
+  type Fleet,
+  type QueueStore,
+  type TaskSessionsReply,
+  type TaskSpawnReply,
+} from "./ports.ts";
 import { route, type Decision } from "./route.ts";
 import {
   advance,
+  canTransition,
   FINISHED,
-  IN_FLIGHT,
   isUnconfirmed,
+  PLACED,
   type Assignment,
   type Reservation,
   type Target,
@@ -17,11 +25,14 @@ import {
 
 type SessionsAnswer = Extract<TaskSessionsReply, { readonly ok: true }>;
 
-/** States of a task whose session was placed on a machine and may still be running there. */
-const PLACED: ReadonlySet<TaskState> = new Set(["running", "needs-input", "lost"]);
-
-/** The `client` a scheduler spawn audits as: `origin=relay client=scheduler` (Settled defaults 3). */
+/**
+ * The `client` a scheduler spawn audits as: `origin=relay client=scheduler`
+ * (Settled defaults 3) on another machine, `origin=leader` on the leader's own.
+ */
 export const SCHEDULER_CLIENT = "scheduler";
+
+/** A write that keeps meeting another writer's version gives up after this many tries. */
+const WRITE_ATTEMPTS = 3;
 
 /**
  * Who reported a session event: the machine that sealed it (the envelope's
@@ -38,6 +49,11 @@ export interface SchedulerOptions {
   readonly config?: SchedulerConfig;
   readonly now: () => number;
   readonly newId?: () => string;
+  /**
+   * A dispatch runs outside any tick (`#launch`), so its fault has no caller to
+   * reject. Without this, the first one surfaces from the next `drain()`.
+   */
+  readonly onError?: (err: unknown) => void;
 }
 
 export type CancelResult =
@@ -54,8 +70,9 @@ interface Held {
 
 /**
  * The loop's state and its transitions, driven by the host: `tick()` on every
- * registry or status push and on a 30s timer while tasks are ready. It owns no
- * timer, socket or clock, so a host that stops calling it leaves nothing running.
+ * registry or status push and on a timer (the leader's fires every 30s). It
+ * owns no timer, socket or clock, so a host that stops calling it leaves
+ * nothing running but the spawns already sent.
  *
  * Writes go through the store per transition, never per tick: an unplaceable
  * task's latest decision is kept here (`lastDecision`) and written only with the
@@ -67,6 +84,7 @@ export class Scheduler {
   readonly #config: SchedulerConfig;
   readonly #now: () => number;
   readonly #newId: () => string;
+  readonly #onError: (err: unknown) => void;
   readonly #held = new Map<string, Held>();
   readonly #decisions = new Map<string, Decision>();
   /**
@@ -77,6 +95,12 @@ export class Scheduler {
    * can make a machine read disconnected beside a `lastSeen` hours old.
    */
   readonly #absentSince = new Map<string, number>();
+  /** Task id → the tail of its writes (`#serial`). */
+  readonly #chains = new Map<string, Promise<void>>();
+  /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
+  readonly #dispatches = new Map<string, Promise<void>>();
+  #sweptAt: number;
+  #fault: { readonly err: unknown } | null = null;
   #ticking: Promise<void> | null = null;
   #again = false;
 
@@ -86,6 +110,12 @@ export class Scheduler {
     this.#config = options.config ?? DEFAULT_CONFIG;
     this.#now = options.now;
     this.#newId = options.newId ?? (() => crypto.randomUUID());
+    this.#onError =
+      options.onError ??
+      ((err) => {
+        this.#fault ??= { err };
+      });
+    this.#sweptAt = this.#now();
   }
 
   /** The store's view replaces this one, unreconciled — a new leader calls `takeover` instead. */
@@ -98,35 +128,19 @@ export class Scheduler {
 
   /**
    * Takeover (docs/scheduler.md): load the store, then check every task the
-   * previous leader left in flight against its machine's own `sessions` — one
-   * call per machine — before the host's first `tick` dispatches anything. A
-   * reservation is settled as the TTL check settles one, except that a session
-   * carrying its id counts at any age. A placed task is settled from its
-   * machine's sessions (`#settlePlaced`): gone is `done`, since it ended while
-   * no leader was listening (M2 has no done detection), and a `lost` one whose
-   * session is there runs again; a `lost` one never confirmed is settled as
-   * its reservation would have been. An unanswered machine leaves its tasks as
-   * they are.
+   * previous leader left reserved or placed against its machine's own
+   * `sessions` — one call per machine — before the host's first `tick`
+   * dispatches anything. Each is settled as a pass settles it (`settle`), except
+   * that a reservation is checked at any age: a session or `ended` entry
+   * carrying its id resolves it inside its TTL, and past the TTL an unanswered
+   * check on a machine no longer connected makes it `lost`. A placed task whose
+   * session is gone is `done` — it ended while no leader was listening. An
+   * unanswered machine leaves everything else as it was.
    */
   async takeover(): Promise<void> {
     await this.load();
-    const pending = this.tasks().filter((t) => IN_FLIGHT.includes(t.state) || t.state === "lost");
-    const machines = new Set(pending.flatMap((t) => (t.reservation ?? t.assignment)?.deviceId ?? []));
-    const replies = new Map(
-      await Promise.all([...machines].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
-    );
-    await Promise.all(
-      pending.map(async (task) => {
-        const at = task.reservation;
-        if (at !== undefined) {
-          const reply = replies.get(at.deviceId);
-          if (reply !== undefined) await this.#reconcileReserved(task.id, at, reply);
-          return;
-        }
-        const reply = task.assignment === undefined ? undefined : replies.get(task.assignment.deviceId);
-        if (reply !== undefined) await this.#settlePlaced(task.id, reply);
-      }),
-    );
+    this.#sweptAt = this.#now();
+    await this.#check(this.tasks().filter((t) => t.state === "reserved" || PLACED.includes(t.state)));
   }
 
   /**
@@ -138,13 +152,15 @@ export class Scheduler {
       .filter((t) => FINISHED.includes(t.state))
       .toSorted((a, b) => a.createdAt - b.createdAt);
     for (const task of finished.slice(0, Math.max(0, finished.length - keep))) {
-      const held = this.#held.get(task.id);
-      if (held === undefined) continue;
       // oxlint-disable-next-line no-await-in-loop -- a handful at a time, and each delete is its own CAS
-      const write = await this.#store.delete(task.id, held.version);
-      if (!write.ok) continue;
-      this.#held.delete(task.id);
-      this.#decisions.delete(task.id);
+      await this.#serial(task.id, async () => {
+        const held = this.#held.get(task.id);
+        if (held === undefined || !FINISHED.includes(held.task.state)) return;
+        const write = await this.#store.delete(task.id, held.version);
+        if (!write.ok) return;
+        this.#held.delete(task.id);
+        this.#decisions.delete(task.id);
+      });
     }
   }
 
@@ -202,6 +218,22 @@ export class Scheduler {
   }
 
   /**
+   * Resolves once no tick runs and no spawn is out, rejecting with the first
+   * dispatch fault no `onError` took. For tests, and a host that wants quiet.
+   */
+  async drain(): Promise<void> {
+    for (;;) {
+      const out = [...this.#dispatches.values(), ...(this.#ticking === null ? [] : [this.#ticking])];
+      if (out.length === 0) break;
+      // oxlint-disable-next-line no-await-in-loop -- a settled spawn's verdict can start no other, but a tick can
+      await Promise.allSettled(out);
+    }
+    const fault = this.#fault;
+    this.#fault = null;
+    if (fault !== null) throw fault.err;
+  }
+
+  /**
    * A session's state, from a `session-event`. For a reserved task it is proof
    * the spawn landed — the reply may be lost — so it resolves the reservation:
    * the assignment is the reservation's target plus the reporting pane. `from`
@@ -210,26 +242,8 @@ export class Scheduler {
    * task is left to its verdict or its TTL.
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource): Promise<void> {
-    const task = this.task(taskId);
-    if (task === undefined) return;
     const to: TaskState = state === "ended" ? "done" : state === "needs-input" ? "needs-input" : "running";
-    if (task.state === to) return;
-    if (task.state === "reserved") {
-      const at = task.reservation;
-      if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return;
-      const assignment: Assignment = { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone, pane: from.pane };
-      await this.#write(task, advance(task, to, { assignment }));
-      return;
-    }
-    // A lost task's machine speaking for it is the proof `lost` waits for.
-    if (task.state !== "running" && task.state !== "needs-input" && task.state !== "lost") return;
-    // Never confirmed, it is a reservation still: only its own machine, named, may resolve it.
-    if (isUnconfirmed(task) && from === undefined) return;
-    const { assignment } = task;
-    if (from !== undefined && assignment !== undefined && from.deviceId !== assignment.deviceId) return;
-    // An assignment with no pane (never confirmed, or a `task_running` verdict) takes the event's.
-    const named = assignment !== undefined && assignment.pane === undefined && from !== undefined;
-    await this.#write(task, advance(task, to, named ? { assignment: { ...assignment, pane: from.pane } } : {}));
+    await this.#update(taskId, (task) => sessionChange(task, to, from));
   }
 
   /**
@@ -237,20 +251,18 @@ export class Scheduler {
    * refused until the verdict lands rather than raced. A `lost` task whose
    * machine is back is despawned like a running one; with its machine still
    * gone nothing can be despawned, so it is cancelled as it stands and marked
-   * `leftRunning` — the record says plainly that a session may outlive it.
+   * `leftRunning` — the record says plainly that a session may outlive it. A
+   * task that finishes while the despawn is out (its session reported `ended`
+   * first) is answered as it finished.
    */
   async cancel(taskId: string): Promise<CancelResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
-    if (task.state === "reserved") return { ok: false, code: "dispatching" };
-    if (task.state !== "ready" && task.state !== "running" && task.state !== "needs-input" && task.state !== "lost") {
-      return { ok: false, code: "finished" };
-    }
+    const refused = cancelRefusal(task);
+    if (refused !== null) return refused;
     const { assignment } = task;
-    if (task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId)) {
-      return this.#cancelled(task, advance(task, "cancelled", { leftRunning: true }));
-    }
-    if (assignment !== undefined) {
+    const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
+    if (assignment !== undefined && !leftRunning) {
       // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
       let pane = assignment.pane;
       if (pane === undefined) {
@@ -263,13 +275,23 @@ export class Scheduler {
         if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
       }
     }
-    return this.#cancelled(task, advance(task, "cancelled"));
-  }
-
-  async #cancelled(task: Task, cancelled: Task): Promise<CancelResult> {
-    const next = await this.#write(task, cancelled);
-    if (next === null) return { ok: false, code: "conflict" };
-    this.#decisions.delete(task.id);
+    let outcome: CancelResult = { ok: false, code: "conflict" };
+    const next = await this.#update(taskId, (current) => {
+      if (FINISHED.includes(current.state)) {
+        outcome = { ok: true, task: current };
+        return null;
+      }
+      const refusal = cancelRefusal(current);
+      if (refusal !== null) {
+        outcome = refusal;
+        return null;
+      }
+      // What was despawned, or found gone, must still be what is cancelled.
+      if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== assignment?.deviceId) return null;
+      return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+    });
+    if (next === null) return outcome;
+    this.#decisions.delete(taskId);
     return { ok: true, task: next };
   }
 
@@ -278,18 +300,14 @@ export class Scheduler {
   }
 
   async #pass(): Promise<void> {
-    await this.#watchAbsence();
-    await Promise.all(
-      this.tasks()
-        .filter((t) => t.state === "reserved")
-        .map((t) => this.#resolveExpired(t)),
-    );
+    await this.#markAbsent();
+    await this.#check(this.#due());
     const ready = this.tasks()
-      .filter((t) => t.state === "ready")
+      .filter((t) => t.state === "ready" && !this.#dispatches.has(t.id))
       .toSorted((a, b) => a.createdAt - b.createdAt);
-    // Reserve one at a time, so each sees the reservations before it in projected usage;
-    // the spawns then run together.
-    const dispatches: Promise<void>[] = [];
+    // Reserve one at a time, so each sees the reservations before it in projected
+    // usage. The spawns are not awaited: one slow machine must not hold every
+    // other placement, TTL and absence check behind its 90s timeout.
     for (const task of ready) {
       const now = this.#now();
       const decision = route({
@@ -303,12 +321,21 @@ export class Scheduler {
       if (decision.chosen === null) continue;
       const reservation: Reservation = { ...decision.chosen, expiresAt: now + this.#config.reservationTtlMs };
       // oxlint-disable-next-line no-await-in-loop -- each route must see the reservation before it
-      const reserved = await this.#write(task, advance(task, "reserved", { reservation, decision, reservedAt: now }));
+      const reserved = await this.#update(task.id, (current) =>
+        // Routed from a snapshot: a task that moved meanwhile (a cancel) keeps what it moved to.
+        current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
+      );
       if (reserved === null) continue;
       this.#decisions.delete(task.id);
-      dispatches.push(this.#dispatch(reserved, reservation));
+      this.#launch(reserved, reservation);
     }
-    await Promise.all(dispatches);
+  }
+
+  #launch(task: Task, at: Reservation): void {
+    const run = this.#dispatch(task, at)
+      .catch(this.#onError)
+      .finally(() => this.#dispatches.delete(task.id));
+    this.#dispatches.set(task.id, run);
   }
 
   async #dispatch(task: Task, at: Reservation): Promise<void> {
@@ -324,10 +351,8 @@ export class Scheduler {
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });
-    const current = this.task(task.id);
-    if (current?.state !== "reserved") return;
-    const next = verdict(current, at, reply);
-    if (next !== null) await this.#write(current, next);
+    // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
+    await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
   }
 
   /**
@@ -335,17 +360,12 @@ export class Scheduler {
    * session may be alive on a machine that only sleeps, and a second dispatch
    * would be its twin. Absent past `lostAfterMs` it is `lost`, so the record
    * says so instead of reading `running` forever; once its machine is
-   * connected again, that machine's `sessions` settles it.
+   * connected again, that machine's `sessions` settles it (`#due`).
    */
-  async #watchAbsence(): Promise<void> {
+  async #markAbsent(): Promise<void> {
     const now = this.#now();
-    const connected = new Set(
-      this.#fleet
-        .machines()
-        .filter((m) => m.connected)
-        .map((m) => m.deviceId),
-    );
-    const placed = this.tasks().filter((t) => PLACED.has(t.state) && t.assignment !== undefined);
+    const connected = this.#connectedIds();
+    const placed = this.tasks().filter((t) => PLACED.includes(t.state) && t.assignment !== undefined);
     const devices = new Set(placed.flatMap((t) => t.assignment?.deviceId ?? []));
     for (const deviceId of [...this.#absentSince.keys()]) {
       if (!devices.has(deviceId) || connected.has(deviceId)) this.#absentSince.delete(deviceId);
@@ -353,154 +373,275 @@ export class Scheduler {
     for (const deviceId of devices) {
       if (!connected.has(deviceId) && !this.#absentSince.has(deviceId)) this.#absentSince.set(deviceId, now);
     }
-
-    const lost: Promise<unknown>[] = [];
-    const recover = new Set<string>();
-    for (const task of placed) {
-      const deviceId = task.assignment?.deviceId ?? "";
-      if (task.state === "lost") {
-        if (connected.has(deviceId)) recover.add(deviceId);
-        continue;
-      }
-      const since = this.#absentSince.get(deviceId);
-      if (since !== undefined && now - since >= this.#config.lostAfterMs) {
-        lost.push(this.#write(task, advance(task, "lost", { absentSince: since })));
-      }
-    }
-    await Promise.all(lost);
     await Promise.all(
-      [...recover].map(async (deviceId) => {
-        const reply = await this.#fleet.sessions(deviceId);
-        const back = this.tasks().filter((t) => t.state === "lost" && t.assignment?.deviceId === deviceId);
-        await Promise.all(back.map((t) => this.#settlePlaced(t.id, reply)));
+      placed.map(async (task) => {
+        const deviceId = task.assignment?.deviceId ?? "";
+        const since = this.#absentSince.get(deviceId);
+        if (task.state === "lost" || since === undefined || now - since < this.#config.lostAfterMs) return;
+        await this.#update(task.id, (current) =>
+          current.state !== "lost" && PLACED.includes(current.state) && current.assignment?.deviceId === deviceId
+            ? advance(current, "lost", { absentSince: since })
+            : null,
+        );
       }),
     );
   }
 
   /**
-   * A placed task against its machine's own `sessions`: a session carrying its
-   * id is the task still running (a `lost` one runs again, on the pane listed
-   * now); none is a session that ended while nobody listened — `done`, whether
-   * or not `ended` still remembers it. A `lost` task never confirmed is not
-   * placed but a reservation its machine kept, and settles as one
-   * (`#settleUnconfirmed`). An unanswered check changes nothing.
+   * What this pass checks against `sessions`: a reservation past its TTL whose
+   * spawn is no longer out (one still out may yet land, and its verdict is
+   * the better answer); a `lost` task whose machine is back; and, once per
+   * `sweepIntervalMs`, every running task on a connected machine — the only
+   * way a task whose `ended` event was lost ever finishes.
    */
-  async #settlePlaced(id: string, reply: TaskSessionsReply): Promise<void> {
-    const current = this.task(id);
-    if (current === undefined || !PLACED.has(current.state) || !reply.ok) return;
-    if (isUnconfirmed(current) && current.assignment !== undefined) {
-      const { deviceId, exclave, clone } = current.assignment;
-      await this.#settleUnconfirmed(current, { deviceId, exclave, clone }, reply);
-      return;
-    }
-    const session = reply.sessions.find((s) => s.taskId === id);
-    if (session === undefined) {
-      await this.#write(current, advance(current, "done"));
-      return;
-    }
-    if (current.state !== "lost" || current.assignment === undefined) return;
-    const { window: _window, pane: _pane, ...target } = current.assignment;
-    const assignment: Assignment = {
-      ...target,
-      window: session.window,
-      ...(session.id === undefined ? {} : { pane: session.id }),
-    };
-    await this.#write(current, advance(current, "running", { assignment }));
+  #due(): readonly Task[] {
+    const now = this.#now();
+    const connected = this.#connectedIds();
+    const sweep = now - this.#sweptAt >= this.#config.sweepIntervalMs;
+    if (sweep) this.#sweptAt = now;
+    return this.tasks().filter((t) => {
+      if (t.state === "reserved") {
+        return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
+      }
+      const deviceId = t.assignment?.deviceId;
+      if (!PLACED.includes(t.state) || deviceId === undefined || !connected.has(deviceId)) return false;
+      return t.state === "lost" || sweep;
+    });
   }
 
-  /** Past its TTL, a reservation with no verdict is resolved from the machine's own `sessions`. */
-  async #resolveExpired(task: Task): Promise<void> {
+  /**
+   * One `sessions` per machine the tasks name, then each settled from its
+   * machine's answer (`settle`) — unless it moved while the call was out, since
+   * an answer read before an event landed could undo it.
+   */
+  async #check(tasks: readonly Task[]): Promise<void> {
+    const devices = new Set(tasks.flatMap((t) => deviceOf(t) ?? []));
+    const replies = new Map(
+      await Promise.all([...devices].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
+    );
+    await Promise.all(
+      tasks.map(async (seen) => {
+        const deviceId = deviceOf(seen);
+        const reply = deviceId === undefined ? undefined : replies.get(deviceId);
+        if (deviceId === undefined || reply === undefined) return;
+        await this.#update(seen.id, (current) =>
+          asSeen(current, seen)
+            ? settle(current, reply, {
+                now: this.#now(),
+                connected: this.#connected(deviceId),
+                reservationTtlMs: this.#config.reservationTtlMs,
+              })
+            : null,
+        );
+      }),
+    );
+  }
+
+  #connectedIds(): ReadonlySet<string> {
+    return new Set(
+      this.#fleet
+        .machines()
+        .filter((m) => m.connected)
+        .map((m) => m.deviceId),
+    );
+  }
+
+  /** Runs `step` after every earlier step for the same task has finished, failed or not. */
+  #serial<T>(id: string, step: () => Promise<T>): Promise<T> {
+    const turn = (this.#chains.get(id) ?? Promise.resolve()).then(step);
+    const tail = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#chains.set(id, tail);
+    void tail.then(() => {
+      if (this.#chains.get(id) === tail) this.#chains.delete(id);
+    });
+    return turn;
+  }
+
+  /**
+   * The one way a held task is written. Serialized per task, with `change`
+   * computed from the copy held when its turn comes, so two writers never race
+   * one version: an `ended` event landing while a verdict's write is out
+   * applies after it, to what it wrote. A version conflict is another writer
+   * outside this process (M3's apps); the held copy is refreshed from the store
+   * and `change` applied again to what it finds. Null when `change` declines
+   * (it returns null for a task no longer in the state it acts on), the task is
+   * gone, or the conflicts outlast `WRITE_ATTEMPTS`.
+   */
+  #update(id: string, change: (task: Task) => Task | null): Promise<Task | null> {
+    return this.#serial(id, async () => {
+      for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+        const held = this.#held.get(id);
+        if (held === undefined) return null;
+        const next = change(held.task);
+        if (next === null) return null;
+        // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
+        const write = await this.#store.put(id, held.version, next);
+        if (write.ok) {
+          this.#held.set(id, { version: write.version, task: next });
+          return next;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const fresh = await this.#store.get(id);
+        if (fresh === null) {
+          this.#held.delete(id);
+          return null;
+        }
+        this.#held.set(id, { version: fresh.version, task: fresh.body });
+      }
+      return null;
+    });
+  }
+}
+
+/** What a settle reads besides the task and the machine's answer. */
+interface Observed {
+  readonly now: number;
+  /** Whether the task's machine is connected now. */
+  readonly connected: boolean;
+  readonly reservationTtlMs: number;
+}
+
+function targetOf(at: Target): Target {
+  return { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone };
+}
+
+/** An assignment on `target` at a session's window and pane, or what a reply names of them. */
+function assignmentOf(
+  target: Target,
+  at: { readonly window?: string | undefined; readonly id?: string | undefined },
+): Assignment {
+  return {
+    ...targetOf(target),
+    ...(at.window === undefined ? {} : { window: at.window }),
+    ...(at.id === undefined ? {} : { pane: at.id }),
+  };
+}
+
+function deviceOf(task: Task): string | undefined {
+  return (task.reservation ?? task.assignment)?.deviceId;
+}
+
+/** Still reserved under exactly `at`: not resolved by an event, nor released and reserved again. */
+function holds(task: Task, at: Reservation): boolean {
+  const { reservation } = task;
+  return (
+    task.state === "reserved" &&
+    reservation !== undefined &&
+    reservation.deviceId === at.deviceId &&
+    reservation.expiresAt === at.expiresAt
+  );
+}
+
+/** Where `seen` was when its machine was asked: a `sessions` answer speaks for that, and only that. */
+function asSeen(current: Task, seen: Task): boolean {
+  if (seen.state === "reserved") return seen.reservation !== undefined && holds(current, seen.reservation);
+  return (
+    PLACED.includes(current.state) &&
+    PLACED.includes(seen.state) &&
+    current.assignment?.deviceId === seen.assignment?.deviceId
+  );
+}
+
+function cancelRefusal(task: Task): CancelResult | null {
+  if (task.state === "reserved") return { ok: false, code: "dispatching" };
+  if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+  // A state not finished and still without the edge is one M3 has not wired yet: a gap, not an input error.
+  if (!canTransition(task.state, "cancelled"))
+    throw new Error(`task ${task.id}: ${task.state} cannot be cancelled yet`);
+  return null;
+}
+
+function sessionChange(task: Task, to: TaskState, from: SessionSource | undefined): Task | null {
+  if (task.state === to) return null;
+  if (task.state === "reserved") {
     const at = task.reservation;
-    if (at === undefined || at.expiresAt > this.#now()) return;
-    await this.#reconcileReserved(task.id, at, await this.#fleet.sessions(at.deviceId));
+    if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return null;
+    return advance(task, to, { assignment: assignmentOf(at, { id: from.pane }) });
   }
+  // A lost task's machine speaking for it is the proof `lost` waits for.
+  if (!PLACED.includes(task.state)) return null;
+  // Never confirmed, it is a reservation still: only its own machine, named, may resolve it.
+  if (isUnconfirmed(task) && from === undefined) return null;
+  const { assignment } = task;
+  if (from !== undefined && assignment !== undefined && from.deviceId !== assignment.deviceId) return null;
+  // An assignment with no pane (never confirmed, or a `task_running` verdict) takes the event's.
+  const named = assignment !== undefined && assignment.pane === undefined && from !== undefined;
+  return advance(task, to, named ? { assignment: { ...assignment, pane: from.pane } } : {});
+}
 
-  /**
-   * Before its TTL only a session carrying the task id, or the id in `ended`,
-   * resolves a reservation; anything else is a spawn still on its way. Past it
-   * the machine's answer settles it (`#settleUnconfirmed`). An unanswered check
-   * keeps waiting while the machine is connected; once it is not, the task is
-   * `lost` on that machine — never released to `ready` on a silence, since a
-   * machine that only sleeps may wake still running it, and `task_running`
-   * guards only a re-dispatch to that same machine.
-   */
-  async #reconcileReserved(id: string, at: Reservation, reply: TaskSessionsReply): Promise<void> {
-    const current = this.task(id);
-    if (current?.state !== "reserved") return;
-    const expired = at.expiresAt <= this.#now();
-    const target: Target = { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone };
-    if (!reply.ok) {
-      if (!expired || this.#connected(at.deviceId)) return;
-      const reservedAt = current.reservedAt ?? at.expiresAt - this.#config.reservationTtlMs;
-      await this.#write(
-        current,
-        advance(current, "lost", { assignment: target, absentSince: this.#now(), reservedAt }),
-      );
-      return;
-    }
-    const known = reply.sessions.some((s) => s.taskId === id) || reply.ended?.includes(id) === true;
-    if (!known && !expired) return;
-    await this.#settleUnconfirmed(current, target, reply);
-  }
+/** A reserved or placed task against its machine's `sessions`; null leaves it as it is. */
+function settle(task: Task, reply: TaskSessionsReply, at: Observed): Task | null {
+  if (task.state === "reserved") return settleReserved(task, reply, at);
+  if (!PLACED.includes(task.state) || !reply.ok) return null;
+  return settlePlaced(task, reply);
+}
 
-  /**
-   * A spawn whose reply never came, against its machine's answer. A session
-   * carrying the task id is the spawn that landed. An id in `ended` landed and
-   * already finished: `done`, never re-routed — its reply and its `ended` event
-   * were both lost and its session is gone, so `task_running` could not catch
-   * a second spawn. With neither, the task goes back to `ready` only on the
-   * machine's proof (`provesNeverLanded`); without it, `failed` — a terminal
-   * state that says what is unknown, where a re-dispatch could start a twin.
-   */
-  async #settleUnconfirmed(current: Task, target: Target, reply: SessionsAnswer): Promise<void> {
-    const session = reply.sessions.find((s) => s.taskId === current.id);
-    if (session !== undefined) {
-      const assignment: Assignment = {
-        ...target,
-        window: session.window,
-        ...(session.id === undefined ? {} : { pane: session.id }),
-      };
-      await this.#write(current, advance(current, "running", { assignment }));
-      return;
-    }
-    if (reply.ended?.includes(current.id) === true) {
-      await this.#write(current, advance(current, "done", { assignment: target }));
-      return;
-    }
-    if (provesNeverLanded(reply, current.reservedAt)) {
-      await this.#write(current, advance(current, "ready"));
-      return;
-    }
-    const why =
-      reply.ledgerSince === undefined
-        ? "its machine keeps no launch ledger"
-        : "its machine's launch ledger no longer reaches back to the reservation";
-    const failure: { readonly code: TaskFailureCode; readonly message: string } = {
-      code: "dispatch_unconfirmed",
-      message: `the spawn was never confirmed and ${why}, so it may have started — not dispatched again`,
-    };
-    await this.#write(current, advance(current, "failed", { assignment: target, failure }));
+/**
+ * Before its TTL only a session carrying the task id, or the id in `ended`,
+ * resolves a reservation; anything else is a spawn still on its way. Past it
+ * the machine's answer settles it (`settleUnconfirmed`). An unanswered check
+ * keeps waiting while the machine is connected; once it is not, the task is
+ * `lost` on that machine — never released to `ready` on a silence, since a
+ * machine that only sleeps may wake still running it, and `task_running`
+ * guards only a re-dispatch to that same machine.
+ */
+function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Task | null {
+  const { reservation } = task;
+  if (reservation === undefined) return null;
+  const expired = reservation.expiresAt <= at.now;
+  const target = targetOf(reservation);
+  if (!reply.ok) {
+    if (!expired || at.connected) return null;
+    const reservedAt = task.reservedAt ?? reservation.expiresAt - at.reservationTtlMs;
+    return advance(task, "lost", { assignment: target, absentSince: at.now, reservedAt });
   }
+  const known = reply.sessions.some((s) => s.taskId === task.id) || reply.ended?.includes(task.id) === true;
+  if (!known && !expired) return null;
+  return settleUnconfirmed(task, target, reply);
+}
 
-  /**
-   * Null when `task` is no longer the held copy (it moved while the caller
-   * awaited) or on a version conflict, after which the held copy is refreshed
-   * from the store. The identity check is what stops a stale `next` — say a
-   * reservation routed from a snapshot taken before a cancel — overwriting it.
-   */
-  async #write(task: Task, next: Task): Promise<Task | null> {
-    const held = this.#held.get(task.id);
-    if (held === undefined || held.task !== task) return null;
-    const write = await this.#store.put(task.id, held.version, next);
-    if (write.ok) {
-      this.#held.set(task.id, { version: write.version, task: next });
-      return next;
-    }
-    const fresh = await this.#store.get(task.id);
-    if (fresh === null) this.#held.delete(task.id);
-    else this.#held.set(task.id, { version: fresh.version, task: fresh.body });
-    return null;
-  }
+/**
+ * A placed task against its machine's own `sessions`: a session carrying its
+ * id is the task still running (a `lost` one runs again, on the pane listed
+ * now); none is a session that ended while nobody listened — `done`, whether
+ * or not `ended` still remembers it. A `lost` task never confirmed is not
+ * placed but a reservation its machine kept, and settles as one.
+ */
+function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
+  const { assignment } = task;
+  if (isUnconfirmed(task) && assignment !== undefined) return settleUnconfirmed(task, assignment, reply);
+  const session = reply.sessions.find((s) => s.taskId === task.id);
+  if (session === undefined) return advance(task, "done");
+  if (task.state !== "lost" || assignment === undefined) return null;
+  return advance(task, "running", { assignment: assignmentOf(assignment, session) });
+}
+
+/**
+ * A spawn whose reply never came, against its machine's answer. A session
+ * carrying the task id is the spawn that landed. An id in `ended` landed and
+ * already finished: `done`, never re-routed — its reply and its `ended` event
+ * were both lost and its session is gone, so `task_running` could not catch
+ * a second spawn. With neither, the task goes back to `ready` only on the
+ * machine's proof (`provesNeverLanded`); without it, `failed` — a terminal
+ * state that says what is unknown, where a re-dispatch could start a twin.
+ */
+function settleUnconfirmed(task: Task, target: Target, reply: SessionsAnswer): Task {
+  const session = reply.sessions.find((s) => s.taskId === task.id);
+  if (session !== undefined) return advance(task, "running", { assignment: assignmentOf(target, session) });
+  if (reply.ended?.includes(task.id) === true) return advance(task, "done", { assignment: targetOf(target) });
+  if (provesNeverLanded(reply, task.reservedAt)) return advance(task, "ready");
+  const why =
+    reply.ledgerSince === undefined
+      ? "its machine keeps no launch ledger"
+      : "its machine's launch ledger no longer reaches back to the reservation";
+  const failure: { readonly code: TaskFailureCode; readonly message: string } = {
+    code: "dispatch_unconfirmed",
+    message: `the spawn was never confirmed and ${why}, so it may have started — not dispatched again`,
+  };
+  return advance(task, "failed", { assignment: targetOf(target), failure });
 }
 
 /**
@@ -518,23 +659,21 @@ function provesNeverLanded(reply: SessionsAnswer, reservedAt: number | undefined
 
 /**
  * One spawn resolves its reservation exactly once, with no second spawn:
- * started or already running → `running`; a daemon refusal → `failed`; no
+ * started or already running → `running`; never delivered → `ready`, to be
+ * routed afresh, since nothing can have run; a daemon refusal → `failed`; no
  * answer, or a transport error that may have come after the spawn ran → stay
  * reserved until the TTL check reads `sessions`.
  */
 function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Task | null {
-  const target = { deviceId: at.deviceId, exclave: at.exclave, clone: at.clone };
   if (reply.ok) {
     // Path alone is ambiguous: every `here` session in a clone shares it.
     const pane = reply.sessions.find((s) => s.path === reply.path && s.window === reply.window)?.id;
-    return advance(task, "running", {
-      assignment: { ...target, window: reply.window, ...(pane === undefined ? {} : { pane }) },
-    });
+    return advance(task, "running", { assignment: assignmentOf(at, { window: reply.window, id: pane }) });
   }
   if (reply.code === "task_running") {
-    const pane = "id" in reply ? reply.id : undefined;
-    return advance(task, "running", { assignment: { ...target, ...(pane === undefined ? {} : { pane }) } });
+    return advance(task, "running", { assignment: assignmentOf(at, { id: "id" in reply ? reply.id : undefined }) });
   }
-  if (reply.code === UNREACHABLE || reply.code === "internal_error" || reply.code === "too_large") return null;
+  if (reply.code === UNDELIVERED) return advance(task, "ready");
+  if (reply.code === UNREACHABLE || TRANSPORT_ERROR_CODES.some((code) => code === reply.code)) return null;
   return advance(task, "failed", { failure: { code: reply.code, message: reply.message } });
 }

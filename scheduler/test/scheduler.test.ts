@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { REPLAY_WINDOW_MS } from "@seance/shared";
-import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, SCHEDULER_CLIENT, type Task } from "../src/index.ts";
+import { REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import {
+  DEFAULT_CONFIG,
+  MemoryQueueStore,
+  Scheduler,
+  SCHEDULER_CLIENT,
+  UNDELIVERED,
+  type Task,
+  type TaskSpawnReply,
+} from "../src/index.ts";
 import { advance } from "../src/task.ts";
 import { FakeFleet, machine, NOW, spec, unreachable } from "./fixtures.ts";
 
@@ -12,6 +20,22 @@ function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   return { store, fleet, clock, scheduler };
 }
 
+/** One pass and the spawns it sent: a pass itself never waits for a spawn's verdict. */
+async function pass(scheduler: Scheduler): Promise<void> {
+  await scheduler.tick();
+  await scheduler.drain();
+}
+
+/** Polls until `ready` holds; each turn lets queued microtasks and timers run. */
+async function until(ready: () => boolean, what: string): Promise<void> {
+  for (let turn = 0; turn < 200; turn += 1) {
+    if (ready()) return;
+    // oxlint-disable-next-line no-await-in-loop -- a poll
+    await Bun.sleep(1);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 async function stored(store: MemoryQueueStore, id: string): Promise<{ version: number; body: Task } | undefined> {
   return (await store.list()).find((s) => s.id === id);
 }
@@ -20,7 +44,7 @@ describe("dispatch", () => {
   test("a ready task is reserved, spawned with its taskId as the scheduler, and running on the chosen pane", async () => {
     const { store, fleet, scheduler } = setup();
     const task = await scheduler.submit(spec({ title: "fix it", plan: true }));
-    await scheduler.tick();
+    await pass(scheduler);
 
     expect(fleet.spawns).toEqual([
       {
@@ -49,15 +73,15 @@ describe("dispatch", () => {
     const { fleet, scheduler } = setup(new FakeFleet([machine("a"), machine("b")]));
     await scheduler.submit(spec());
     await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.spawns.map((s) => s.deviceId).toSorted()).toEqual(["a", "b"]);
   });
 
   test("an unplaceable task is written nowhere per tick; its decision is kept in memory", async () => {
     const { store, scheduler } = setup(new FakeFleet([machine("a", { connected: false })]));
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
-    await scheduler.tick();
+    await pass(scheduler);
+    await pass(scheduler);
     expect((await stored(store, task.id))?.version).toBe(1);
     expect(scheduler.lastDecision(task.id)?.candidates[0]?.rejected).toEqual([{ code: "offline" }]);
   });
@@ -66,8 +90,8 @@ describe("dispatch", () => {
     const { fleet, scheduler } = setup();
     fleet.scripts.set("a", () => ({ ok: false, code: "repo_not_found", message: "gone" }));
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
-    await scheduler.tick();
+    await pass(scheduler);
+    await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
     expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "repo_not_found" } });
   });
@@ -76,8 +100,8 @@ describe("dispatch", () => {
     const { fleet, scheduler } = setup();
     fleet.scripts.set("a", () => ({ ok: false, code: "task_running", message: "already", id: "%7" }));
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
-    await scheduler.tick();
+    await pass(scheduler);
+    await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
     expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { deviceId: "a", pane: "%7" } });
   });
@@ -93,7 +117,7 @@ describe("dispatch", () => {
       ],
     }));
     const task = await scheduler.submit(spec({ mode: "here" }));
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.assignment?.pane).toBe("%4");
   });
 });
@@ -107,16 +131,16 @@ describe("reservation TTL", () => {
       return unreachable;
     });
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
     clock.now += 119_000;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.sessionCalls).toEqual([]);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
     clock.now += 1_000;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { pane: "%1", window: "w1" } });
     expect(fleet.spawns).toHaveLength(1);
@@ -126,11 +150,11 @@ describe("reservation TTL", () => {
     const { fleet, clock, scheduler } = setup();
     fleet.scripts.set("a", () => unreachable);
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.scripts.delete("a");
     clock.now += 120_000;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.spawns).toHaveLength(2);
     expect(scheduler.task(task.id)?.state).toBe("running");
   });
@@ -143,18 +167,18 @@ describe("reservation TTL", () => {
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
       const task = await scheduler.submit(spec());
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       clock.now += 120_000;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(scheduler.task(task.id)).toMatchObject({
         state: "failed",
         failure: { code: "dispatch_unconfirmed" },
         assignment: { deviceId: "a", clone: "app" },
       });
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(fleet.spawns).toHaveLength(1);
     }
   });
@@ -164,11 +188,11 @@ describe("reservation TTL", () => {
     fleet.scripts.set("a", () => unreachable);
     fleet.ledgerSince.set("a", NOW - REPLAY_WINDOW_MS);
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.scripts.delete("a");
     clock.now += 120_000;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("running");
     expect(fleet.spawns).toHaveLength(2);
   });
@@ -179,14 +203,14 @@ describe("reservation TTL", () => {
     fleet.scripts.set("a", () => unreachable);
     fleet.sessionsReply = () => unreachable;
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += 120_000;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
     fleet.fleet = [machine("a", { connected: false }), machine("b")];
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({
       state: "lost",
       assignment: { deviceId: "a", exclave: "main", clone: "app" },
@@ -197,7 +221,7 @@ describe("reservation TTL", () => {
     expect(scheduler.task(task.id)?.reservation).toBeUndefined();
     clock.now += 3_600_000;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("lost");
     expect(fleet.spawns).toHaveLength(1);
   });
@@ -228,18 +252,18 @@ describe("a reservation whose machine went away", () => {
     const env = setup(fleet);
     fleet.scripts.set("a", () => unreachable);
     const task = await env.scheduler.submit(spec());
-    await env.scheduler.tick();
+    await pass(env.scheduler);
     fleet.scripts.delete("a");
     fleet.fleet = [machine("a", { connected: false }), machine("b")];
     env.clock.now += 120_000;
     fleet.beat(env.clock.now);
-    await env.scheduler.tick();
+    await pass(env.scheduler);
     expect(env.scheduler.task(task.id)?.state).toBe("lost");
     /** `a` connected again, and a pass to notice. */
     const back = async (): Promise<void> => {
       fleet.fleet = [machine("a"), machine("b")];
       fleet.beat(env.clock.now);
-      await env.scheduler.tick();
+      await pass(env.scheduler);
     };
     return { ...env, task, back };
   }
@@ -283,7 +307,7 @@ describe("a reservation whose machine went away", () => {
       clock.now += 120_000;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
-      await scheduler.tick();
+      await pass(scheduler);
       expect(fleet.spawns).toHaveLength(1);
     }
   });
@@ -334,11 +358,11 @@ describe("cancelling a lost task", () => {
   test("its machine gone: cancelled with nothing despawned, and the record says its session was left running", async () => {
     const { fleet, scheduler, clock } = setup(new FakeFleet([machine("a")]));
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false })];
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += DEFAULT_CONFIG.lostAfterMs;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("lost");
 
     expect(await scheduler.cancel(task.id)).toMatchObject({
@@ -350,7 +374,7 @@ describe("cancelling a lost task", () => {
     // Terminal: its machine back with the session, or an event from it, changes nothing.
     fleet.fleet = [machine("a")];
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     await scheduler.onSession(task.id, "busy", { deviceId: "a", pane: "%1" });
     expect(scheduler.task(task.id)).toMatchObject({ state: "cancelled", leftRunning: true });
     expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "finished" });
@@ -365,10 +389,10 @@ describe("cancelling a lost task", () => {
       return unreachable;
     });
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false }), machine("b", { connected: false })];
     clock.now += 120_000;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({ state: "lost", assignment: { deviceId: "a" } });
     expect(scheduler.task(task.id)?.assignment?.pane).toBeUndefined();
 
@@ -385,10 +409,10 @@ describe("cancelling a lost task", () => {
     const { scheduler, clock } = setup(fleet);
     fleet.scripts.set("a", () => unreachable);
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false })];
     clock.now += 120_000;
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a")];
     fleet.sessionsReply = () => unreachable;
     expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
@@ -404,7 +428,7 @@ describe("a machine that stops answering", () => {
     const env = setup(new FakeFleet([machine("a"), machine("b")]), config);
     env.fleet.scripts.set("b", () => ({ ok: false, code: "repo_not_found", message: "only a runs it" }));
     const task = await env.scheduler.submit(spec({ pin: { deviceId: "a" } }));
-    await env.scheduler.tick();
+    await pass(env.scheduler);
     expect(env.scheduler.task(task.id)?.state).toBe("running");
     env.fleet.fleet = gone === "forgotten" ? [machine("b")] : [machine("a", { connected: false }), machine("b")];
     return { ...env, task };
@@ -415,17 +439,17 @@ describe("a machine that stops answering", () => {
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
       const { clock, fleet, scheduler, task } = await runningThenGone(gone);
       const absent = clock.now;
-      await scheduler.tick();
+      await pass(scheduler);
       clock.now += LOST_AFTER - 1;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(scheduler.task(task.id)?.state).toBe("running");
 
       clock.now += 1;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(scheduler.task(task.id)).toMatchObject({
         state: "lost",
         absentSince: absent,
@@ -434,7 +458,7 @@ describe("a machine that stops answering", () => {
       clock.now += 3_600_000;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(scheduler.task(task.id)?.state).toBe("lost");
       expect(fleet.spawns).toHaveLength(1);
     }
@@ -449,29 +473,29 @@ describe("a machine that stops answering", () => {
     expect(scheduler.preview(spec()).candidates.flatMap((c) => c.rejected)).toContainEqual(
       expect.objectContaining({ code: "cap_reached" }),
     );
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += LOST_AFTER;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("lost");
     const next = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(next.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
   });
 
   test("its machine back with the session alive: running again on the pane listed now, with no twin", async () => {
     const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += LOST_AFTER;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("lost");
 
     // The daemon restarted its tmux view: the same task id, on a new pane.
     fleet.running.set("a", [{ id: "%40", window: "w40", repo: "app", path: "/wt/x", taskId: task.id }]);
     fleet.fleet = [machine("a"), machine("b")];
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({
       state: "running",
       assignment: { deviceId: "a", pane: "%40", window: "w40" },
@@ -485,17 +509,17 @@ describe("a machine that stops answering", () => {
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
       const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       clock.now += LOST_AFTER;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       fleet.running.set("a", []);
       if (ended) fleet.ended.set("a", [task.id]);
       fleet.fleet = [machine("a"), machine("b")];
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
-      await scheduler.tick();
+      await pass(scheduler);
       expect(scheduler.task(task.id)?.state).toBe("done");
       expect(fleet.spawns).toHaveLength(1);
     }
@@ -503,14 +527,14 @@ describe("a machine that stops answering", () => {
 
   test("an unanswered check keeps it lost; an event from its own machine settles it, one from another does not", async () => {
     const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += LOST_AFTER;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a"), machine("b")];
     fleet.beat(clock.now);
     fleet.sessionsReply = () => unreachable;
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("lost");
 
     await scheduler.onSession(task.id, "busy", { deviceId: "b", pane: "%1" });
@@ -521,16 +545,16 @@ describe("a machine that stops answering", () => {
 
   test("a machine back inside the bound resets the count", async () => {
     const { clock, fleet, scheduler, task } = await runningThenGone("disconnected");
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += LOST_AFTER - 1;
     fleet.fleet = [machine("a"), machine("b")];
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false }), machine("b")];
-    await scheduler.tick();
+    await pass(scheduler);
     clock.now += LOST_AFTER - 1;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("running");
   });
 
@@ -561,7 +585,7 @@ describe("prune", () => {
       // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
       failed.push((await scheduler.submit(spec())).id);
       // oxlint-disable-next-line no-await-in-loop -- each fails before the next is created
-      await scheduler.tick();
+      await pass(scheduler);
     }
     fleet.scripts.delete("a");
     fleet.fleet = [machine("a", { connected: false })];
@@ -580,7 +604,7 @@ describe("session state", () => {
     expect(scheduler.task(task.id)?.state).toBe("ready");
     await scheduler.onSession("nope", "ended");
 
-    await scheduler.tick();
+    await pass(scheduler);
     await scheduler.onSession(task.id, "needs-input");
     expect(scheduler.task(task.id)?.state).toBe("needs-input");
     await scheduler.onSession(task.id, "busy");
@@ -610,7 +634,7 @@ describe("a reply lost, then the session ends", () => {
   test("the ended event resolves the reservation as done; the TTL check then spawns nothing", async () => {
     const { fleet, clock, scheduler } = lostReply();
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
     fleet.end("a", task.id);
@@ -622,7 +646,7 @@ describe("a reply lost, then the session ends", () => {
 
     clock.now += 120_000;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
     expect(scheduler.task(task.id)?.state).toBe("done");
   });
@@ -630,15 +654,15 @@ describe("a reply lost, then the session ends", () => {
   test("the ended event lost too: past the TTL the daemon's `ended` says the task ran, and it is done", async () => {
     const { fleet, clock, scheduler } = lostReply();
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.end("a", task.id);
 
     clock.now += 120_000;
     fleet.beat(clock.now);
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task(task.id)).toMatchObject({ state: "done", assignment: { deviceId: "a", clone: "app" } });
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
   });
 
@@ -646,7 +670,7 @@ describe("a reply lost, then the session ends", () => {
     const { scheduler } = lostReply();
     const first = await scheduler.submit(spec());
     const second = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     await scheduler.onSession(first.id, "busy", { deviceId: "a", pane: "%1" });
     await scheduler.onSession(second.id, "needs-input", { deviceId: "a", pane: "%2" });
     expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { pane: "%1" } });
@@ -656,7 +680,7 @@ describe("a reply lost, then the session ends", () => {
   test("an event from a machine the task was not placed on, or with no source, moves nothing", async () => {
     const { scheduler } = lostReply();
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     await scheduler.onSession(task.id, "ended", { deviceId: "b", pane: "%1" });
     await scheduler.onSession(task.id, "ended");
     expect(scheduler.task(task.id)?.state).toBe("reserved");
@@ -676,7 +700,7 @@ describe("cancel", () => {
 
     fleet.fleet = [machine("a")];
     const live = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(await scheduler.cancel(live.id)).toMatchObject({ ok: true });
     expect(fleet.despawns).toEqual([{ deviceId: "a", id: "%1" }]);
   });
@@ -688,7 +712,7 @@ describe("cancel", () => {
       return { ok: false, code: "task_running", message: "already" };
     });
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(scheduler.task(task.id)?.assignment?.pane).toBeUndefined();
     expect(await scheduler.cancel(task.id)).toMatchObject({ ok: true });
     expect(fleet.despawns).toEqual([{ deviceId: "a", id: "%1" }]);
@@ -715,21 +739,45 @@ describe("cancel", () => {
     });
     await scheduler.submit(spec());
     const later = await scheduler.submit(spec());
-    const pass = scheduler.tick();
+    const ticking = scheduler.tick();
     await Bun.sleep(0);
     expect(await scheduler.cancel(later.id)).toMatchObject({ ok: true });
     held = false;
     gate.resolve();
-    await pass;
+    await ticking;
+    await scheduler.drain();
     expect(scheduler.task(later.id)?.state).toBe("cancelled");
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["t1"]);
+  });
+
+  test("a session that reports ended before the despawn's reply lands is answered as the finished task", async () => {
+    let scheduler: Scheduler | null = null;
+    class EndingFleet extends FakeFleet {
+      override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
+        // The pane exits on the despawn, and its `ended` event outruns the reply.
+        await scheduler?.onSession(request.id === "%1" ? "t1" : "", "ended", { deviceId, pane: request.id });
+        return super.despawn(deviceId, request);
+      }
+    }
+    const env = setup(new EndingFleet([machine("a")]));
+    scheduler = env.scheduler;
+    const task = await env.scheduler.submit(spec());
+    await pass(env.scheduler);
+    expect(await env.scheduler.cancel(task.id)).toMatchObject({ ok: true, task: { id: task.id, state: "done" } });
+  });
+
+  test("a state with no cancel edge yet is a gap, never answered finished", async () => {
+    const { store, scheduler } = setup();
+    await store.put("q", 0, { id: "q", spec: spec(), state: "queued", createdAt: NOW });
+    await scheduler.load();
+    await expect(scheduler.cancel("q")).rejects.toThrow("cannot be cancelled yet");
   });
 
   test("a reserved task is mid-dispatch and refused", async () => {
     const { fleet, scheduler } = setup();
     fleet.scripts.set("a", () => unreachable);
     const task = await scheduler.submit(spec());
-    await scheduler.tick();
+    await pass(scheduler);
     expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "dispatching" });
   });
 });
@@ -747,15 +795,15 @@ describe("takeover", () => {
       });
     }
     const tasks = await Promise.all([scheduler.submit(spec()), scheduler.submit(spec())]);
-    await scheduler.tick();
+    await pass(scheduler);
     // A third task whose spawn never reached its machine, and a fourth that ran and ended.
     fleet.scripts.set("a", () => unreachable);
     fleet.scripts.set("b", () => unreachable);
     const lost = await scheduler.submit(spec({ pin: { deviceId: "a" } }));
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.scripts.clear();
     const ended = await scheduler.submit(spec({ pin: { deviceId: "b" } }));
-    await scheduler.tick();
+    await pass(scheduler);
     fleet.running.set(
       "b",
       (fleet.running.get("b") ?? []).filter((s) => s.taskId !== ended.id),
@@ -781,7 +829,7 @@ describe("takeover", () => {
     // Past the TTL with still no session, it is released and dispatched once.
     clock.now += 120_000;
     fleet.beat(clock.now);
-    await successor.tick();
+    await pass(successor);
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual([lost.id]);
     expect(successor.task(lost.id)?.state).toBe("running");
   });
@@ -804,7 +852,7 @@ describe("store", () => {
     const successor = new Scheduler({ store, fleet, now: () => NOW });
     await successor.load();
     expect(successor.tasks().map((t) => t.id)).toEqual([task.id]);
-    await successor.tick();
+    await pass(successor);
     expect(successor.task(task.id)?.state).toBe("running");
   });
 
@@ -814,7 +862,7 @@ describe("store", () => {
     // Someone else moved it first.
     const current = await stored(store, task.id);
     await store.put(task.id, current?.version ?? 0, { ...task, state: "cancelled" });
-    await scheduler.tick();
+    await pass(scheduler);
     expect(fleet.spawns).toEqual([]);
     expect(scheduler.task(task.id)?.state).toBe("cancelled");
   });
@@ -841,12 +889,16 @@ test("preview routes a spec without queuing it", () => {
 });
 
 test("ticks asked for while one runs coalesce into one more pass, never a concurrent one", async () => {
-  const { fleet, scheduler } = setup();
   const gate = Promise.withResolvers<void>();
-  fleet.scripts.set("a", async (request) => {
-    await gate.promise;
-    return fleet.start("a", request);
-  });
+  class GatedStore extends MemoryQueueStore {
+    override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+      if (body.state === "reserved") await gate.promise;
+      return super.put(id, version, body);
+    }
+  }
+  const fleet = new FakeFleet([machine("a")]);
+  let n = 0;
+  const scheduler = new Scheduler({ store: new GatedStore(), fleet, now: () => NOW, newId: () => `t${++n}` });
   await scheduler.submit(spec());
   const first = scheduler.tick();
   await Bun.sleep(0);
@@ -854,9 +906,169 @@ test("ticks asked for while one runs coalesce into one more pass, never a concur
   await scheduler.submit(spec());
   const second = scheduler.tick();
   await Bun.sleep(0);
-  expect(fleet.spawns).toHaveLength(1);
+  expect(scheduler.tasks().map((t) => t.state)).toEqual(["ready", "ready"]);
   gate.resolve();
   await Promise.all([first, second]);
+  await scheduler.drain();
   expect(fleet.spawns).toHaveLength(2);
   expect(scheduler.tasks().map((t) => t.state)).toEqual(["running", "running"]);
+});
+
+describe("a pass never waits on a spawn", () => {
+  test("a spawn that never answers holds neither another machine's placement nor its own TTL check", async () => {
+    const { fleet, clock, scheduler } = setup(new FakeFleet([machine("a"), machine("b")]));
+    const hung = Promise.withResolvers<TaskSpawnReply>();
+    fleet.scripts.set("a", () => hung.promise);
+    const stuck = await scheduler.submit(spec({ pin: { deviceId: "a" } }));
+    await scheduler.tick();
+    expect(scheduler.task(stuck.id)?.state).toBe("reserved");
+
+    const next = await scheduler.submit(spec({ pin: { deviceId: "b" } }));
+    await scheduler.tick();
+    await until(() => scheduler.task(next.id)?.state === "running", "the second task running");
+    expect(scheduler.task(next.id)?.assignment?.deviceId).toBe("b");
+
+    // Past its TTL with its spawn still out, the reservation waits for the verdict, not `sessions`.
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    expect(fleet.sessionCalls).not.toContain("a");
+    expect(scheduler.task(stuck.id)?.state).toBe("reserved");
+
+    const sent = fleet.spawns[0]?.request;
+    if (sent === undefined) throw new Error("no spawn was sent");
+    hung.resolve(fleet.start("a", sent));
+    await scheduler.drain();
+    expect(scheduler.task(stuck.id)?.state).toBe("running");
+  });
+
+  test("a verdict for a reservation that was resolved and made again elsewhere changes nothing", async () => {
+    const { fleet, scheduler } = setup(new FakeFleet([machine("a"), machine("b")]));
+    const late = Promise.withResolvers<TaskSpawnReply>();
+    fleet.scripts.set("a", () => late.promise);
+    const task = await scheduler.submit(spec({ pin: { deviceId: "a" } }));
+    await scheduler.tick();
+    // An event resolves the reservation while the spawn is still out.
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    expect(scheduler.task(task.id)?.state).toBe("done");
+    late.resolve({ ok: false, code: "repo_not_found", message: "late" });
+    await scheduler.drain();
+    expect(scheduler.task(task.id)?.state).toBe("done");
+  });
+
+  test("a dispatch that throws reaches onError, and the pass it came from is not cut short", async () => {
+    const errors: unknown[] = [];
+    const fleet = new FakeFleet([machine("a"), machine("b")]);
+    fleet.scripts.set("a", () => Promise.reject(new Error("boom")));
+    let n = 0;
+    const scheduler = new Scheduler({
+      store: new MemoryQueueStore(),
+      fleet,
+      now: () => NOW,
+      newId: () => `t${++n}`,
+      onError: (err) => errors.push(err),
+    });
+    await scheduler.submit(spec({ pin: { deviceId: "a" } }));
+    const other = await scheduler.submit(spec({ pin: { deviceId: "b" } }));
+    await pass(scheduler);
+    expect(errors).toEqual([new Error("boom")]);
+    expect(scheduler.task(other.id)?.state).toBe("running");
+  });
+});
+
+describe("a spawn the relay never delivered", () => {
+  test("is ready again at once, and the next pass routes it afresh", async () => {
+    const { fleet, scheduler } = setup(new FakeFleet([machine("a")]));
+    fleet.scripts.set("a", () => ({ ok: false, code: UNDELIVERED, message: "that machine is not connected" }));
+    const task = await scheduler.submit(spec());
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "ready" });
+    expect(scheduler.task(task.id)?.reservation).toBeUndefined();
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+    expect(fleet.spawns.map((s) => s.deviceId)).toEqual(["a", "b"]);
+  });
+});
+
+describe("a session whose ended event never came", () => {
+  test("is done within one sweep, and its slot is free again", async () => {
+    const { fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const first = await scheduler.submit(spec());
+    await pass(scheduler);
+    expect(scheduler.task(first.id)?.state).toBe("running");
+    // The pane exits; the daemon's event is lost on the way.
+    fleet.end("a", first.id);
+    const second = await scheduler.submit(spec());
+    await pass(scheduler);
+    expect(scheduler.lastDecision(second.id)?.candidates[0]?.rejected).toContainEqual(
+      expect.objectContaining({ code: "cap_reached" }),
+    );
+
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(scheduler.task(first.id)?.state).toBe("done");
+    // Settled before routing, in the same pass: the freed slot goes to the waiting task.
+    expect(scheduler.task(second.id)?.state).toBe("running");
+  });
+
+  test("the sweep asks each machine once, only when due, and only machines holding running tasks", async () => {
+    const { fleet, clock, scheduler } = setup(new FakeFleet([machine("a"), machine("b"), machine("c")]));
+    await Promise.all([scheduler.submit(spec()), scheduler.submit(spec()), scheduler.submit(spec())]);
+    fleet.scripts.set("c", () => ({ ok: false, code: "repo_not_found", message: "gone" }));
+    await pass(scheduler);
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs - 1;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual([]);
+    clock.now += 1;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(fleet.sessionCalls.toSorted()).toEqual(["a", "b"]);
+    expect(
+      scheduler
+        .tasks()
+        .map((t) => t.state)
+        .toSorted(),
+    ).toEqual(["failed", "running", "running"]);
+  });
+});
+
+describe("writes to one task never race", () => {
+  /** A store whose puts take a round trip, as M3's relay store's will. */
+  class SlowStore extends MemoryQueueStore {
+    override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+      await Bun.sleep(20);
+      return super.put(id, version, body);
+    }
+  }
+
+  test("an ended event landing while the spawn verdict's write is out is applied after it: done", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    const store = new SlowStore();
+    let n = 0;
+    const scheduler = new Scheduler({ store, fleet, now: () => NOW, newId: () => `t${++n}` });
+    const task = await scheduler.submit(spec());
+    await scheduler.tick();
+    // The reservation is written; the spawn answered and its `running` write is in flight now.
+    await until(() => fleet.spawns.length === 1, "the spawn");
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    await scheduler.drain();
+    expect(scheduler.task(task.id)?.state).toBe("done");
+    expect((await store.get(task.id))?.body.state).toBe("done");
+  });
+
+  test("a conflict with a writer outside the process is re-read and the change applied to what it finds", async () => {
+    const { store, fleet, scheduler } = setup();
+    const task = await scheduler.submit(spec());
+    await pass(scheduler);
+    // Another writer bumps the version without changing the state the event acts on.
+    const current = await store.get(task.id);
+    const body = current?.body ?? task;
+    await store.put(task.id, current?.version ?? 0, { ...body, spec: { ...body.spec, title: "renamed" } });
+    await scheduler.onSession(task.id, "needs-input", { deviceId: "a", pane: "%1" });
+    expect((await store.get(task.id))?.body).toMatchObject({ state: "needs-input", spec: { title: "renamed" } });
+    expect(fleet.spawns).toHaveLength(1);
+  });
 });

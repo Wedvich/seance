@@ -28,6 +28,12 @@ export interface SchedulerConfig {
    * such, never dispatched again, until that machine answers for it.
    */
   readonly lostAfterMs: number;
+  /**
+   * How often a pass also reads `sessions` from each connected machine holding
+   * a running task: the backstop for an `ended` event that never arrived, whose
+   * task would otherwise read `running` and hold its slot for good.
+   */
+  readonly sweepIntervalMs: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -43,4 +49,5 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   globalMax: 8,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
+  sweepIntervalMs: 120_000,
 };
