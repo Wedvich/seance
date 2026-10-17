@@ -53,3 +53,14 @@ export function matchSkills(skills: readonly string[], query: string): readonly 
 export function completeSkill(name: string): string {
   return `/${name} `;
 }
+
+/**
+ * Length of the leading `/name` the prompt field paints as a skill: first
+ * token only, and only a name the index knows, as Claude Code highlights. 0
+ * when none — an unknown name still goes as typed, it just isn't marked.
+ */
+export function skillTokenLength(prompt: string, skills: readonly string[]): number {
+  const match = /^\/(\S+)(?=\s|$)/u.exec(prompt);
+  if (match === null || !skills.includes(match[1] ?? "")) return 0;
+  return match[0].length;
+}

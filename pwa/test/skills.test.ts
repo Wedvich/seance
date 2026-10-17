@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExclaveInfo, Machine } from "@seance/shared";
-import { completeSkill, matchSkills, skillIndex, skillQuery } from "../src/skills.ts";
+import { completeSkill, matchSkills, skillIndex, skillQuery, skillTokenLength } from "../src/skills.ts";
 
 const NOW = 1_800_000_000_000;
 
@@ -88,4 +88,23 @@ describe("matchSkills", () => {
 test("completeSkill makes the name the first token and leaves the caret past a space", () => {
   expect(completeSkill("ship")).toBe("/ship ");
   expect(skillQuery(completeSkill("ship"))).toBeNull();
+});
+
+describe("skillTokenLength", () => {
+  const skills = ["ship", "review"];
+
+  test("marks a known name as the first token, alone or before more text", () => {
+    expect(skillTokenLength("/ship", skills)).toBe(5);
+    expect(skillTokenLength("/ship abc", skills)).toBe(5);
+    expect(skillTokenLength("/review\nnotes", skills)).toBe(7);
+  });
+
+  test("marks nothing for an unknown or partial name, or one that isn't first", () => {
+    expect(skillTokenLength("/shi", skills)).toBe(0);
+    expect(skillTokenLength("/shipit now", skills)).toBe(0);
+    expect(skillTokenLength("/", skills)).toBe(0);
+    expect(skillTokenLength(" /ship", skills)).toBe(0);
+    expect(skillTokenLength("do /ship", skills)).toBe(0);
+    expect(skillTokenLength("/ship", [])).toBe(0);
+  });
 });

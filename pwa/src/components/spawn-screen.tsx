@@ -14,7 +14,7 @@ import {
   type RescanState,
   type SheetKind,
 } from "../state.ts";
-import { completeSkill, matchSkills, skillIndex, skillQuery } from "../skills.ts";
+import { completeSkill, matchSkills, skillIndex, skillQuery, skillTokenLength } from "../skills.ts";
 import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { RelayDot } from "./relay-dot.tsx";
@@ -399,6 +399,17 @@ export function SpawnScreen(props: {
   const [cursor, setCursor] = useState<{ query: string | null; index: number }>({ query, index: 0 });
   if (cursor.query !== query) setCursor({ query, index: 0 });
   const active = cursor.query === query && cursor.index < matches.length ? cursor.index : 0;
+  // A textarea can't style a run of its own text, so the highlight is painted
+  // by a mirror behind it (same box and metrics, text drawn there instead) that
+  // follows its scroll. The scroll event covers user scrolling; the layout
+  // effect covers an edit that moves the caret without one.
+  const tokenLength = skillTokenLength(form.prompt, skills);
+  const promptBackdrop = useRef<HTMLDivElement>(null);
+  const syncBackdrop = (): void => {
+    if (promptBackdrop.current === null || promptInput.current === null) return;
+    promptBackdrop.current.scrollTop = promptInput.current.scrollTop;
+  };
+  useLayoutEffect(syncBackdrop, [form.prompt, pickerOpen]);
   const pickSkill = (name: string): void => {
     actions.setPrompt(completeSkill(name));
     promptInput.current?.focus();
@@ -460,30 +471,41 @@ export function SpawnScreen(props: {
             </span>
             <PromptAction onClear={clearPrompt} onUndo={undoClear} prompt={form.prompt} undo={promptUndo} />
           </div>
-          <textarea
-            ref={promptInput}
-            className={pickerOpen ? "prompt-input prompt-input-compact" : "prompt-input"}
-            rows={pickerOpen ? 1 : undefined}
-            aria-labelledby="prompt-label"
-            role="combobox"
-            aria-expanded={pickerOpen}
-            aria-autocomplete="list"
-            aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
-            aria-activedescendant={pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined}
-            placeholder="Describe the work — or leave it blank and start empty."
-            value={form.prompt}
-            onInput={(event) => actions.setPrompt(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (pickerKey(event)) {
-                event.preventDefault();
-                return;
+          <div className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}>
+            <div ref={promptBackdrop} className="prompt-input prompt-backdrop" aria-hidden="true">
+              {tokenLength > 0 && <mark className="prompt-skill">{form.prompt.slice(0, tokenLength)}</mark>}
+              {form.prompt.slice(tokenLength)}
+              {/* A trailing newline adds no line box in a div; the textarea gives it one. */}
+              {form.prompt.endsWith("\n") && " "}
+            </div>
+            <textarea
+              ref={promptInput}
+              className="prompt-input prompt-text"
+              onScroll={syncBackdrop}
+              rows={pickerOpen ? 1 : undefined}
+              aria-labelledby="prompt-label"
+              role="combobox"
+              aria-expanded={pickerOpen}
+              aria-autocomplete="list"
+              aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
+              aria-activedescendant={
+                pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined
               }
-              if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
-              if (!view.button.enabled) return;
-              event.preventDefault();
-              actions.spawn();
-            }}
-          />
+              placeholder="Describe the work — or leave it blank and start empty."
+              value={form.prompt}
+              onInput={(event) => actions.setPrompt(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (pickerKey(event)) {
+                  event.preventDefault();
+                  return;
+                }
+                if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+                if (!view.button.enabled) return;
+                event.preventDefault();
+                actions.spawn();
+              }}
+            />
+          </div>
           {pickerOpen && query !== null && (
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}

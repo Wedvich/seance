@@ -3280,6 +3280,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `pointerdown` without default so a tap neither blurs the field nor drops the keyboard. With
   matches, Enter and Tab pick and never spawn; with none it says the name goes as typed and the
   keys behave as without it — an unknown name is not an error (M4's routing filter, still open, will let it pass).
+  A known name as the first token is painted in the accent colour, as Claude Code marks one; a
+  textarea can't style its own text, so a mirror behind it with the same metrics draws the
+  glyphs and follows its scroll, and the field keeps only caret, selection and input.
 
 ## MCP server (`seanced mcp`) — designed 2026-08-03
 
