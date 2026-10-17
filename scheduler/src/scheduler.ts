@@ -1,12 +1,23 @@
-import { isTransportError, REPLAY_WINDOW_MS, type SessionState, type TaskFailureCode } from "@seance/shared";
+import {
+  DECISION_MAX_CANDIDATES,
+  isTransportError,
+  REPLAY_WINDOW_MS,
+  TARGET_LIMITS,
+  TASK_FAILURE_LIMITS,
+  type SessionState,
+  type TaskFailureCode,
+} from "@seance/shared";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import {
   UNDELIVERED,
   UNREACHABLE,
   type Fleet,
   type QueueStore,
+  type StoreEntry,
+  type StoreWrite,
   type TaskSessionsReply,
   type TaskSpawnReply,
+  type UnreadableTask,
 } from "./ports.ts";
 import { route, type Decision } from "./route.ts";
 import {
@@ -86,6 +97,8 @@ export class Scheduler {
   readonly #newId: () => string;
   readonly #onError: (err: unknown) => void;
   readonly #held = new Map<string, Held>();
+  /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
+  readonly #unreadable = new Map<string, UnreadableTask>();
   readonly #decisions = new Map<string, Decision>();
   /**
    * deviceId → when a pass first saw it not connected (or gone from the
@@ -122,8 +135,32 @@ export class Scheduler {
   async load(): Promise<void> {
     const stored = await this.#store.list();
     this.#held.clear();
+    this.#unreadable.clear();
     this.#decisions.clear();
-    for (const { id, version, body } of stored) this.#held.set(id, { version, task: body });
+    for (const entry of stored) this.#keep(entry);
+  }
+
+  /**
+   * One record re-read, as `load` reads them all — what a host calls when the
+   * store says a key changed under it (`store-changed`). Serialized with the
+   * task's own writes, so it never lands between a write and its refresh.
+   */
+  async refresh(id: string): Promise<void> {
+    await this.#serial(id, async () => {
+      const entry = await this.#store.get(id);
+      this.#held.delete(id);
+      this.#unreadable.delete(id);
+      if (entry === null) {
+        this.#decisions.delete(id);
+        return;
+      }
+      this.#keep(entry);
+    });
+  }
+
+  /** What the store holds that this scheduler cannot read, and why — for the host to report. */
+  unreadable(): readonly UnreadableTask[] {
+    return [...this.#unreadable.values()];
   }
 
   /**
@@ -157,7 +194,10 @@ export class Scheduler {
         const held = this.#held.get(task.id);
         if (held === undefined || !FINISHED.includes(held.task.state)) return;
         const write = await this.#store.delete(task.id, held.version);
-        if (!write.ok) return;
+        if (!write.ok) {
+          this.#refused(task.id, "delete", write);
+          return;
+        }
         this.#held.delete(task.id);
         this.#decisions.delete(task.id);
       });
@@ -180,19 +220,21 @@ export class Scheduler {
   /** A dry run over the current fleet: what `tick` would decide for this spec now. */
   preview(spec: TaskSpec): Decision {
     const task: Task = { id: "", spec, state: "ready", createdAt: this.#now() };
-    return route({
-      task,
-      machines: this.#fleet.machines(),
-      tasks: this.tasks(),
-      now: this.#now(),
-      config: this.#config,
-    });
+    return capped(
+      route({
+        task,
+        machines: this.#fleet.machines(),
+        tasks: this.tasks(),
+        now: this.#now(),
+        config: this.#config,
+      }),
+    );
   }
 
   async submit(spec: TaskSpec): Promise<Task> {
     const task: Task = { id: this.#newId(), spec, state: "ready", createdAt: this.#now() };
     const write = await this.#store.put(task.id, 0, task);
-    if (!write.ok) throw new Error(`task id ${task.id} already exists`);
+    if (!write.ok) throw new Error(`task ${task.id} was not stored (${write.code})`);
     this.#held.set(task.id, { version: write.version, task });
     return task;
   }
@@ -310,13 +352,15 @@ export class Scheduler {
     // other placement, TTL and absence check behind its 90s timeout.
     for (const task of ready) {
       const now = this.#now();
-      const decision = route({
-        task,
-        machines: this.#fleet.machines(),
-        tasks: this.tasks(),
-        now,
-        config: this.#config,
-      });
+      const decision = capped(
+        route({
+          task,
+          machines: this.#fleet.machines(),
+          tasks: this.tasks(),
+          now,
+          config: this.#config,
+        }),
+      );
       this.#decisions.set(task.id, decision);
       if (decision.chosen === null) continue;
       const reservation: Reservation = { ...decision.chosen, expiresAt: now + this.#config.reservationTtlMs };
@@ -464,36 +508,100 @@ export class Scheduler {
    * The one way a held task is written. Serialized per task, with `change`
    * computed from the copy held when its turn comes, so two writers never race
    * one version: an `ended` event landing while a verdict's write is out
-   * applies after it, to what it wrote. A version conflict is another writer
-   * outside this process (M3's apps); the held copy is refreshed from the store
-   * and `change` applied again to what it finds. Null when `change` declines
-   * (it returns null for a task no longer in the state it acts on), the task is
-   * gone, or the conflicts outlast `WRITE_ATTEMPTS`.
+   * applies after it, to what it wrote. A version conflict is a write this
+   * process did not make — a term that ended without hearing it had, or a
+   * create racing its own — so the held copy is refreshed from the store and
+   * `change` applied again to what it finds. A lost reply (`indeterminate`) is
+   * read the same way, except that the one version after ours is ours. A record
+   * past the store's bound is written again with its decision cut to the
+   * winner, never the task cut. Null when `change` declines (it returns null
+   * for a task no longer in the state it acts on), the task is gone or
+   * unreadable, the store refused the write, or the conflicts outlast
+   * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
    */
   #update(id: string, change: (task: Task) => Task | null): Promise<Task | null> {
     return this.#serial(id, async () => {
+      let trim = false;
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
         const held = this.#held.get(id);
         if (held === undefined) return null;
-        const next = change(held.task);
-        if (next === null) return null;
+        const changed = change(held.task);
+        if (changed === null) return null;
+        const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);
         if (write.ok) {
           this.#held.set(id, { version: write.version, task: next });
           return next;
         }
-        // oxlint-disable-next-line no-await-in-loop -- as above
-        const fresh = await this.#store.get(id);
-        if (fresh === null) {
-          this.#held.delete(id);
+        if (write.code === "too_large" && !trim && next.decision !== undefined) {
+          trim = true;
+          continue;
+        }
+        if (write.code !== "version_conflict" && write.code !== "indeterminate") {
+          this.#refused(id, "put", write);
           return null;
         }
-        this.#held.set(id, { version: fresh.version, task: fresh.body });
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const fresh = await this.#store.get(id);
+        this.#held.delete(id);
+        if (fresh === null) return null;
+        // Every overwrite of a task is the leader's, so the one version after ours, after a
+        // lost reply, is our write — adopted as written, or the change would decline itself.
+        if (write.code === "indeterminate" && fresh.body !== undefined && fresh.version === held.version + 1) {
+          this.#held.set(id, { version: fresh.version, task: next });
+          return next;
+        }
+        this.#keep(fresh);
+        if (fresh.body === undefined) return null;
       }
       return null;
     });
   }
+
+  /** A record as read: held when it opened, set aside with its reason when it did not. */
+  #keep(entry: StoreEntry): void {
+    if (entry.body === undefined) {
+      this.#unreadable.set(entry.id, entry);
+      this.#decisions.delete(entry.id);
+      return;
+    }
+    this.#unreadable.delete(entry.id);
+    this.#held.set(entry.id, { version: entry.version, task: entry.body });
+  }
+
+  /** A write the store refused outright: no race to retry, so it is a fault for the host to see. */
+  #refused(id: string, op: string, write: Extract<StoreWrite, { readonly ok: false }>): void {
+    this.#onError(new Error(`store refused ${op} of task ${id}: ${write.code}`));
+  }
+}
+
+/** At most `DECISION_MAX_CANDIDATES`, cut from the end — the rejected trail — and counted in `trimmed`. */
+function capped(decision: Decision): Decision {
+  const over = decision.candidates.length - DECISION_MAX_CANDIDATES;
+  if (over <= 0) return decision;
+  return {
+    ...decision,
+    candidates: decision.candidates.slice(0, DECISION_MAX_CANDIDATES),
+    trimmed: (decision.trimmed ?? 0) + over,
+  };
+}
+
+/**
+ * A task whose record would not fit: its decision cut to the candidate it chose,
+ * the rest counted in `trimmed`. Everything else a record holds is bounded, so
+ * this is the one cut that can make it fit (`STORE_MAX_CT_LENGTH`).
+ */
+function trimmed(task: Task): Task {
+  const { decision } = task;
+  if (decision === undefined) return task;
+  const { chosen } = decision;
+  const kept = decision.candidates.filter(
+    (c) => chosen !== null && c.deviceId === chosen.deviceId && c.exclave === chosen.exclave,
+  );
+  const cut = decision.candidates.length - kept.length;
+  if (cut === 0) return task;
+  return { ...task, decision: { ...decision, candidates: kept, trimmed: (decision.trimmed ?? 0) + cut } };
 }
 
 /** What a settle reads besides the task and the machine's answer. */
@@ -515,7 +623,8 @@ function assignmentOf(
 ): Assignment {
   return {
     ...targetOf(target),
-    ...(at.window === undefined ? {} : { window: at.window }),
+    // Cut to what a reader accepts: the daemon names the window, and a record holding a longer one would not read.
+    ...(at.window === undefined ? {} : { window: at.window.slice(0, TARGET_LIMITS.window) }),
     ...(at.id === undefined ? {} : { pane: at.id }),
   };
 }
@@ -675,5 +784,7 @@ function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Task | nul
   }
   if (reply.code === UNDELIVERED) return advance(task, "ready");
   if (reply.code === UNREACHABLE || isTransportError(reply.code)) return null;
-  return advance(task, "failed", { failure: { code: reply.code, message: reply.message } });
+  // A daemon's message can carry a whole stderr; the record keeps a line of it.
+  const failure = { code: reply.code, message: reply.message.slice(0, TASK_FAILURE_LIMITS.message) };
+  return advance(task, "failed", { failure });
 }

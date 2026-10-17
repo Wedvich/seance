@@ -218,7 +218,7 @@ describe("leader requests", () => {
       leader.deliver(await appRequest("queue", {}, "remote"));
       await Bun.sleep(100);
       expect(replies.size).toBe(0);
-      expect((await store.list()).map((t) => t.body.state)).toEqual(["ready", "ready"]);
+      expect((await store.list()).map((t) => t.body?.state)).toEqual(["ready", "ready"]);
     } finally {
       leader.stop();
       relay.stop();
@@ -241,7 +241,7 @@ describe("leader requests", () => {
       // The app's `taskId` is not a field a task takes: the scheduler mints its own.
       expect(queuedTask.id).not.toBe("mine");
       expect(queuedTask).toMatchObject({ state: "ready", spec: { repo: "github.com/acme/app", prompt: "fix it" } });
-      expect((await store.get(queuedTask.id))?.body.id).toBe(queuedTask.id);
+      expect((await store.get(queuedTask.id))?.body?.id).toBe(queuedTask.id);
 
       leader.deliver(await appRequest("queue"));
       const queued = queueReply((await replies.next()).response.payload).tasks;
@@ -340,7 +340,7 @@ describe("leader requests", () => {
       const session = { id: "%9", window: "w9", repo: "app", path: "/wt/run-b", taskId: "run-b" };
       await answerAsB("sessions", { sessions: [session], at: Date.now() } satisfies SessionsResponse);
       await leader.settled();
-      expect((await store.get("run-b"))?.body.state).toBe("running");
+      expect((await store.get("run-b"))?.body?.state).toBe("running");
 
       leader.deliver(await appRequest("cancel", { taskId: "run-b" }));
       // `client: scheduler` from `SCHEDULER_ID` is what `b` audits as `origin=relay client=scheduler`.
@@ -426,6 +426,8 @@ describe("leader requests", () => {
       get: (id) => inner.get(id),
       put: (id, version, body) => inner.put(id, version, body),
       delete: (id, version) => inner.delete(id, version),
+      getPause: () => inner.getPause(),
+      putPause: (version, holds) => inner.putPause(version, holds),
     };
     const { leader, replies } = leaderOver(relay, slow);
     try {
@@ -572,6 +574,8 @@ describe("leader lifecycle", () => {
       get: (id) => inner.get(id),
       put: (id, version, body) => inner.put(id, version, body),
       delete: (id, version) => inner.delete(id, version),
+      getPause: () => inner.getPause(),
+      putPause: (version, holds) => inner.putPause(version, holds),
     };
     const { leader } = leaderOver(relay, flaky, 50);
     try {
@@ -678,8 +682,8 @@ describe("leader in the daemon", () => {
         relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: reply }));
         await daemon.leader.settled();
         ended = {
-          remote: (await store.get("remote-task"))?.body.state,
-          self: (await store.get("self-task"))?.body.state,
+          remote: (await store.get("remote-task"))?.body?.state,
+          self: (await store.get("self-task"))?.body?.state,
         };
 
         relay.follow(deviceId);
@@ -726,12 +730,12 @@ describe("leader in the daemon", () => {
         relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: reply }));
       }
       await daemon.leader.settled();
-      expect((await store.get("on-b"))?.body.state).toBe("ready");
+      expect((await store.get("on-b"))?.body?.state).toBe("ready");
       expect((await store.get("on-c"))?.body).toMatchObject({
         state: "failed",
         failure: { code: "dispatch_unconfirmed" },
       });
-      expect((await store.get("on-self"))?.body.state).toBe("ready");
+      expect((await store.get("on-self"))?.body?.state).toBe("ready");
     } finally {
       daemon.stop();
       relay.stop();
@@ -758,7 +762,7 @@ describe("leader in the daemon", () => {
       );
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: answer }));
       await daemon.leader.settled();
-      expect((await store.get("t-b"))?.body.state).toBe("reserved");
+      expect((await store.get("t-b"))?.body?.state).toBe("reserved");
 
       const event = (from: string, payload: object) =>
         seal(
@@ -773,14 +777,14 @@ describe("leader in the daemon", () => {
       }
       // Had either been taken, the task would already be done, and a later `busy` could not move it.
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", { ...ended, state: "busy" }) }));
-      await pollUntil(async () => (await store.get("t-b"))?.body.state !== "reserved", "the busy event to land");
+      await pollUntil(async () => (await store.get("t-b"))?.body?.state !== "reserved", "the busy event to land");
       expect((await store.get("t-b"))?.body).toMatchObject({
         state: "running",
         assignment: { deviceId: "b", pane: "%3" },
       });
 
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: await event("b", ended) }));
-      await pollUntil(async () => (await store.get("t-b"))?.body.state === "done", "the ended event to land");
+      await pollUntil(async () => (await store.get("t-b"))?.body?.state === "done", "the ended event to land");
     } finally {
       daemon.stop();
       relay.stop();

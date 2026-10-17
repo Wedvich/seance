@@ -245,7 +245,9 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
   "Session events"). The mod is also the phase-2 bus.
 - **`leader.ts`, the scheduler role** (M2; DESIGN.md _Scheduler_, "The leader"). `QueueStore` is
   still the library's in-memory one, fenced by the term; M3 swaps in the relay's `store-*` ops
-  behind the same interface.
+  behind the port as the store port left it (2026-10-17: unreadable records as values, every
+  write failure but a revoked term as a value, the pause slot, `refresh`) — so the adapter maps
+  the relay's answers onto it rather than widening it.
 
 ## Scheduler (`scheduler/`)
 
@@ -266,10 +268,13 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
   "`lost`" and "Takeover", with `scheduler/src/task.ts` the table that runs; M3's is below.
 
 **The store adapter (M3 item 3).** M2's leader runs on the library's `MemoryQueueStore`. M3's
-`QueueStore` is `daemon/src/queue-store.ts` over the relay's `store-*` ops. The library still
-sees plain task bodies: the adapter seals and opens each under the daemon's imported key, binds
-it to its version and key (Wire changes, _Version binding_), and carries the term on every
-write. Tests stay layered: the library against in-memory fakes of both interfaces, the adapter
+`QueueStore` is `daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as
+the store port left it (DESIGN.md _Scheduler_, "The library"). The library sees plain task
+bodies, plus each record that did not read as `{ id, version, reason }`: the adapter seals and
+opens each under the daemon's imported key, binds it through `bindTaskRecord` (Wire changes,
+_Version binding_), and carries the term on every write. It maps the relay's answers onto the
+port's: `not_leader` to a `StoreRevoked` throw, a reply lost to the timeout to `indeterminate`,
+`forbidden` and `invalid_request` to `refused`, and the rest by name. Tests stay layered: the library against in-memory fakes of both interfaces, the adapter
 against `daemon/test/harness.ts`, the store against the real DO in e2e.
 
 **Records (M3).** One sealed `TaskRecord` per task at `task:<id>`, the pause at `queue:pause`;
@@ -478,15 +483,17 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     an unfinished one names; a cycle fails every member at admission (`dependency_cycle`); a
     `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
-  - `cap_reached` scope `batch` (a batch at its strategy's bound; `sequential` is 1). The pause
-    hold's own `Reason` (`paused`) lands with the store port, once the PWA's and MCP's reason
-    wording is one module (the M2 review's quality PR) and adding a code is one edit there.
+  - `cap_reached` scope `batch` (a batch at its strategy's bound; `sequential` is 1).
   - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
     `QueueChanged.tasks`.
-- **Before wave 1: the store port** (the M2 review's store PR): `QueueStore.list`/`get` return an
-  unreadable record as `{ id, version, reason }` so "skipped and reported" is testable in the
-  library; write failures beyond `version_conflict`; a home for `queue:pause`; a one-record
-  refresh for `store-changed`; `MemoryQueueStore` with tombstones and fault injection.
+- **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
+  library", is its record): `QueueStore.list`/`get` return an unreadable record as
+  `{ id, version, reason }`, so "skipped and reported" is tested in the library; every write
+  failure is a value but `StoreRevoked`; the `queue:pause` slot; `Scheduler.refresh(id)` for
+  `store-changed`; `MemoryQueueStore` with tombstones and fault hooks. The writer bounds 0b set
+  (failure message, window, decision cap) are applied where the library writes, and the pause
+  hold's `Reason` (`paused`) and raw scheduler error codes ride along, now that the PWA's and
+  MCP's wording is one module (`shared/src/scheduler-text.ts`).
 - **Wave 1**, in parallel:
   - **1. Relay store** — `relay/src/store.ts`, with `hub.ts` and `wire.ts`: the four frames, the
     per-prefix rules, term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS` /
