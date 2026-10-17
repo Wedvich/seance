@@ -445,7 +445,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
     `store-refused` with a `STORE_ERROR_CODES` code.
   - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
-    `task:` prefix lists in 5 MiB. Paging stays possible without a break — `after` on the request,
+    `task:` prefix lists in one frame (unverified in production; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
     which an older relay ignores and answers whole, and `next` on the reply, which today's
     clients refuse rather than read a page as the whole queue.
   - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
@@ -581,6 +581,14 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `submit` would write a record no reader keeps. Item 6 removes `submit`, but it lands after
     this item; so this item makes `submit` create `queued` (admission moves it on in the same
     pass) or lands only after item 6.
+    **Production check first:** the takeover reconcile lists the whole queue in one `store-list`,
+    and no Cloudflare limit on a message a Durable Object _sends_ is documented (DESIGN.md, "The
+    store", _Send size_, which holds the arithmetic). Item 2's `RelayClient.listTasks` already
+    lists `task:` in one frame on the app leg, so verify against the deployed relay that a full
+    prefix lists in one `store-listed` and arrives intact at the daemon (the Bun client) and at an
+    app-leg client: at least the PWA in a browser, ideally also the iOS WKWebView. A refused send
+    is a client timeout plus a `store reply not sent` relay log line, or a closed socket. If it
+    does not arrive, page with the reserved `after`/`next`.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
     credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
     handlers after the split.
@@ -787,7 +795,7 @@ same PR, with the reason.
 11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
     (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 40 KiB (`STORE_MAX_CT_LENGTH`) and a
     create's 28 KiB (`STORE_CREATE_MAX_CT_LENGTH`), and `task:` holds 128 (`MAX_TASKS`), so the
-    whole queue lists in one 5 MiB frame with no paging. A task names its work ("implement this
+    whole queue lists in one frame with no paging (unverified in production; DESIGN.md "The store"). A task names its work ("implement this
     Linear issue, and here are the details") and the session gathers the rest with tools; 8K
     characters is far more than that takes. A direct spawn is not bound by it. Measured: a
     create with every field at its bound and the prompt in two-byte characters fits the create

@@ -1238,8 +1238,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
 
 - **Four requests, four replies, on both legs.** `store-list { id, prefix }` answers
   `store-listed { re, records }`: every live record under `task:` or `queue:`, ascending by key, as
-  one frame (about 5 MiB at the caps; paging stays open — an `after` is ignored and answered whole,
-  and `parseStoreReply` refuses a reply carrying `next`). `store-get { id, key }` answers
+  one frame (unverified in production, sized in _Send size_ below; paging stays
+  open — an `after` is ignored and answered whole, and `parseStoreReply` refuses a reply carrying
+  `next`). `store-get { id, key }` answers
   `store-record { re, record }`, `null` for an absent or tombstoned key. `store-put` and
   `store-delete` answer `store-written { re, version }` — the new version, or the version a delete
   removed — or `store-refused { re, code }`. Parsed and bounded in `relay/src/wire.ts`, ruled in
@@ -1252,12 +1253,12 @@ enforces is what it can see: who is asking, the key, a version and a size.
   or the leader record. Records never reach the registry push and never count toward
   `MAX_DEVICES`.
 
-  | Key                                 | Value                                      | Why                                                                          |
-  | ----------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------- |
-  | `store:<key>`                       | `{ version, env }`                         | a live record                                                                |
-  | `store-tomb:<key>`                  | `{ version, at }`                          | a tombstone: no env                                                          |
-  | `store-tomb-at:<16-digit at>:<key>` | the store key                              | age index: tombstone keys sort by key, so a bounded purge needs one by age   |
-  | `store-meta:counts`                 | `{ total, prefixes: { "task:": n, ... } }` | kept counts: every DO `list` reads values, and a full `task:` is about 5 MiB |
+  | Key                                 | Value                                      | Why                                                                                  |
+  | ----------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
+  | `store:<key>`                       | `{ version, env }`                         | a live record                                                                        |
+  | `store-tomb:<key>`                  | `{ version, at }`                          | a tombstone: no env                                                                  |
+  | `store-tomb-at:<16-digit at>:<key>` | the store key                              | age index: tombstone keys sort by key, so a bounded purge needs one by age           |
+  | `store-meta:counts`                 | `{ total, prefixes: { "task:": n, ... } }` | kept counts: every DO `list` reads values, and a full `task:` is large (_Send size_) |
 
 - **Who may write**, per `STORE_PREFIXES` and the leg:
 
@@ -1322,9 +1323,32 @@ enforces is what it can see: who is asking, the key, a version and a size.
 - **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…`, with no `key=` on
   `version_conflict` (the normal answer to an enqueue retry and to leader races, so a key with a
   time would link task ids to retries) — and none for an accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
-  item 3). Never an `env`, a `ct` or its length. A storage failure logs and sends **no reply**;
-  the client's `STORE_TIMEOUT_MS` reads it as indeterminate. A shared-shape follow-up could give
-  it a code (`shared/src/types.ts` is not touched by item 1).
+  item 3). Never an `env`, a `ct` or its length.
+- **Two causes get no reply, and no code** (owner's call, 2026-10-17). A storage throw: a read's
+  escapes the handler, as does `#holdsTerm`'s on the daemon leg (it reads outside the try); a
+  `put` or `delete` throw is caught and logged. And a reply the socket refused: `#storeReply`
+  logs `store reply not sent` and sends nothing. Either way the client's `STORE_TIMEOUT_MS` reads
+  it as indeterminate, which is the honest answer: a rejected storage write does not prove it
+  never committed. (`#nudgeLeader`'s read can throw too, but only after the reply went out.) A code would change
+  nothing for the client, which recovers the same way either way: retry the same put at the
+  original `expect`. `version_conflict` then means it landed or another writer moved the key, and
+  a re-read tells which — as `landedEarlier` does for an enqueue (below). Re-reading first and
+  putting at the new version would apply the write twice. In production a failed storage write
+  is expected to reset the object and close the socket, so the client would see a dropped
+  connection, not a reply; unverified (Cloudflare's docs say nothing on it).
+- **Send size is unverified in production.** Cloudflare's Durable Objects limits page lists
+  "WebSocket message size: 32 MiB (only for received messages)" for both SQLite- and KV-backed
+  objects; the Workers limits page lists no WebSocket message limit; and the 2025-10-31 changelog
+  that raised it from 1 MiB to 32 MiB names no direction. No limit on a message a DO _sends_ is
+  documented. The relay suite lists a full prefix through local workerd, which says nothing about
+  the deployed limit, so a full `store-listed` (`MAX_TASKS` 128 × `STORE_MAX_CT_LENGTH` 40 KiB,
+  about 5 MiB — the one place the arithmetic lives) sent by a deployed relay is unchecked. Item 2's
+  `RelayClient.listTasks` already lists `task:` in one frame on the app leg, so the check must
+  cover both legs: a full listing arrives intact at the daemon (Bun client) and at an app-leg
+  client — at least the PWA in a browser, ideally also the iOS WKWebView it runs in. Item 3 runs
+  it before its takeover relies on one `store-list` (docs/scheduler.md); if production refuses
+  it, the fix is the reserved `after`/`next` paging. A refused send looks like a client timeout
+  plus a `store reply not sent` line on the relay, or a closed socket.
 - **Older and newer clients.** Unknown fields are ignored (`after` on a list); an unknown `t`
   parses to null and is dropped; a store frame with no usable `id` is dropped and logged, the
   socket stays usable (the relay cannot answer what it cannot correlate); one with an `id` and a

@@ -165,8 +165,11 @@ export interface Client {
   sendRaw(text: string): void;
   /** Next frame of the given `t`, discarding others (registry pushes interleave). */
   waitFor<T extends { t: string }>(t: T["t"], timeoutMs?: number): Promise<T>;
-  /** Next frame whose `re` is this, discarding others — store replies are correlated on `re`, not typed like `msg`. */
-  waitForRe<T extends { re: string }>(re: string, timeoutMs?: number): Promise<T>;
+  /**
+   * Next frame whose `re` is this, discarding others — store replies are correlated on `re`, not typed like `msg`.
+   * A frame of type `forbid` among the discarded ones throws: what `expectNo` checks after a reply, this checks before it.
+   */
+  waitForRe<T extends { re: string }>(re: string, timeoutMs?: number, forbid?: string): Promise<T>;
   /** Next frame verbatim — heartbeats are bare strings, not JSON. */
   nextRaw(timeoutMs?: number): Promise<string>;
   /** Asserts no frame of this type arrives — used where one must have been dropped. */
@@ -203,15 +206,16 @@ function wrap(ws: WebSocket): Client {
         if (frame.t === t) return frame as T;
       }
     },
-    waitForRe: async <T extends { re: string }>(re: string, timeoutMs = 2_000): Promise<T> => {
+    waitForRe: async <T extends { re: string }>(re: string, timeoutMs = 2_000, forbid?: string): Promise<T> => {
       const deadline = Bun.nanoseconds() + timeoutMs * 1e6;
       for (;;) {
         const remaining = Math.ceil((deadline - Bun.nanoseconds()) / 1e6);
         if (remaining <= 0) throw new Error(`no frame with re "${re}" within ${timeoutMs}ms`);
         const text = await frames.next(remaining);
         if (text === "pong") continue;
-        const frame = JSON.parse(text) as { re?: unknown };
+        const frame = JSON.parse(text) as { re?: unknown; t?: unknown };
         if (frame.re === re) return frame as T;
+        if (forbid !== undefined && frame.t === forbid) throw new Error(`expected no "${forbid}" frame, got ${text}`);
       }
     },
     nextRaw: (timeoutMs = 2_000) => frames.next(timeoutMs),

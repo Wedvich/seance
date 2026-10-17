@@ -14,7 +14,7 @@ import {
   type StoreRecord,
   type StoreReplyFrame,
 } from "@seance/shared";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   connectApp,
   connectDaemon,
@@ -61,15 +61,24 @@ function taskKey(tag = "t"): string {
   return `task:${tag}-${tasks}`;
 }
 
+/** Fixed keys for the caps suite, which fills a fresh relay each test. */
+const capKey = (i: number): string => `task:c-${String(i).padStart(3, "0")}`;
+const queueKey = (i: number): string => `queue:q-${String(i).padStart(3, "0")}`;
+
 /**
  * One store request and its reply, parsed by the shared client parser: a reply
  * the item 2/3 clients would reject fails here, not in their suites.
  */
-async function ask(client: Client, frame: Record<string, unknown>, timeoutMs = 5_000): Promise<StoreReplyFrame> {
+async function ask(
+  client: Client,
+  frame: Record<string, unknown>,
+  timeoutMs = 5_000,
+  forbid?: string,
+): Promise<StoreReplyFrame> {
   requests += 1;
   const id = `q-${requests}`;
   client.send({ ...frame, id });
-  const raw = await client.waitForRe<{ re: string }>(id, timeoutMs);
+  const raw = await client.waitForRe<{ re: string }>(id, timeoutMs, forbid);
   const reply = parseStoreReply(raw);
   if (reply === null) throw new Error(`a client would reject this reply: ${JSON.stringify(raw)}`);
   return reply;
@@ -128,6 +137,10 @@ const connectedIs =
   (frame: RegistryFrame): boolean =>
     frame.entries.some((entry) => entry.deviceId === deviceId && entry.connected === want);
 
+function expectNoCiphertext(lines: readonly string[]): void {
+  expect(lines.filter((line) => line.includes(MARKER))).toEqual([]);
+}
+
 /** The suite's shared rig: ids listed in SCHEDULER_LEADERS, an observer app, and daemons that join and leave. */
 function rig(): {
   readonly boot: (opts?: { tombstoneMs?: number; leaders?: number }) => Promise<void>;
@@ -163,6 +176,8 @@ function rig(): {
   return {
     boot: async (opts = {}) => {
       await Bun.sleep(SETTLE_MS);
+      // A fresh relay lists only its own ids: one left over from the last boot could never lead.
+      listed.length = 0;
       listed.push(...(await Promise.all(Array.from({ length: opts.leaders ?? 16 }, () => newDeviceId()))));
       hub = await startRelay(TOKEN, {
         leaders: listed,
@@ -172,7 +187,9 @@ function rig(): {
       });
     },
     stop: async () => {
-      await hub?.dispose();
+      const booted = hub;
+      hub = undefined;
+      await booted?.dispose();
       await Bun.sleep(SETTLE_MS);
     },
     relay: current,
@@ -347,8 +364,17 @@ describe("relay store: rules, versions and tombstones", () => {
     const raw = await leader.daemon.waitFor<{ t: string }>("store-changed", 5_000);
     expect(parseStoreChanged(raw)).toEqual({ t: "store-changed", key, version: 1 });
 
-    expect(await put(leader.daemon, key, 1, sealed(), leader.term)).toMatchObject(written(2));
+    // Either order: a nudge sent before the leader's own reply fails the ask, one after it the expectNo.
+    const own = { t: "store-put", key, expect: 1, env: sealed(), term: leader.term };
+    expect(await ask(leader.daemon, own, 5_000, "store-changed")).toMatchObject(written(2));
     await leader.daemon.expectNo("store-changed");
+    await follower.expectNo("store-changed");
+
+    // The leader still hears the next app write, so the silence above was about its own write.
+    const next = taskKey();
+    expect(await put(app, next, 0, sealed())).toMatchObject(written(1));
+    const after = await leader.daemon.waitFor<{ t: string }>("store-changed", 5_000);
+    expect(parseStoreChanged(after)).toEqual({ t: "store-changed", key: next, version: 1 });
     await follower.expectNo("store-changed");
 
     app.close();
@@ -484,30 +510,51 @@ describe("relay store: rules, versions and tombstones", () => {
     observer.close();
   }, 30_000);
 
-  test("no relay log line holds a record's ciphertext", () => {
+  // Its own write and refusal, so the check holds in any test order; run last, it covers this suite's relay.
+  // The caps suite's per-test relays are checked in its `afterEach`.
+  test("no relay log line holds a record's ciphertext", async () => {
+    const app = await connectApp(rigA.relay());
+    const key = taskKey();
+    expect(await put(app, key, 0, sealed(200))).toMatchObject(written(1));
+    expect(await put(app, key, 1, sealed(200))).toMatchObject(refused("forbidden"));
+    app.close();
+
     const lines = rigA.relay().logs();
-    expect(lines.length).toBeGreaterThan(0);
-    expect(lines.filter((line) => line.includes(MARKER))).toEqual([]);
+    expectNoCiphertext(lines);
     // Refusals are logged (with no ciphertext); the marker never appears.
     expect(lines.some((line) => line.startsWith("store refused"))).toBe(true);
   });
 });
 
+// A relay per test: each cap needs the store at a known fill, and `queue:` keys nobody may delete
+// would leave the next test a different one.
 describe("relay store: caps", () => {
   const rigB = rig();
 
-  beforeAll(() => rigB.boot({ leaders: 3 }));
-  afterAll(() => rigB.stop());
+  beforeEach(() => rigB.boot({ leaders: 1 }));
+  afterEach(async () => {
+    // After a failed boot `relay()` throws; `stop` still runs.
+    try {
+      expectNoCiphertext(rigB.relay().logs());
+    } finally {
+      await rigB.stop();
+    }
+  });
+
+  /** `task:` filled to `MAX_TASKS` by the leader, at version 1 and the default size. */
+  async function fillTasks(leader: { daemon: Client; term: number }): Promise<void> {
+    for (let i = 0; i < MAX_TASKS; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the cap
+      const reply = await put(leader.daemon, capKey(i), 0, sealed(), leader.term);
+      expect(reply).toMatchObject(written(1));
+    }
+  }
 
   test("a full task: prefix refuses creates on both legs, but a retried create still reads version_conflict", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
     const app = await connectApp(rigB.relay());
-    for (let i = 0; i < MAX_TASKS; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the cap
-      const reply = await put(leader.daemon, `task:c-${String(i).padStart(3, "0")}`, 0, sealed(), leader.term);
-      expect(reply).toMatchObject(written(1));
-    }
+    await fillTasks(leader);
     expect(await put(app, "task:x-1", 0, sealed())).toMatchObject(refused("store_full"));
     expect(await put(leader.daemon, "task:x-2", 0, sealed(), leader.term)).toMatchObject(refused("store_full"));
     // The version check comes before the caps: the retry of a create that landed is not a full-store answer.
@@ -526,12 +573,12 @@ describe("relay store: caps", () => {
   test("a full prefix lists as one frame, ascending by key", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
-    const before = await list(leader.daemon, "task:");
-    expect(before).toHaveLength(MAX_TASKS);
-    for (const record of before) {
+    await fillTasks(leader);
+    // Creates are capped below `STORE_MAX_CT_LENGTH`, so each record reaches it by an overwrite.
+    for (let i = 0; i < MAX_TASKS; i += 1) {
       // oxlint-disable-next-line no-await-in-loop -- sequential: 128 records at the largest size
-      const reply = await put(leader.daemon, record.key, record.version, sealed(STORE_MAX_CT_LENGTH), leader.term);
-      expect(reply).toMatchObject(written(record.version + 1));
+      const reply = await put(leader.daemon, capKey(i), 1, sealed(STORE_MAX_CT_LENGTH), leader.term);
+      expect(reply).toMatchObject(written(2));
     }
     const records = await list(leader.daemon, "task:", 20_000);
     expect(records).toHaveLength(MAX_TASKS);
@@ -545,17 +592,14 @@ describe("relay store: caps", () => {
   test("MAX_RECORDS bounds the total across prefixes: queue: keys count with the tasks", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
-    let landed = 0;
-    for (let i = 0; i < MAX_RECORDS; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential fill until the relay says full
-      const reply = await put(leader.daemon, `queue:q-${String(i).padStart(3, "0")}`, 0, sealed(), leader.term);
-      if (reply.t === "store-refused") {
-        expect(reply.code).toBe("store_full");
-        break;
-      }
-      landed += 1;
+    await fillTasks(leader);
+    for (let i = 0; i < MAX_RECORDS - MAX_TASKS; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the total
+      expect(await put(leader.daemon, queueKey(i), 0, sealed(), leader.term)).toMatchObject(written(1));
     }
-    expect(landed).toBe(MAX_RECORDS - MAX_TASKS);
+    expect(await put(leader.daemon, queueKey(MAX_RECORDS), 0, sealed(), leader.term)).toMatchObject(
+      refused("store_full"),
+    );
     await rigB.dismiss(observer, leader);
     observer.close();
   }, 60_000);
