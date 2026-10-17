@@ -1545,7 +1545,11 @@ enqueue through them in item 6, and the leader's adapter (item 3) reuses the rec
   they are Layer 1 plaintext the relay answers itself, so no envelope, leader or guard is
   involved. A store reply that does not parse (a `next` page included) still names its request
   and settles it as `null` at once rather than at `STORE_TIMEOUT_MS`; a close fails it
-  `dropped`, as it does a sealed request.
+  `dropped`, as it does a sealed request. So does a reconnect, which fails the store requests
+  sent on the replaced socket: the relay answers a store frame only on the socket that sent
+  it (a sealed reply fans out to every app socket), so a reply counts only from that socket.
+  A listing is checked too: a key outside `task:`, or listed twice, reads `key_mismatch` for
+  every copy (`openTaskListing`).
 
 ## Daemon (`seanced`, Bun)
 

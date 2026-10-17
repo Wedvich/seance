@@ -3,8 +3,10 @@
 // because the real one answers no store frame until scheduler M3 item 1.
 import {
   APP_ID,
+  AT_REST_OPS,
   importPsk,
   isRecord,
+  openAtRest,
   openTaskRecord,
   parseEnvelope,
   RelayClient,
@@ -41,6 +43,7 @@ interface StoreDouble {
   readonly url: string;
   readonly records: Map<string, StoreRecord>;
   readonly received: Frame[];
+  readonly sockets: Set<ServerWebSocket<unknown>>;
   answer: ((frame: Frame) => unknown) | null;
   readonly stop: () => Promise<void>;
 }
@@ -77,6 +80,7 @@ function memoryAnswer(records: Map<string, StoreRecord>, frame: Frame): unknown 
 function startDouble(): StoreDouble {
   const records = new Map<string, StoreRecord>();
   const received: Frame[] = [];
+  const sockets = new Set<ServerWebSocket<unknown>>();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -85,6 +89,8 @@ function startDouble(): StoreDouble {
     },
     websocket: {
       perMessageDeflate: false,
+      open: (ws) => void sockets.add(ws),
+      close: (ws) => void sockets.delete(ws),
       message(ws: ServerWebSocket<unknown>, message) {
         if (message === "ping") {
           ws.send("pong");
@@ -108,6 +114,7 @@ function startDouble(): StoreDouble {
     url: `ws://127.0.0.1:${server.port}/app`,
     records,
     received,
+    sockets,
     answer: null,
     stop: () => server.stop(true),
   };
@@ -185,6 +192,18 @@ describe("createTask", () => {
     expect(double.received).toEqual([]);
   });
 
+  test("seals the checked copy: a property the task type does not carry never reaches the record", async () => {
+    const double = startDouble();
+    const client = await connect(double);
+    const task = queued();
+    const withExtra = { ...task, smuggled: "x" };
+    expect(await client.createTask(withExtra)).toEqual({ ok: true, landedEarlier: false });
+    const env = parseEnvelope(double.received[0]?.["env"]);
+    if (env === null) throw new Error("the put carried no envelope");
+    // Opened raw: `openTaskRecord` would parse the extra property away and hide it.
+    expect((await openAtRest(key, env, AT_REST_OPS.task)).payload).toEqual({ version: 1, task });
+  });
+
   test("hands back any other refusal raw, a code this build has never seen included", async () => {
     const double = startDouble();
     const client = await connect(double);
@@ -245,6 +264,35 @@ describe("reading tasks", () => {
     expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: true, task: null });
   });
 
+  test("a listing with a key outside task: or one listed twice reports them, the rest still read", async () => {
+    const double = startDouble();
+    const client = await connect(double);
+    const good = queued();
+    const twice = queued();
+    const outside = queued();
+    const copy = await stored(twice, 1);
+    const outsideAt = `queue:${outside.id}`;
+    const records = [await stored(good, 1), copy, copy, await stored(outside, 1, key, outsideAt)];
+    double.answer = (frame) => ({ t: "store-listed", re: frame["id"], records });
+
+    const listing = await client.listTasks();
+    if (listing === null || !listing.ok) throw new Error(`no listing: ${JSON.stringify(listing)}`);
+    expect(listing.tasks).toEqual([{ version: 1, task: good }]);
+    expect(listing.unreadable).toEqual([
+      { key: taskKey(twice.id), version: 1, reason: "key_mismatch" },
+      { key: taskKey(twice.id), version: 1, reason: "key_mismatch" },
+      { key: outsideAt, version: 1, reason: "key_mismatch" },
+    ]);
+  });
+
+  test("a refused list or get comes back as the refusal", async () => {
+    const double = startDouble();
+    const client = await connect(double);
+    double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "rate_limited" });
+    expect(await client.listTasks()).toEqual({ ok: false, code: "rate_limited" });
+    expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: false, code: "rate_limited" });
+  });
+
   test("a get answered with another key's record is no answer, however well it binds", async () => {
     const double = startDouble();
     const client = await connect(double);
@@ -284,5 +332,29 @@ describe("store transport", () => {
     expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
     double.answer = () => "close";
     expect(await failure(client.createTask(queued()))).toBe("dropped");
+  });
+
+  test("a reconnect fails the store request sent on the replaced socket at once", async () => {
+    const double = startDouble();
+    const client = await connect(double, 60_000);
+    double.answer = () => "silent";
+    const outcome = failure(client.getTask(crypto.randomUUID()));
+    await pollUntil(() => double.received.length === 1, "the request to arrive");
+    const started = Date.now();
+    client.reconnect();
+    expect(await outcome).toBe("dropped");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("a reply after the timeout settles nothing and throws nothing", async () => {
+    const double = startDouble();
+    const client = await connect(double, 50);
+    double.answer = () => "silent";
+    expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
+    const [late] = double.received;
+    for (const ws of double.sockets) ws.send(JSON.stringify({ t: "store-record", re: late?.["id"], record: null }));
+    // The socket orders frames, so once this answers, the late reply has been handled.
+    double.answer = null;
+    expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: true, task: null });
   });
 });

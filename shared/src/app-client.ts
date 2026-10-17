@@ -22,7 +22,6 @@ import {
   type MetricsRequest,
   type Plain,
   type QueueReply,
-  type RecordUnreadable,
   type RegistryView,
   type RepoEntry,
   type RequestOp,
@@ -58,7 +57,7 @@ import {
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
 import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
-import { openTaskRecord, sealTaskRecord, taskKey } from "./task-record.ts";
+import { openTaskListing, openTaskRecord, sealTaskRecord, taskKey, type UnreadableRecord } from "./task-record.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 
@@ -130,13 +129,6 @@ export function failureReasonText(failure: RequestFailure): string {
     case "timeout":
       return `${failure.message} — the machine may be asleep, or the request may have landed anyway`;
   }
-}
-
-/** A stored task this build could not keep: skipped and reported with its reason, never fatal, never deleted. */
-export interface UnreadableRecord {
-  readonly key: string;
-  readonly version: number;
-  readonly reason: RecordUnreadable;
 }
 
 /**
@@ -294,6 +286,8 @@ interface Pending {
 }
 
 interface StorePending {
+  /** The relay answers a store frame on the socket that sent it, so a reply is this request's only there. */
+  readonly socket: WebSocket;
   readonly settle: (result: { ok: true; reply: StoreReplyFrame | null } | { ok: false; error: RequestFailure }) => void;
   readonly timer: ReturnType<typeof setTimeout>;
 }
@@ -715,6 +709,11 @@ export class RelayClient {
     // reporting the deliberate swap as a drop.
     const previous = this.#socket;
     this.#socket = null;
+    // Sealed replies fan out to every app socket and may still arrive on the new one; a store
+    // reply goes only to its sender, so these would otherwise ride out STORE_TIMEOUT_MS.
+    if (previous !== null) {
+      this.#failStoreSentOn(previous, new RequestFailure("dropped", "the relay socket was replaced"));
+    }
     previous?.close();
     this.#stopped = false;
     this.#connect();
@@ -814,6 +813,15 @@ export class RelayClient {
     }
   }
 
+  #failStoreSentOn(socket: WebSocket, error: RequestFailure): void {
+    for (const [id, pending] of [...this.#storePending]) {
+      if (pending.socket !== socket) continue;
+      clearTimeout(pending.timer);
+      this.#storePending.delete(id);
+      pending.settle({ ok: false, error });
+    }
+  }
+
   #connect(): void {
     if (this.#stopped) return;
     const url = new URL(this.#url);
@@ -838,7 +846,7 @@ export class RelayClient {
         this.#pongDeadline = null;
         return;
       }
-      void this.#onFrame(event.data);
+      void this.#onFrame(event.data, socket);
     });
     socket.addEventListener("close", (event) => {
       if (this.#socket !== socket) return;
@@ -934,7 +942,7 @@ export class RelayClient {
     this.#pongDeadline = null;
   }
 
-  async #onFrame(text: string): Promise<void> {
+  async #onFrame(text: string, socket: WebSocket): Promise<void> {
     const frame = parseFrame(text);
     if (frame === null) {
       // Observable but contentless: the frame is peer-supplied text, so nothing
@@ -969,7 +977,7 @@ export class RelayClient {
     }
     if (frame.t === "store-unreadable") {
       this.#wireLog("dropped", `re=${quote(frame.re)} reason=store-shape`);
-      this.#storePending.get(frame.re)?.settle({ ok: true, reply: null });
+      this.#settleStore(socket, frame.re, null);
       return;
     }
     if (
@@ -978,12 +986,24 @@ export class RelayClient {
       frame.t === "store-written" ||
       frame.t === "store-refused"
     ) {
-      const pending = this.#storePending.get(frame.re);
-      this.#wireLog("recv", `re=${quote(frame.re)} t=${frame.t} pending=${pending === undefined ? "no" : "yes"}`);
-      pending?.settle({ ok: true, reply: frame });
+      this.#settleStore(socket, frame.re, frame);
       return;
     }
     await this.#onMessage(frame.env);
+  }
+
+  /** Settles a store request only from the socket it was sent on; anything else is stale. */
+  #settleStore(socket: WebSocket, re: string, reply: StoreReplyFrame | null): void {
+    const pending = this.#storePending.get(re);
+    if (pending !== undefined && pending.socket !== socket) {
+      this.#wireLog("dropped", `re=${quote(re)} reason=store-stale`);
+      return;
+    }
+    this.#wireLog(
+      "recv",
+      `re=${quote(re)} t=${reply?.t ?? "unreadable"} pending=${pending === undefined ? "no" : "yes"}`,
+    );
+    pending?.settle({ ok: true, reply });
   }
 
   #onUndeliverable(to: string, iv: string, code: string): void {
@@ -1351,6 +1371,7 @@ export class RelayClient {
         reject(new RequestFailure("timeout", `${frame.t} timed out after ${limit}ms`));
       }, limit);
       this.#storePending.set(frame.id, {
+        socket,
         timer,
         settle: (result) => {
           clearTimeout(timer);
@@ -1379,16 +1400,7 @@ export class RelayClient {
     const reply = await this.#store({ t: "store-list", id: crypto.randomUUID(), prefix: STORE_PREFIXES.task.prefix });
     if (reply?.t === "store-refused") return { ok: false, code: reply.code };
     if (reply?.t !== "store-listed") return this.#storeKindMismatch(reply);
-    const now = Date.now();
-    const opened = await Promise.all(
-      reply.records.map(async (stored) => ({ stored, read: await openTaskRecord(this.#key, stored, now) })),
-    );
-    const tasks: TaskRecord[] = [];
-    const unreadable: UnreadableRecord[] = [];
-    for (const { stored, read } of opened) {
-      if (typeof read === "string") unreadable.push({ key: stored.key, version: stored.version, reason: read });
-      else tasks.push(read);
-    }
+    const { tasks, unreadable } = await openTaskListing(this.#key, reply.records, Date.now());
     if (unreadable.length > 0) this.#wireLog("skipped", `prefix=task count=${unreadable.length}`);
     return { ok: true, tasks, unreadable };
   }
@@ -1400,7 +1412,10 @@ export class RelayClient {
     if (reply?.t !== "store-record") return this.#storeKindMismatch(reply);
     if (reply.record === null) return { ok: true, task: null };
     // Binding checks the record against the key it came with, so that key must be the one asked for.
-    if (reply.record.key !== key) return this.#storeKindMismatch(reply);
+    if (reply.record.key !== key) {
+      this.#wireLog("dropped", `re=${quote(reply.re)} t=${reply.t} reason=store-key`);
+      return null;
+    }
     const read = await openTaskRecord(this.#key, reply.record, Date.now());
     return { ok: true, task: typeof read === "string" ? { key, version: reply.record.version, reason: read } : read };
   }
@@ -1411,13 +1426,16 @@ export class RelayClient {
    * through its daemon socket instead. A record every reader would skip, or
    * one past the create cap, is refused here and never sent. A retry after a
    * lost reply re-sends the same task, and its `version_conflict` is queued.
+   *
+   * Precondition: `task.id` is freshly minted by the app, never reused and
+   * never an id whose key may hold a tombstone — `version_conflict` is read as
+   * "queued", which for any other key would report a task that never runs.
    */
   async createTask(task: Task): Promise<TaskCreated | StoreRefusal | null> {
     const key = taskKey(task.id);
-    const record: TaskRecord = { version: 1, task };
-    if (typeof bindTaskRecord(record, { key, version: 1 }, Date.now()) === "string") {
-      return { ok: false, code: "invalid_request" };
-    }
+    // Sealed is the parsed copy, which holds only known fields: what is sealed is what was checked.
+    const record = bindTaskRecord({ version: 1, task }, { key, version: 1 }, Date.now());
+    if (typeof record === "string") return { ok: false, code: "invalid_request" };
     const env = await sealTaskRecord(this.#key, APP_ID, record);
     if (env.ct.length > STORE_CREATE_MAX_CT_LENGTH) return { ok: false, code: "too_large" };
     const reply = await this.#store({ t: "store-put", id: crypto.randomUUID(), key, expect: 0, env });

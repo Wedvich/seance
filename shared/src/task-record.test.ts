@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, sealAtRest, toBase64 } from "./crypto.ts";
-import { openTaskRecord, sealTaskRecord, taskKey } from "./task-record.ts";
+import { openTaskListing, openTaskRecord, sealTaskRecord, taskKey } from "./task-record.ts";
 import { APP_ID, SCHEDULER_ID, type Task, type TaskRecord } from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
@@ -56,5 +56,28 @@ describe("task records at rest", () => {
     const id = crypto.randomUUID();
     const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", { version: 1, task: { id } });
     expect(await openTaskRecord(key, { key: taskKey(id), version: 1, env }, NOW)).toBe("malformed");
+  });
+});
+
+describe("a task listing", () => {
+  test("reports a key outside task: and every copy of a repeated key; the rest open", async () => {
+    const good = queued();
+    const twice = queued();
+    const outside = queued();
+    const env = (task: Task) => sealTaskRecord(key, APP_ID, { version: 1, task });
+    const copy = { key: taskKey(twice.id), version: 1, env: await env(twice) };
+    const records = [
+      { key: taskKey(good.id), version: 1, env: await env(good) },
+      copy,
+      { ...copy, env: await env(twice) },
+      { key: `queue:${outside.id}`, version: 1, env: await env(outside) },
+    ];
+    const { tasks, unreadable } = await openTaskListing(key, records, NOW);
+    expect(tasks).toEqual([{ version: 1, task: good }]);
+    expect(unreadable.map((u) => [u.key, u.reason])).toEqual([
+      [taskKey(twice.id), "key_mismatch"],
+      [taskKey(twice.id), "key_mismatch"],
+      [`queue:${outside.id}`, "key_mismatch"],
+    ]);
   });
 });

@@ -48,3 +48,43 @@ export async function openTaskRecord(
   }
   return bindTaskRecord(payload, stored, now);
 }
+
+/** A stored task this build could not keep: skipped and reported with its reason, never fatal, never deleted. */
+export interface UnreadableRecord {
+  readonly key: string;
+  readonly version: number;
+  readonly reason: RecordUnreadable;
+}
+
+/**
+ * Every record of a `task:` listing, opened one by one. The relay is
+ * untrusted, so the listing itself is checked too: a key outside the prefix
+ * is no task's, and a key listed twice has two authentic blobs for one id —
+ * a lie, not a choice to make — so every copy is reported. Both reuse
+ * `key_mismatch`: the key is not one record's address. Order is the listing's.
+ */
+export async function openTaskListing(
+  key: CryptoKey,
+  records: readonly StoreRecord[],
+  now: number,
+): Promise<{ readonly tasks: TaskRecord[]; readonly unreadable: UnreadableRecord[] }> {
+  const copies = new Map<string, number>();
+  for (const stored of records) copies.set(stored.key, (copies.get(stored.key) ?? 0) + 1);
+  const opened = await Promise.all(
+    records.map(
+      async (stored): Promise<TaskRecord | RecordUnreadable> =>
+        !stored.key.startsWith(STORE_PREFIXES.task.prefix) || (copies.get(stored.key) ?? 0) > 1
+          ? "key_mismatch"
+          : openTaskRecord(key, stored, now),
+    ),
+  );
+  const tasks: TaskRecord[] = [];
+  const unreadable: UnreadableRecord[] = [];
+  records.forEach((stored, i) => {
+    const read = opened[i];
+    if (read === undefined) return;
+    if (typeof read === "string") unreadable.push({ key: stored.key, version: stored.version, reason: read });
+    else tasks.push(read);
+  });
+  return { tasks, unreadable };
+}
