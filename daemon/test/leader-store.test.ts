@@ -2,7 +2,20 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appRelayUrl, importPsk, open, RelayClient, SCHEDULER_ID, seal, toBase64, type OpName } from "@seance/shared";
+import {
+  APP_ID,
+  appRelayUrl,
+  importPsk,
+  open,
+  openTaskRecord,
+  RelayClient,
+  SCHEDULER_ID,
+  seal,
+  sealTaskRecord,
+  toBase64,
+  type OpName,
+  type Plain,
+} from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
@@ -73,11 +86,15 @@ const noLocalOps: LocalOps = {
  */
 function leaderOver(relay: TestRelay, store: QueueStore) {
   let resigned = 0;
+  const replies: { readonly to: string; readonly response: Plain }[] = [];
   const leader: Leader = createLeader({
     selfDeviceId: "self",
     local: noLocalOps,
     store,
-    reply: () => Promise.resolve(true),
+    reply: (to, response) => {
+      replies.push({ to, response });
+      return Promise.resolve(true);
+    },
     resign: () => {
       resigned += 1;
     },
@@ -93,17 +110,22 @@ function leaderOver(relay: TestRelay, store: QueueStore) {
         createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
       }),
   });
-  return { leader, resigned: () => resigned };
+  return { leader, replies, resigned: () => resigned };
 }
 
 async function withLeader(
-  body: (t: { relay: TestRelay; leader: Leader; resigned: () => number }) => Promise<void>,
+  body: (t: {
+    relay: TestRelay;
+    leader: Leader;
+    replies: readonly { readonly to: string; readonly response: Plain }[];
+    resigned: () => number;
+  }) => Promise<void>,
   store: QueueStore = new MemoryQueueStore(),
 ): Promise<void> {
   const relay = startTestRelay(TOKEN);
-  const { leader, resigned } = leaderOver(relay, store);
+  const { leader, replies, resigned } = leaderOver(relay, store);
   try {
-    await body({ relay, leader, resigned });
+    await body({ relay, leader, replies, resigned });
   } finally {
     leader.stop();
     relay.stop();
@@ -196,10 +218,126 @@ describe("store-changed", () => {
       leader.onStoreChanged("task:x", 1);
       await pollUntil(() => store.failures === 0, "the first refresh to fail");
       expect(await stateOf(store, "x")).toBe("queued");
-      // The nudge was kept: a tick refreshes it before its pass.
-      leader.onStoreChanged("task:other", 1);
-      await pollUntil(async () => (await stateOf(store, "x")) === "ready", "the retried refresh to admit it");
+      // The failed refresh puts x back a microtask after the get rejects, so a tick sent at once may
+      // run before it: any later tick retries it, and none else moves x.
+      await pollUntil(async () => {
+        leader.onStoreChanged("task:other", 1);
+        return (await stateOf(store, "x")) === "ready";
+      }, "a later tick to retry the failed refresh and admit it");
     }, store);
+  });
+});
+
+describe("store-changed while takeover's buffered nudges are refreshing", () => {
+  test("a nudge that arrives between the term running and its buffered refresh finishing is applied, not lost", async () => {
+    class Gated extends MemoryQueueStore {
+      readonly listGate = Promise.withResolvers<void>();
+      readonly getGate = Promise.withResolvers<void>();
+      listed = false;
+      xGetHeld = false;
+      override async list(): Promise<readonly StoreEntry[]> {
+        const snapshot = await super.list();
+        this.listed = true;
+        await this.listGate.promise;
+        return snapshot;
+      }
+      // Only x's refresh is held: it is the buffered nudge takeover applies once `running` is set.
+      override async get(id: string): Promise<StoreEntry | null> {
+        if (id === "x") {
+          this.xGetHeld = true;
+          await this.getGate.promise;
+        }
+        return super.get(id);
+      }
+    }
+    const store = new Gated();
+    await withLeader(async ({ leader }) => {
+      leader.lead(1);
+      await pollUntil(() => store.listed, "takeover to read the store");
+      await store.put("x", 0, task("x"));
+      leader.onStoreChanged("task:x", 1);
+      store.listGate.resolve();
+      await pollUntil(() => store.xGetHeld, "the buffered refresh to be in flight");
+      await store.put("y", 0, task("y"));
+      leader.onStoreChanged("task:y", 1);
+      await pollUntil(async () => (await stateOf(store, "y")) === "ready", "the mid-refresh nudge to be admitted");
+      store.getGate.resolve();
+      await pollUntil(async () => (await stateOf(store, "x")) === "ready", "the buffered nudge to be admitted");
+    }, store);
+  });
+});
+
+/** Writes go through until `armed`, then every one meets the relay's `not_leader`. */
+class Revocable extends MemoryQueueStore {
+  armed = false;
+  override put(id: string, expect: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+    if (this.armed) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
+    return super.put(id, expect, body);
+  }
+}
+
+describe("a revoked term, from the paths that write on an event", () => {
+  const running = (): Task => task("t", { state: "running", assignment: placedOnB });
+  const branchState = {
+    taskId: "t",
+    repo: "github.com/acme/app",
+    branch: "worktree-x",
+    pushed: true,
+    merged: false,
+    at: 1,
+  };
+
+  // The task arrives by a nudge, whose refresh is async: each test re-sends its event until the
+  // library holds the task and writes, which is the revoked write that ends the term.
+  async function armed(store: Revocable, leader: Leader): Promise<void> {
+    leader.lead(1);
+    await leader.settled();
+    await store.put("t", 0, running());
+    leader.onStoreChanged("task:t", 1);
+    store.armed = true;
+  }
+
+  test("onSession", async () => {
+    const store = new Revocable();
+    await withLeader(async ({ leader, resigned }) => {
+      await armed(store, leader);
+      await pollUntil(async () => {
+        await leader.onSession("t", "ended", { deviceId: "b", pane: "%3" });
+        return leader.term() === null;
+      }, "the revoked session write to end the term");
+      expect(resigned()).toBe(0);
+    }, store);
+  });
+
+  test("onBranchState", async () => {
+    const store = new Revocable();
+    await withLeader(async ({ leader, resigned }) => {
+      await armed(store, leader);
+      await pollUntil(() => {
+        leader.onBranchState(branchState, "b");
+        return leader.term() === null;
+      }, "the revoked branch-state write to end the term");
+      expect(resigned()).toBe(0);
+    }, store);
+  });
+
+  test("an app's request is answered not_leader, not internal_error", async () => {
+    class RevokedCreate extends MemoryQueueStore {
+      override put(id: string, expect: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (expect === 0) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
+        return super.put(id, expect, body);
+      }
+    }
+    await withLeader(async ({ leader, replies, resigned }) => {
+      leader.lead(1);
+      await leader.settled();
+      const submit = { repo: "github.com/acme/app", mode: "worktree" };
+      leader.deliver(await sealedTo("submit", submit, APP_ID));
+      await pollUntil(() => leader.term() === null, "the revoked request to end the term");
+      await pollUntil(() => replies.length === 1, "the app to be answered");
+      expect(replies[0]?.response.payload).toMatchObject({ ok: false, code: "not_leader" });
+      expect(resigned()).toBe(0);
+    }, new RevokedCreate());
   });
 });
 
@@ -319,7 +457,7 @@ describe("branch state and PR", () => {
 });
 
 describe("leader in the daemon", () => {
-  async function startLeaderDaemon(relay: TestRelay, store: QueueStore) {
+  async function startLeaderDaemon(relay: TestRelay, store: QueueStore | undefined) {
     const fixture = await makeGitFixture(await mkdtemp(join(base, "fixture-")));
     const config: Config = {
       name: "LeaderBox",
@@ -335,7 +473,7 @@ describe("leader in the daemon", () => {
       pingIntervalMs: 60_000,
       pongTimeoutMs: 300,
       baseBackoffMs: 20,
-      leader: { store, tickIntervalMs: 3_600_000 },
+      leader: { ...(store === undefined ? {} : { store }), tickIntervalMs: 3_600_000 },
     });
     const { deviceId } = await relay.registers.next();
     return { daemon, deviceId };
@@ -351,6 +489,28 @@ describe("leader in the daemon", () => {
       await store.put("x", 0, task("x"));
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "store-changed", key: "task:x", version: 1 }));
       await pollUntil(async () => (await stateOf(store, "x")) === "ready", "the daemon to pass the nudge on");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("with no store given the daemon leads on the relay's: an app's create is nudged, admitted and written back through the store leg", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { daemon, deviceId } = await startLeaderDaemon(relay, undefined);
+    try {
+      relay.lead(deviceId, 1);
+      await daemon.leader.settled();
+      // Takeover listed `task:` over the leg, under the term the relay named.
+      expect((await relay.storeFrames.next()).t).toBe("store-list");
+      const created = relay.appWrite("task:x", await sealTaskRecord(key, APP_ID, { version: 1, task: task("x") }));
+      expect(created).toEqual({ ok: true, version: 1 });
+      await pollUntil(() => relay.storeRecords().get("task:x")?.version === 2, "the leader to write the admit");
+      const held = relay.storeRecords().get("task:x");
+      if (held === undefined) throw new Error("no record");
+      const opened = await openTaskRecord(key, { key: "task:x", version: held.version, env: held.env }, Date.now());
+      expect(opened).toMatchObject({ version: 2, task: { id: "x", state: "ready" } });
+      expect(held.env.from).toBe(SCHEDULER_ID);
     } finally {
       daemon.stop();
       relay.stop();

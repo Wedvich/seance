@@ -228,6 +228,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     running: () => running,
     now,
     tick: () => tick(),
+    fail,
     reply: opts.reply,
   });
   // What another daemon or an app sent the scheduler, already opened and

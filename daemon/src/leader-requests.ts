@@ -1,4 +1,11 @@
-import { FINISHED, type CancelResult, type PauseResult, type Scheduler, winnerOnly } from "@seance/scheduler";
+import {
+  FINISHED,
+  StoreRevoked,
+  type CancelResult,
+  type PauseResult,
+  type Scheduler,
+  winnerOnly,
+} from "@seance/scheduler";
 import {
   APP_ID,
   MAX_ACTIVE_TASKS,
@@ -34,7 +41,7 @@ import { log } from "./log.ts";
 
 const audit = queueAudit(daemonSink);
 
-/** M2's in-memory queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
+/** The queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
 const KEEP_FINISHED = 50;
 
 function schedulerError(code: SchedulerErrorCode, message: string): SchedulerError {
@@ -192,8 +199,8 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
       return reply;
     }
-    // M2 only: the queue is this process's memory, so this is the one way in.
-    // M3 replaces it with an app's `store-put` at `expect: 0` and drops the op.
+    // Until M3 item 6, the one way in: the leader creates the record itself.
+    // Item 6 replaces it with an app's `store-put` at `expect: 0` and drops the op.
     case "submit": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed submit request");
@@ -257,6 +264,11 @@ export interface TermRequests {
   readonly running: () => boolean;
   readonly now: () => number;
   readonly tick: () => void;
+  /**
+   * The term's own fault path: a `StoreRevoked` out of a request is the relay's
+   * `not_leader` on a store write, which ends the term (`leader.ts`).
+   */
+  readonly fail: (err: unknown) => void;
   /** `LeaderOpts.reply`: the answer leaves on the daemon socket, not the term's leg. */
   readonly reply: (to: string, response: Plain) => Promise<boolean>;
 }
@@ -285,8 +297,14 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
         ? await answer({ scheduler: ctx.scheduler(), id: plain.id, now: now(), tick, admit }, op, plain.payload)
         : schedulerError("not_ready", `term ${term} is still taking over`);
     } catch (err) {
-      log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
-      payload = schedulerError("internal_error", String(err));
+      if (err instanceof StoreRevoked) {
+        // The write was refused or never sent, so the app may ask the next leader.
+        ctx.fail(err);
+        payload = schedulerError("not_leader", "this daemon's term has ended");
+      } else {
+        log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
+        payload = schedulerError("internal_error", String(err));
+      }
     }
     await ctx.reply(from, { id: crypto.randomUUID(), ts: Date.now(), op, re: plain.id, payload });
   };
