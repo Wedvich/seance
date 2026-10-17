@@ -25,13 +25,16 @@ export type SchedulerAlert =
 
 /**
  * The needs-input clock rides the write that moves the state: entering
- * `needs-input` stamps `needsInputSince`, any other state clears it and
- * `escalated`. On the record, so a new leader does not restart the clock.
+ * `needs-input` stamps `needsInputSince`, leaving it for any state but `lost`
+ * clears it and `escalated`. `lost` keeps both: a machine's absence is not an
+ * answer, and the wait resumes where it was when the machine returns. On the
+ * record, so a new leader does not restart the clock.
  */
 export function inputClock(task: Task, now: number): Task {
   if (task.state === "needs-input") {
     return task.needsInputSince === undefined ? { ...task, needsInputSince: now } : task;
   }
+  if (task.state === "lost") return task;
   if (task.needsInputSince === undefined && task.escalated === undefined) return task;
   const { needsInputSince: _since, escalated: _escalated, ...rest } = task;
   return rest;

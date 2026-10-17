@@ -51,13 +51,17 @@ export interface SchedulerOptions {
    * reject. Without this, the first one surfaces from the next `drain()`.
    */
   readonly onError?: (err: unknown) => void;
-  /** A dispatch spending credits, or an escalated wait for input (`SchedulerAlert`); fired after its write lands. */
+  /**
+   * A dispatch spending credits (once its spawn is confirmed), or an escalated
+   * wait for input (once its write lands) — `SchedulerAlert`. A throw goes to `onError`.
+   */
   readonly onAlert?: (alert: SchedulerAlert) => void;
 }
 
 /**
  * `pause` and `resume`: every hold in force after the change, or why not.
- * `full`: past `MAX_PAUSE_HOLDS`. `conflict`: the record kept changing under
+ * `full`: past `MAX_PAUSE_HOLDS`, one of them kept for the whole-queue hold
+ * (account holds stop at one fewer, so a queue `pause` always fits). `conflict`: the record kept changing under
  * the write.
  */
 export type PauseResult =
@@ -98,11 +102,11 @@ export class Scheduler {
   /** `queue:pause` as last read or written; version 0 before the first pause. */
   #pause: { readonly version: number; readonly holds: readonly PauseHold[] } = { version: 0, holds: [] };
   /**
-   * `account window` → the reset of the window a spill was last alerted for:
-   * one alert per account per window, not per task. Memory only, so a new
-   * leader alerts an ongoing spill once more.
+   * `account window` → the reset (ms) of the window a spill was last alerted
+   * for, 0 when that reading carried none: one alert per account per window,
+   * not per task. Memory only, so a new leader alerts an ongoing spill once more.
    */
-  readonly #spilled = new Map<string, string>();
+  readonly #spilled = new Map<string, number>();
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
   readonly #decisions = new Map<string, Decision>();
@@ -174,7 +178,7 @@ export class Scheduler {
       hold = { ...(account === undefined ? {} : { account }), until: "resume", at: now };
     } else {
       const resumeAt =
-        account === undefined ? null : accountResetAt(account, this.#fleet.machines(), now, this.#config);
+        account === undefined ? null : accountResetAt(account, this.#fleet.machines(), this.tasks(), now, this.#config);
       if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
       hold = { account, until: "reset", at: now, resumeAt };
     }
@@ -449,17 +453,19 @@ export class Scheduler {
       );
       if (reserved === null) continue;
       this.#decisions.delete(task.id);
-      this.#spill(reserved.id, decision);
-      this.#launch(reserved, reservation);
+      this.#launch(reserved, reservation, decision);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
   }
 
   /**
-   * A reservation on a candidate that `spill`s spends credits: alerted once per
-   * account per quota window (the window's label and its reset), not per task —
-   * the record's decision carries the spill for each task.
+   * A confirmed spawn on a candidate that `spill`s spends credits: alerted once
+   * per account per quota window, not per task — the record's decision carries
+   * the spill for each task. The window is told apart by its reset; two
+   * readings of one window differ by seconds, so a reset only counts as a new
+   * window when it is later by more than `resetGraceMs` (or the alerted one has
+   * passed), and a reading with no reset never does.
    */
   #spill(taskId: string, decision: Decision): void {
     const { chosen } = decision;
@@ -474,11 +480,23 @@ export class Scheduler {
       ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
     if (accountId === undefined || accountId === null) return;
     const key = `${accountId} ${spill.window}`;
-    const reset = String(windowResetOf(accountId, machines, spill.window) ?? "");
-    if (this.#spilled.get(key) === reset) return;
-    this.#spilled.set(key, reset);
+    const resetS = windowResetOf(accountId, machines, spill.window);
+    const reset = resetS === undefined ? undefined : resetS * 1000;
+    const now = this.#now();
+    const alerted = this.#spilled.get(key);
+    if (alerted !== undefined) {
+      if (reset === undefined) return;
+      // An alert stamped with no reset learns it, without alerting again.
+      if (alerted === 0) {
+        this.#spilled.set(key, reset);
+        return;
+      }
+      const newWindow = reset - alerted > this.#config.resetGraceMs || (alerted <= now && reset > now);
+      if (!newWindow) return;
+    }
+    this.#spilled.set(key, reset ?? 0);
     const pct = Math.round(spill.projectedPct);
-    this.#onAlert({
+    this.#alert({
       kind: "spill",
       taskId,
       accountId,
@@ -486,6 +504,15 @@ export class Scheduler {
       projectedPct: spill.projectedPct,
       message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
     });
+  }
+
+  /** An alert is a side channel: a host that throws must not strand a reservation or end a pass. */
+  #alert(alert: SchedulerAlert): void {
+    try {
+      this.#onAlert(alert);
+    } catch (err) {
+      this.#onError(err);
+    }
   }
 
   /**
@@ -503,7 +530,7 @@ export class Scheduler {
           const next = await this.#update(seen.id, (current) => escalation(current, now, after));
           if (next?.escalated !== true || next.needsInputSince === undefined) return;
           const minutes = Math.round((now - next.needsInputSince) / 60_000);
-          this.#onAlert({
+          this.#alert({
             kind: "needs-input",
             taskId: next.id,
             since: next.needsInputSince,
@@ -542,7 +569,7 @@ export class Scheduler {
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
         const held = this.#pause;
         const next = change(held.holds);
-        if (next.length > MAX_PAUSE_HOLDS) return { ok: false, code: "full" };
+        if (next.filter((h) => h.account !== undefined).length >= MAX_PAUSE_HOLDS) return { ok: false, code: "full" };
         if (sameHolds(next, held.holds)) return { ok: true, holds: this.holds() };
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.putPause(held.version, next);
@@ -591,14 +618,14 @@ export class Scheduler {
     );
   }
 
-  #launch(task: Task, at: Reservation): void {
-    const run = this.#dispatch(task, at)
+  #launch(task: Task, at: Reservation, decision: Decision): void {
+    const run = this.#dispatch(task, at, decision)
       .catch(this.#onError)
       .finally(() => this.#dispatches.delete(task.id));
     this.#dispatches.set(task.id, run);
   }
 
-  async #dispatch(task: Task, at: Reservation): Promise<void> {
+  async #dispatch(task: Task, at: Reservation, decision: Decision): Promise<void> {
     const { spec } = task;
     const reply = await this.#fleet.spawn(at.deviceId, {
       repo: at.clone,
@@ -613,6 +640,8 @@ export class Scheduler {
     });
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
     await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
+    // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
+    if (reply.ok) this.#spill(task.id, decision);
   }
 
   /**

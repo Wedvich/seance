@@ -1,14 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "@seance/shared";
-import {
-  accountResetAt,
-  DEFAULT_CONFIG,
-  route,
-  type Candidate,
-  type Decision,
-  type SchedulerConfig,
-  type Task,
-} from "../src/index.ts";
+import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
+import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
@@ -60,7 +53,7 @@ function twoAccounts(): Machine {
 
 /** When `org:a` resets, read from one machine reporting `quota`. */
 function resetOf(quota: ReturnType<typeof obs>): number | null {
-  return accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], NOW, DEFAULT_CONFIG);
+  return accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], [], NOW, DEFAULT_CONFIG);
 }
 
 describe("filter", () => {
@@ -332,12 +325,25 @@ describe("filter", () => {
       expect(resetOf(obs(0, { h: 95, hr: NOW_S + 3600, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 3600) * 1000);
     });
 
+    test("in-flight tasks on the account count, as routing counts them", () => {
+      const reading = machine("a", {
+        status: status({ quota: [obs(0, { h: 78, hr: NOW_S + 7200, d: 40, dr: NOW_S + 3600 })] }),
+      });
+      const running = (id: string): Task =>
+        task({ id, state: "running", assignment: { deviceId: "a", exclave: "main", clone: "app" } });
+      const inFlight = [running("x"), running("y"), running("z")];
+      // 78% plus four tasks of 5% crosses the 90% line in 5h: its reset, the latest of the full ones.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
+      // Alone it is under the line everywhere: the earliest reset.
+      expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
+    });
+
     test("under the line: the earliest reset still ahead", () => {
       expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 86_400) * 1000);
     });
 
     test("unknown: no reading, a full window with no reset, or every reset past", () => {
-      expect(accountResetAt("org:zz", [machine("a")], NOW, DEFAULT_CONFIG)).toBeNull();
+      expect(accountResetAt("org:zz", [machine("a")], [], NOW, DEFAULT_CONFIG)).toBeNull();
       expect(resetOf(obs(0, { h: 95, d: 10, dr: NOW_S + 86_400 }))).toBeNull();
       expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60 }))).toBeNull();
     });

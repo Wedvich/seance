@@ -83,9 +83,7 @@ export function route(input: RouteInput): Decision {
     config,
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
-    accountAt: (placement) =>
-      machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
-        ?.accountId ?? null,
+    accountAt: (placement) => accountOfPlacement(machines, placement),
     capReached:
       inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
@@ -180,11 +178,18 @@ interface AccountJudgement {
  * account cap and projected usage both count. A task whose machine has left
  * the registry has no account to read, so it counts toward neither.
  */
-function accountInFlight(pass: Pass, accountId: string): number {
+function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: string): number {
   return pass.inFlight.filter((t) => {
     const at = t.assignment ?? t.reservation;
     return at !== undefined && pass.accountAt(at) === accountId;
   }).length;
+}
+
+function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
+  return (
+    machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
+      ?.accountId ?? null
+  );
 }
 
 /** Projected usage counts this task and every in-flight one on the same account (`sharing`). */
@@ -260,7 +265,8 @@ function accountQuota(
 /**
  * When `accountId`'s quota next frees it, ms, by its newest reading: what a
  * `pause { until: "reset" }` lifts at. Over the line in any window (one more
- * task's estimate on the effective reading), the latest reset among those, since
+ * task's estimate on top of every in-flight one, judged as routing does —
+ * `overLine`), the latest reset among those, since
  * an earlier one would lift the hold into a window still full; otherwise the
  * earliest reset still ahead. Null when no reading says — the account unknown
  * (`quota_unknown`'s rules), a deciding window with no reset, or every reset
@@ -269,6 +275,7 @@ function accountQuota(
 export function accountResetAt(
   accountId: string,
   machines: readonly Machine[],
+  tasks: readonly Task[],
   now: number,
   config: SchedulerConfig,
 ): number | null {
@@ -276,8 +283,15 @@ export function accountResetAt(
   if (!account.known) return null;
   const resetMs = (w: QuotaWindow): number[] =>
     w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
+  const sharing = accountInFlight(
+    {
+      inFlight: tasks.filter((t) => IN_FLIGHT.includes(t.state)),
+      accountAt: (placement) => accountOfPlacement(machines, placement),
+    },
+    accountId,
+  );
   const over = account.windows.filter(
-    (w) => effectivePct(w.pct, w.resetsAt, now) + config.taskEstimatePct > config.quotaLinePct,
+    (w) => overLine([w], config.taskEstimatePct * (sharing + 1), now, config) !== null,
   );
   if (over.length > 0) {
     const resets = over.flatMap(resetMs);

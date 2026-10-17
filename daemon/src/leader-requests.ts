@@ -150,7 +150,7 @@ interface Asked {
 const PAUSE_REFUSALS: Record<Exclude<PauseResult, { readonly ok: true }>["code"], SchedulerError> = {
   reset_unknown: schedulerError("reset_unknown", "no quota reading says when that account resets"),
   conflict: schedulerError("conflict", "the pause record changed while this ran; ask again"),
-  full: schedulerError("invalid_request", `the queue already holds ${MAX_PAUSE_HOLDS} holds`),
+  full: schedulerError("invalid_request", `the queue holds at most ${MAX_PAUSE_HOLDS - 1} account holds`),
 };
 
 /** A `pause` or `resume` answered and audited: the holds after it, or why not. */
@@ -161,7 +161,7 @@ async function held(
   result: PauseResult,
 ): Promise<PauseResponse | SchedulerError> {
   if (!result.ok) {
-    await audit.refused(op, id, result.code);
+    await audit.refused(op, id, result.code, { account });
     return PAUSE_REFUSALS[result.code];
   }
   await audit.held(op, id, account);
@@ -216,7 +216,7 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       if (ref === null) return schedulerError("invalid_request", "malformed cancel request");
       const result = await scheduler.cancel(ref.taskId);
       if (!result.ok) {
-        await audit.refused("cancel", id, result.code, ref.taskId);
+        await audit.refused("cancel", id, result.code, { taskId: ref.taskId });
         return CANCEL_REFUSALS[result.code];
       }
       await audit.cancelled(id, result.task);

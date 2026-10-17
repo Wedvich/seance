@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MAX_PAUSE_HOLDS } from "@seance/shared";
-import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler } from "../src/index.ts";
+import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, StoreRevoked } from "../src/index.ts";
 import { FakeFleet, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), store = new MemoryQueueStore()) {
@@ -130,14 +130,45 @@ describe("pause and resume", () => {
     expect(fleet.spawns).toHaveLength(1);
   });
 
-  test(`at most MAX_PAUSE_HOLDS holds; the next is refused full`, async () => {
+  test("account holds stop one short of MAX_PAUSE_HOLDS, so a whole-queue pause always fits", async () => {
     const { scheduler } = setup();
-    for (let i = 0; i < MAX_PAUSE_HOLDS; i += 1) {
+    for (let i = 0; i < MAX_PAUSE_HOLDS - 1; i += 1) {
       // oxlint-disable-next-line no-await-in-loop -- each write follows the last
       expect(await scheduler.pause({ until: "resume", account: `org:${i}` })).toMatchObject({ ok: true });
     }
-    expect(await scheduler.pause({ until: "resume" })).toEqual({ ok: false, code: "full" });
+    expect(await scheduler.pause({ until: "resume", account: "org:extra" })).toEqual({ ok: false, code: "full" });
     // Replacing a hold already held still fits.
     expect(await scheduler.pause({ until: "resume", account: "org:0" })).toMatchObject({ ok: true });
+    expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    expect(scheduler.holds()).toHaveLength(MAX_PAUSE_HOLDS);
+  });
+
+  test("a revoked term unwinds the pause write; a reply lost before it committed retries at the same version", async () => {
+    const { scheduler, store } = setup();
+    store.failNext({ code: "revoked" });
+    await expect(scheduler.pause({ until: "resume" })).rejects.toBeInstanceOf(StoreRevoked);
+    expect(await store.getPause()).toBeNull();
+
+    store.failNext({ code: "indeterminate" });
+    expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    expect(await store.getPause()).toEqual({ version: 1, holds: [{ until: "resume", at: NOW }] });
+  });
+
+  test("an account pause over an unreadable record persists the synthetic queue hold until a resume", async () => {
+    const store = new MemoryQueueStore();
+    store.plantPause("unopenable", 3);
+    const { clock, scheduler } = setup(new FakeFleet([machine("a")]), store);
+    await scheduler.takeover();
+    clock.now = NOW + 60_000;
+    expect(await scheduler.pause({ until: "resume", account: "org:a" })).toMatchObject({ ok: true });
+    // The queue hold keeps the read time as its `at` and is now a real record.
+    expect(await store.getPause()).toEqual({
+      version: 4,
+      holds: [
+        { until: "resume", at: NOW },
+        { account: "org:a", until: "resume", at: NOW + 60_000 },
+      ],
+    });
+    expect(await scheduler.resume({})).toMatchObject({ ok: true, holds: [{ account: "org:a" }] });
   });
 });

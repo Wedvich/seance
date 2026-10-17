@@ -507,9 +507,51 @@ describe("leader requests", () => {
     const audits = lines.filter((line) => line.includes("audit queue"));
     expect(audits).toContainEqual(expect.stringContaining(`op=pause id="${ids["pause"]}" ok`));
     expect(audits).toContainEqual(
-      expect.stringContaining(`op=pause id="${ids["unknown"]}" refused code=reset_unknown`),
+      expect.stringContaining(`op=pause id="${ids["unknown"]}" account="org:nobody" refused code=reset_unknown`),
     );
     expect(audits).toContainEqual(expect.stringContaining(`op=resume id="${ids["resume"]}" ok`));
+  });
+
+  test("a pause past the hold limit is invalid_request and a revoked store is internal_error, each audited with its account", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const accounts = Array.from({ length: MAX_PAUSE_HOLDS - 1 }, (_, i) => ({
+      account: `org:${i}`,
+      until: "resume" as const,
+      at: 1,
+    }));
+    await store.putPause(0, accounts);
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        expect(await ask("full", "pause", { until: "resume", account: "org:extra" })).toMatchObject({
+          ok: false,
+          code: "invalid_request",
+        });
+        store.failNext({ code: "revoked" });
+        expect(await ask("revoked", "pause", { until: "resume" })).toMatchObject({
+          ok: false,
+          code: "internal_error",
+        });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pause id="${ids["full"]}" account="org:extra" refused code=full`),
+    );
   });
 
   test("past MAX_ACTIVE_TASKS unfinished tasks, submit is queue_full", async () => {

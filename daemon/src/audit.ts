@@ -238,7 +238,8 @@ export interface QueueAudit {
     op: "submit" | "cancel" | "pause" | "resume",
     id: string,
     code: string,
-    taskId?: string,
+    /** What the request named: a `cancel`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    subject?: { readonly taskId?: string; readonly account?: string },
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
   readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
@@ -263,8 +264,10 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       ),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
-    refused: (op, id, code, taskId) =>
-      emit(`op=${op} id=${quote(id)}${taskId === undefined ? "" : ` task=${quote(taskId)}`} refused code=${code}`),
+    refused: (op, id, code, subject) =>
+      emit(
+        `op=${op} id=${quote(id)}${subject?.taskId === undefined ? "" : ` task=${quote(subject.taskId)}`}${subject?.account === undefined ? "" : ` account=${quote(subject.account)}`} refused code=${code}`,
+      ),
   };
 }
 

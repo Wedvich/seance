@@ -1471,7 +1471,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `resume` (_The library_, "Pause"), answered with every hold in force after the change;
   `resume` ticks, so what the hold kept waiting is placed at once. Their refusals:
   `reset_unknown` (a reset hold on an account no reading gives a reset for), `conflict` (the
-  record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS`. `queue`
+  record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS - 1` account holds. `queue`
   carries the holds in force (`QueueResponse.holds`, absent only from M2's leaders); they come
   off `QUEUE_REPLY_BUDGET` before any task, since a reader refuses a reply whose holds do not
   parse — 32 at every bound still seal under the envelope. **All four are audited** (`queueAudit`
@@ -1614,7 +1614,8 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   `route.ts`. A task whose machine has left the registry has no account to read and counts
   toward neither; its machine's absence makes it `lost` anyway.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
-  whole queue, one per account, at most `MAX_PAUSE_HOLDS`. The library reads it on `load()` —
+  whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
+  it, so a whole-queue pause always fits. The library reads it on `load()` —
   so takeover, and a pause outlives the leader that took it — and writes it through
   `putPause` by CAS, serialized like a task's writes; a conflict or lost reply re-reads and
   applies the change again (after a lost reply the one version past ours is ours, the record
@@ -1623,20 +1624,24 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   every candidate, an account hold `paused { scope: "account" }` on that account's, so the
   decision says why a task waits, and `route-preview` says it too; running sessions are never
   touched. `until: "reset"` needs an account and stores `resumeAt`, resolved at the pause from
-  the account's newest reading (`accountResetAt`): over the line in any window, the latest
+  the account's newest reading (`accountResetAt`): over the line in any window (judged as
+  routing judges it, in-flight tasks and reset grace included), the latest
   reset among those windows — an earlier one would lift the hold into a window still full —
   else the earliest reset still ahead; with no such reading, `reset_unknown`. A reset hold past
   its `resumeAt` lifts with no write and no resume; the next pause or resume drops it from the
   record. **An unreadable `queue:pause` fails closed** (decided 2026-10-17): it reads as one
   whole-queue `until: "resume"` hold, reported through `onError`, and the next pause or resume
-  overwrites it at its version. A pause is usually about spending, and a term holder can put
+  overwrites it at its version. The hold is synthetic — its `at` is the time of the read, not of
+  any pause — and the next write persists it: an account pause made meanwhile writes it back as
+  a real whole-queue hold, which then stays until a `resume`. A pause is usually about spending, and a term holder can put
   junk there (Threat model, item 3): failing open would let junk lift a pause, failing closed
   lets it stop dispatch, which holding the term already could. After a PSK rotation the cost is
   one resume.
 - **Needs input** (`alerts.ts`, M3 item 5; docs/scheduler.md Settled defaults 5). The clock
   rides the write that moves the state: `#update`, the one write path, stamps
-  `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on any other
-  state, so no transition can skip it and it costs no write of its own. On the record, so a new
+  `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
+  it for any state but `lost` (a machine's absence is not an answer: the stay resumes where it
+  was, and an escalated one is not alerted twice), so no transition can skip it and it costs no write of its own. On the record, so a new
   leader does not restart it. A pass marks a task waiting past `needsInputEscalateMs` (30 min)
   `escalated: true` — one write per stay — and alerts once that write lands, so neither the
   next pass nor the next leader alerts it again; the task keeps its slot and is never killed.
@@ -1644,8 +1649,12 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   one write. The check is inside the pass, which runs at least every 30s: no timer of its own.
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
   the decision the reservation writes — the PWA's verdict shows it on the chosen line, "would
-  spend credits (5h at 93%)" — and alerted through `onAlert` once per account per quota window,
-  keyed by the window's label and its reset, not per task: the record is the per-task trace.
+  spend credits (5h at 93%)" — and alerted through `onAlert` once its spawn is confirmed (a
+  refused spawn spent nothing, and must not burn the window's one alert), once per account per
+  quota window, not per task: the record is the per-task trace. A window is told apart by its
+  reset, and two readings of one reset differ by seconds, so a later reset is a new window only
+  by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
+  never is one. An `onAlert` that throws goes to `onError`, never into the pass.
   The de-dupe is in memory, so a new leader alerts an ongoing spill once more; accepted for a
   log line, M4's push decides whether it needs more.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
