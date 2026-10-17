@@ -9,6 +9,7 @@ import {
   appRelayUrl,
   importPsk,
   MAX_ACTIVE_TASKS,
+  MAX_PAUSE_HOLDS,
   open,
   parseQueueReply,
   parseSubmitReply,
@@ -26,6 +27,7 @@ import {
   type MachineInfo,
   type MachineStatus,
   type OpName,
+  type PauseHold,
   type Plain,
   type QueueResponse,
   type RegistryView,
@@ -444,6 +446,114 @@ describe("leader requests", () => {
     }
   });
 
+  test("pause holds dispatch and queue shows the hold; resume places the task; each is audited, refusals too", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const ids: Record<string, string> = {};
+    /** Delivers an app request and answers with its payload, keeping its id for the audit lines. */
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        relay.setRegistry([await routableEntry("b")]);
+
+        expect(await ask("pause", "pause", { until: "resume" })).toEqual({
+          holds: [{ until: "resume", at: expect.any(Number) }],
+        });
+        expect(await ask("unknown", "pause", { until: "reset", account: "org:nobody" })).toMatchObject({
+          ok: false,
+          code: "reset_unknown",
+        });
+        // A reset with no account is no account's reset: malformed.
+        expect(await ask("malformed", "pause", { until: "reset" })).toMatchObject({
+          ok: false,
+          code: "invalid_request",
+        });
+        expect(await ask("mark", "mark-done", { taskId: "x" })).toMatchObject({ ok: false, code: "invalid_request" });
+
+        const { task: queued } = submitReply(
+          await ask("submit", "submit", { repo: "github.com/acme/app", mode: "worktree" }),
+        );
+        // Ticks every 50ms: a hold that leaked would have dispatched by now.
+        await Bun.sleep(300);
+        expect(relay.appFrames.size).toBe(0);
+        const shown = queueReply(await ask("queue", "queue", {}));
+        expect(shown.holds).toEqual([{ until: "resume", at: expect.any(Number) }]);
+        expect(shown.tasks).toMatchObject([{ id: queued.id, state: "ready" }]);
+        expect(shown.tasks[0]?.decision?.candidates[0]?.rejected).toContainEqual({
+          code: "paused",
+          until: "resume",
+          scope: "queue",
+        });
+        expect((await store.getPause())?.holds).toHaveLength(1);
+
+        expect(await ask("resume", "resume", {})).toEqual({ holds: [] });
+        const spawn = await relay.appFrames.next(5_000);
+        expect(spawn.env.to).toBe("b");
+        expect((await open(key, spawn.env)).op).toBe("spawn");
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(expect.stringContaining(`op=pause id="${ids["pause"]}" ok`));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pause id="${ids["unknown"]}" account="org:nobody" refused code=reset_unknown`),
+    );
+    expect(audits).toContainEqual(expect.stringContaining(`op=resume id="${ids["resume"]}" ok`));
+  });
+
+  test("a pause past the hold limit is invalid_request and a revoked store is internal_error, each audited with its account", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const accounts = Array.from({ length: MAX_PAUSE_HOLDS - 1 }, (_, i) => ({
+      account: `org:${i}`,
+      until: "resume" as const,
+      at: 1,
+    }));
+    await store.putPause(0, accounts);
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        expect(await ask("full", "pause", { until: "resume", account: "org:extra" })).toMatchObject({
+          ok: false,
+          code: "invalid_request",
+        });
+        store.failNext({ code: "revoked" });
+        expect(await ask("revoked", "pause", { until: "resume" })).toMatchObject({
+          ok: false,
+          code: "internal_error",
+        });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pause id="${ids["full"]}" account="org:extra" refused code=full`),
+    );
+  });
+
   test("past MAX_ACTIVE_TASKS unfinished tasks, submit is queue_full", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
@@ -544,8 +654,8 @@ describe("leader requests", () => {
 });
 
 /** `boundedQueue` over the decisions the tasks carry, as the transport would send it. */
-function boundedReply(tasks: readonly Task[]): Plain {
-  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0);
+function boundedReply(tasks: readonly Task[], holds: readonly PauseHold[] = []): Plain {
+  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0, holds);
   return { id: crypto.randomUUID(), ts: 0, op: "queue", re: crypto.randomUUID(), payload };
 }
 
@@ -606,8 +716,16 @@ describe("boundedQueue", () => {
       full(1, "reserved"),
       ...Array.from({ length: QUEUE_MAX_TASKS - 2 }, (_, i) => full(i + 2, "failed")),
     ];
-    const answered = boundedReply(tasks);
+    // Every hold the record may carry, each at its bounds: the budget is what is left after them.
+    const holds = Array.from({ length: MAX_PAUSE_HOLDS }, (_, i) => ({
+      account: `${i}`.padStart(128, "a"),
+      until: "reset" as const,
+      at: Number.MAX_SAFE_INTEGER,
+      resumeAt: Number.MAX_SAFE_INTEGER,
+    }));
+    const answered = boundedReply(tasks, holds);
     expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    expect(queueReply(answered.payload).holds).toHaveLength(MAX_PAUSE_HOLDS);
     const ids = queueReply(answered.payload).tasks.map((t) => t.id);
     expect(ids.length).toBeLessThan(QUEUE_MAX_TASKS);
     expect(ids).toContain("f0");

@@ -1,13 +1,18 @@
-import { FINISHED, type CancelResult, type Scheduler, winnerOnly } from "@seance/scheduler";
+import { FINISHED, type CancelResult, type PauseResult, type Scheduler, winnerOnly } from "@seance/scheduler";
 import {
   APP_ID,
   MAX_ACTIVE_TASKS,
+  MAX_PAUSE_HOLDS,
+  parsePauseRequest,
+  parseResumeRequest,
   parseTaskRef,
   parseTaskRequest,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
   type Decision,
+  type PauseHold,
+  type PauseResponse,
   type Plain,
   type QueueResponse,
   type RoutePreviewResponse,
@@ -37,7 +42,7 @@ function schedulerError(code: SchedulerErrorCode, message: string): SchedulerErr
 }
 
 function queueView(scheduler: Scheduler, now: number): QueueResponse {
-  return boundedQueue(scheduler.tasks(), (id) => scheduler.lastDecision(id), now);
+  return boundedQueue(scheduler.tasks(), (id) => scheduler.lastDecision(id), now, scheduler.holds());
 }
 
 /**
@@ -63,7 +68,9 @@ function undecided(task: Task): Task {
 }
 
 /**
- * Newest first and bounded, prompts cut. Full decisions are filled against
+ * Newest first and bounded, prompts cut, with every hold in force (at most
+ * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
+ * drops one). Full decisions are filled against
  * `QUEUE_REPLY_BUDGET`, live ones first and then newest first; the rest go out
  * `winnerOnly`. Where even those overrun it — every bounded field near its cap —
  * the oldest tasks are left out, finished ones before live ones. Exported for
@@ -73,6 +80,7 @@ export function boundedQueue(
   all: readonly Task[],
   decisionOf: (id: string) => Decision | undefined,
   now: number,
+  holds: readonly PauseHold[] = [],
 ): QueueResponse {
   const newest = all
     .toSorted((a, b) => b.createdAt - a.createdAt)
@@ -87,7 +95,7 @@ export function boundedQueue(
     sizes.set(task.id, jsonBytes(withDecision(task, cut)));
   }
   // Every trimmed record is counted up front, so a full one only ever replaces its own.
-  let left = QUEUE_REPLY_BUDGET - newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
+  let left = QUEUE_REPLY_BUDGET - jsonBytes(holds) - newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
   const byClaim = [
     ...newest.filter((t) => LIVE_DECISION.has(t.state)),
     ...newest.filter((t) => !LIVE_DECISION.has(t.state)),
@@ -117,6 +125,7 @@ export function boundedQueue(
         return withDecision(task, full.has(task.id) ? decision?.whole : decision?.cut);
       }),
     at: now,
+    holds,
   };
 }
 
@@ -136,6 +145,27 @@ interface Asked {
    * admits sit either side of awaits, so two run together would both pass it.
    */
   readonly admit: <T>(step: () => Promise<T>) => Promise<T>;
+}
+
+const PAUSE_REFUSALS: Record<Exclude<PauseResult, { readonly ok: true }>["code"], SchedulerError> = {
+  reset_unknown: schedulerError("reset_unknown", "no quota reading says when that account resets"),
+  conflict: schedulerError("conflict", "the pause record changed while this ran; ask again"),
+  full: schedulerError("invalid_request", `the queue holds at most ${MAX_PAUSE_HOLDS - 1} account holds`),
+};
+
+/** A `pause` or `resume` answered and audited: the holds after it, or why not. */
+async function held(
+  op: "pause" | "resume",
+  id: string,
+  account: string | undefined,
+  result: PauseResult,
+): Promise<PauseResponse | SchedulerError> {
+  if (!result.ok) {
+    await audit.refused(op, id, result.code, { account });
+    return PAUSE_REFUSALS[result.code];
+  }
+  await audit.held(op, id, account);
+  return { holds: result.holds };
 }
 
 const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code"], SchedulerError> = {
@@ -186,7 +216,7 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       if (ref === null) return schedulerError("invalid_request", "malformed cancel request");
       const result = await scheduler.cancel(ref.taskId);
       if (!result.ok) {
-        await audit.refused("cancel", id, result.code, ref.taskId);
+        await audit.refused("cancel", id, result.code, { taskId: ref.taskId });
         return CANCEL_REFUSALS[result.code];
       }
       await audit.cancelled(id, result.task);
@@ -195,11 +225,22 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply: TaskResponse = { task: result.task };
       return reply;
     }
-    // M3's ops, in the schema ahead of their handlers (M3 items 5 and 6): a
-    // refusal rather than silence, which an app would read as a dead leader.
+    case "pause": {
+      const request = parsePauseRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed pause request");
+      return held(op, id, request.account, await scheduler.pause(request));
+    }
+    case "resume": {
+      const request = parseResumeRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed resume request");
+      const reply = await held(op, id, request.account, await scheduler.resume(request));
+      // What the hold kept waiting is placed now rather than on the next 30s tick.
+      tick();
+      return reply;
+    }
+    // M3 item 6's op, in the schema ahead of its handler: a refusal rather
+    // than silence, which an app would read as a dead leader.
     case "mark-done":
-    case "pause":
-    case "resume":
       return schedulerError("invalid_request", `this leader does not handle ${op} yet`);
   }
 }

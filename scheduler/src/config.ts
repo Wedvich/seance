@@ -20,8 +20,12 @@ export interface SchedulerConfig {
   readonly taskEstimatePct: number;
   /** Disk floor, MiB free; above it disk adds nothing to the score. */
   readonly minFreeMib: number;
-  /** In-flight (reserved + running) scheduler tasks across the fleet. */
+  /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
   readonly globalMax: number;
+  /** The same count per account, by the account of each task's placement. */
+  readonly accountMax: number;
+  /** A task in `needs-input` this long is escalated once: re-alerted, never killed, its slot kept. */
+  readonly needsInputEscalateMs: number;
   readonly reservationTtlMs: number;
   /**
    * A running task whose machine has been absent this long is `lost`: shown as
@@ -61,6 +65,9 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   taskEstimatePct: 5,
   minFreeMib: 1024,
   globalMax: 8,
+  // Half the fleet's slots: one account's sessions draw on its 5h window together.
+  accountMax: 4,
+  needsInputEscalateMs: 30 * 60_000,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
   sweepIntervalMs: 120_000,

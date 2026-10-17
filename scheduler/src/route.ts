@@ -11,6 +11,7 @@ import {
   type Machine,
   type MachineStatus,
   type NewestQuota,
+  type PauseHold,
   type QuotaBasis,
   type QuotaObservation,
   type Reason,
@@ -19,6 +20,7 @@ import {
 import { batchCap } from "./batch.ts";
 import type { SchedulerConfig } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
+import { accountPause, activeHolds, queuePause } from "./pause.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
 
 // The decision record is a wire type — `route-preview` and `queue` carry it —
@@ -38,6 +40,8 @@ export interface RouteInput {
   readonly tasks: readonly Task[];
   readonly now: number;
   readonly config: SchedulerConfig;
+  /** What holds dispatch (`queue:pause`); expired ones are ignored here. */
+  readonly holds?: readonly PauseHold[];
 }
 
 const FIVE_HOURS_MS = 5 * 3600_000;
@@ -66,6 +70,7 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
+  readonly holds: readonly PauseHold[];
 }
 
 export function route(input: RouteInput): Decision {
@@ -78,15 +83,14 @@ export function route(input: RouteInput): Decision {
     config,
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
-    accountAt: (placement) =>
-      machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
-        ?.accountId ?? null,
+    accountAt: (placement) => accountOfPlacement(machines, placement),
     capReached:
       inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
+    holds: activeHolds(input.holds ?? [], now),
   };
-  const caps = [pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
+  const caps = [queuePause(pass.holds), pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
@@ -122,8 +126,14 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
-  const account = exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId);
+  const sharing = exclave.accountId === null ? 0 : accountInFlight(pass, exclave.accountId);
+  const account = exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing);
   if (account?.reason !== undefined) rejected.push(account.reason);
+  if (sharing >= config.accountMax) {
+    rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
+  }
+  const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
+  if (paused !== null) rejected.push(paused);
 
   const base: Candidate = {
     deviceId: machine.deviceId,
@@ -163,16 +173,31 @@ interface AccountJudgement {
   readonly pressure: number;
 }
 
-/** Projected usage counts this task and every in-flight one on the same account. */
-function judgeAccount(pass: Pass, exclave: ExclaveInfo, accountId: string): AccountJudgement {
+/**
+ * In-flight tasks billed to `accountId`, by where each is placed: what the
+ * account cap and projected usage both count. A task whose machine has left
+ * the registry has no account to read, so it counts toward neither.
+ */
+function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: string): number {
+  return pass.inFlight.filter((t) => {
+    const at = t.assignment ?? t.reservation;
+    return at !== undefined && pass.accountAt(at) === accountId;
+  }).length;
+}
+
+function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
+  return (
+    machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
+      ?.accountId ?? null
+  );
+}
+
+/** Projected usage counts this task and every in-flight one on the same account (`sharing`). */
+function judgeAccount(pass: Pass, exclave: ExclaveInfo, accountId: string, sharing: number): AccountJudgement {
   const account = pass.quotaOf(accountId);
   if (!account.known) return { reason: { code: "quota_unknown", why: account.why }, pressure: 0 };
   const { observation, deviceId } = account.newest;
   const quota = { observedAt: observation.at, observer: deviceId, source: observation.s };
-  const sharing = pass.inFlight.filter((t) => {
-    const at = t.assignment ?? t.reservation;
-    return at !== undefined && pass.accountAt(at) === accountId;
-  }).length;
   const added = pass.config.taskEstimatePct * (sharing + 1);
   const pressure = pressureOf(account.windows, added, pass.now);
   const over = overLine(account.windows, added, pass.now, pass.config);
@@ -235,6 +260,51 @@ function accountQuota(
   if (found === undefined) return { known: false, why: "unobserved" };
   const windows = windowsOf(found.observation);
   return windows.length === 0 ? { known: false, why: "unobserved" } : { known: true, newest: found, windows };
+}
+
+/**
+ * When `accountId`'s quota next frees it, ms, by its newest reading: what a
+ * `pause { until: "reset" }` lifts at. Over the line in any window (one more
+ * task's estimate on top of every in-flight one, judged as routing does —
+ * `overLine`), the latest reset among those, since
+ * an earlier one would lift the hold into a window still full; otherwise the
+ * earliest reset still ahead. Null when no reading says — the account unknown
+ * (`quota_unknown`'s rules), a deciding window with no reset, or every reset
+ * already past, whose next one would be a guess.
+ */
+export function accountResetAt(
+  accountId: string,
+  machines: readonly Machine[],
+  tasks: readonly Task[],
+  now: number,
+  config: SchedulerConfig,
+): number | null {
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines));
+  if (!account.known) return null;
+  const resetMs = (w: QuotaWindow): number[] =>
+    w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
+  const sharing = accountInFlight(
+    {
+      inFlight: tasks.filter((t) => IN_FLIGHT.includes(t.state)),
+      accountAt: (placement) => accountOfPlacement(machines, placement),
+    },
+    accountId,
+  );
+  const over = account.windows.filter(
+    (w) => overLine([w], config.taskEstimatePct * (sharing + 1), now, config) !== null,
+  );
+  if (over.length > 0) {
+    const resets = over.flatMap(resetMs);
+    return resets.length === over.length ? Math.max(...resets) : null;
+  }
+  const resets = account.windows.flatMap(resetMs);
+  return resets.length === 0 ? null : Math.min(...resets);
+}
+
+/** The reset of one window (a `Candidate.spill` label) on `accountId`'s newest reading, unix seconds. */
+export function windowResetOf(accountId: string, machines: readonly Machine[], window: string): number | undefined {
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines));
+  return account.known ? account.windows.find((w) => w.label === window)?.resetsAt : undefined;
 }
 
 function hosts(machine: Machine, accountId: string): boolean {

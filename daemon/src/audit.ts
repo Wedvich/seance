@@ -234,7 +234,15 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 export interface QueueAudit {
   readonly submitted: (id: string, taskId: string) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
-  readonly refused: (op: "submit" | "cancel", id: string, code: string, taskId?: string) => Promise<void>;
+  readonly refused: (
+    op: "submit" | "cancel" | "pause" | "resume",
+    id: string,
+    code: string,
+    /** What the request named: a `cancel`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    subject?: { readonly taskId?: string; readonly account?: string },
+  ) => Promise<void>;
+  /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
+  readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
 }
 
 /**
@@ -254,8 +262,12 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
-    refused: (op, id, code, taskId) =>
-      emit(`op=${op} id=${quote(id)}${taskId === undefined ? "" : ` task=${quote(taskId)}`} refused code=${code}`),
+    held: (op, id, account) =>
+      emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
+    refused: (op, id, code, subject) =>
+      emit(
+        `op=${op} id=${quote(id)}${subject?.taskId === undefined ? "" : ` task=${quote(subject.taskId)}`}${subject?.account === undefined ? "" : ` account=${quote(subject.account)}`} refused code=${code}`,
+      ),
   };
 }
 

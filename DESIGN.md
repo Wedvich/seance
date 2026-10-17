@@ -266,7 +266,9 @@ Séance's noise is cover for a real intruder.
    client deletes the pause, and with no tombstone a delete would let a term
    holder silently unpause the queue. A term holder can still overwrite the
    pause with junk, which readers handle as an unreadable record (the
-   scheduler's concern, not the relay's). Registry growth is bounded in the DO by a
+   scheduler's concern, not the relay's): the leader reads it as the whole
+   queue held until a resume, so junk can stop dispatch — which a term holder
+   could do anyway — but never lift a pause (Scheduler, "Pause"). Registry growth is bounded in the DO by a
    32-entry cap that turns away only _unknown_ ids — so a full registry locks
    out machines you have not added yet and never knocks a known one offline —
    plus a per-socket register rate limit, which bounds write rate as the entry
@@ -803,8 +805,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `store-list` / `store-get` / `store-put` / `store-delete` — M3           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` (item 3), with `term` on writes                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame` (item 1)                                                                                                                                                                                                    |
 | `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts` (item 1)                                                                                                                    | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store (item 3)                                                                                                                                                              |
 | `store-changed` — M3                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's daemon socket after an app-leg write (item 1)                                                                                                    | `daemon/src/relay-client.ts` → `daemon/src/leader.ts` (item 3), via `parseStoreChanged`                                                                                                                                                                                                                                                |
-| records `task` / `pause-state` (at rest) — M3                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store (item 3)                                                                               | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` (item 5)                                                                                                                                   |
-| ops `mark-done` / `pause` / `resume` — M3                                | an app via `shared/src/app-client.ts` (item 6)                                                                                                                                                      | `daemon/src/leader-requests.ts` `answer` — `invalid_request` "this leader does not handle <op> yet" until items 5 and 6                                                                                                                                                                                                                |
+| records `task` / `pause-state` (at rest) — M3                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store (item 3)                                                                               | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store (item 3), held by `Scheduler.load` (item 5)                                                                             |
+| ops `mark-done` / `pause` / `resume` — M3                                | an app via `shared/src/app-client.ts` (item 6)                                                                                                                                                      | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest`, run by `Scheduler.pause` / `resume` (item 5); `mark-done` answers `invalid_request` "this leader does not handle <op> yet" until item 6                                                                                                |
 | op `queue-changed` (→`"app"`) — M3                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"` (item 6)                                                                                                                           | `shared/src/app-client.ts`, via `parseQueueChanged` (item 6)                                                                                                                                                                                                                                                                           |
 | op `branch-state` (→`"scheduler"`) — M3                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")            | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink item 3 feeds to the library (item 4a)                                                                                                                                                                                                      |
 
@@ -1111,9 +1113,12 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `cancel { taskId }` (`TaskRef`) → `{ task }` (`TaskResponse`), the task as it now stands:
   `Scheduler.cancel`, so a running one is despawned on its machine first (Scheduler, "The
   leader"). M3 keeps it; only its PWA button waits for item 6.
-- `mark-done`, `pause`, `resume` — M3's, in the schema since M3 PR 0 but refused until M3 items
-  5 and 6 land their handlers: the leader answers `invalid_request` "this leader does not handle
-  <op> yet", so an app reads a refusal rather than a timeout that looks like a dead leader.
+- `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
+  `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
+  "Pause"). `queue` replies carry the same `holds`.
+- `mark-done` — M3's, in the schema since M3 PR 0 but refused until M3 item 6 lands its
+  handler: the leader answers `invalid_request` "this leader does not handle <op> yet", so an
+  app reads a refusal rather than a timeout that looks like a dead leader.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -1462,8 +1467,16 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   otherwise both pass it. `cancel` (`TaskRef`) is `Scheduler.cancel` (_The library_, below),
   answered with the task as it now stands (`TaskResponse`), and ticks, since a cancelled task
   frees its slot. Before 2026-10-17 it answered `invalid_request` with the M3 ops, so a `lost`
-  task could not be cleared at all. **Both are audited** (`queueAudit` in `audit.ts`) as
-  `audit queue origin=relay op=submit|cancel id=<request> task=<task>` and `ok` or `refused
+  task could not be cleared at all. `pause` and `resume` (M3 item 5) are `Scheduler.pause` and
+  `resume` (_The library_, "Pause"), answered with every hold in force after the change;
+  `resume` ticks, so what the hold kept waiting is placed at once. Their refusals:
+  `reset_unknown` (a reset hold on an account no reading gives a reset for), `conflict` (the
+  record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS - 1` account holds. `queue`
+  carries the holds in force (`QueueResponse.holds`, absent only from M2's leaders); they come
+  off `QUEUE_REPLY_BUDGET` before any task, since a reader refuses a reply whose holds do not
+  parse — 32 at every bound still seal under the envelope. **All four are audited** (`queueAudit`
+  in `audit.ts`) as `audit queue origin=relay op=submit|cancel|pause|resume id=<request>`, with
+  `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
 code=…`: the request id finds the app's side, and the task id joins the line to the
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
   the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
@@ -1512,12 +1525,16 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   first is the only one that acts on it. What it cannot reach is another daemon: the role address
   is the one envelope with more than one possible recipient (Security model, "Routing fields bound
   as AAD"), and the residual cross-daemon duplicate is recorded there.
+- **Alerts are log lines until M4** (M3 item 5). The term's `Scheduler` takes `onAlert`, which
+  `startTerm` logs as `warn scheduler: <message>`: a dispatch spending credits, and a wait for
+  input past 30 minutes (_The library_, "Credits spill" and "Needs input"). The line names task
+  and account ids, never a prompt or title. M4's Web Push takes the same alerts.
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL, and then only with its `sessions` check
   unanswered and its machine not connected — and is never dispatched again on that evidence
   alone (_The library_, below, "`lost`").
 
-### The library (`scheduler/`) — landed 2026-10-16, M2 item 1; M3's states 2026-10-17, M3 item 4a
+### The library (`scheduler/`) — landed 2026-10-16, M2 item 1; M3's states 2026-10-17, M3 item 4a; caps, pause and alerts 2026-10-17, M3 item 5
 
 What the leader runs. The plan and what is still ahead live in docs/scheduler.md; this
 section records what exists. `daemon/src/leader.ts` hosts it ("The leader", above); in M2
@@ -1559,8 +1576,8 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   bills; an empty list reads the same, since a real daemon always lists `default`, and
   stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
-  `quota_over_line`, `cap_reached` (global, or `scope: "batch"`, "Batches" below),
-  `batch_order` ("Batches"). Skill and
+  `quota_over_line`, `cap_reached` (global; `scope: "account"`, "Caps" below; or `scope:
+"batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). Skill and
   stacked-base filters are M4's. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
@@ -1585,8 +1602,61 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   effective reading plus a fixed estimate for this task and each in-flight one billed to
   the same account; the filter additionally treats a window resetting within 15 min as
   empty. An exclave with extra usage on is scored past the line and its candidate
-  carries `spill` (M3 shows it, M4 alerts on it); `extraUsageEnabled: null` reads as off.
+  carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
+- **Caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
+  and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
+  `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
+  it. `accountMax` (4, docs/scheduler.md Settled defaults 8) puts `cap_reached` with `scope:
+"account"` on each candidate whose exclave's account already holds that many, counted by
+  the account of each task's reservation or assignment exactly as projected usage counts
+  "each in-flight one billed to the same account" — one count, `accountInFlight` in
+  `route.ts`. A task whose machine has left the registry has no account to read and counts
+  toward neither; its machine's absence makes it `lost` anyway.
+- **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
+  whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
+  it, so a whole-queue pause always fits. The library reads it on `load()` —
+  so takeover, and a pause outlives the leader that took it — and writes it through
+  `putPause` by CAS, serialized like a task's writes; a conflict or lost reply re-reads and
+  applies the change again (after a lost reply the one version past ours is ours, the record
+  being the leader's alone), and three lost races answer `conflict`. A change that leaves the
+  holds as they were writes nothing. A whole-queue hold puts `paused { scope: "queue" }` on
+  every candidate, an account hold `paused { scope: "account" }` on that account's, so the
+  decision says why a task waits, and `route-preview` says it too; running sessions are never
+  touched. `until: "reset"` needs an account and stores `resumeAt`, resolved at the pause from
+  the account's newest reading (`accountResetAt`): over the line in any window (judged as
+  routing judges it, in-flight tasks and reset grace included), the latest
+  reset among those windows — an earlier one would lift the hold into a window still full —
+  else the earliest reset still ahead; with no such reading, `reset_unknown`. A reset hold past
+  its `resumeAt` lifts with no write and no resume; the next pause or resume drops it from the
+  record. **An unreadable `queue:pause` fails closed** (decided 2026-10-17): it reads as one
+  whole-queue `until: "resume"` hold, reported through `onError`, and the next pause or resume
+  overwrites it at its version. The hold is synthetic — its `at` is the time of the read, not of
+  any pause — and the next write persists it: an account pause made meanwhile writes it back as
+  a real whole-queue hold, which then stays until a `resume`. A pause is usually about spending, and a term holder can put
+  junk there (Threat model, item 3): failing open would let junk lift a pause, failing closed
+  lets it stop dispatch, which holding the term already could. After a PSK rotation the cost is
+  one resume.
+- **Needs input** (`alerts.ts`, M3 item 5; docs/scheduler.md Settled defaults 5). The clock
+  rides the write that moves the state: `#update`, the one write path, stamps
+  `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
+  it for any state but `lost` (a machine's absence is not an answer: the stay resumes where it
+  was, and an escalated one is not alerted twice), so no transition can skip it and it costs no write of its own. On the record, so a new
+  leader does not restart it. A pass marks a task waiting past `needsInputEscalateMs` (30 min)
+  `escalated: true` — one write per stay — and alerts once that write lands, so neither the
+  next pass nor the next leader alerts it again; the task keeps its slot and is never killed.
+  A `needs-input` record no leader stamped (one written before this) has its clock started by
+  one write. The check is inside the pass, which runs at least every 30s: no timer of its own.
+- **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
+  the decision the reservation writes — the PWA's verdict shows it on the chosen line, "would
+  spend credits (5h at 93%)" — and alerted through `onAlert` once its spawn is confirmed (a
+  refused spawn spent nothing, and must not burn the window's one alert), once per account per
+  quota window, not per task: the record is the per-task trace. A window is told apart by its
+  reset, and two readings of one reset differ by seconds, so a later reset is a new window only
+  by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
+  never is one. An `onAlert` that throws goes to `onError`, never into the pass.
+  The de-dupe is in memory, so a new leader alerts an ongoing spill once more; accepted for a
+  log line, M4's push decides whether it needs more.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
@@ -1741,7 +1811,7 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   ignores `pushed` and `merged` altogether: its branch is the checkout's, often the
   default branch, pushed and trivially merged; its `opened` comes from its PR and its
   `merged` only at `done`: an `awaiting-merge` `here` task is left out of the sweep, since no
-  reply can change it, and reaches `done` only by mark-done (items 5/6), so its `after:
+  reply can change it, and reaches `done` only by mark-done (item 6), so its `after:
 "merged"` dependents wait for that. What `branch-state` carried while no leader
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
