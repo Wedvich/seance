@@ -75,6 +75,8 @@ a production change.
   there and removes the directory, so a suite that never reached its teardown leaks
   nothing either. A ^C at a terminal reaches only the shard reading the tty (the pty
   wrapper puts it in raw mode); the rest finish and the sweep runs as usual.
+  The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
+  tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
@@ -99,7 +101,10 @@ a production change.
   their ids at first start, after the relay has booted, so `startStack` mints the
   suite daemon's — and each second daemon named in `secondLeaders` — through the
   daemon's own `loadOrInitState` first and lists them; the daemon then loads that
-  state as its own.
+  state as its own. The leader leads on the real relay store: a test reads the queue with
+  `stack.queue()` and puts a task where a previous term left it with `stack.seedTask`
+  (written from the leader's own socket, so no `store-changed` — `restartDaemon` after it
+  makes the next term take it over).
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,

@@ -804,11 +804,11 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `session-event` (→`"scheduler"`)                                      | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                  | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                         |
 | `store-list` / `store-get` / `store-put` / `store-delete` — M3           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` (item 3), with `term` on writes                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame` (item 1)                                                                                                                                                                                                    |
 | `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts` (item 1)                                                                                                                    | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store (item 3)                                                                                                                                                              |
-| `store-changed` — M3                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's daemon socket after an app-leg write (item 1)                                                                                                    | `daemon/src/relay-client.ts` → `daemon/src/leader.ts` (item 3), via `parseStoreChanged`                                                                                                                                                                                                                                                |
-| records `task` / `pause-state` (at rest) — M3                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store (item 3)                                                                               | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store (item 3), held by `Scheduler.load` (item 5)                                                                             |
+| `store-changed` — M3                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's daemon socket after an app-leg write (item 1)                                                                                                    | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged` (item 3), via `parseStoreChanged`                                                                                                                                                                                                       |
+| records `task` / `pause-state` (at rest) — M3                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store (item 3); `pause-state`: `sealAtRest`, by the queue store (item 3)                     | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store (item 3), held by `Scheduler.load` (item 5)                                                                             |
 | ops `mark-done` / `pause` / `resume` — M3                                | an app via `shared/src/app-client.ts` (item 6)                                                                                                                                                      | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest`, run by `Scheduler.pause` / `resume` (item 5); `mark-done` answers `invalid_request` "this leader does not handle <op> yet" until item 6                                                                                                |
 | op `queue-changed` (→`"app"`) — M3                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"` (item 6)                                                                                                                           | `shared/src/app-client.ts`, via `parseQueueChanged` (item 6)                                                                                                                                                                                                                                                                           |
-| op `branch-state` (→`"scheduler"`) — M3                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")            | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink item 3 feeds to the library (item 4a)                                                                                                                                                                                                      |
+| op `branch-state` (→`"scheduler"`) — M3                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")            | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library (items 4a, 3)                                                                                                                                                                                                     |
 
 Rows marked _M3_ are the scheduler plan's third milestone (docs/scheduler.md, "M3 — durable
 queue"): their shapes and parsers are in `shared/src/types.ts` and `shared/src/parse.ts`
@@ -1350,9 +1350,12 @@ enforces is what it can see: who is asking, the key, a version and a size.
   about 5 MiB — the one place the arithmetic lives) sent by a deployed relay is unchecked. Item 2's
   `RelayClient.listTasks` already lists `task:` in one frame on the app leg, so the check must
   cover both legs: a full listing arrives intact at the daemon (Bun client) and at an app-leg
-  client — at least the PWA in a browser, ideally also the iOS WKWebView it runs in. Item 3 runs
-  it before its takeover relies on one `store-list` (docs/scheduler.md); if production refuses
-  it, the fix is the reserved `after`/`next` paging. A refused send looks like a client timeout
+  client — at least the PWA in a browser, ideally also the iOS WKWebView it runs in. Item 3's
+  takeover relies on one `store-list` (docs/scheduler.md) and its suite reads a full 128 × 40 KiB
+  listing through the adapter, but against the harness double, which says nothing about the
+  deployed limit: the production check stays open. If production refuses it, the fix is the
+  reserved `after`/`next` paging; until then a listing the adapter cannot read is a failed,
+  retried takeover, never a short queue. A refused send looks like a client timeout
   plus a `store reply not sent` line on the relay, or a closed socket.
 - **Older and newer clients.** Unknown fields are ignored (`after` on a list); an unknown `t`
   parses to null and is dropped; a store frame with no usable `id` is dropped and logged, the
@@ -1412,13 +1415,22 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   after it, every change to the leg's machine list ticks, and ticks coalesce in the library.
 - **The term rides every write and dispatch.** Dispatches carry it on the frame, where the relay
   fences them. Writes go through a store wrapper that refuses once the term has ended (throwing
-  `StoreRevoked`, as M3's adapter will on `not_leader`), so a verdict landing after its term
-  cannot write into the store the next term reads; M3's term-fenced `store-put` replaces it at
-  the relay. The store itself outlives terms, as the relay's will: M2's
-  is the library's `MemoryQueueStore`, one per `startDaemon` handle (`createLeader` in `run.ts`),
-  so a daemon demoted and re-promoted reconciles what it left. It is not one per process: a
-  config reload swaps the whole handle (`supervise.ts`) and starts the queue empty, as a leader
-  change across machines does (M2's stated gap).
+  `StoreRevoked`, as the queue store does on `not_leader`), so a verdict landing after its term
+  cannot write into the store the next term reads; the relay's term-fenced `store-put` is the
+  fence behind it. The store outlives terms: since M3 item 3 it is the relay's, reached through
+  `createQueueStore` (_The queue store_, below), built per term over the daemon's relay client
+  and never shared, so a late pass of an ended term cannot write under its successor's term. A
+  leader change across machines, a config reload (`supervise.ts`) and a daemon demoted and
+  re-promoted all reconcile what the last term left. `LeaderOpts` takes a `store` (tests) or a
+  `storeLeg` with the PSK `key` (production); neither is a type error, never a memory fallback.
+- **`store-changed` wakes the term; the term's own writes do not.** The relay nudges the leader's
+  daemon socket after an _app-leg_ write, so an enqueue is placed at once rather than at the next
+  30s tick; the leader's own writes (its daemon socket, under the term) raise none.
+  `Leader.onStoreChanged` re-reads the one key (`Scheduler.refresh`) and ticks. A nudge that
+  arrives while takeover runs is buffered, since takeover's `load` replaces the held view, and
+  applied right after it; one whose refresh fails is kept and retried at the start of the next
+  tick, before the pass reads the held view. A nudge with no running term is ignored: takeover
+  reads the same state.
 - **Session events reach the term two ways** (item 5; Local op socket, "Session events").
   Another daemon's `session-event` comes through the relay to this daemon's socket. That socket
   hands it unopened to the term's leg, which opens and replay-checks it under the scheduler guard
@@ -1460,9 +1472,13 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   the reply holds fewer than `QUEUE_MAX_TASKS` rather than none. Without the budget twenty
   finished tasks sealed past the bound on a 3 × 2 fleet, and `queue` answered `too_large` for
   good. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
-  reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) queues the request and
-  ticks at once, so the task is placed without waiting for the 30s timer; the scheduler mints the
-  task id, never the app. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
+  reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) creates the task
+  `queued` and admits it in the same call, so the reply carries the admitted state (`ready` with
+  no deps) that MCP's placement follow and the PWA's `auto` verdict read, and ticks at once, so
+  the task is placed without waiting for the 30s timer; the scheduler mints the task id, never
+  the app. The create is `queued` because the store refuses a version-1 record in any other
+  state; one whose reply was lost is read back, since the leader's own write raises no
+  `store-changed` and a later leader would otherwise run an orphan the caller then resubmits. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
   count and the submit it admits sit either side of awaits, so two arriving together would
   otherwise both pass it. `cancel` (`TaskRef`) is `Scheduler.cancel` (_The library_, below),
   answered with the task as it now stands (`TaskResponse`), and ticks, since a cancelled task
@@ -1558,10 +1574,10 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   (provably never reached the machine, so it did not). It owns no timer, socket or clock:
   the host calls `tick()` on each registry or `status` push and on a 30s timer, so a host
   that stops calling leaves nothing running but the spawns already sent. `MemoryQueueStore`
-  is shipped, not a test double: M2's leader runs on it, since the queue is in-memory until
-  M3. It keeps the relay store's rules, tombstones included, and fault hooks (`failNext`,
-  `replay`, `plant`) that let the suite (`scheduler/test/store.test.ts`) play the relay and an
-  attacker. The suite's `Fleet` double is `scheduler/test/fixtures.ts`.
+  is the library's reference store and its tests' store; since M3 item 3 the daemon's leader no
+  longer runs on it (_The queue store_, below). It keeps the relay store's rules, tombstones
+  included, and fault hooks (`failNext`, `replay`, `plant`) that let the suite
+  (`scheduler/test/store.test.ts`) play the relay and an attacker. The suite's `Fleet` double is `scheduler/test/fixtures.ts`.
 - **Layering is enforced** (`scheduler/test/layering.test.ts`): nothing in `scheduler/`
   imports `daemon/`, and nothing in `daemon/` imports `scheduler/` but the leader's modules
   (the test's `LEADER_MODULES`, an exact-path set), by
@@ -1828,8 +1844,9 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   nulls the whole list on one bad entry) sets `progressTrimmed` too, so every PR-less
   session-less task on that machine holds its slot until the daemon and leader agree on the shape
   (an update); accepted on the same ground. A daemon that sends no `progress` settles by
-  the PR the record holds. The leader does not yet pass `prUrl`, `progress` or `branch-state` on
-  (M3 item 3), so until then a session that ends is `done`.
+  the PR the record holds. The leader passes `prUrl`, `progress` and `branch-state` on since M3
+  item 3: `sessionsOf` in `leader-adapters.ts` parses the machine's `progress` list at takeover
+  and on every check, and an unparsable one sets `progressTrimmed`.
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
   deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
@@ -1879,7 +1896,8 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
 
 The relay's store (M3 item 1) holds ciphertext; what a record is, and who reads it how, is
 `shared/src/task-record.ts` and the app-client. Nothing calls these yet: the PWA and MCP
-enqueue through them in item 6, and the leader's adapter (item 3) reuses the record helpers.
+enqueue through them in item 6, and the leader's adapter (item 3, _The queue store_, below)
+reuses the record helpers.
 
 - **One sealer, one reader.** `sealTaskRecord` seals `{ version, task }` as op `task` to
   `"scheduler"`, from its writer. `openTaskRecord` opens with `openAtRest` — never the replay
@@ -1906,6 +1924,48 @@ enqueue through them in item 6, and the leader's adapter (item 3) reuses the rec
   it (a sealed reply fans out to every app socket), so a reply counts only from that socket.
   A listing is checked too: a key outside `task:`, or listed twice, reads `key_mismatch` for
   every copy (`openTaskListing`).
+
+### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-17, M3 item 3
+
+The leader's `QueueStore` over the relay's store ops, so a task waiting for capacity survives a
+leader change and an app can enqueue with no leader at all. It is the adapter the library's port
+assumes: sealing, opening and the reader rules are its job, the record shapes are item 2's.
+
+- **One adapter per term, on the daemon's socket.** `createQueueStore({ leg, key, term, now })`
+  sends `store-*` frames through `RelayClient.store` on the daemon's own socket, with `term` on
+  writes: the relay fences a write on the term and the socket it was issued to, so the leader's
+  writes cannot leave on the app leg. Records are sealed `to` and `from` `"scheduler"` — op
+  `task`, or `pause-state` for `queue:pause` — and every read goes through `openAtRest` with its
+  slot's op, which checks only `to`: a task an app created is sealed `from: "app"` and reads the
+  same.
+- **Reads reject, never shorten.** `list` is one unpaged `store-list` of `task:` through
+  `openTaskListing`; a `next` page, a refusal or an unreadable reply throws, so a takeover that
+  cannot read the whole queue is retried instead of running on a short one. Entries that do not
+  bind come back as `{ id, version, reason }` (the library holds them apart and never deletes
+  them). `get` throws on a record answered under another key.
+- **Writes map to the port's failures, the doubtful ones to `indeterminate`.** `put` runs
+  `bindTaskRecord` on what it is about to seal and seals the parsed copy, then checks the cap
+  (`STORE_CREATE_MAX_CT_LENGTH` for `expect: 0`, else `STORE_MAX_CT_LENGTH`) before sending.
+  `version_conflict`, `too_large`, `rate_limited` and `store_full` pass through; any other refusal
+  is `refused`. A `store-written` whose version is not the one expected, a timeout and a dropped
+  socket are `indeterminate` — the write may have landed — which the library settles by reading
+  the key again. `not_leader` and a disconnected daemon socket throw `StoreRevoked`, ending the
+  term: the relay no longer thinks it leads, or no reply can ever come. `delete` maps the same
+  way; the relay refuses a `queue:` delete, which the adapter never sends.
+- **The pause slot.** `getPause`/`putPause` seal and open `queue:pause` as op `pause-state`
+  (`openAtRest` plus `parsePauseRecord`); an unreadable record reads as `key_mismatch`,
+  `unopenable`, `malformed` or `version_mismatch`, and a hold list `parsePauseRecord` refuses
+  is `refused` before sealing. Item 5 drives it through the port only.
+- **The relay client's store leg** (`RelayClient.store`). Store frames correlate on their own
+  `id` in a pending map apart from sealed requests, as the app-client's do, and a reply counts
+  only from the socket the request left on. A reply that does not parse settles `null`; a timeout
+  (`STORE_TIMEOUT_MS`, logged by id and `t` only — never a key, `env` or `ct`), a drop or `stop()`
+  fails the pending request; a reply with nothing pending is dropped. `store-changed` goes to
+  `onStoreChanged` (`parseStoreChanged`). No line is logged per accepted store read or write.
+- **Rejected: `MemoryQueueStore` as a fallback.** A leader that cannot reach the store must not
+  run on a queue the next leader will not see; the option is a type error. The daemon suites run
+  on a store double in `daemon/test/harness.ts` (term fence, tombstones, `store-changed`); the
+  e2e suite runs on the real store.
 
 ### Branch state (`daemon/src/branch-state.ts`) — added 2026-10-17, scheduler M3 item 4b
 
@@ -2069,8 +2129,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   process to `leader.onBranchState`, as it does session events to `onSession`. The leader's relay
   event handler parses a relayed `branch-state` (`parseBranchState`) into the same sink, so there is
   one place to wire. Only a daemon observes a branch: one sealed `from: "app"` is dropped and
-  logged like a malformed one, since a PSK holder's app could otherwise settle a task `done`. That sink does nothing until item 3 feeds it to the library, so until then the
-  library learns of a merge on the leader's own machine only through `progress`.
+  logged like a malformed one, since a PSK holder's app could otherwise settle a task `done`. Since M3 item 3 that sink feeds `Scheduler.onBranchState`, so the library learns
+  of a merge on the leader's own machine from the in-process event as well as from `progress`.
 - **Decided tails.**
   - A PR closed without merging keeps its repo fetched every five minutes until the ledger evicts the
     task (7 days or 128 launches): it has a PR URL, so the quiet-task cut-off above never applies,
@@ -3442,9 +3502,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the wrong repo. `list_machines` does not show origins: the clone name serves the
   common case, the ambiguity error names the origins when it doesn't, and its output
   keeps its shape. **M2's limits are in both tool descriptions**, since an agent would
-  otherwise take the queue for a backlog: a task waiting for capacity lives only in
-  the leader's memory and is lost on a leader change (every relay deploy, every daemon
-  self-update); a placed session is ordinary and survives; no deps or ordering. **Not
+  otherwise take the queue for a backlog: a task waiting for capacity is held by the relay
+  and survives a leader change (every relay deploy, every daemon self-update), the next leader
+  taking it over; a placed session is ordinary; no deps or ordering. **Not
   through the broker**: a keyless `seanced mcp` gets "auto needs this machine's own
   key; unavailable through the broker", and nothing falls back. A scheduler action
   would be a new broker action, which is a threat-model change ("Fleet broker"), so
@@ -3852,7 +3912,7 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   the event, never echoed. The check runs before the URL can become an `href` in the
   PWA or text in a push, and the leader re-checks it in `parseSessionEvent` — then drops it.
   `Scheduler.onSession` takes it since M3 item 4a (done detection: a session that ends with
-  a PR is `awaiting-merge`), and the leader passes it on from M3 item 3. The daemon also
+  a PR is `awaiting-merge`), and the leader passes it on since M3 item 3. The daemon also
   records the checked URL in the launch ledger (`EndedTasks.notePr`, for a task launched here
   only), where `progress` carries it to a leader that missed the event.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event

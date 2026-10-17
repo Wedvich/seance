@@ -218,9 +218,10 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 "reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `queue` and
 `route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
 answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
-term, `not_ready` during takeover. M2 adds a temporary `submit` (a `TaskRequest` →
-`Scheduler.submit`), because its queue is in memory on the leader and there is no store to
-`store-put` into; M3 item 6 removes it, with the PWA's move to `store-put`. `enqueue` is _not_ a
+term, `not_ready` during takeover. M2 added a temporary `submit` (a `TaskRequest` →
+`Scheduler.submit`), because there was no store to `store-put` into; it stays, creating the task
+`queued` and admitting it in the same call, until M3 item 6 removes it with the PWA's move to
+`store-put`. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling. It names the tasks that changed (`tasks`, absent when
@@ -272,15 +273,17 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
   item 4a), with `scheduler/src/task.ts` the table that runs; the store's half of takeover is
   below.
 
-**The store adapter (M3 item 3).** M2's leader runs on the library's `MemoryQueueStore`. M3's
-`QueueStore` is `daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as
-the store port left it (DESIGN.md _Scheduler_, "The library"). The library sees plain task
-bodies, plus each record that did not read as `{ id, version, reason }`: the adapter seals and
-opens each under the daemon's imported key, binds it through `bindTaskRecord` (Wire changes,
-_Version binding_), and carries the term on every write. It maps the relay's answers onto the
-port's: `not_leader` to a `StoreRevoked` throw, a reply lost to the timeout to `indeterminate`,
-`forbidden` and `invalid_request` to `refused`, and the rest by name. Tests stay layered: the library against in-memory fakes of both interfaces, the adapter
-against `daemon/test/harness.ts`, the store against the real DO in e2e.
+**The store adapter (M3 item 3, landed 2026-10-17).** The leader runs on the relay's store;
+`MemoryQueueStore` is the library's reference store and its tests'. The `QueueStore` is
+`daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as the store port
+left it (DESIGN.md _Scheduler_, "The queue store"). The library sees plain task bodies, plus each
+record that did not read as `{ id, version, reason }`: the adapter seals and opens each under the
+daemon's imported key, binds it through `bindTaskRecord` (Wire changes, _Version binding_), and
+carries the term on every write. It maps the relay's answers onto the port's: `not_leader` (and
+a disconnected daemon socket) to a `StoreRevoked` throw, a reply lost to the timeout to
+`indeterminate`, `forbidden` and `invalid_request` to `refused`, and the rest by name. Tests stay
+layered: the library against in-memory fakes of both interfaces, the adapter against
+`daemon/test/harness.ts`, the store against the real DO in e2e.
 
 **Records (M3).** One sealed `TaskRecord` per task at `task:<id>`, the pause at `queue:pause`;
 machines, exclaves, pressure and quota come from the fleet feed and are persisted nowhere. A
@@ -316,7 +319,7 @@ outlive a leader change (today it is in memory) is M4's call.
 
 **Done detection, ahead.** `branch-state merged` → `done`, a session ending with a PR open →
 `awaiting-merge`, and the read-back from `progress` landed with M3 item 4a (DESIGN.md "Done
-detection"); the leader passing them on is item 3's. Still ahead: Linear Done (M4, if linked,
+detection"); the leader passes them on since item 3. Still ahead: Linear Done (M4, if linked,
 poll); the `mark-done` op, which always wins; and `failed` for a session that ends with no
 PR and a nonzero exit, which needs an exit status no event carries — until then a PR-less end
 is `done` by `session`.
@@ -394,9 +397,10 @@ pane (daemon + e2e); the leader's leg outliving `LazyRelay`'s idle window and no
 surviving `follow` (daemon); and every filter reason, score component, stickiness case and
 `quota unknown` rule over fixtures, with the layering test (scheduler).
 
-**Gaps, until later milestones close them.** The queue is in memory on the leader: a leader
-change forgets `auto` tasks not yet dispatched (sessions already running are ordinary sessions and
-survive), and `submit` is the only way in until M3's `store-put` replaces it. No deps, no batches,
+**Gaps, until later milestones close them.** (The queue was in memory on the leader — a
+leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the queue is the
+relay's and the next leader takes it over; `submit` is still the only way in for the PWA and MCP
+until item 6 moves them to `store-put`.) No deps, no batches,
 no caps beyond the global max, no pause, no alerts; the PWA polls `queue` for a task's progress
 instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
@@ -597,6 +601,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     app-leg client: at least the PWA in a browser, ideally also the iOS WKWebView. A refused send
     is a client timeout plus a `store reply not sent` relay log line, or a closed socket. If it
     does not arrive, page with the reserved `after`/`next`.
+    **Landed 2026-10-17** (DESIGN.md _Scheduler_, "The queue store", "The leader"). Not done:
+    the production check above (no token or PSK was available to the implementer — a read-only
+    `store-list` with the production token answers it, and also shows whether junk is already
+    stored), and the Exit bullet's "kill the leader between spawn and verdict" e2e. `submit`
+    admits inside its call rather than in the next pass, so its reply still carries `ready` for
+    MCP's placement follow and the PWA's `auto` verdict.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
     credits-spill detection (logged and shown in the PWA; the push alert is M4). **Landed
     2026-10-17** (DESIGN.md _Scheduler_, "The library": "Caps", "Pause", "Needs input", "Credits
