@@ -30,10 +30,24 @@ export interface SchedulerConfig {
   readonly lostAfterMs: number;
   /**
    * How often a pass also reads `sessions` from each connected machine holding
-   * a running task: the backstop for an `ended` event that never arrived, whose
-   * task would otherwise read `running` and hold its slot for good.
+   * a running or `awaiting-merge` task: the backstop for an `ended` event that
+   * never arrived (its task would read `running` and hold its slot for good) and
+   * a `branch-state` merge that did not (its dependents would wait for good).
    */
   readonly sweepIntervalMs: number;
+  /**
+   * Finished tasks kept for `queue` to show; older ones are pruned, so creates
+   * stay under the store's `MAX_TASKS`.
+   */
+  readonly keepFinished: number;
+  /**
+   * A pass prunes only once the store holds this many records (held plus
+   * unreadable): pruning every pass would delete a finished task an app is
+   * about to name in `deps` before the app's create reaches us, failing it
+   * `dependency_missing`. Below the store's `MAX_TASKS`, so apps' creates still
+   * have room until it fires.
+   */
+  readonly pruneAt: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -50,4 +64,6 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
   sweepIntervalMs: 120_000,
+  keepFinished: 50,
+  pruneAt: 96,
 };

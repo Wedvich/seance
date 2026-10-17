@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import { MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -595,6 +595,91 @@ describe("prune", () => {
     expect(scheduler.tasks().map((t) => t.id)).toEqual([...failed.slice(2), ready.id]);
     expect((await store.list()).map((s) => s.id)).toEqual([...failed.slice(2), ready.id]);
   });
+
+  test("a finished task an unfinished one names is kept past the keep: its dependent would fail on work that was there", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    await store.put("named", 0, { id: "named", spec: spec(), state: "done", createdAt: NOW });
+    await store.put("other", 0, { id: "other", spec: spec(), state: "cancelled", createdAt: NOW + 1 });
+    const deps = [{ task: "named", after: "merged" }] as const;
+    await store.put("next", 0, { id: "next", spec: spec({ deps }), state: "queued", createdAt: NOW + 2 });
+    await scheduler.load();
+    await scheduler.prune(0);
+    expect((await store.list()).map((s) => s.id)).toEqual(["named", "next"]);
+  });
+
+  test("a pass prunes only once the store holds pruneAt records, so a finished task is not gone before an app can name it", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 4 };
+    const { store, fleet, scheduler } = setup(new FakeFleet([machine("a")]), config);
+    for (const [i, id] of ["f1", "f2", "f3"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW - 10 + i });
+    }
+    await scheduler.load();
+    await pass(scheduler);
+    expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
+
+    await store.put("f4", 0, { id: "f4", spec: spec(), state: "done", createdAt: NOW });
+    await scheduler.refresh("f4");
+    await pass(scheduler);
+    expect((await store.list()).map((s) => s.id)).toEqual(["f4"]);
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("takeover below pruneAt prunes nothing: a create naming a finished task may be in flight", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 4 };
+    const { store, scheduler } = setup(new FakeFleet([machine("a")]), config);
+    for (const [i, id] of ["f1", "f2", "f3"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW - 10 + i });
+    }
+    await scheduler.takeover();
+    expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
+  });
+
+  test("takeover and a pass at pruneAt prune to the configured keep", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 2 };
+    const { store, fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), config);
+    for (const id of ["f1", "f2", "f3"]) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: (clock.now += 1) });
+    }
+    await scheduler.takeover();
+    expect((await store.list()).map((s) => s.id)).toEqual(["f3"]);
+
+    const task = await scheduler.submit(spec());
+    await pass(scheduler);
+    fleet.end("a", task.id);
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    await pass(scheduler);
+    expect((await store.list()).map((s) => s.id)).toEqual([task.id]);
+  });
+
+  test("equally old finished tasks go in id order, so two leaders prune the same ones", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    for (const id of ["b", "c", "a"]) {
+      // oxlint-disable-next-line no-await-in-loop -- stored in an order unrelated to the ids
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW });
+    }
+    await scheduler.load();
+    await scheduler.prune(1);
+    expect((await store.list()).map((s) => s.id)).toEqual(["c"]);
+  });
+
+  test("the default pruneAt leaves room under the store's cap for apps' creates", () => {
+    expect(DEFAULT_CONFIG.pruneAt).toBeLessThan(MAX_TASKS);
+  });
+
+  test("a create meeting a full store prunes, then lands", async () => {
+    const fleet = new FakeFleet([]);
+    const store = new MemoryQueueStore({ maxTasks: 2 });
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1 };
+    const scheduler = new Scheduler({ store, fleet, config, now: () => NOW, newId: () => "new" });
+    await store.put("old", 0, { id: "old", spec: spec(), state: "done", createdAt: NOW - 2 });
+    await store.put("older", 0, { id: "older", spec: spec(), state: "failed", createdAt: NOW - 3 });
+    await scheduler.load();
+    await scheduler.submit(spec());
+    expect((await store.list()).map((s) => s.id).toSorted()).toEqual(["new", "old"]);
+  });
 });
 
 describe("session state", () => {
@@ -767,11 +852,19 @@ describe("cancel", () => {
     expect(await env.scheduler.cancel(task.id)).toMatchObject({ ok: true, task: { id: task.id, state: "done" } });
   });
 
-  test("a state with no cancel edge yet is a gap, never answered finished", async () => {
-    const { store, scheduler } = setup();
+  test("queued, blocked and awaiting-merge tasks have no session to stop: cancelled as they stand", async () => {
+    const { store, fleet, scheduler } = setup(new FakeFleet([machine("a", { connected: false })]));
+    const placed = { assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } } as const;
     await store.put("q", 0, { id: "q", spec: spec(), state: "queued", createdAt: NOW });
+    await store.put("b", 0, { id: "b", spec: spec(), state: "blocked", createdAt: NOW });
+    await store.put("m", 0, { id: "m", spec: spec(), state: "awaiting-merge", createdAt: NOW, ...placed });
     await scheduler.load();
-    await expect(scheduler.cancel("q")).rejects.toThrow("cannot be cancelled yet");
+    for (const id of ["q", "b", "m"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one at a time, so a failure names its task
+      expect(await scheduler.cancel(id)).toMatchObject({ ok: true, task: { id, state: "cancelled" } });
+    }
+    expect(fleet.despawns).toEqual([]);
+    expect(fleet.sessionCalls).toEqual([]);
   });
 
   test("a reserved task is mid-dispatch and refused", async () => {

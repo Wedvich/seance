@@ -8,6 +8,7 @@ import type {
   SessionEntry,
   SpawnRequest,
   SpawnResponse,
+  TaskProgress,
 } from "@seance/shared";
 import type { Task } from "./task.ts";
 
@@ -155,6 +156,17 @@ export type TaskSessionsReply =
        * for launches from here on. Absent from older daemons, which prove nothing.
        */
       readonly ledgerSince?: number;
+      /**
+       * `SessionsResponse.progress`: each task's PR and branch as the machine
+       * last saw them. Absent from older daemons; read as no entry for any task.
+       */
+      readonly progress?: readonly TaskProgress[];
+      /**
+       * `SessionsResponse.progressTrimmed`. Present, a task with no `progress`
+       * entry is unknown, and waits for a later read. An adapter whose
+       * `progress` did not parse sets it too.
+       */
+      readonly progressTrimmed?: number;
     }
   | ErrorResponse
   | NoAnswer;

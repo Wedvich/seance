@@ -1077,7 +1077,8 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `submit` (a `TaskRequest`) → `{ task }`, the task as queued — **M2 only**. M2's queue is in
   memory on the leader, so this op is the one way in; it ends in `Scheduler.submit`, refuses
   `queue_full` past `MAX_ACTIVE_TASKS` unfinished tasks, and prunes all but the newest 50
-  finished ones first, since nothing else ever deletes from that memory. M3 replaces it with the
+  finished ones first (the library also prunes after takeover and, near the store's cap, in a pass since M3 item 4a,
+  "The library", below). M3 replaces it with the
   app sealing the task and `store-put`ting it at `expect: 0`, which queues with no leader up, and
   removes the op (docs/scheduler.md, M3).
 - `cancel { taskId }` (`TaskRef`) → `{ task }` (`TaskResponse`), the task as it now stands:
@@ -1345,7 +1346,7 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   unanswered and its machine not connected — and is never dispatched again on that evidence
   alone (_The library_, below, "`lost`").
 
-### The library (`scheduler/`) — landed 2026-10-16, M2 item 1
+### The library (`scheduler/`) — landed 2026-10-16, M2 item 1; M3's states 2026-10-17, M3 item 4a
 
 What the leader runs. The plan and what is still ahead live in docs/scheduler.md; this
 section records what exists. `daemon/src/leader.ts` hosts it ("The leader", above); in M2
@@ -1386,7 +1387,8 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   bills; an empty list reads the same, since a real daemon always lists `default`, and
   stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
-  `quota_over_line`, `cap_reached`. Skill and stacked-base filters are M4's. Pressure
+  `quota_over_line`, `cap_reached` (global, or `scope: "batch"`, "Batches" below). Skill and
+  stacked-base filters are M4's. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
   every status alike, through `newestQuotaByAccount` and `effectivePct` — the
@@ -1462,33 +1464,128 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
 - **The sweep** (M2 review, 2026-10-17). A running task whose `ended` event never arrived
   would read `running` forever and hold its slot; after `globalMax` of them `auto` places
   nothing (`cap_reached`). So once per `sweepIntervalMs` (120s, docs/scheduler.md Settled
-  defaults 12) a pass also reads `sessions` from each connected machine holding a running or
-  `needs-input` task, settled as takeover settles one: no session carrying its id is `done`.
+  defaults 12) a pass also reads `sessions` from each connected machine holding a running,
+  `needs-input` or `awaiting-merge` task, settled as takeover settles one: no session carrying
+  its id has ended, and `progress` is applied to a live one ("Done detection" below). The
+  `awaiting-merge` read is the backstop for a `branch-state` merge that never arrived, which
+  would otherwise leave its `after: "merged"` dependents blocked for good; it shares the one
+  cadence, since a merge is no more urgent than a freed slot.
   It shares the pass's one `sessions` call per machine with the TTL and `lost` checks, and
   runs before routing, so a slot it frees is used in the same pass. An answer is applied
   only to a task still where it was when its machine was asked, since one read before an
   event landed could undo it. Rejected: a sweep every pass, which is one `sessions` per busy
   machine per status beat; and trusting events alone, which is what left the slot held.
 - **Takeover** (`takeover()`) is `load()` plus one `sessions` read per machine with an
-  in-flight or `lost` task, settled before the host's first tick: a reservation as the TTL
-  check settles one, except that a session or an `ended` entry carrying its id counts at any
-  age; a running task with no session left is `done`; a `lost` task as below. An unanswered
-  machine changes nothing, with the TTL check's one exception: a reservation past its TTL on
-  a machine no longer connected becomes `lost`.
-- **States are M2's slice** (`task.ts`): `ready → reserved → running ⇄ needs-input →
-done`, `failed`/`cancelled` off-path, one transition table, an illegal move a thrown
-  bug. `reserved` also reaches `needs-input` and `done` directly. The alternative was
-  a two-step through `running`. An event for a reserved task is one observed
-  transition, so it costs one store write, and a `running` written first would record
-  a state nobody observed. A session that ends is `done` until M3's done detection; a reserved task refuses
-  `cancel` (`dispatching`) rather than racing its spawn. `cancel`'s other answers derive
-  from the table, not a list beside it: a finished task is `finished`, and a state with no
-  cancel edge yet (M3's `queued`, `blocked`) is a thrown gap — the leader's
-  `internal_error` — never misread as `finished`. A task that finishes while its despawn
-  is out (its `ended` outran the reply) is answered as the task it now is, not `conflict`.
-  Which states are placed, finished, still waiting and so on is one table shared with the
-  apps (`TASK_PHASES`, `shared/src/task-phase.ts`); `task.ts` derives `PLACED` and
-  `FINISHED` from it.
+  in-flight, `lost` or `awaiting-merge` task, settled before the host's first tick: a
+  reservation as the TTL check settles one, except that a session or an `ended` entry
+  carrying its id counts at any age; a running task with no session left has ended, and
+  is settled by its PR ("Done detection"); a `lost` task as below. An unanswered machine
+  changes nothing, with the TTL check's one exception: a reservation past its TTL on a
+  machine no longer connected becomes `lost`. Then finished tasks are pruned ("Pruning").
+- **States** (`task.ts`; M2 item 1, M3's added in M3 item 4a, 2026-10-17): `queued →
+blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
+  `failed`, `cancelled` and `lost` off-path, one transition table, an illegal move a thrown
+  bug. An app creates `queued`; only admission moves it ("Admission and dependencies").
+  `reserved` also reaches `needs-input`, `awaiting-merge` and `done` directly. The
+  alternative was a two-step through `running`. An event for a reserved task is one
+  observed transition, so it costs one store write, and a `running` written first would
+  record a state nobody observed. A reserved task refuses `cancel` (`dispatching`) rather
+  than racing its spawn; a finished one is `finished`; `queued`, `blocked` and
+  `awaiting-merge` have no session, so they are cancelled with no despawn. A task that
+  finishes while its despawn is out (its `ended` outran the reply) is answered as the task
+  it now is, not `conflict`. Which states are placed, finished, still waiting and so on is
+  one table shared with the apps (`TASK_PHASES`, `shared/src/task-phase.ts`); `task.ts`
+  derives `PLACED` and `FINISHED` from it.
+- **Admission and dependencies** (`deps.ts`, M3 item 4a). Every pass, after its
+  `sessions` checks and before routing, moves each `queued` or `blocked` task to where its
+  `deps` put it: `ready` when every edge has released, `blocked` while one waits, `failed`
+  when one never can. An edge releases when its predecessor is `done`, whatever settled
+  it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
+  `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
+"merged"` only at `done`, a merge being what makes a task done. A `failed` or
+  `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
+  predecessor with a PR and a pushed branch fails `opened` too. A dependent already
+  released has left `blocked` and is not judged again, so an outcome can depend on whether a
+  pass saw the predecessor fail before the release; accepted. A `lost` predecessor is waited on, since it may still finish. Three ways an edge
+  never releases, each a
+  `TaskFailureCode`: `dependency_failed`, a `failed` or `cancelled` predecessor — computed
+  to a fixpoint in one call, so a chain fails in one pass rather than one link per pass;
+  `dependency_missing`, an id the store does not hold once `DEP_MISSING_GRACE_MS` has
+  passed since the dependent's own `createdAt` (a client puts a batch one record at a
+  time), where an id held as an unreadable record waits, being in the store; and
+  `dependency_cycle`, every `queued` or `blocked` member of a strongly connected component
+  over every held task, a self-edge included, and a `sequential` member's wait on the
+  nearest lower `index` not over counted as an edge (a lower index depending on a higher
+  one of its batch would otherwise deadlock silently), so a loop a later create closes fails the
+  member already blocked too — leaving out the edges of a finished task, whose dependents
+  its outcome has already released or failed, so a `cancelled` member's dependent fails
+  `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
+  `STORE_TOMBSTONE_MS` old is never admitted: its key's tombstone may be gone, so it may be
+  a pruned task's authentic version-1 blob put back. It stays `queued` — no failure code
+  says why yet — and its dependents wait on it. A release lands at the next pass, not on
+  the event: the host ticks at least every 30s.
+- **Batches** (`batch.ts`, M3 item 4a). No batch record exists: a batch is the tasks that
+  name its id, and its strategy is the earliest-created member's (ties to the lower id).
+  `sequential` bounds it at one member in flight, `parallel` at `max`, `auto` not at all;
+  at the bound every candidate carries `cap_reached` with `scope: "batch"`. The bound
+  counts `IN_FLIGHT` and `lost`, so an `awaiting-merge` member frees its place but a lost
+  one does not: the global cap leaves `lost` out so a forgotten machine cannot pin it, a
+  reason a batch's own serialization lacks, and its session may still run on a machine
+  that only sleeps, so the next `sequential` member would run beside it. `sequential` also
+  enforces `index` order, which routing order alone cannot (a member whose predecessor is
+  unroutable this pass would go first): a member is held, with the same `cap_reached`
+  (`inFlight` the lower indexes not yet over), until every held lower index is over —
+  finished in any state, `failed` and `cancelled` included, or `awaiting-merge` — with
+  `inFlight: 1` of `max: 1`, one earlier member holding the sequential slot (the schema has
+  no reason for "an earlier member is not over"; a `batch_order` reason is a schema
+  follow-up). One still `blocked` or unroutable holds it. Order is enforced among held
+  members only: a lower index not in the store (never put, not yet refreshed, or pruned)
+  holds nothing, so gaps, 1-based numbering and pruning never wedge a batch, and the check
+  costs the members, not the `index`. One client puts a batch together, so the window is a
+  refresh. A pass routes ready tasks
+  oldest first, except that one batch's members go in `index` order from where its oldest
+  ready member would have gone.
+- **Done detection** (`done.ts`, M3 item 4a). A session that ends with a PR known — the
+  event's `prUrl`, the one its record holds, or its machine's `progress` — is
+  `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
+  it is `done`, `doneBy: "session"`. A live session's newer PR URL is recorded even when
+  its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
+  the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
+  within one branch, so the first pushed report with a PR releases `opened` for good — and
+  a merge makes the task `done`, `doneBy: "merged"`, a session still running included. A
+  report naming a different branch than the one recorded starts it unpushed. A `merged`
+  verdict is believed only of a branch seen pushed (`pushed` is per branch, sticky within
+  one, so a remote branch deleted after its merge still reports pushed on takeover; a PR URL
+  is no evidence, being tied to no branch, so it is the old branch's after a switch; a
+  first report naming a branch has no prior to compare): reap's `Merged` reads a branch with no commits past the default
+  branch as an ancestor, which is every task branch before its first commit, and a task
+  that switched branches would otherwise be `done` with its PR unmerged. A `here` task
+  ignores `pushed` and `merged` altogether: its branch is the checkout's, often the
+  default branch, pushed and trivially merged; its `opened` comes from its PR and its
+  `merged` only at `done`: an `awaiting-merge` `here` task is left out of the sweep, since no
+  reply can change it, and reaches `done` only by mark-done (items 5/6), so its `after:
+"merged"` dependents wait for that. What `branch-state` carried while no leader
+  listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
+  on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
+  task is connected again after a pass saw it away. In a reply the daemon trimmed
+  (`progressTrimmed`) a session-less task with no entry is unknown and waits for a later
+  read, never settled as PR-less; a daemon that sends no `progress` settles by the PR the
+  record holds. The leader does not yet pass `prUrl`, `progress` or `branch-state` on
+  (M3 item 3), so until then a session that ends is `done`.
+- **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
+  app's create past it is `store_full` — which the leader never sees. So `prune()`
+  deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
+  defaults 13) on `submit`'s `store_full` unconditionally, and after takeover and at the
+  end of a pass only once the store holds `pruneAt` records (96, held plus unreadable;
+  under `MAX_TASKS` so creates still fit): pruning every time would delete a finished task
+  an app is naming in a create still on its way to us, and the dependent would fail
+  `dependency_missing`. `pruneAt` narrows that race, it does not close it. It
+  writes only when something is over the keep; never a task an unfinished one names in
+  `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
+  there. Equally old tasks go in id order, so two leaders prune the same ones. M2's `submit` also prunes
+  and retries once when its own create meets `store_full`. `MemoryQueueStore` refuses
+  creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
+  nothing.
 - **`lost`: a task whose machine stopped answering for it** (M2 item 3's gap B, closed in item
   6; the reservation half added 2026-10-16). A `running` or `needs-input` task whose machine has
   been absent — not connected, or gone from the registry — for `lostAfterMs` (15 min, Settled
@@ -1501,9 +1598,10 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   once connected, its `sessions` reply decides — a session carrying the task id is `running`
   again, on the pane listed now — or a `session-event` sealed by that machine does, as for any
   placed task (the event names the pane a never-confirmed task lacks). With no session, a task
-  that ran is `done`, whether or not `ended` still remembers it, as takeover settles a running
-  task whose session is gone; a never-confirmed one settles as its reservation would have —
-  `done` if `ended` lists it, `ready` on the ledger's proof, `failed` `dispatch_unconfirmed`
+  that ran has ended — `awaiting-merge` or `done` by its PR — whether or not `ended` still
+  remembers it, as takeover settles a running task whose session is gone; a never-confirmed
+  one settles as its reservation would have — ended if `ended` lists it, `ready` on the
+  ledger's proof, `failed` `dispatch_unconfirmed`
   without. `lost → ready` exists for that task alone, and `advance` throws for any other. An
   unanswered check keeps it `lost`. The absence clock is the scheduler's own, in memory, started the first
   pass that sees the machine away, not `Machine.lastSeen`: a request timeout's offline mark can
@@ -3204,9 +3302,9 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
 - **A PR URL is kept only as `https:`** (`httpsUrl`, `shared/src/parse.ts`). It must
   parse, carry no credentials, and stay under 2 KiB. Anything else is dropped from
   the event, never echoed. The check runs before the URL can become an `href` in the
-  PWA or text in a push, and the leader re-checks it in `parseSessionEvent` — then, in M2,
-  drops it: `Scheduler.onSession` takes the state alone, and nothing reads a PR URL before
-  M3's done detection.
+  PWA or text in a push, and the leader re-checks it in `parseSessionEvent` — then drops it.
+  `Scheduler.onSession` takes it since M3 item 4a (done detection: a session that ends with
+  a PR is `awaiting-merge`), and the leader passes it on from M3 item 3.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere but the quota store. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the

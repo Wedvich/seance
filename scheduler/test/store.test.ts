@@ -39,6 +39,15 @@ describe("MemoryQueueStore", () => {
     expect(await store.put("t", 0, queued("t"))).toEqual({ ok: true, version: 1 });
   });
 
+  test("a create past the cap is store_full; an overwrite is not, and a tombstone counts toward nothing", async () => {
+    const store = new MemoryQueueStore({ maxTasks: 1 });
+    expect(await store.put("t", 0, queued("t"))).toEqual({ ok: true, version: 1 });
+    expect(await store.put("u", 0, queued("u"))).toEqual({ ok: false, code: "store_full" });
+    expect(await store.put("t", 1, queued("t"))).toEqual({ ok: true, version: 2 });
+    await store.delete("t", 2);
+    expect(await store.put("u", 0, queued("u"))).toEqual({ ok: true, version: 1 });
+  });
+
   test("an old body put back at a newer version reads as a version mismatch, never as the task", async () => {
     const { store } = setup();
     await store.put("t", 0, queued("t"));
