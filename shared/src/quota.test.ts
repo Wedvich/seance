@@ -33,6 +33,82 @@ describe("newestQuotaByAccount", () => {
     expect(newest.get("org:acct")).toEqual({ observation: newer, deviceId: "b" });
   });
 
+  // `/usage` on the laptop cached the Fable cap; the tower's newer cache never
+  // saw it. The tower's 5h/7d win, the laptop's Fable window survives.
+  test("windows the newest observation lacks come from the next newest that has them", () => {
+    const newest = newestQuotaByAccount([
+      host(
+        "laptop",
+        [exclave("main", "org:acct")],
+        [{ x: 0, h: 10, hr: S + 60, d: 20, w: [{ m: "Fable", p: 30, r: S + 99 }], s: "cache", at: S - 600 }],
+      ),
+      host("tower", [exclave("work", "org:acct")], [{ x: 0, h: 40, d: 28, s: "cache", at: S - 60 }]),
+      host(
+        "old",
+        [exclave("main", "org:acct")],
+        [
+          {
+            x: 0,
+            w: [
+              { m: "Fable", p: 5 },
+              { m: "Next", p: 7 },
+            ],
+            s: "cache",
+            at: S - 3600,
+          },
+        ],
+      ),
+    ]);
+    expect(newest.get("org:acct")).toEqual({
+      // The tower's `h` keeps no reset rather than borrowing the laptop's `hr`.
+      observation: {
+        x: 0,
+        h: 40,
+        d: 28,
+        w: [
+          { m: "Fable", p: 30, r: S + 99 },
+          { m: "Next", p: 7 },
+        ],
+        s: "cache",
+        at: S - 60,
+      },
+      deviceId: "tower",
+    });
+  });
+
+  // Nothing expires a window with no reset, and filled it would wear the newer
+  // reading's stamp, so only a reading under one window length older fills it.
+  test("a reset-less window is filled only from a reading less than one window length older", () => {
+    const newest = newestQuotaByAccount([
+      host("tower", [exclave("work", "org:acct")], [{ x: 0, s: "cache", at: S }]),
+      host(
+        "asleep",
+        [exclave("main", "org:acct")],
+        [
+          {
+            x: 0,
+            h: 99,
+            d: 98,
+            w: [
+              { m: "Fable", p: 97 },
+              { m: "Next", p: 96, r: S - 1 },
+            ],
+            s: "cache",
+            at: S - 8 * 86_400,
+          },
+        ],
+      ),
+      host("laptop", [exclave("main", "org:acct")], [{ x: 0, h: 50, d: 40, s: "cache", at: S - 6 * 3_600 }]),
+    ]);
+    expect(newest.get("org:acct")?.observation).toEqual({
+      x: 0,
+      d: 40,
+      w: [{ m: "Next", p: 96, r: S - 1 }],
+      s: "cache",
+      at: S,
+    });
+  });
+
   test("a tie keeps the first machine in fleet order", () => {
     const newest = newestQuotaByAccount([
       host("a", [exclave("one", "org:acct")], [{ x: 0, h: 10, s: "cache", at: S }]),

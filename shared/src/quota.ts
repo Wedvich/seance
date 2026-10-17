@@ -16,9 +16,12 @@ export interface NewestQuota {
 
 /**
  * Newest observation per account id, across every machine; ties go to the
- * first in fleet order. Statuses are expected sanitized already (`RelayClient`
- * does it), but an index outside the exclave list is still skipped rather than
- * trusted. Exclaves not signed in have no account and contribute nothing.
+ * first in fleet order. Windows the newest lacks come from the next newest
+ * that has them (`mergeQuota`), so a machine whose cache never saw a per-model
+ * cap doesn't erase the one another machine read. Statuses are expected
+ * sanitized already (`RelayClient` does it), but an index outside the exclave
+ * list is still skipped rather than trusted. Exclaves not signed in have no
+ * account and contribute nothing.
  * Live and kept statuses fold alike — an observation carries its own `at`, so
  * an asleep machine's last reading still counts for an account it shares —
  * which is why this reads `status` directly and never through `liveStatus`.
@@ -28,18 +31,60 @@ export interface NewestQuota {
 export function newestQuotaByAccount(
   machines: readonly Pick<Machine, "deviceId" | "exclaves" | "status">[],
 ): ReadonlyMap<string, NewestQuota> {
-  const newest = new Map<string, NewestQuota>();
+  const seen = new Map<string, NewestQuota[]>();
   for (const machine of machines) {
     const exclaves = machine.exclaves ?? [];
     for (const observation of machine.status?.quota ?? []) {
       const accountId = exclaves[observation.x]?.accountId;
       if (accountId === undefined || accountId === null) continue;
-      const current = newest.get(accountId);
-      if (current !== undefined && observation.at <= current.observation.at) continue;
-      newest.set(accountId, { observation, deviceId: machine.deviceId });
+      const list = seen.get(accountId) ?? [];
+      list.push({ observation, deviceId: machine.deviceId });
+      seen.set(accountId, list);
     }
   }
+  const newest = new Map<string, NewestQuota>();
+  for (const [accountId, all] of seen) {
+    // Stable sort: a tie keeps fleet order.
+    const [first, ...older] = all.toSorted((a, b) => b.observation.at - a.observation.at);
+    if (first === undefined) continue;
+    const observation = older.reduce((merged, next) => mergeQuota(merged, next.observation), first.observation);
+    newest.set(accountId, { observation, deviceId: first.deviceId });
+  }
   return newest;
+}
+
+const FIVE_HOURS_S = 5 * 3_600;
+const SEVEN_DAYS_S = 7 * 86_400;
+
+/**
+ * `newer` with every window it lacks taken from `older`, under `newer`'s stamp,
+ * source and index. Safe because a reading is a lower bound — use only raises
+ * it until reset, and a passed reset reads 0% whatever its age
+ * (`effectivePct`) — so an older window never understates the account. A
+ * window and its reset travel as a pair: `newer`'s `h` never takes `older`'s
+ * `hr`. Per-model windows merge by model name. A window with no reset has
+ * nothing to expire it, and once filled its age hides behind `newer`'s stamp,
+ * so it is taken only from a reading less than one window length older — else
+ * a long-asleep machine's reading would pin the account forever.
+ */
+export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): QuotaObservation {
+  const age = newer.at - older.at;
+  const fresh = (resetsAt: number | undefined, lengthS: number): boolean => resetsAt !== undefined || age < lengthS;
+  const models = new Set((newer.w ?? []).map((window) => window.m));
+  const w = [
+    ...(newer.w ?? []),
+    ...(older.w ?? []).filter((window) => !models.has(window.m) && fresh(window.r, SEVEN_DAYS_S)),
+  ];
+  return {
+    ...newer,
+    ...(newer.h === undefined && older.h !== undefined && fresh(older.hr, FIVE_HOURS_S)
+      ? { h: older.h, ...(older.hr === undefined ? {} : { hr: older.hr }) }
+      : {}),
+    ...(newer.d === undefined && older.d !== undefined && fresh(older.dr, SEVEN_DAYS_S)
+      ? { d: older.d, ...(older.dr === undefined ? {} : { dr: older.dr }) }
+      : {}),
+    ...(w.length === 0 ? {} : { w }),
+  };
 }
 
 /**

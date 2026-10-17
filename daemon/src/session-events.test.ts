@@ -88,7 +88,7 @@ describe("newestQuota", () => {
       d: 20,
       w: [{ m: "Fable", p: 30 }],
     });
-    expect(newestQuota(cache, { x: 0, s: "session", at: 50, h: 1 })).toBe(cache);
+    expect(newestQuota(cache, { x: 0, s: "session", at: 50, h: 1 })).toEqual(cache);
     expect(newestQuota(null, null)).toBeNull();
   });
 });

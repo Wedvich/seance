@@ -3141,7 +3141,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, named by the
   email any of its exclaves reports (the short account id from a daemon that predates it), newest
-  observation wins, since every daemon hosting one of its exclaves reports it — an asleep
+  observation wins, since every daemon hosting one of its exclaves reports it, each window
+  it lacks filled from the next newest that has one (`mergeQuota`) — per-model caps reach
+  the cache only through `/usage`, so a machine whose newer cache never saw one must not
+  erase another's; a window with no reset fills only from a reading under one window length
+  older, since nothing else would ever expire it. Every machine counts, an asleep
   machine's included, from the status the relay kept, with "asleep" and its age on the
   observed line. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
@@ -3800,10 +3804,11 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   fsync, coalesced to one write behind the one in flight — a reading lost to a power
   cut costs freshness, unlike the launch ledger's write-ahead. A reading older than a
   week has passed every window and is dropped at load. The telemetry
-  tick takes the newer of it and the config dir's cache (`newestQuota`), the cache
-  filling what the report lacks: its per-model `w`, and a five-hour or seven-day
-  window (with its reset) the report left out. That is safe because a reading is a lower bound: use
-  only raises it until reset, and a passed reset reads 0%. The observation rides
+  tick takes the newer of it and the config dir's cache (`newestQuota`), the older
+  filling what the newer lacks (`mergeQuota`, `shared/src/quota.ts`): per-model `w`
+  by model name, and a five-hour or seven-day window (with its reset) left out. That is
+  safe because a reading is a lower bound: use only raises it until reset, and a passed
+  reset reads 0%. Readers fold across machines by the same rule. The observation rides
   `status` under the same metric names. Rejected: wrapping each exclave's
   `statusLine.command` in `settings.json`. It would rewrite the user's config in
   every exclave and owe an exact restore on uninstall. It would also put a process
