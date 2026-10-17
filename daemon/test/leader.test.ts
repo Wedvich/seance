@@ -5,12 +5,14 @@ import { join } from "node:path";
 import {
   APP_ID,
   CAPABILITIES,
+  ENVELOPE_MAX_CT_LENGTH,
   appRelayUrl,
   importPsk,
   MAX_ACTIVE_TASKS,
   open,
   parseQueueReply,
   parseSubmitReply,
+  QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   RelayClient,
   REPLAY_WINDOW_MS,
@@ -18,6 +20,8 @@ import {
   SCHEDULER_ID,
   seal,
   toBase64,
+  type Candidate,
+  type Decision,
   type Envelope,
   type MachineInfo,
   type MachineStatus,
@@ -32,7 +36,14 @@ import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import type { LocalOps } from "../src/handlers.ts";
-import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
+import {
+  boundedQueue,
+  createLeader,
+  MemoryQueueStore,
+  type Leader,
+  type QueueStore,
+  type Task,
+} from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
 import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 import { AsyncQueue, startTestRelay, type TestRelay } from "./harness.ts";
@@ -176,6 +187,52 @@ async function routableEntry(deviceId: string): Promise<RegistryView> {
 /** An app's request to the scheduler, sealed as the PWA's client seals one. */
 function appRequest(op: OpName, payload: unknown = {}, from = APP_ID): Promise<Envelope> {
   return seal(key, { to: SCHEDULER_ID, from }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
+}
+
+/**
+ * A routing record over `machines` × `exclaves`, shaped as the router writes one:
+ * a 43-character deviceId per machine, raw score components at full float
+ * precision, a quota basis on every candidate, and every third one rejected.
+ */
+function fleetDecision(machines: number, exclaves: number, seed: number): Decision {
+  const candidates: Candidate[] = [];
+  for (let m = 0; m < machines; m += 1) {
+    const deviceId = `${"d".repeat(40)}-${m}${seed % 10}`;
+    for (let x = 0; x < exclaves; x += 1) {
+      const quota = { observedAt: 1_760_000_000 + seed, observer: deviceId, source: "session" } as const;
+      const common = { deviceId, machine: `machine-${m}`, exclave: `exclave-${x}`, clone: "app", quota };
+      const f = (k: number): number => (seed + m * 7 + x * 13 + k) / 97;
+      candidates.push(
+        (m + x) % 3 === 2
+          ? { ...common, rejected: [{ code: "quota_over_line", window: "five_hour", projectedPct: f(1) * 100 }] }
+          : {
+              ...common,
+              rejected: [],
+              score: {
+                components: {
+                  accountPressure: f(1),
+                  machinePressure: f(2),
+                  dependencyDistance: 0,
+                  queuePressure: f(3),
+                },
+                sticky: 0,
+                total: f(4),
+              },
+            },
+      );
+    }
+  }
+  const [first] = candidates;
+  return {
+    at: 1_760_000_000_000 + seed,
+    chosen: first === undefined ? null : { deviceId: first.deviceId, exclave: "exclave-0", clone: "app" },
+    candidates,
+  };
+}
+
+/** Sealed as the daemon's transport seals an answer, whose bound is on `ct`. */
+async function sealedLength(response: Plain): Promise<number> {
+  return (await seal(key, { to: APP_ID, from: "self" }, response)).ct.length;
 }
 
 describe("leader requests", () => {
@@ -444,6 +501,97 @@ describe("leader requests", () => {
       leader.stop();
       relay.stop();
     }
+  });
+
+  test("on a 3×3 fleet, twenty finished tasks still seal under the envelope bound, the oldest cut to their winner", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const finished = ["done", "failed", "cancelled"] as const;
+    const stored: Task[] = [];
+    for (let i = 0; i < QUEUE_MAX_TASKS; i += 1) {
+      const decision = fleetDecision(3, 3, i);
+      const state = finished[i % finished.length] ?? "done";
+      stored.push(task(`t${i}`, { createdAt: i + 1, state, decision }));
+      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
+      await store.put(`t${i}`, 0, stored[i] ?? task(`t${i}`, {}));
+    }
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      // Every record whole, as the leader used to answer: what this test exists to keep out.
+      const whole: Plain = {
+        id: crypto.randomUUID(),
+        ts: 0,
+        op: "queue",
+        re: crypto.randomUUID(),
+        payload: { tasks: stored, at: 0 },
+      };
+      expect(await sealedLength(whole)).toBeGreaterThan(ENVELOPE_MAX_CT_LENGTH);
+
+      leader.lead(1);
+      await leader.settled();
+      leader.deliver(await appRequest("queue"));
+      const { response } = await replies.next();
+      expect(await sealedLength(response)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+      const { tasks } = queueReply(response.payload);
+      expect(tasks).toHaveLength(QUEUE_MAX_TASKS);
+      const sizes = tasks.map((t) => t.decision?.candidates.length);
+      // Newest first: whole records while the budget lasts, then the winner alone — never the other way round.
+      expect(sizes[0]).toBe(9);
+      expect(sizes.at(-1)).toBe(1);
+      // A cut record says so, and by how much; a whole one carries no count.
+      expect(tasks.map((t) => t.decision?.trimmed ?? 0)).toEqual(sizes.map((n = 0) => 9 - n));
+      expect(sizes).toEqual(sizes.toSorted((a = 0, b = 0) => b - a));
+      for (const t of tasks) expect(t.decision?.chosen).toEqual(stored.find((s) => s.id === t.id)?.decision?.chosen);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
+
+/** `boundedQueue` over the decisions the tasks carry, as the transport would send it. */
+function boundedReply(tasks: readonly Task[]): Plain {
+  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0);
+  return { id: crypto.randomUUID(), ts: 0, op: "queue", re: crypto.randomUUID(), payload };
+}
+
+describe("boundedQueue", () => {
+  test("a ready or reserved task keeps its whole record ahead of newer finished ones; nothing invents a decision", async () => {
+    const unplaced = { ...fleetDecision(3, 3, 1), chosen: null };
+    const tasks = [
+      task("waiting", { createdAt: 1, decision: unplaced }),
+      task("going", { createdAt: 2, state: "reserved", decision: fleetDecision(3, 3, 2) }),
+      task("bare", { createdAt: 3, state: "done" }),
+      ...Array.from({ length: QUEUE_MAX_TASKS - 3 }, (_, i) =>
+        task(`done${i}`, { createdAt: 10 + i, state: "done", decision: fleetDecision(3, 3, 10 + i) }),
+      ),
+    ];
+    const answered = boundedReply(tasks);
+    expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    const byId = new Map(queueReply(answered.payload).tasks.map((t) => [t.id, t]));
+    expect(byId.get("waiting")?.decision).toEqual(unplaced);
+    expect(byId.get("going")?.decision).not.toHaveProperty("trimmed");
+    expect(byId.get("going")?.decision?.candidates).toHaveLength(9);
+    expect(byId.get("bare")).not.toHaveProperty("decision");
+    expect(byId.get("done0")?.decision).toMatchObject({ candidates: [expect.anything()], trimmed: 8 });
+  });
+
+  test("past the budget even a live record is cut, and one with no winner keeps its verdict with no candidates", async () => {
+    const tasks = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) =>
+      task(`r${i}`, {
+        createdAt: i,
+        // Odd ones as the scheduler stores a record it had to cut already.
+        decision: { ...fleetDecision(10, 5, i), ...(i % 2 === 0 ? { chosen: null } : { trimmed: 3 }) },
+      }),
+    );
+    const answered = boundedReply(tasks);
+    expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    const { tasks: queued } = queueReply(answered.payload);
+    expect(queued.find((t) => t.id === "r0")?.decision).toMatchObject({ chosen: null, candidates: [], trimmed: 50 });
+    // The leader's own cut adds to the count, never replaces it.
+    expect(queued.find((t) => t.id === "r1")?.decision).toMatchObject({ candidates: [expect.anything()], trimmed: 52 });
+    // Newest first, so the newest live record is the one kept whole.
+    expect(queued[0]?.decision?.candidates).toHaveLength(50);
   });
 });
 

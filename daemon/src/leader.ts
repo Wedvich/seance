@@ -27,6 +27,7 @@ import {
   QUEUE_PROMPT_PREVIEW,
   quote,
   RequestFailure,
+  type Decision,
   type DespawnResponse,
   type Envelope,
   type ErrorResponse,
@@ -261,23 +262,91 @@ function schedulerError(code: SchedulerErrorCode, message: string): SchedulerErr
   return { ok: false, code, message };
 }
 
-/** Newest first and bounded, prompts cut: the reply carries a decision per task, which grows with the fleet. */
 function queueView(scheduler: Scheduler, now: number): QueueResponse {
-  const newest = scheduler
-    .tasks()
+  return boundedQueue(scheduler.tasks(), (id) => scheduler.lastDecision(id), now);
+}
+
+/**
+ * UTF-8 bytes of task JSON one `queue` reply may carry. Sealing is base64 of
+ * the whole `Plain`, 4/3 of it, against `ENVELOPE_MAX_CT_LENGTH`'s 65 536:
+ * 44 000 seals to about 58 900, leaving room for the wrapper and a prompt
+ * preview's multi-byte characters.
+ */
+const QUEUE_REPLY_BUDGET = 44_000;
+
+/** Where the decision is still live: why a task waits, or where it is going. */
+const LIVE_DECISION: ReadonlySet<Task["state"]> = new Set(["ready", "reserved"]);
+
+const utf8 = new TextEncoder();
+
+function jsonBytes(value: unknown): number {
+  return utf8.encode(JSON.stringify(value)).length;
+}
+
+/**
+ * The winner alone, so a reader still says where and why without the losers
+ * that make a record grow with the fleet (a 3×3 one is about 5 KB). The cut
+ * adds to `trimmed`, which says the list is partial and by how much.
+ */
+function winnerOnly(decision: Decision): Decision {
+  const { chosen } = decision;
+  const winner =
+    chosen === null
+      ? undefined
+      : decision.candidates.find((c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave);
+  const candidates = winner === undefined ? [] : [winner];
+  const cut = (decision.trimmed ?? 0) + decision.candidates.length - candidates.length;
+  return { at: decision.at, chosen, candidates, ...(cut === 0 ? {} : { trimmed: cut }) };
+}
+
+/** A task as `queue` shows it before its decision is chosen: the prompt cut to a preview. */
+function undecided(task: Task): Task {
+  const { decision: _, spec, ...rest } = task;
+  const { prompt } = spec;
+  return { ...rest, spec: prompt === undefined ? spec : { ...spec, prompt: prompt.slice(0, QUEUE_PROMPT_PREVIEW) } };
+}
+
+/**
+ * Newest first and bounded, prompts cut. Full decisions are filled against
+ * `QUEUE_REPLY_BUDGET`, live ones first and then newest first; the rest go out
+ * `winnerOnly`. Exported for its test: a daemon test cannot build a `Scheduler`.
+ */
+export function boundedQueue(
+  all: readonly Task[],
+  decisionOf: (id: string) => Decision | undefined,
+  now: number,
+): QueueResponse {
+  const newest = all
     .toSorted((a, b) => b.createdAt - a.createdAt)
-    .slice(0, QUEUE_MAX_TASKS);
-  const tasks: Task[] = [];
+    .slice(0, QUEUE_MAX_TASKS)
+    .map(undecided);
+  const cut = new Map<string, Decision>();
   for (const task of newest) {
-    const decision = scheduler.lastDecision(task.id);
-    const { prompt } = task.spec;
-    tasks.push({
-      ...task,
-      spec: prompt === undefined ? task.spec : { ...task.spec, prompt: prompt.slice(0, QUEUE_PROMPT_PREVIEW) },
-      ...(decision === undefined ? {} : { decision }),
-    });
+    const decision = decisionOf(task.id);
+    if (decision !== undefined) cut.set(task.id, winnerOnly(decision));
   }
-  return { tasks, at: now };
+  // Every trimmed record is counted up front, so a full one only ever replaces its own.
+  let left =
+    QUEUE_REPLY_BUDGET - newest.reduce((sum, task) => sum + jsonBytes(withDecision(task, cut.get(task.id))), 0);
+  const full = new Map<string, Decision>();
+  const byClaim = [
+    ...newest.filter((t) => LIVE_DECISION.has(t.state)),
+    ...newest.filter((t) => !LIVE_DECISION.has(t.state)),
+  ];
+  for (const task of byClaim) {
+    const decision = decisionOf(task.id);
+    const short = cut.get(task.id);
+    if (decision === undefined || short === undefined) continue;
+    const extra = jsonBytes(decision) - jsonBytes(short);
+    if (extra > left) continue;
+    left -= extra;
+    full.set(task.id, decision);
+  }
+  return { tasks: newest.map((task) => withDecision(task, full.get(task.id) ?? cut.get(task.id))), at: now };
+}
+
+function withDecision(task: Task, decision: Decision | undefined): Task {
+  return decision === undefined ? task : { ...task, decision };
 }
 
 /** What answering one app request reads: the term's scheduler and the request it answers. */

@@ -1063,7 +1063,8 @@ Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and ans
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
 - `queue {}` → `{ tasks, at }` — the leader's newest `QUEUE_MAX_TASKS` tasks with their latest
-  decisions, prompts cut to `QUEUE_PROMPT_PREVIEW`.
+  decisions, prompts cut to `QUEUE_PROMPT_PREVIEW`; a decision past the reply's budget carries
+  only its winner, counted in `trimmed` (Scheduler, "The leader").
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
@@ -1262,8 +1263,14 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   `despawn_failed`, `conflict`), `internal_error` when the handler throws, and `not_leader`
   (below). `queue`
   replies with the newest `QUEUE_MAX_TASKS` tasks, prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
-  its latest decision — placed or not — since a decision grows with the fleet and the reply must
-  fit one envelope. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
+  its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
+  3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
+  against a plaintext budget (`QUEUE_REPLY_BUDGET`, 44 000 bytes, about 59 000 sealed against
+  65 536): `ready` and `reserved` tasks first, whose decision says why they wait or where they are
+  going, then the rest newest first. A decision past the budget goes out as `chosen` plus the
+  winner's candidate alone, its cut added to `Decision.trimmed` — still "placed on X, and why",
+  and a reader can tell the losers were left out. Without it twenty finished tasks sealed past
+  the bound on a 3 × 2 fleet, and `queue` answered `too_large` for good. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
   reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) queues the request and
   ticks at once, so the task is placed without waiting for the 30s timer; the scheduler mints the
   task id, never the app. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
