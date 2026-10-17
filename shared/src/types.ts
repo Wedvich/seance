@@ -514,8 +514,9 @@ export interface StoreChangedFrame {
  * guard, and never accepted on a live routing path — one op per kind, so a
  * stored record can stand in neither for a request nor for another kind of
  * record. `task` and `pause-state` are sealed to SCHEDULER_ID: `task` by
- * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by nobody yet
- * (M3 item 5).
+ * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by nobody yet:
+ * the library writes the pause through `QueueStore.putPause`, and sealing it
+ * is M3 item 3's store adapter.
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -544,8 +545,9 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
  * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it, and M3
- * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's: no
- * client sends them yet, and today's leaders answer them `invalid_request`.
+ * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's: the
+ * leader answers all but `mark-done`, which it refuses `invalid_request` until
+ * M3 item 6.
  * Enqueue is not among them — an app `store-put`s the task itself.
  */
 export const SCHEDULER_OPS = ["queue", "route-preview", "submit", "cancel", "mark-done", "pause", "resume"] as const;
@@ -1433,7 +1435,7 @@ export type Reason =
   | { readonly code: "batch_order"; readonly index: number }
   /**
    * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
-   * account. M3 item 5; no leader sets it yet.
+   * account. Set by the leader since M3 item 5.
    */
   | { readonly code: "paused"; readonly until: PauseUntil; readonly scope: "queue" | "account" };
 
@@ -1471,7 +1473,7 @@ export interface Candidate {
   readonly rejected: readonly Reason[];
   readonly score?: Score;
   readonly quota?: QuotaBasis;
-  /** Over the line but allowed to spend credits — dispatching here spills (M4 alerts on it). */
+  /** Over the line but allowed to spend credits — dispatching here spills. The leader logs it once per account per window after a confirmed spawn; M4 adds the push. */
   readonly spill?: { readonly window: string; readonly projectedPct: number };
 }
 
@@ -1625,7 +1627,7 @@ export interface PauseHold {
 /** Holds at most: one for the queue plus one per account. */
 export const MAX_PAUSE_HOLDS = 32;
 
-/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; M3 item 5, not written yet). */
+/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; the library writes it through `QueueStore.putPause`, sealed once M3 item 3's store adapter lands). */
 export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
 }

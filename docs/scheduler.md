@@ -626,6 +626,13 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   (`STORE_TIMEOUT_MS`), not a clear refusal. `failureReasonText` words a `timeout` as "the machine
   may be asleep", wrong for a frame the relay itself answers; reword it when this item surfaces
   store failures.
+  **Gaps item 5 left for this item** (owner, 2026-10-17): `pwa/src/decision-view.ts`'s
+  `spillText` words a spill as "would spend credits" even on a task already placed or running —
+  tense it by the task's state; the PWA shows neither an escalated `needs-input` task
+  (`Task.escalated`) nor `QueueResponse.holds` (a hold reaches it only as a candidate's `paused`
+  reason). MCP's `get_queue` (`daemon/src/mcp.ts`) has the same gap: it returns only `at` and the
+  tasks, so `holds` is dropped and a pause shows only through `paused` reasons
+  (`reasonText`) — add the holds when this item moves `get_queue` to the store.
 
 **Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
 `parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
