@@ -1070,6 +1070,73 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // An app's cancel of a task running on another machine: the leader despawns
+  // it there through the relay, and that machine's audit trail says who asked —
+  // origin=relay, client=scheduler — which only the target daemon can show.
+  test("an app's cancel ends a task's session on another machine, audited there as the scheduler's", async () => {
+    const taskId = "e2e-cancel-task";
+    const app = startApp(stack, { auto: true });
+    let second: SecondDaemon | null = null;
+    let window: string | null = null;
+    let down = false;
+    try {
+      // Not on SCHEDULER_LEADERS, so the suite's daemon leads again once it is back.
+      second = await stack.startSecondDaemon({ name: "CancelBox" });
+      const b = second.deviceId;
+      await app.waitForApp(
+        (state) => state.relay.machines.some((m) => m.deviceId === b && m.connected && m.repos.length > 0),
+        "the second machine online with its repos",
+      );
+      const spawned = await app.client.request<SpawnResponse>(b, "spawn", {
+        repo: "myrepo",
+        mode: "here",
+        title: "cancel me",
+        taskId,
+      });
+      if (!spawned.ok) throw new Error(`spawn failed: ${spawned.message}`);
+      window = spawned.window;
+      const pane = spawned.sessions.find((s) => s.window === spawned.window)?.id;
+      if (pane === undefined) throw new Error("the spawned session is not listed");
+
+      // The leader's queue holds the task running there, as a dispatch would have left it.
+      stack.daemon.stop();
+      down = true;
+      await stack.leaderStore.put(taskId, 0, {
+        id: taskId,
+        spec: { repo: "github.com/acme/app", mode: "here" },
+        state: "running",
+        createdAt: Date.now(),
+        assignment: { deviceId: b, exclave: "default", clone: "myrepo", window, pane },
+      });
+      await stack.restartDaemon();
+      down = false;
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.daemon.leader.settled();
+      // Takeover asked B and found the session, so the task is still running.
+      expect((await stack.leaderStore.get(taskId))?.body.state).toBe("running");
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+
+      const reply = await app.client.cancel(taskId);
+      if (reply === null || "ok" in reply) throw new Error(`cancel failed: ${JSON.stringify(reply)}`);
+      expect(reply.task.state).toBe("cancelled");
+      await pollUntil(
+        async () => !(await listWindows()).includes(window ?? ""),
+        "the session's window to close",
+        10_000,
+      );
+      window = null;
+      const despawn = (await Bun.file(second.log).text())
+        .split("\n")
+        .find((line) => line.includes("audit despawn origin=relay") && line.includes(`target=${JSON.stringify(pane)}`));
+      expect(despawn).toContain('client="scheduler"');
+    } finally {
+      if (down) await stack.restartDaemon();
+      if (window !== null) await killWindow(window);
+      app.stop();
+      await second?.stop();
+    }
+  }, 60_000);
+
   // The M3 gate's exit, with M2's reader check kept as its tripwire. A
   // bearer-token holder's daemon socket with signed roles and no PSK, connected
   // while the real leader is down, is never nominated: auto stays "no
