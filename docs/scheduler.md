@@ -586,7 +586,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     record that is not `queued` (`created_unqueued`), so once the adapter backs the leader every
     `submit` would write a record no reader keeps. Item 6 removes `submit`, but it lands after
     this item; so this item makes `submit` create `queued` (admission moves it on in the same
-    pass) or lands only after item 6.
+    pass), as part of itself rather than in a PR of its own (owner, 2026-10-17). The edit is
+    `Scheduler.submit` in `scheduler/src/scheduler.ts` and its tests only — item 3's one
+    sanctioned touch of a file item 5 owns (Who edits what); item 5 leaves `submit` alone.
     **Production check first:** the takeover reconcile lists the whole queue in one `store-list`,
     and no Cloudflare limit on a message a Durable Object _sends_ is documented (DESIGN.md, "The
     store", _Send size_, which holds the arithmetic). Item 2's `RelayClient.listTasks` already
@@ -597,7 +599,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     does not arrive, page with the reserved `after`/`next`.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
     credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
-    handlers after the split.
+    handlers after the split. What it adds surfaces as data its own requests return — `queue`
+    fields, a `Decision`'s reasons — wherever that serves, so it stays in `leader-requests.ts`
+    and the library; where it needs a hook the library pushes (a spill to log, an escalation
+    timer) or config caps, the one accepted touchpoint is the `new Scheduler({…})` options in
+    `startTerm` (`leader.ts`), plus the `config` `run.ts` passes — a line each, rebased over
+    item 3 (owner, 2026-10-17).
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
   Batch creation must refuse a spec whose `batch.index` is past `TASK_SPEC_LIMITS.batchIndex`
   (= `MAX_TASKS`) at submit time: `parseBatch` bounds it, and a spec past it makes the whole record
@@ -624,7 +631,9 @@ own, not inside its wave. The one exception is item 6, which deletes M2's `submi
 both — a deletion in the last wave, so it races nothing. `relay/src/hub.ts` and `leadership.ts`
 are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adapters.ts` are item 3's, with
 `scheduler/test/layering.test.ts` (`leader.ts` then goes to 6 for `queue-changed`); `leader-requests.ts` (the request handlers) goes 5 → 6. `scheduler/src/scheduler.ts` goes
-4a → 5. `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
+4a → 5, but for item 3's `submit` edit. Each item crosses the other's line once, by name: item
+3 at `Scheduler.submit` (its precondition), item 5 at `startTerm`'s `Scheduler` options and
+`run.ts`'s `config` (item 5's bullet). `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
 `daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
 harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. PR 0 touched
 `leader.ts` (a `not supported yet` answer for the four new ops, so they are refused rather than
