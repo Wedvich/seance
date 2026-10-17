@@ -6,6 +6,7 @@ import {
   Scheduler,
   SCHEDULER_CLIENT,
   UNDELIVERED,
+  type StoredTask,
   type Task,
   type TaskSpawnReply,
 } from "../src/index.ts";
@@ -36,8 +37,8 @@ async function until(ready: () => boolean, what: string): Promise<void> {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-async function stored(store: MemoryQueueStore, id: string): Promise<{ version: number; body: Task } | undefined> {
-  return (await store.list()).find((s) => s.id === id);
+async function stored(store: MemoryQueueStore, id: string): Promise<StoredTask | undefined> {
+  return (await store.list()).find((s): s is StoredTask => s.id === id && s.body !== undefined);
 }
 
 describe("dispatch", () => {
@@ -1056,7 +1057,7 @@ describe("writes to one task never race", () => {
     await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
     await scheduler.drain();
     expect(scheduler.task(task.id)?.state).toBe("done");
-    expect((await store.get(task.id))?.body.state).toBe("done");
+    expect((await store.get(task.id))?.body?.state).toBe("done");
   });
 
   test("a conflict with a writer outside the process is re-read and the change applied to what it finds", async () => {

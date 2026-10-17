@@ -773,7 +773,7 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
       await stack.restartDaemon();
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
-      expect((await stack.leaderStore.get(taskId))?.body.state).toBe("reserved");
+      expect((await stack.leaderStore.get(taskId))?.body?.state).toBe("reserved");
       // Same state dir, same id; connected later, so it follows.
       second = await stack.startSecondDaemon({ name: "EventBox" });
       expect(second.deviceId).toBe(b);
@@ -809,11 +809,11 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
       await Bun.write(go, "");
 
       await pollUntil(
-        async () => (await stack.leaderStore.get(taskId))?.body.state === "done",
+        async () => (await stack.leaderStore.get(taskId))?.body?.state === "done",
         "the leader to take the event",
         10_000,
       );
-      expect((await stack.leaderStore.get(taskId))?.body.assignment).toMatchObject({ deviceId: b, pane });
+      expect((await stack.leaderStore.get(taskId))?.body?.assignment).toMatchObject({ deviceId: b, pane });
     } finally {
       if (pane !== null) await tmux(["kill-session", "-t", "e2e-event-sender"]);
       await second?.stop();
@@ -969,7 +969,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (preview?.kind !== "ok") throw new Error(`no preview: ${JSON.stringify(preview)}`);
       expect(preview.decision.chosen?.deviceId).toBe(stack.deviceId);
       expect(stack.daemon.leader.term()).not.toBeNull();
-      expect((await stack.leaderStore.list()).filter((t) => t.body.state === "reserved")).toEqual([]);
+      expect((await stack.leaderStore.list()).filter((t) => t.body?.state === "reserved")).toEqual([]);
       // A drop leaves the leader as it was, and the form still asks again once back — a
       // preview the drop failed in flight would otherwise stand until tapped.
       app.client.reconnect();
@@ -1113,7 +1113,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
       await stack.daemon.leader.settled();
       // Takeover asked B and found the session, so the task is still running.
-      expect((await stack.leaderStore.get(taskId))?.body.state).toBe("running");
+      expect((await stack.leaderStore.get(taskId))?.body?.state).toBe("running");
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
 
       const reply = await app.client.cancel(taskId);

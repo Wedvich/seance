@@ -1,6 +1,7 @@
 import {
   FINISHED,
   MemoryQueueStore,
+  StoreRevoked,
   Scheduler,
   UNDELIVERED,
   type CancelResult,
@@ -148,14 +149,6 @@ export interface Leader {
   readonly stop: () => void;
 }
 
-/** A write from a term that has ended: M3's relay answers it `not_leader`; here the store wrapper refuses it first. */
-class TermEnded extends Error {
-  constructor(term: number) {
-    super(`scheduler term ${term} has ended`);
-    this.name = "TermEnded";
-  }
-}
-
 function unreachable(message: string): Unreachable {
   return { ok: false, code: UNREACHABLE, message };
 }
@@ -170,13 +163,16 @@ function undelivered(message: string): Undelivered {
  * next term already reads. Reads stay open: they change nothing.
  */
 function fencedStore(inner: QueueStore, term: number, live: () => boolean): QueueStore {
+  // What M3's relay answers a write from an ended term (`not_leader`), refused here first.
   const fence = (write: () => Promise<StoreWrite>): Promise<StoreWrite> =>
-    live() ? write() : Promise.reject(new TermEnded(term));
+    live() ? write() : Promise.reject(new StoreRevoked(`scheduler term ${term} has ended`));
   return {
     list: () => inner.list(),
     get: (id) => inner.get(id),
     put: (id, expect, body) => fence(() => inner.put(id, expect, body)),
     delete: (id, expect) => fence(() => inner.delete(id, expect)),
+    getPause: () => inner.getPause(),
+    putPause: (expect, holds) => fence(() => inner.putPause(expect, holds)),
   };
 }
 
@@ -366,7 +362,7 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
 
 function report(err: unknown): void {
   // A pass the term's end cut short; the next term reconciles whatever it left.
-  if (err instanceof TermEnded) return;
+  if (err instanceof StoreRevoked) return;
   log.warn(`scheduler: ${String(err)}`);
 }
 
@@ -492,7 +488,7 @@ function startTerm(
         await scheduler.takeover();
         break;
       } catch (err) {
-        if (err instanceof TermEnded) return;
+        if (err instanceof StoreRevoked) return;
         log.warn(`scheduler: term ${term} takeover failed, retrying in ${intervalMs}ms: ${String(err)}`);
       }
       // oxlint-disable-next-line no-await-in-loop -- the wait between attempts

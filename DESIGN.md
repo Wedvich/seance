@@ -1227,9 +1227,10 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   interval rather than left as a term that holds the role and runs nothing. Only then do the first tick and the timer run;
   after it, every change to the leg's machine list ticks, and ticks coalesce in the library.
 - **The term rides every write and dispatch.** Dispatches carry it on the frame, where the relay
-  fences them. Writes go through a store wrapper that refuses once the term has ended, so a
-  verdict landing after its term cannot write into the store the next term reads; M3's term-fenced
-  `store-put` replaces it at the relay. The store itself outlives terms, as the relay's will: M2's
+  fences them. Writes go through a store wrapper that refuses once the term has ended (throwing
+  `StoreRevoked`, as M3's adapter will on `not_leader`), so a verdict landing after its term
+  cannot write into the store the next term reads; M3's term-fenced `store-put` replaces it at
+  the relay. The store itself outlives terms, as the relay's will: M2's
   is the library's `MemoryQueueStore`, one per `startDaemon` handle (`createLeader` in `run.ts`),
   so a daemon demoted and re-promoted reconciles what it left. It is not one per process: a
   config reload swaps the whole handle (`supervise.ts`) and starts the queue empty, as a leader
@@ -1331,16 +1332,27 @@ section records what exists. `daemon/src/leader.ts` hosts it ("The leader", abov
 tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
 
 - **A pure library behind two interfaces** (`scheduler/src/ports.ts`). `QueueStore`
-  (`list`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)`, `version_conflict` as
-  a value; a conflict refreshes the one task through `get`) holds plain task bodies — sealing, and M3's version binding, are the adapter's.
+  (`list`, `get(id)`, `put(id, expect, body)`, `delete(id, expect)`, and `getPause`/`putPause`
+  for `queue:pause`) holds plain task bodies — sealing, opening and the reader rules
+  (`bindTaskRecord`) are the adapter's. A record the adapter cannot read comes back as
+  `{ id, version, reason }`: the library holds it apart (`Scheduler.unreadable()`), never acts
+  on it and never deletes it, since after a PSK rotation every record reads that way. A failed
+  write is a value (store port, 2026-10-17): a `version_conflict` or a lost reply
+  (`indeterminate`) refreshes the one task through `get` and applies the change again — after a
+  lost reply the one version past ours is ours, every task overwrite being the leader's;
+  `too_large` writes again with the decision cut to its winner; any other refusal goes to
+  `onError`. Losing the right to write is a throw, `StoreRevoked`, which unwinds the pass.
+  `refresh(id)` re-reads one record, for a host told that key changed.
   `Fleet` is the registry with each machine's newest status, live or kept, plus
   `spawn`/`sessions`/`despawn` to a `deviceId`, with two codes of the library's own
   beside the daemon's: `unreachable` (no answer, so it may have run) and `undelivered`
   (provably never reached the machine, so it did not). It owns no timer, socket or clock:
   the host calls `tick()` on each registry or `status` push and on a 30s timer, so a host
-  that stops calling leaves nothing running but the spawns already sent. `MemoryQueueStore` is shipped, not a test
-  double: M2's leader runs on it, since the queue is in-memory until M3. The suite's
-  `Fleet` double is `scheduler/test/fixtures.ts`.
+  that stops calling leaves nothing running but the spawns already sent. `MemoryQueueStore`
+  is shipped, not a test double: M2's leader runs on it, since the queue is in-memory until
+  M3. It keeps the relay store's rules, tombstones included, and fault hooks (`failNext`,
+  `replay`, `plant`) that let the suite (`scheduler/test/store.test.ts`) play the relay and an
+  attacker. The suite's `Fleet` double is `scheduler/test/fixtures.ts`.
 - **Layering is enforced** (`scheduler/test/layering.test.ts`): nothing in `scheduler/`
   imports `daemon/`, and nothing in `daemon/` imports `scheduler/` but `leader.ts`, by
   package name or by relative path, static or dynamic. The test also proves the

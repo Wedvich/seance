@@ -45,7 +45,6 @@ import {
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   QUOTA_SOURCES,
-  SCHEDULER_ERROR_CODES,
   SCHEDULER_OPS,
   SESSION_STATES,
   SPAWN_ERROR_CODES,
@@ -615,6 +614,11 @@ function parseReason(value: unknown): Reason | null {
       if (scope === undefined) return { code, inFlight, max };
       return scope === "global" || scope === "account" || scope === "batch" ? { code, inFlight, max, scope } : null;
     }
+    case "paused": {
+      const until = PAUSE_UNTIL.find((u) => u === value["until"]);
+      const { scope } = value;
+      return until !== undefined && (scope === "queue" || scope === "account") ? { code, until, scope } : null;
+    }
     default:
       return null;
   }
@@ -880,11 +884,11 @@ export function parseResumeRequest(value: unknown): ResumeRequest | null {
   return isAccountId(account) ? { account } : null;
 }
 
-/** A scheduler refusal; an unknown code is no refusal this build can word, so the reply is unreadable. */
+/** A scheduler refusal, its code kept raw: a leader a version ahead still refuses, rather than answers nothing. */
 function parseSchedulerError(value: unknown): SchedulerError | null {
   if (!isRecord(value) || value["ok"] !== false || typeof value["message"] !== "string") return null;
-  const code = SCHEDULER_ERROR_CODES.find((c) => c === value["code"]);
-  return code === undefined ? null : { ok: false, code, message: value["message"] };
+  const { code } = value;
+  return isName(code, TASK_FAILURE_LIMITS.code) ? { ok: false, code, message: value["message"] } : null;
 }
 
 export function parseQueueReply(value: unknown): QueueReply | null {
