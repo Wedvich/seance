@@ -86,8 +86,8 @@ export interface TelemetrySources {
   /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
-  /** The newest session-reported quota for an exclave id (`SessionQuota.get`); absent, the cache is the only source. */
-  readonly sessionQuota?: (exclave: string) => Omit<QuotaObservation, "x"> | undefined;
+  /** The newest session-reported quota for an exclave id under its account (`SessionQuota.get`); absent, the cache is the only source. */
+  readonly sessionQuota?: (exclave: string, account: string | null) => Omit<QuotaObservation, "x"> | undefined;
   readonly probe?: HostProbe;
 }
 
@@ -162,7 +162,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
 
     const at = Math.floor(nowMs / 1000);
     const reported = scan.exclaves.map((exclave, x) => {
-      const observation = sources.sessionQuota?.(exclave.id);
+      const observation = sources.sessionQuota?.(exclave.id, scan.info[x]?.accountId ?? null);
       return observation === undefined ? null : { ...observation, x };
     });
     const observations = scan.exclaves

@@ -481,7 +481,8 @@ nothing checked it. The last is the gap they leave.
   umask alone, and they hold repo paths, device ids and window titles (which,
   unlike the prompt, are logged verbatim). `launched.json`, the launch ledger
   (task ids and launch times, Local op socket, "Session events"), is written
-  0600 the same way, temp file first. `metrics.sqlite` and its `-wal` and
+  0600 the same way, temp file first, and so is `session-quota.json` (the last
+  quota each exclave's sessions reported, "Session events"). `metrics.sqlite` and its `-wal` and
   `-shm` join them: the database is created as an empty 0600 file before SQLite
   opens it, and SQLite gives the files it spawns the database's mode. All
   created at 0600 rather than
@@ -3180,7 +3181,18 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   seven-day `percentUsed` with ISO resets) after each main-thread turn and whenever a
   window moves a whole point, whether or not a status line renders. The daemon turns
   them into a `session` quota observation for the pane's exclave, stamped with its
-  receive time. `SessionQuota` keeps the newest per exclave in memory. The telemetry
+  receive time. `SessionQuota` (`daemon/src/session-quota.ts`) keeps the newest per
+  exclave, under the account the exclave was signed into when it came in, and on disk
+  (`session-quota.json` in `stateDir()`, added 2026-10-17). In memory alone, every
+  restart — each self-update — dropped it: an account with no session running fell
+  back to a cache days old, and the machine's next `status` replaced the snapshot the
+  relay kept with that older reading. The fleet fold could not undo it, since the
+  newer reading no longer existed anywhere. The account is kept because the key is the
+  exclave: a reading answers only for the account it was read under, and a reading
+  under a new login replaces it whatever the stamps say. Temp file and rename, no
+  fsync, coalesced to one write behind the one in flight — a reading lost to a power
+  cut costs freshness, unlike the launch ledger's write-ahead. A reading older than a
+  week has passed every window and is dropped at load. The telemetry
   tick takes the newer of it and the config dir's cache (`newestQuota`), the cache
   filling what the report lacks: its per-model `w`, and a five-hour or seven-day
   window (with its reset) the report left out. That is safe because a reading is a lower bound: use

@@ -35,7 +35,8 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { createSessionEvents, EndedTasks, listPanePids, peerBindingProblem, SessionQuota } from "./session-events.ts";
+import { createSessionEvents, EndedTasks, listPanePids, peerBindingProblem } from "./session-events.ts";
+import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type Registered } from "./telemetry.ts";
@@ -268,7 +269,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Session events (the session-events mod): quota reports fold into telemetry,
   // ended tasks into the `sessions` reply, and task sessions' states go to the
   // leader. Built before the handler context, which reads the two stores.
-  const sessionQuota = new SessionQuota();
+  const sessionQuota = await SessionQuota.open();
   const endedTasks = await endedTasksFor(launchLedgerPath());
 
   // One context, a handler per inbound surface. The relay leg and the local op
@@ -296,7 +297,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     diskPaths: config.repoRoots,
     registered: () => registered,
     sessions: () => handlerCtx.backend.sessions(state.repos),
-    sessionQuota: (exclave) => sessionQuota.get(exclave),
+    sessionQuota: (exclave, account) => sessionQuota.get(exclave, account),
   });
   const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
   let telemetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -453,6 +454,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const sessionEvents = createSessionEvents({
     panes: listPanePids,
     exclaves: () => exclaveScan.exclaves,
+    accountOf: (exclave) => exclaveScan.info.find((info) => info.id === exclave)?.accountId ?? null,
     // The leader reaches itself in process, never by a relay round trip. A
     // daemon that just lost the role still sends to "scheduler", which the
     // relay routes to whoever leads now.
