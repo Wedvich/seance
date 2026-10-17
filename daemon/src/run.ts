@@ -494,6 +494,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       }
       return client.sendBranchState(branch);
     },
+    // The rule the `sessions` reply's `ended` uses: a task no live session carries has ended (so is one not yet
+    // registered). `state.repos`, not `[]`, is load-bearing: `resolveLive` prunes the shared `repoMemo` to each
+    // call's keys, so an empty list would evict the entries every other caller relies on.
+    liveTasks: async () =>
+      new Set((await handlerCtx.backend.sessions(state.repos)).flatMap((session) => session.taskId ?? [])),
     ...opts.branchState,
   });
 
