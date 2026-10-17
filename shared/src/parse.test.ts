@@ -452,6 +452,19 @@ describe("tasks and their records", () => {
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
+
+  test("a pause reads with its scope and how it lifts; a malformed one drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const paused: Reason = { code: "paused", until: "reset", scope: "account" };
+    expect(parseDecision(decision(paused))?.candidates[0]?.rejected).toEqual([paused]);
+    for (const bad of [
+      { ...paused, until: "never" },
+      { ...paused, scope: "machine" },
+    ]) {
+      expect(parseDecision(decision(bad))?.candidates[0]?.rejected).toEqual([]);
+    }
+  });
 });
 
 describe("pause", () => {
@@ -512,11 +525,14 @@ describe("scheduler ops", () => {
     expect(parseTaskRef({})).toBeNull();
   });
 
-  test("their replies are the task, or a refusal this build can word", () => {
+  test("their replies are the task, or a refusal — its code kept raw, so a leader ahead still refuses", () => {
     expect(parseTaskReply({ task })).toEqual({ task });
     const refusal: SchedulerError = { ok: false, code: "dispatching", message: "starting" };
     expect(parseTaskReply(refusal)).toEqual(refusal);
-    expect(parseTaskReply({ ok: false, code: "nope", message: "?" })).toBeNull();
+    const later: SchedulerError = { ok: false, code: "batch_locked", message: "?" };
+    expect(parseTaskReply(later)).toEqual(later);
+    expect(parseTaskReply({ ok: false, code: "", message: "?" })).toBeNull();
+    expect(parseTaskReply({ ok: false, code: 7, message: "?" })).toBeNull();
     expect(parseTaskReply({ task: { ...task, state: "paused" } })).toBeNull();
   });
 

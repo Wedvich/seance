@@ -76,9 +76,14 @@ export function reasonText(reason: Reason): string {
     case "quota_over_line":
       return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
     case "cap_reached":
-      return reason.scope === "account"
-        ? `${reason.inFlight} of ${reason.max} auto tasks already in flight on its account`
-        : `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
+      if (reason.scope === "account")
+        return `${reason.inFlight} of ${reason.max} auto tasks already in flight on its account`;
+      if (reason.scope === "batch") return `${reason.inFlight} of ${reason.max} of its batch already in flight`;
+      return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
+    case "paused": {
+      const why = reason.until === "reset" ? "until its quota resets" : "until resumed";
+      return reason.scope === "account" ? `its account is paused ${why}` : `the queue is paused ${why}`;
+    }
   }
 }
 

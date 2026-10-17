@@ -137,6 +137,10 @@ test("every reason has its own words", () => {
     { code: "quota_unknown", why: "trimmed" },
     { code: "quota_over_line", window: "5h", projectedPct: 91.6 },
     { code: "cap_reached", inFlight: 8, max: 8 },
+    { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+    { code: "cap_reached", inFlight: 1, max: 1, scope: "batch" },
+    { code: "paused", until: "resume", scope: "queue" },
+    { code: "paused", until: "reset", scope: "account" },
   ];
   const texts = reasons.map(reasonText);
   expect(new Set(texts).size).toBe(reasons.length);

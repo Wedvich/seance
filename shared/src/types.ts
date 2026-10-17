@@ -1394,7 +1394,12 @@ export type Reason =
       readonly inFlight: number;
       readonly max: number;
       readonly scope?: "global" | "account" | "batch";
-    };
+    }
+  /**
+   * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
+   * account. M3 item 5; no leader sets it yet.
+   */
+  | { readonly code: "paused"; readonly until: PauseUntil; readonly scope: "queue" | "account" };
 
 export type ReasonCode = Reason["code"];
 
@@ -1638,7 +1643,12 @@ export type SchedulerErrorCode = (typeof SCHEDULER_ERROR_CODES)[number];
 
 export interface SchedulerError {
   readonly ok: false;
-  readonly code: SchedulerErrorCode;
+  /**
+   * A `SchedulerErrorCode` from a leader of this build; raw as read, as
+   * `store-refused`'s is, so a code minted after a client was built still
+   * reads as a refusal (`schedulerErrorText` words one it does not know).
+   */
+  readonly code: string;
   readonly message: string;
 }
 
