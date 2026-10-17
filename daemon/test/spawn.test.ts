@@ -241,6 +241,8 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   // Offline or auth-less is no reason to refuse a spawn: it goes ahead on the
   // refs on disk, and the note is the only place the staleness can surface.
   test("unreachable origin: the spawn still lands, and the note says the base may be stale", async () => {
+    // Own fetch first, so "last fetched" holds without an earlier test having fetched.
+    await git(fixture.repoPath, ["fetch", "-q", "origin"]);
     await git(fixture.repoPath, ["remote", "set-url", "origin", join(base, "nowhere.git")]);
     try {
       const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Offline" }, repos, WAIT);

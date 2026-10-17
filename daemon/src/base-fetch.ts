@@ -21,14 +21,15 @@ const inFlight = new Map<string, Promise<FetchResult>>();
  * The explicit `+src:dst` refspec, not a bare branch name: it says exactly
  * which ref moves, survives a force-pushed default, and can never read as an
  * option. `FETCH_HEAD` is written on purpose — it is what tells claude its own
- * fetch is unneeded.
+ * fetch is unneeded. No submodule recursion: on-demand recursion can outlast the
+ * timeout after the tracking ref already moved, reporting a landed fetch as failed.
  */
 function fetchDefault(repoPath: string, commonDir: string, branch: string): Promise<FetchResult> {
   const running = inFlight.get(commonDir);
   if (running !== undefined) return running;
   const run = hardenedGit(
     repoPath,
-    ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+    ["fetch", "--quiet", "--no-recurse-submodules", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
     FETCH_TIMEOUT_MS,
   )
     .then((result): FetchResult => (result.exitCode === 0 ? { ok: true } : { ok: false, detail: execFailure(result) }))
@@ -71,8 +72,9 @@ export async function freshenBase(repo: RepoEntry, mode: SpawnMode): Promise<str
     const [commonDir, branch] = await Promise.all([resolveCommonDir(repo.path), readDefaultBranch(repo.path)]);
     if (commonDir === null || branch === null) return undefined;
     if (mode === "here") {
-      const current = await hardenedGit(repo.path, ["symbolic-ref", "--quiet", "--short", "HEAD"], 5_000);
-      if (current.exitCode !== 0 || current.stdout.trim() !== branch) return undefined;
+      // Full ref, not `--short`: a tag sharing the branch's name shortens HEAD to `heads/<b>`.
+      const current = await hardenedGit(repo.path, ["symbolic-ref", "--quiet", "HEAD"], 5_000);
+      if (current.exitCode !== 0 || current.stdout.trim() !== `refs/heads/${branch}`) return undefined;
     }
 
     const fetched = await fetchDefault(repo.path, commonDir, branch);
