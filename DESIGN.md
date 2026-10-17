@@ -63,6 +63,16 @@ its Tailscale lockdown defeats the relay's purpose).
   a captured spawn blob to a different machine and it would decrypt. AAD
   makes "relay compromise cannot spawn anything" literally true. Both ends
   build the AAD via one shared helper (byte-identical or nothing decrypts).
+  One exception, by design: the role address `scheduler` (Scheduler,
+  "Leadership") names whichever daemon the relay nominates, so the AAD binds
+  that envelope to the role, not to a machine — one envelope, more than one
+  possible recipient. Each daemon checks every `to: "scheduler"` envelope
+  against one guard that outlives its terms, so the relay cannot replay an
+  app's `submit` into a second term on one daemon. It can still deliver it to
+  daemon A, move the role, and deliver it to daemon B inside the 60s window:
+  two guards, one prompt run twice. Accepted residual: it needs the relay
+  itself, which can already make any daemon lead (Threat model, item 4), and
+  the duplicate is that app's own task, not a new one.
 - **Replay window**: plaintext carries `ts`; receivers reject frames outside
   ±60s of local time and keep seen IVs for 120s (2× window, pruned lazily on
   insert). All devices are NTP-synced; 60s is generous. Rejected: ±30s
@@ -708,7 +718,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (daemon→relay)                                                  | `daemon/src/run.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                                                           | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                  |
 | `status` (relay→app)                                                     | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                 |
 | op `metrics`                                                             | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                     |
-| op `session-event` (→`"scheduler"`)                                      | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, its own `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                  |
+| op `session-event` (→`"scheduler"`)                                      | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                         |
 | `store-list` / `store-get` / `store-put` / `store-delete` — M3           | apps via `shared/src/app-client.ts` (M3 item 2); the leader's daemon socket via `daemon/src/queue-store.ts` (item 3), with `term` on writes        | `relay/src/store.ts` through `relay/src/hub.ts`, bounds in `relay/src/wire.ts` (item 1); `parseDaemonFrame` / `parseAppFrame` return none of them until then                                                                                                                                                                           |
 | `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/store.ts` (item 1)                                                                                                                      | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client (item 2) and the queue store (item 3)                                                                                                                                                                                                                 |
 | `store-changed` — M3                                                     | `relay/src/hub.ts`, to the leader's daemon socket after a write it did not make (item 1)                                                           | `daemon/src/relay-client.ts` → `daemon/src/leader.ts` (item 3), via `parseStoreChanged`                                                                                                                                                                                                                                                |
@@ -1119,7 +1129,7 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
 - **Replies come back on the daemon socket.** A daemon answers `env.from`, so a reply to the
   leader is `to: "scheduler"`, and the relay routes that to the leader's _daemon_ socket, not its
   app leg. `relay-client.ts` hands such an envelope over unopened, and the leg's `deliver` opens,
-  replay-checks (its own `ReplayGuard`) and correlates it on `re` as if it had arrived on the leg.
+  replay-checks (the scheduler guard, below) and correlates it on `re` as if it had arrived on the leg.
   This was the one reply-path change the plan missed, and it is daemon-side only. A `not_leader`
   still arrives on the leg, by `iv`, as for any app.
 - **This machine only in process.** A dispatch to the leader's own `deviceId` never leaves it:
@@ -1147,8 +1157,8 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   change across machines does (M2's stated gap).
 - **Session events reach the term two ways** (item 5; Local op socket, "Session events").
   Another daemon's `session-event` comes through the relay to this daemon's socket. That socket
-  hands it unopened to the term's leg, which opens and replay-checks it under its own guard like
-  a reply, then passes it to the leg's `onEvent` (the scheduler leg alone has one), because it
+  hands it unopened to the term's leg, which opens and replay-checks it under the scheduler guard
+  like a reply, then passes it to the leg's `onEvent` (the scheduler leg alone has one), because it
   answers nothing. `leader.ts` re-validates it (`parseSessionEvent`) and applies it with the
   sealer's AAD-bound id as `from`. This machine's own events call `Leader.onSession` in process
   (`run.ts`), as the leader reaches itself only locally. Both are dropped outside a running term,
@@ -1156,7 +1166,7 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   through.
 - **Apps ask the term; the daemon socket answers** (M2 item 6). An app's request `to: "scheduler"`
   (`SCHEDULER_OPS` in `shared/src/types.ts`) reaches the leg like an event — no `re` — and the leg
-  opens and replay-checks it under its own guard. `leader.ts` takes it as a request only when it
+  opens and replay-checks it under the scheduler guard. `leader.ts` takes it as a request only when it
   was sealed `from: "app"` and its op is a scheduler op; a scheduler op from anyone else is
   dropped and logged, and any other op is an event (applied only if it is a valid
   `session-event`).
@@ -1199,7 +1209,7 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   resign below is in flight), and a request left to time out reads as a dead machine. So
   `Leader.deliver` says whether a term took the envelope — a running one, or one still taking
   over, which answers `not_ready` — and when none did, `relay-client.ts` opens it under the
-  daemon leg's own guard and answers an app's scheduler request `{ ok: false, code:
+  same scheduler guard and answers an app's scheduler request `{ ok: false, code:
 "not_leader" }`. Anything else — a late reply or event for an ended term — is dropped
   (`reason=not-leading`). That makes a follower
   open what is sent the scheduler, where it used to drop it unopened; it acts on none of it beyond
@@ -1219,6 +1229,17 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   asks for the role again. No timer: the token whose rejection caused it is the daemon socket's
   too, and a redial is where that token is proven again — a timed retry on a socket that still
   holds its old authorization would only flap the role and push the registry each time.
+- **One replay guard for every scheduler envelope, outliving terms** (M2 review, 2026-10-17).
+  Each term's leg used to build its own `ReplayGuard`, and the `not_leader` answer used the daemon
+  leg's. The relay decides which term an envelope reaches, so it could hand an app's `submit` to
+  term _t_, then — after a `lead { t+1 }`, or a `follow` and a `lead` — to the next term, or to
+  the follower, inside the 60s window: one prompt run once per term. Now one guard per daemon
+  process (`schedulerGuard` in `daemon/src/run.ts`, module-level so a config reload keeps it) is
+  injected into every term's leg (`scheduler.guard` on the shared `RelayClient`) and into the
+  `not_leader` path (`schedulerGuard` on the daemon's `RelayClient`), so whichever sees an envelope
+  first is the only one that acts on it. What it cannot reach is another daemon: the role address
+  is the one envelope with more than one possible recipient (Security model, "Routing fields bound
+  as AAD"), and the residual cross-daemon duplicate is recorded there.
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL, and then only with its `sessions` check
   unanswered and its machine not connected — and is never dispatched again on that evidence
