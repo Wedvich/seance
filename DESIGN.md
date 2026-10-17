@@ -3077,9 +3077,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, named by the
   email any of its exclaves reports (the short account id from a daemon that predates it), newest
-  observation wins, each window it lacks filled from the next newest that has one
-  (`mergeQuota`) — per-model caps reach the cache only through `/usage`, so a machine whose
-  newer cache never saw one must not erase another's — since every daemon hosting one of its exclaves reports it — an asleep
+  observation wins, since every daemon hosting one of its exclaves reports it, each window
+  it lacks filled from the next newest that has one (`mergeQuota`) — per-model caps reach
+  the cache only through `/usage`, so a machine whose newer cache never saw one must not
+  erase another's; a window with no reset fills only from a reading under one window length
+  older, since nothing else would ever expire it. Every machine counts, an asleep
   machine's included, from the status the relay kept, with "asleep" and its age on the
   observed line. A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its

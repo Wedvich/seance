@@ -76,6 +76,39 @@ describe("newestQuotaByAccount", () => {
     });
   });
 
+  // Nothing expires a window with no reset, and filled it would wear the newer
+  // reading's stamp, so only a reading under one window length older fills it.
+  test("a reset-less window is filled only from a reading less than one window length older", () => {
+    const newest = newestQuotaByAccount([
+      host("tower", [exclave("work", "org:acct")], [{ x: 0, s: "cache", at: S }]),
+      host(
+        "asleep",
+        [exclave("main", "org:acct")],
+        [
+          {
+            x: 0,
+            h: 99,
+            d: 98,
+            w: [
+              { m: "Fable", p: 97 },
+              { m: "Next", p: 96, r: S - 1 },
+            ],
+            s: "cache",
+            at: S - 8 * 86_400,
+          },
+        ],
+      ),
+      host("laptop", [exclave("main", "org:acct")], [{ x: 0, h: 50, d: 40, s: "cache", at: S - 6 * 3_600 }]),
+    ]);
+    expect(newest.get("org:acct")?.observation).toEqual({
+      x: 0,
+      d: 40,
+      w: [{ m: "Next", p: 96, r: S - 1 }],
+      s: "cache",
+      at: S,
+    });
+  });
+
   test("a tie keeps the first machine in fleet order", () => {
     const newest = newestQuotaByAccount([
       host("a", [exclave("one", "org:acct")], [{ x: 0, h: 10, s: "cache", at: S }]),
