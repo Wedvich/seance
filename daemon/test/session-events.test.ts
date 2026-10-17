@@ -9,12 +9,11 @@ import { createHandler } from "../src/handlers.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { MetricsStore } from "../src/metrics-store.ts";
+import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import {
   createSessionEvents,
   EndedTasks,
   listPanePids,
-  SESSION_EVENT_KIND,
-  SESSION_EVENT_VERSION,
   SessionQuota,
   type SessionEvents,
 } from "../src/session-events.ts";

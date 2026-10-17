@@ -96,16 +96,12 @@ export function parsePsParents(text: string): ReadonlyMap<number, number> {
   return parents;
 }
 
-type ProcPidInfo = (pid: number, flavor: number, arg: number, buffer: number, size: number) => number;
-
 /** `proc_pidinfo`'s flavor for struct proc_bsdinfo (<sys/proc_info.h>): 136 bytes, `pbi_ppid` a uint32 at 16. */
 const PROC_PIDTBSDINFO = 3;
 const BSDINFO_BYTES = 136;
 const BSDINFO_PPID_OFFSET = 16;
 
-let procPidInfo: ProcPidInfo | null | undefined;
-
-function loadProcPidInfo(): ProcPidInfo | null {
+function loadProcPidInfo() {
   if (process.platform !== "darwin") return null;
   try {
     const { symbols } = dlopen("/usr/lib/libSystem.B.dylib", {
@@ -114,11 +110,14 @@ function loadProcPidInfo(): ProcPidInfo | null {
         returns: FFIType.i32,
       },
     });
-    return symbols.proc_pidinfo as ProcPidInfo;
+    return symbols.proc_pidinfo;
   } catch {
     return null;
   }
 }
+
+/** Undefined until first asked; null once the call will not load, which is then never retried. */
+let procPidInfo: ReturnType<typeof loadProcPidInfo> | undefined;
 
 /**
  * macOS's parent of `pid` from the kernel's own record, exec-free — what `ps`
@@ -126,7 +125,7 @@ function loadProcPidInfo(): ProcPidInfo | null {
  * undefined where the call will not load, so the caller falls back to `ps`.
  */
 export function bsdParent(pid: number): number | null | undefined {
-  procPidInfo ??= loadProcPidInfo();
+  if (procPidInfo === undefined) procPidInfo = loadProcPidInfo();
   if (procPidInfo === null) return undefined;
   const info = new Uint8Array(BSDINFO_BYTES);
   try {
@@ -174,7 +173,22 @@ async function parentLookup(): Promise<(pid: number) => Promise<number | null>> 
   // `proc_pidinfo` refuses another user's process, which `ps` reads: a `sudo` between
   // pane and peer would otherwise end the walk where it used to carry on.
   let listing: Promise<(pid: number) => Promise<number | null>> | null = null;
-  return async (pid) => bsdParent(pid) ?? (await (listing ??= psParents()))(pid);
+  return async (pid) => {
+    const parent = bsdParent(pid);
+    if (typeof parent === "number") return parent;
+    // A pid gone is gone to `ps` too: only a refused hop is worth listing every process for.
+    return exists(pid) ? (await (listing ??= psParents()))(pid) : null;
+  };
+}
+
+/** Signal 0 sends nothing: EPERM is a live process that is not ours, ESRCH one that is gone. */
+function exists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err instanceof Error && "code" in err && err.code === "EPERM";
+  }
 }
 
 async function psParents(): Promise<(pid: number) => Promise<number | null>> {

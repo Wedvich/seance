@@ -1,7 +1,7 @@
 import { isRecord } from "@seance/shared";
 import { exchange } from "./local-client.ts";
 import { socketPath } from "./paths.ts";
-import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-events.ts";
+import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
 
 /**
  * Long enough for the daemon's pane lookup and parent walk, short enough that

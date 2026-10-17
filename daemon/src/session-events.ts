@@ -15,6 +15,7 @@ import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
+import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -23,7 +24,7 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * it runs in, through `seanced session-event`. Ingest-only — the handler stores
  * and forwards; nothing here spawns, despawns or runs a command shaped by the
  * frame. Its only subprocesses are fixed-argv reads: `tmux list-panes` and, on
- * macOS, `ps` for the parent walk.
+ * macOS where `proc_pidinfo` will not answer a hop, `ps` for the parent walk.
  *
  * Every field of a frame is untrusted. The run directory admits any process of
  * this user, and every session is this user, so a frame could name any pane or
@@ -39,10 +40,6 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * no `ts`, so it cannot arrive from the relay, no op rides in as one, and a
  * daemon that predates the kind drops it as malformed.
  */
-
-export const SESSION_EVENT_VERSION = 1;
-
-export const SESSION_EVENT_KIND = "session-event";
 
 /** One rate-limit window as Claude Code reports it (`session.measure`'s `rateLimits`). */
 export interface RateLimitReport {
