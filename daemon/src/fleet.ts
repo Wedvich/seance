@@ -1,4 +1,4 @@
-import type { ErrorResponse, Machine } from "@seance/shared";
+import type { ErrorResponse, Machine, QueueReply, SubmitReply, TaskRequest } from "@seance/shared";
 import type { LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
@@ -21,11 +21,26 @@ import type { Check } from "./check.ts";
  * Nothing here logs: stdout is the MCP server's JSON-RPC channel.
  */
 
+/**
+ * The scheduler leader, asked as an app: M2's `submit` and `queue`, as
+ * `RelayClient` has them — refused before sending unless a verified leader is
+ * nominated (`no_leader`, `leader_unverified`).
+ */
+export interface SchedulerLeg {
+  readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
+  readonly queue: () => Promise<QueueReply | null>;
+}
+
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
 export interface FleetLease {
   readonly machines: readonly Machine[];
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T | ErrorResponse>;
+  /**
+   * Null through the broker: its actions are fixed, and a scheduler one would
+   * widen what a same-uid process can make the daemon send (DESIGN.md "Fleet broker").
+   */
+  readonly scheduler: SchedulerLeg | null;
   /** Ends the call; the direct transport's idle clock starts from here. */
   readonly release: () => void;
 }
@@ -44,6 +59,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
         machines: client.getState().machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
           client.request<T>(deviceId, op, payload),
+        scheduler: { submit: (request) => client.submit(request), queue: () => client.queue() },
         release: (): void => relay.release(),
       };
     },
@@ -63,6 +79,7 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
       machines: await brokerMachines(opts),
       request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
         brokerRequest<T>(deviceId, op, payload, opts),
+      scheduler: null,
       release: (): void => {},
     }),
     stop: (): void => {},

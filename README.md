@@ -398,13 +398,23 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
+
+`spawn_session` with `machine: "auto"` hands the spawn to the scheduler, as the app's
+**auto** does: it answers with the task id, where the session landed and why, and
+`get_queue` lists the scheduler's recent tasks. `repo` is a repo name from
+`list_machines` (or its origin, when the name means different repos on different
+machines). Until the durable queue lands, a task still waiting for capacity lives only
+in the leading daemon's memory and is lost when leadership moves — every relay deploy
+and daemon self-update — so `auto` is for work that should start now, not a backlog.
+It needs the key in the MCP process itself: on a box where only the daemon can read
+it (below), `auto` is unavailable.
 
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
-for it, over the same local socket, and the key never leaves the daemon. Every tool
-still works for every machine, with the same registration; `seanced doctor` says which
+for it, over the same local socket, and the key never leaves the daemon. Every tool but
+`auto` and `get_queue` still works for every machine, with the same registration; `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
 read the key itself, the daemon runs no broker, so nothing gains fleet reach without
 the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).

@@ -1,4 +1,14 @@
-import { RequestFailure, type Machine, type RelayState, type RequestOp } from "@seance/shared";
+import {
+  RequestFailure,
+  SCHEDULER_ID,
+  type ErrorResponse,
+  type Machine,
+  type QueueReply,
+  type RelayState,
+  type RequestOp,
+  type SchedulerOp,
+  type SubmitReply,
+} from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
 
 /**
@@ -27,7 +37,12 @@ export interface FakeRelay extends AppRelay {
   setState: (next: Partial<RelayState>) => void;
 }
 
-/** `respond` may return an Error to reject, or a promise to answer later. */
+/**
+ * `respond` may return an Error to reject, or a promise to answer later. A
+ * scheduler op reaches it with `deviceId` `SCHEDULER_ID`, and only once
+ * `state.scheduler` is `ready` — the real client refuses at the source before
+ * that, and so does this; e2e holds the two to the same behaviour.
+ */
 export function fakeRelay(
   machines: readonly Machine[],
   respond: (op: RequestOp, payload: unknown, deviceId: string) => unknown = () => ({}),
@@ -47,6 +62,13 @@ export function fakeRelay(
   };
   const listeners = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();
+  const schedule = async <T>(op: SchedulerOp, payload: unknown): Promise<T | ErrorResponse> => {
+    if (state.scheduler.kind === "none") throw new RequestFailure("no_leader", "no scheduler is leading");
+    if (state.scheduler.kind === "unverified") {
+      throw new RequestFailure("leader_unverified", "the scheduler nominee is unverified");
+    }
+    return fake.request<T>(SCHEDULER_ID, op, payload);
+  };
   const fake: FakeRelay = {
     requests: [],
     started: 0,
@@ -79,6 +101,8 @@ export function fakeRelay(
       // The fake's caller names T; this is the boundary that stands in for the wire.
       return reply as T;
     },
+    submit: (request) => schedule<SubmitReply | null>("submit", request),
+    queue: () => schedule<QueueReply | null>("queue", {}),
   };
   return fake;
 }
