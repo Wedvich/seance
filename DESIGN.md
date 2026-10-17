@@ -1899,7 +1899,10 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   main clone's name (two paths behind one name, and spawn needs one). Measured:
   19ms for 58 repos — the walk is free (2026-10-09, one dev machine: 20ms for 33, down from
   26ms for 46 with the 13 worktrees). Scans run at startup, hourly, and on explicit
-  `rescan` — never implicitly from PWA activity. Results cached in
+  `rescan` — never implicitly from PWA activity — and one at a time: a
+  `rescan` arriving mid-scan waits, then scans afresh. Two in flight committed
+  in finish order, so the older could drop a clone the newer had found (and
+  had already answered the app with). Results cached in
   state.json (restart re-registers instantly from cache); re-register only
   when the set changed. `defaultBranch` is best-effort from local refs only
   (`origin/HEAD` on disk, null otherwise — ~⅓ of repos lack it), carried

@@ -213,7 +213,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
 
   let stopped = false;
 
-  const rescan = async (): Promise<State["repos"]> => {
+  const scanOnce = async (): Promise<State["repos"]> => {
     const [repos, exclaves] = await Promise.all([
       scanRepos(config.repoRoots, state.repos),
       scanExclaves(home, exclaveScan.info),
@@ -237,6 +237,17 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       await client.reRegister();
     }
     return scanned;
+  };
+  // One scan at a time, each begun after the last has registered. Two in flight
+  // (the boot or hourly one, and an app's) diff against and commit to the same
+  // `state`: the one begun first, blind to a clone made since, could land last
+  // and take the clone back out — and a register built between the two commits
+  // carried whichever was current, so the app's own rescan never re-registered.
+  let scanning: Promise<unknown> = Promise.resolve();
+  const rescan = (): Promise<State["repos"]> => {
+    const next = scanning.then(scanOnce);
+    scanning = next.catch(() => undefined);
+    return next;
   };
 
   const updateRuntime = (connected: boolean): void => {
