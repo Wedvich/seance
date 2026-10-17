@@ -16,6 +16,7 @@ import {
   type Reason,
   type ScoreComponents,
 } from "@seance/shared";
+import { batchCap } from "./batch.ts";
 import type { SchedulerConfig } from "./config.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
 
@@ -84,13 +85,11 @@ export function route(input: RouteInput): Decision {
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
   };
+  const caps = [pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [
-      ...machineFilter(machine, now, config),
-      ...(pass.capReached === null ? [] : [pass.capReached]),
-    ];
+    const machineReasons = [...machineFilter(machine, now, config), ...caps];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;

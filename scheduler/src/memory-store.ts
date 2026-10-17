@@ -1,4 +1,4 @@
-import { STORE_TOMBSTONE_MS, type PauseHold, type RecordUnreadable } from "@seance/shared";
+import { MAX_TASKS, STORE_TOMBSTONE_MS, type PauseHold, type RecordUnreadable } from "@seance/shared";
 import {
   StoreRevoked,
   type QueueStore,
@@ -25,12 +25,15 @@ export interface StoreFault {
 export interface MemoryQueueStoreOptions {
   readonly now?: () => number;
   readonly tombstoneMs?: number;
+  /** Records a create may not grow past (`store_full`): the relay's `MAX_TASKS` unless a test needs a smaller one. */
+  readonly maxTasks?: number;
 }
 
 /**
  * The relay store's rules over Maps, with the adapter's reader rules folded in:
  * `expect: 0` creates, every put increments, a mismatch is `version_conflict`,
- * a delete leaves a tombstone that refuses any put for `tombstoneMs`, and a
+ * a create past `maxTasks` is `store_full`, a delete leaves a tombstone that
+ * refuses any put for `tombstoneMs`, and a
  * body that does not name its record's version reads `version_mismatch`. M2's
  * leader runs on this — its queue is in memory until M3's store lands — and the
  * suite tests on it, through the fault hooks below for what only a real store
@@ -44,11 +47,13 @@ export class MemoryQueueStore implements QueueStore {
   readonly #faults: StoreFault[] = [];
   readonly #now: () => number;
   readonly #tombstoneMs: number;
+  readonly #maxTasks: number;
   #pause: StoredPause | UnreadablePause | null = null;
 
   constructor(options: MemoryQueueStoreOptions = {}) {
     this.#now = options.now ?? Date.now;
     this.#tombstoneMs = options.tombstoneMs ?? STORE_TOMBSTONE_MS;
+    this.#maxTasks = options.maxTasks ?? MAX_TASKS;
   }
 
   async list(): Promise<readonly StoreEntry[]> {
@@ -64,6 +69,8 @@ export class MemoryQueueStore implements QueueStore {
       if (this.#tombstoned(id)) return { ok: false, code: "version_conflict" };
       const version = this.#entries.get(id)?.version ?? 0;
       if (version !== expect) return { ok: false, code: "version_conflict" };
+      // Tombstones count toward no cap.
+      if (version === 0 && this.#entries.size >= this.#maxTasks) return { ok: false, code: "store_full" };
       this.#hold(id, version + 1, body);
       return { ok: true, version: version + 1 };
     });

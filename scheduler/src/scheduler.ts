@@ -1,18 +1,13 @@
-import { DECISION_MAX_CANDIDATES, type SessionState } from "@seance/shared";
+import { DECISION_MAX_CANDIDATES, type BranchState, type SessionState } from "@seance/shared";
+import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
+import { admission, named } from "./deps.ts";
+import { branchChange } from "./done.ts";
 import { type Fleet, type QueueStore, type StoreEntry, type StoreWrite, type UnreadableTask } from "./ports.ts";
+import { prunable } from "./prune.ts";
 import { route, type Decision } from "./route.ts";
 import { asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
-import {
-  advance,
-  canTransition,
-  FINISHED,
-  PLACED,
-  type Reservation,
-  type Task,
-  type TaskSpec,
-  type TaskState,
-} from "./task.ts";
+import { advance, FINISHED, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
 
@@ -73,12 +68,19 @@ export class Scheduler {
   readonly #decisions = new Map<string, Decision>();
   /**
    * deviceId → when a pass first saw it not connected (or gone from the
-   * registry), for machines holding placed tasks. Memory only: a new leader
-   * starts the count again, which can only delay `lost`, never hasten it — and
-   * it is this clock, not `Machine.lastSeen`, because a timeout's offline mark
-   * can make a machine read disconnected beside a `lastSeen` hours old.
+   * registry), for machines holding placed or `awaiting-merge` tasks. Memory
+   * only: a new leader starts the count again, which can only delay `lost`,
+   * never hasten it — and it is this clock, not `Machine.lastSeen`, because a
+   * timeout's offline mark can make a machine read disconnected beside a
+   * `lastSeen` hours old.
    */
   readonly #absentSince = new Map<string, number>();
+  /**
+   * Machines seen absent that are connected again, until the next `#due` reads
+   * their tasks' `sessions`: what they sent while away (`branch-state`) went
+   * to no one, and `progress` holds it.
+   */
+  #returned = new Set<string>();
   /** Task id → the tail of its writes (`#serial`). */
   readonly #chains = new Map<string, Promise<void>>();
   /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
@@ -142,28 +144,34 @@ export class Scheduler {
    * that a reservation is checked at any age: a session or `ended` entry
    * carrying its id resolves it inside its TTL, and past the TTL an unanswered
    * check on a machine no longer connected makes it `lost`. A placed task whose
-   * session is gone is `done` — it ended while no leader was listening. An
-   * unanswered machine leaves everything else as it was.
+   * session is gone ended while no leader was listening: `awaiting-merge` if its
+   * machine's `progress` (or its record) shows a PR, `done` if the branch merged
+   * meanwhile or there was none. An `awaiting-merge` task is read back the same
+   * way, for a merge the gap hid. An unanswered machine leaves everything else
+   * as it was. Then finished tasks past the keep are pruned.
    */
   async takeover(): Promise<void> {
     await this.load();
     this.#sweptAt = this.#now();
-    await this.#check(this.tasks().filter((t) => t.state === "reserved" || PLACED.includes(t.state)));
+    await this.#check(
+      this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
+    );
+    await this.prune();
   }
 
   /**
-   * M2's queue is in memory and only grows, so past `keep` the oldest finished
-   * tasks are deleted — never one with anything left to happen.
+   * The store caps `task:` (`MAX_TASKS`), so past `keep` the oldest finished
+   * tasks are deleted (`prunable`) — never one with anything left to happen,
+   * nor one an unfinished task names. Runs after takeover and every pass, where
+   * it writes only when something is over the keep, since an app's create
+   * meeting `store_full` is never seen here.
    */
-  async prune(keep: number): Promise<void> {
-    const finished = this.tasks()
-      .filter((t) => FINISHED.includes(t.state))
-      .toSorted((a, b) => a.createdAt - b.createdAt);
-    for (const task of finished.slice(0, Math.max(0, finished.length - keep))) {
+  async prune(keep = this.#config.keepFinished): Promise<void> {
+    for (const task of prunable(this.tasks(), keep)) {
       // oxlint-disable-next-line no-await-in-loop -- a handful at a time, and each delete is its own CAS
       await this.#serial(task.id, async () => {
         const held = this.#held.get(task.id);
-        if (held === undefined || !FINISHED.includes(held.task.state)) return;
+        if (held === undefined || !FINISHED.includes(held.task.state) || named(this.tasks()).has(task.id)) return;
         const write = await this.#store.delete(task.id, held.version);
         if (!write.ok) {
           this.#refused(task.id, "delete", write);
@@ -202,9 +210,18 @@ export class Scheduler {
     );
   }
 
+  /**
+   * M2's in-memory enqueue, created `ready` and so past admission; M3 item 6
+   * replaces it with an app's `queued` create. A full store is pruned once and
+   * the create tried again.
+   */
   async submit(spec: TaskSpec): Promise<Task> {
     const task: Task = { id: this.#newId(), spec, state: "ready", createdAt: this.#now() };
-    const write = await this.#store.put(task.id, 0, task);
+    let write = await this.#store.put(task.id, 0, task);
+    if (!write.ok && write.code === "store_full") {
+      await this.prune();
+      write = await this.#store.put(task.id, 0, task);
+    }
     if (!write.ok) throw new Error(`task ${task.id} was not stored (${write.code})`);
     this.#held.set(task.id, { version: write.version, task });
     return task;
@@ -252,16 +269,28 @@ export class Scheduler {
    * the assignment is the reservation's target plus the reporting pane. `from`
    * is checked against where the task was placed, so a machine can move only
    * the tasks it was given; without `from` (a host that cannot say) a reserved
-   * task is left to its verdict or its TTL.
+   * task is left to its verdict or its TTL. `prUrl` is the event's: a session
+   * that ends with one is `awaiting-merge`, not `done`.
    */
-  async onSession(taskId: string, state: SessionState, from?: SessionSource): Promise<void> {
-    const to: TaskState = state === "ended" ? "done" : state === "needs-input" ? "needs-input" : "running";
-    await this.#update(taskId, (task) => sessionChange(task, to, from));
+  async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
+    await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl));
+  }
+
+  /**
+   * A task branch's state, from a `branch-state` sealed by `from`: its branch
+   * and `pushed` recorded, a merge making it `done` (`branchChange`). Only the
+   * machine the task was placed on moves it. A dependent it releases moves on
+   * the next pass.
+   */
+  async onBranchState(state: BranchState, from: string): Promise<void> {
+    await this.#update(state.taskId, (task) => branchChange(task, state, from));
   }
 
   /**
    * A reserved task is mid-dispatch: its spawn may already be running, so it is
-   * refused until the verdict lands rather than raced. A `lost` task whose
+   * refused until the verdict lands rather than raced. A `queued`, `blocked` or
+   * `awaiting-merge` task has no session to stop, so it is cancelled as it
+   * stands. A `lost` task whose
    * machine is back is despawned like a running one; with its machine still
    * gone nothing can be despawned, so it is cancelled as it stands and marked
    * `leftRunning` — the record says plainly that a session may outlive it. A
@@ -275,7 +304,7 @@ export class Scheduler {
     if (refused !== null) return refused;
     const { assignment } = task;
     const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
-    if (assignment !== undefined && !leftRunning) {
+    if (assignment !== undefined && !leftRunning && PLACED.includes(task.state)) {
       // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
       let pane = assignment.pane;
       if (pane === undefined) {
@@ -315,12 +344,13 @@ export class Scheduler {
   async #pass(): Promise<void> {
     await this.#markAbsent();
     await this.#check(this.#due());
-    const ready = this.tasks()
-      .filter((t) => t.state === "ready" && !this.#dispatches.has(t.id))
-      .toSorted((a, b) => a.createdAt - b.createdAt);
+    // After the checks, so a predecessor they settled releases or fails its dependents in this pass.
+    await this.#admit();
+    const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage. The spawns are not awaited: one slow machine must not hold every
-    // other placement, TTL and absence check behind its 90s timeout.
+    // usage and its batch's bound. The spawns are not awaited: one slow machine
+    // must not hold every other placement, TTL and absence check behind its 90s
+    // timeout.
     for (const task of ready) {
       const now = this.#now();
       const decision = capped(
@@ -344,6 +374,24 @@ export class Scheduler {
       this.#decisions.delete(task.id);
       this.#launch(reserved, reservation);
     }
+    await this.prune();
+  }
+
+  /**
+   * Admission (`admission`): each `queued` or `blocked` task to where its edges
+   * put it. Computed over one snapshot, so a cascade lands whole; each write
+   * re-checks that its task is still waiting where it was.
+   */
+  async #admit(): Promise<void> {
+    const moves = admission(this.tasks(), new Set(this.#unreadable.keys()), this.#now());
+    await Promise.all(
+      [...moves].map(([id, move]) =>
+        this.#update(id, (current) => {
+          if ((current.state !== "queued" && current.state !== "blocked") || current.state === move.state) return null;
+          return advance(current, move.state, move.state === "failed" ? { failure: move.failure } : {});
+        }),
+      ),
+    );
   }
 
   #launch(task: Task, at: Reservation): void {
@@ -381,8 +429,13 @@ export class Scheduler {
     const now = this.#now();
     const connected = this.#connectedIds();
     const placed = this.tasks().filter((t) => PLACED.includes(t.state) && t.assignment !== undefined);
-    const devices = new Set(placed.flatMap((t) => t.assignment?.deviceId ?? []));
+    const devices = new Set(
+      this.tasks()
+        .filter((t) => PLACED.includes(t.state) || t.state === "awaiting-merge")
+        .flatMap((t) => t.assignment?.deviceId ?? []),
+    );
     for (const deviceId of [...this.#absentSince.keys()]) {
+      if (devices.has(deviceId) && connected.has(deviceId)) this.#returned.add(deviceId);
       if (!devices.has(deviceId) || connected.has(deviceId)) this.#absentSince.delete(deviceId);
     }
     for (const deviceId of devices) {
@@ -405,22 +458,28 @@ export class Scheduler {
   /**
    * What this pass checks against `sessions`: a reservation past its TTL whose
    * spawn is no longer out (one still out may yet land, and its verdict is
-   * the better answer); a `lost` task whose machine is back; and, once per
-   * `sweepIntervalMs`, every running task on a connected machine — the only
-   * way a task whose `ended` event was lost ever finishes.
+   * the better answer); a `lost` task whose machine is back; every placed or
+   * `awaiting-merge` task on a machine back from an absence, whose
+   * `branch-state`s went nowhere meanwhile; and, once per `sweepIntervalMs`,
+   * every running task on a connected machine — the only way a task whose
+   * `ended` event was lost ever finishes.
    */
   #due(): readonly Task[] {
     const now = this.#now();
     const connected = this.#connectedIds();
     const sweep = now - this.#sweptAt >= this.#config.sweepIntervalMs;
     if (sweep) this.#sweptAt = now;
+    const returned = this.#returned;
+    this.#returned = new Set();
     return this.tasks().filter((t) => {
       if (t.state === "reserved") {
         return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
       }
       const deviceId = t.assignment?.deviceId;
-      if (!PLACED.includes(t.state) || deviceId === undefined || !connected.has(deviceId)) return false;
-      return t.state === "lost" || sweep;
+      if (deviceId === undefined || !connected.has(deviceId)) return false;
+      if (t.state === "awaiting-merge") return returned.has(deviceId);
+      if (!PLACED.includes(t.state)) return false;
+      return t.state === "lost" || sweep || returned.has(deviceId);
     });
   }
 
@@ -588,8 +647,5 @@ export function winnerOnly(decision: Decision): Decision {
 function cancelRefusal(task: Task): CancelResult | null {
   if (task.state === "reserved") return { ok: false, code: "dispatching" };
   if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
-  // A state not finished and still without the edge is one M3 has not wired yet: a gap, not an input error.
-  if (!canTransition(task.state, "cancelled"))
-    throw new Error(`task ${task.id}: ${task.state} cannot be cancelled yet`);
   return null;
 }

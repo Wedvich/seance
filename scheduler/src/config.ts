@@ -34,6 +34,11 @@ export interface SchedulerConfig {
    * task would otherwise read `running` and hold its slot for good.
    */
   readonly sweepIntervalMs: number;
+  /**
+   * Finished tasks kept for `queue` to show; older ones are pruned, so creates
+   * stay under the store's `MAX_TASKS`.
+   */
+  readonly keepFinished: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -50,4 +55,5 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
   sweepIntervalMs: 120_000,
+  keepFinished: 50,
 };

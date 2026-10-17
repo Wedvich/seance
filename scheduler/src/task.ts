@@ -5,11 +5,15 @@ import { statesIn, type Task, type TaskState } from "@seance/shared";
 export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskState } from "@seance/shared";
 
 /**
- * M2's slice of the task lifecycle (docs/scheduler.md, "Task states"): no deps,
- * so no `queued`/`blocked`, and no done detection, so no `awaiting-merge` — a
- * session that ends is `done`. M3 widens this table; nothing else encodes it.
+ * The task lifecycle (DESIGN.md, Scheduler, "States"); nothing else encodes it.
  *
- * `reserved` reaches `needs-input` and `done` directly, not only through
+ * An app creates a task `queued`; only a leader's admission moves it on — to
+ * `blocked` while a dependency edge waits, `ready` once none does, `failed`
+ * when one never can (`TaskDep`). A session that ends with a PR open is
+ * `awaiting-merge`: no slot held, and `after: "merged"` dependents still
+ * blocked until a merge (or `mark-done`) makes it `done`.
+ *
+ * `reserved` reaches `needs-input`, `awaiting-merge` and `done` directly, not only through
  * `running`: a session event for a reserved task is proof its spawn landed
  * even when the reply never came, and a session that already ended is one
  * observed transition, so one store write — a `running` written first would
@@ -20,24 +24,21 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * machine's answer moves it — a session carrying the task id (`running`), an
  * event from it, or no such session — or a cancel, which cannot reach a
  * machine that is gone and so leaves its session as it is. A task lost from
- * `running` with no session is `done`, as takeover settles a running task whose
- * session is gone. One lost from `reserved` (`reservedAt` kept) never had its
+ * `running` with no session has ended, as takeover settles a running task whose
+ * session is gone (`awaiting-merge` with a PR open, else `done`). One lost from `reserved` (`reservedAt` kept) never had its
  * spawn confirmed: with no session it is `ready` again only when the machine's
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
  * is legal for that task alone, and `advance` refuses it for any other.
- *
- * M3's `queued`, `blocked` and `awaiting-merge` are in the schema already but
- * have no edges yet: nothing enters or leaves them until M3 item 4a does.
  */
 export const TRANSITIONS = {
-  queued: [],
-  blocked: [],
+  queued: ["blocked", "ready", "failed", "cancelled"],
+  blocked: ["ready", "failed", "cancelled"],
   ready: ["reserved", "cancelled"],
-  reserved: ["running", "needs-input", "done", "ready", "lost", "failed", "cancelled"],
-  running: ["needs-input", "lost", "done", "failed", "cancelled"],
-  "needs-input": ["running", "lost", "done", "failed", "cancelled"],
-  "awaiting-merge": [],
-  lost: ["running", "needs-input", "done", "ready", "failed", "cancelled"],
+  reserved: ["running", "needs-input", "awaiting-merge", "done", "ready", "lost", "failed", "cancelled"],
+  running: ["needs-input", "awaiting-merge", "lost", "done", "failed", "cancelled"],
+  "needs-input": ["running", "awaiting-merge", "lost", "done", "failed", "cancelled"],
+  "awaiting-merge": ["done", "cancelled"],
+  lost: ["running", "needs-input", "awaiting-merge", "done", "ready", "failed", "cancelled"],
   done: [],
   failed: [],
   cancelled: [],
@@ -54,6 +55,9 @@ export const FINISHED: readonly TaskState[] = statesIn("finished");
 
 /** States whose session was placed on a machine and may still be running there. */
 export const PLACED: readonly TaskState[] = statesIn("placed");
+
+/** What a transition may set beside the state. */
+export type TaskFields = Partial<Omit<Task, "id" | "spec" | "state">>;
 
 export function canTransition(from: TaskState, to: TaskState): boolean {
   const allowed: readonly TaskState[] = TRANSITIONS[from];
@@ -72,7 +76,7 @@ export function isUnconfirmed(task: Task): boolean {
  * leaving `lost` drops when its machine went absent; `reservedAt` survives only
  * from `reserved` into `lost`.
  */
-export function advance(task: Task, to: TaskState, fields: Partial<Omit<Task, "id" | "spec" | "state">> = {}): Task {
+export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
   if (task.state === "lost" && to === "ready" && !isUnconfirmed(task)) {
     throw new Error(`task ${task.id}: a lost task that ran never returns to ready`);
