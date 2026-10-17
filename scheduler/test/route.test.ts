@@ -49,6 +49,20 @@ function held(id: string, deviceId: string, state: Task["state"] = "running"): T
   });
 }
 
+/** Machine `a` with two exclaves on two accounts, both observed and both holding a clone. */
+function twoAccounts(): Machine {
+  return machine("a", {
+    exclaves: [exclave("main", "org:a"), exclave("alt", "org:b")],
+    repos: [clone("app", "main"), clone("app2", "alt")],
+    status: status({ quota: [obs(0), obs(1)] }),
+  });
+}
+
+/** When `org:a` resets, read from one machine reporting `quota`. */
+function resetOf(quota: ReturnType<typeof obs>): number | null {
+  return accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], NOW, DEFAULT_CONFIG);
+}
+
 describe("filter", () => {
   test("a healthy machine is scored and chosen", () => {
     const decision = decide([machine("a")]);
@@ -257,14 +271,6 @@ describe("filter", () => {
   });
 
   describe("cap_reached scope account", () => {
-    /** Machine `a` with two exclaves on two accounts, both observed and both holding a clone. */
-    const twoAccounts = (): Machine =>
-      machine("a", {
-        exclaves: [exclave("main", "org:a"), exclave("alt", "org:b")],
-        repos: [clone("app", "main"), clone("app2", "alt")],
-        status: status({ quota: [obs(0), obs(1)] }),
-      });
-
     test("rejects only the full account's candidates, counting reserved and needs-input tasks", () => {
       const tasks = [held("x", "a", "reserved"), held("y", "a", "needs-input"), held("z", "a", "awaiting-merge")];
       const decision = decide([twoAccounts()], { tasks, config: { accountMax: 2 } });
@@ -321,9 +327,6 @@ describe("filter", () => {
   });
 
   describe("accountResetAt", () => {
-    const resetOf = (quota: ReturnType<typeof obs>): number | null =>
-      accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], NOW, DEFAULT_CONFIG);
-
     test("over the line: the latest reset among the full windows, not an earlier one that leaves it full", () => {
       expect(resetOf(obs(0, { h: 10, hr: NOW_S + 3600, d: 95, dr: NOW_S + 86_400 }))).toBe((NOW_S + 86_400) * 1000);
       expect(resetOf(obs(0, { h: 95, hr: NOW_S + 3600, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 3600) * 1000);

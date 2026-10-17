@@ -1,11 +1,31 @@
-import { DECISION_MAX_CANDIDATES, type BranchState, type SessionState } from "@seance/shared";
+import {
+  DECISION_MAX_CANDIDATES,
+  MAX_PAUSE_HOLDS,
+  PAUSE_KEY,
+  quote,
+  type BranchState,
+  type PauseHold,
+  type PauseRequest,
+  type ResumeRequest,
+  type SessionState,
+} from "@seance/shared";
+import { escalation, inputClock, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
 import { branchChange } from "./done.ts";
-import { type Fleet, type QueueStore, type StoreEntry, type StoreWrite, type UnreadableTask } from "./ports.ts";
+import { activeHolds, sameHolds, withHold, withoutHold } from "./pause.ts";
+import {
+  type Fleet,
+  type QueueStore,
+  type StoredPause,
+  type StoreEntry,
+  type StoreWrite,
+  type UnreadablePause,
+  type UnreadableTask,
+} from "./ports.ts";
 import { prunable } from "./prune.ts";
-import { route, type Decision } from "./route.ts";
+import { accountResetAt, route, windowResetOf, type Decision } from "./route.ts";
 import { asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
 import { advance, FINISHED, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
@@ -31,7 +51,18 @@ export interface SchedulerOptions {
    * reject. Without this, the first one surfaces from the next `drain()`.
    */
   readonly onError?: (err: unknown) => void;
+  /** A dispatch spending credits, or an escalated wait for input (`SchedulerAlert`); fired after its write lands. */
+  readonly onAlert?: (alert: SchedulerAlert) => void;
 }
+
+/**
+ * `pause` and `resume`: every hold in force after the change, or why not.
+ * `full`: past `MAX_PAUSE_HOLDS`. `conflict`: the record kept changing under
+ * the write.
+ */
+export type PauseResult =
+  | { readonly ok: true; readonly holds: readonly PauseHold[] }
+  | { readonly ok: false; readonly code: "reset_unknown" | "conflict" | "full" };
 
 export type CancelResult =
   | { readonly ok: true; readonly task: Task }
@@ -62,7 +93,16 @@ export class Scheduler {
   readonly #now: () => number;
   readonly #newId: () => string;
   readonly #onError: (err: unknown) => void;
+  readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #held = new Map<string, Held>();
+  /** `queue:pause` as last read or written; version 0 before the first pause. */
+  #pause: { readonly version: number; readonly holds: readonly PauseHold[] } = { version: 0, holds: [] };
+  /**
+   * `account window` → the reset of the window a spill was last alerted for:
+   * one alert per account per window, not per task. Memory only, so a new
+   * leader alerts an ongoing spill once more.
+   */
+  readonly #spilled = new Map<string, string>();
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
   readonly #decisions = new Map<string, Decision>();
@@ -101,6 +141,7 @@ export class Scheduler {
       ((err) => {
         this.#fault ??= { err };
       });
+    this.#onAlert = options.onAlert ?? (() => {});
     this.#sweptAt = this.#now();
   }
 
@@ -111,6 +152,38 @@ export class Scheduler {
     this.#unreadable.clear();
     this.#decisions.clear();
     for (const entry of stored) this.#keep(entry);
+    this.#pause = this.#pauseOf(await this.#store.getPause());
+  }
+
+  /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
+  holds(): readonly PauseHold[] {
+    return activeHolds(this.#pause.holds, this.#now());
+  }
+
+  /**
+   * Holds dispatch on the whole queue (no `account`) or on one account's
+   * candidates; running sessions are never touched. `until: "reset"` lifts at
+   * the account's next reset (`accountResetAt`), resolved now and stored, so a
+   * later leader lifts it at the same time.
+   */
+  async pause(request: PauseRequest): Promise<PauseResult> {
+    const now = this.#now();
+    const { account } = request;
+    let hold: PauseHold;
+    if (request.until === "resume") {
+      hold = { ...(account === undefined ? {} : { account }), until: "resume", at: now };
+    } else {
+      const resumeAt =
+        account === undefined ? null : accountResetAt(account, this.#fleet.machines(), now, this.#config);
+      if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
+      hold = { account, until: "reset", at: now, resumeAt };
+    }
+    return this.#writeHolds((current) => withHold(current, hold, now));
+  }
+
+  /** Lifts the hold on `account`, or the whole-queue hold when absent; lifting none writes nothing. */
+  async resume(request: ResumeRequest): Promise<PauseResult> {
+    return this.#writeHolds((current) => withoutHold(current, request.account, this.#now()));
   }
 
   /**
@@ -207,6 +280,7 @@ export class Scheduler {
         tasks: this.tasks(),
         now: this.#now(),
         config: this.#config,
+        holds: this.#pause.holds,
       }),
     );
   }
@@ -345,6 +419,7 @@ export class Scheduler {
   async #pass(): Promise<void> {
     await this.#markAbsent();
     await this.#check(this.#due());
+    await this.#escalate();
     // After the checks, so a predecessor they settled releases or fails its dependents in this pass.
     await this.#admit();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
@@ -361,6 +436,7 @@ export class Scheduler {
           tasks: this.tasks(),
           now,
           config: this.#config,
+          holds: this.#pause.holds,
         }),
       );
       this.#decisions.set(task.id, decision);
@@ -373,10 +449,120 @@ export class Scheduler {
       );
       if (reserved === null) continue;
       this.#decisions.delete(task.id);
+      this.#spill(reserved.id, decision);
       this.#launch(reserved, reservation);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
+  }
+
+  /**
+   * A reservation on a candidate that `spill`s spends credits: alerted once per
+   * account per quota window (the window's label and its reset), not per task —
+   * the record's decision carries the spill for each task.
+   */
+  #spill(taskId: string, decision: Decision): void {
+    const { chosen } = decision;
+    if (chosen === null) return;
+    const spill = decision.candidates.find(
+      (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave,
+    )?.spill;
+    if (spill === undefined) return;
+    const machines = this.#fleet.machines();
+    const accountId = machines
+      .find((m) => m.deviceId === chosen.deviceId)
+      ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
+    if (accountId === undefined || accountId === null) return;
+    const key = `${accountId} ${spill.window}`;
+    const reset = String(windowResetOf(accountId, machines, spill.window) ?? "");
+    if (this.#spilled.get(key) === reset) return;
+    this.#spilled.set(key, reset);
+    const pct = Math.round(spill.projectedPct);
+    this.#onAlert({
+      kind: "spill",
+      taskId,
+      accountId,
+      window: spill.window,
+      projectedPct: spill.projectedPct,
+      message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
+    });
+  }
+
+  /**
+   * A task waiting for input past `needsInputEscalateMs` is marked `escalated`
+   * — one write per stay — and alerted once that write lands, so a new leader
+   * reading the record never alerts it again.
+   */
+  async #escalate(): Promise<void> {
+    const now = this.#now();
+    const after = this.#config.needsInputEscalateMs;
+    await Promise.all(
+      this.tasks()
+        .filter((t) => escalation(t, now, after) !== null)
+        .map(async (seen) => {
+          const next = await this.#update(seen.id, (current) => escalation(current, now, after));
+          if (next?.escalated !== true || next.needsInputSince === undefined) return;
+          const minutes = Math.round((now - next.needsInputSince) / 60_000);
+          this.#onAlert({
+            kind: "needs-input",
+            taskId: next.id,
+            since: next.needsInputSince,
+            message: `needs input: task=${quote(next.id)} waiting ${minutes} min — escalated, its slot kept`,
+          });
+        }),
+    );
+  }
+
+  /**
+   * `queue:pause` as read. Unreadable fails closed — the whole queue held until
+   * a `resume`, which overwrites it at its version: a pause is usually about
+   * spending, and dispatching through one nobody can read is the costlier guess.
+   */
+  #pauseOf(read: StoredPause | UnreadablePause | null): {
+    readonly version: number;
+    readonly holds: readonly PauseHold[];
+  } {
+    if (read === null) return { version: 0, holds: [] };
+    if (read.reason === undefined) return { version: read.version, holds: read.holds };
+    this.#onError(
+      new Error(`${PAUSE_KEY} is unreadable (${read.reason}): the whole queue is held until a resume overwrites it`),
+    );
+    return { version: read.version, holds: [{ until: "resume", at: this.#now() }] };
+  }
+
+  /**
+   * The one way `queue:pause` is written, serialized like a task's writes
+   * (`PAUSE_KEY` is no task id). A conflict or a lost reply re-reads and
+   * applies `change` again, as `#update` does; after a lost reply the one
+   * version past ours is ours, the pause being the leader's alone. A change
+   * that leaves the holds as they are writes nothing.
+   */
+  #writeHolds(change: (holds: readonly PauseHold[]) => readonly PauseHold[]): Promise<PauseResult> {
+    return this.#serial(PAUSE_KEY, async (): Promise<PauseResult> => {
+      for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
+        const held = this.#pause;
+        const next = change(held.holds);
+        if (next.length > MAX_PAUSE_HOLDS) return { ok: false, code: "full" };
+        if (sameHolds(next, held.holds)) return { ok: true, holds: this.holds() };
+        // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
+        const write = await this.#store.putPause(held.version, next);
+        if (write.ok) {
+          this.#pause = { version: write.version, holds: next };
+          return { ok: true, holds: this.holds() };
+        }
+        if (write.code !== "version_conflict" && write.code !== "indeterminate") {
+          throw new Error(`store refused put of ${PAUSE_KEY}: ${write.code}`);
+        }
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const fresh = await this.#store.getPause();
+        if (write.code === "indeterminate" && fresh?.reason === undefined && fresh?.version === held.version + 1) {
+          this.#pause = { version: fresh.version, holds: next };
+          return { ok: true, holds: this.holds() };
+        }
+        this.#pause = this.#pauseOf(fresh);
+      }
+      return { ok: false, code: "conflict" };
+    });
   }
 
   /**
@@ -556,7 +742,9 @@ export class Scheduler {
    * `change` applied again to what it finds. A lost reply (`indeterminate`) is
    * read the same way, except that the one version after ours is ours. A record
    * past the store's bound is written again with its decision cut to the
-   * winner, never the task cut. Null when `change` declines (it returns null
+   * winner, never the task cut. The needs-input clock (`inputClock`) rides
+   * whatever state a write lands, so no path can enter or leave `needs-input`
+   * without it. Null when `change` declines (it returns null
    * for a task no longer in the state it acts on), the task is gone or
    * unreadable, the store refused the write, or the conflicts outlast
    * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
@@ -567,8 +755,9 @@ export class Scheduler {
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
         const held = this.#held.get(id);
         if (held === undefined) return null;
-        const changed = change(held.task);
-        if (changed === null) return null;
+        const proposed = change(held.task);
+        if (proposed === null) return null;
+        const changed = inputClock(proposed, this.#now());
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);
