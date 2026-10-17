@@ -14,10 +14,14 @@ import {
   type RescanState,
   type SheetKind,
 } from "../state.ts";
+import { completeSkill, describeSources, matchSkills, skillIndex, skillQuery } from "../skills.ts";
 import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
+import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
+
+const SKILL_LIST_ID = "skill-list";
 
 /** One collator for every sheet sort; constructing one per comparison is not free. */
 const collator = new Intl.Collator();
@@ -376,6 +380,47 @@ export function SpawnScreen(props: {
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
 
+  // Open from the prompt text alone, never focus: a tap on a row blurs the
+  // textarea before its click lands on some browsers, and a focus-driven picker
+  // would be gone by then. Escape hides it until the prompt next changes.
+  const skills = useMemo(() => skillIndex(machines), [machines]);
+  const query = skillQuery(form.prompt);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const pickerOpen = query !== null && skills.skills.length > 0 && dismissed !== form.prompt;
+  const matches = useMemo(
+    () => (pickerOpen && query !== null ? matchSkills(skills.skills, query) : []),
+    [pickerOpen, query, skills],
+  );
+  // Tied to the query it was moved under, so typing resets the highlight to the
+  // top without an effect, and a shrinking list can't leave it past the end.
+  const [cursor, setCursor] = useState({ query: "", index: 0 });
+  const active = cursor.query === query && cursor.index < matches.length ? cursor.index : 0;
+  const pickSkill = (name: string): void => {
+    actions.setPrompt(completeSkill(name));
+    promptInput.current?.focus();
+  };
+  const pickerKey = (event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!pickerOpen || event.isComposing) return false;
+    if (event.key === "Escape") {
+      setDismissed(form.prompt);
+      return true;
+    }
+    // With nothing to pick the prompt goes as typed: Enter is a newline and
+    // Cmd/Ctrl+Enter still spawns.
+    if (matches.length === 0 || query === null) return false;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setCursor({ query, index: (active + step + matches.length) % matches.length });
+      return true;
+    }
+    if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
+      const entry = matches[active];
+      if (entry !== undefined) pickSkill(entry.name);
+      return true;
+    }
+    return false;
+  };
+
   // CLEAR leaves nothing to type into, so it drops focus (and the keyboard with
   // it); UNDO hands the field straight back. Focusing before the restore lands
   // leaves the caret at the end of the text, ready to keep writing.
@@ -408,18 +453,36 @@ export function SpawnScreen(props: {
           </div>
           <textarea
             ref={promptInput}
-            className="prompt-input"
+            className={pickerOpen ? "prompt-input prompt-input-compact" : "prompt-input"}
+            rows={pickerOpen ? 1 : undefined}
             aria-labelledby="prompt-label"
+            aria-autocomplete="list"
+            aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
+            aria-activedescendant={pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined}
             placeholder="Describe the work — or leave it blank and start empty."
             value={form.prompt}
             onInput={(event) => actions.setPrompt(event.currentTarget.value)}
             onKeyDown={(event) => {
+              if (pickerKey(event)) {
+                event.preventDefault();
+                return;
+              }
               if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
               if (!view.button.enabled) return;
               event.preventDefault();
               actions.spawn();
             }}
           />
+          {pickerOpen && query !== null && (
+            <SkillPicker
+              id={SKILL_LIST_ID}
+              query={query}
+              items={matches}
+              active={active}
+              describe={(entry) => describeSources(entry, skills.machines)}
+              onPick={pickSkill}
+            />
+          )}
         </div>
 
         {view.banner !== null &&
