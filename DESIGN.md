@@ -1269,7 +1269,10 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   65 536): `ready` and `reserved` tasks first, whose decision says why they wait or where they are
   going, then the rest newest first. A decision past the budget goes out as `chosen` plus the
   winner's candidate alone, its cut added to `Decision.trimmed` — still "placed on X, and why",
-  and a reader can tell the losers were left out. Without it twenty finished tasks sealed past
+  and the readers say the losers were left out: the PWA's decision card counts them among its
+  other candidates and closes the list with "N more not shown", MCP's decision line ends with
+  "N more candidates not shown", and a record cut to no candidates at all never reads as an
+  empty fleet. Without it twenty finished tasks sealed past
   the bound on a 3 × 2 fleet, and `queue` answered `too_large` for good. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
   reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) queues the request and
   ticks at once, so the task is placed without waiting for the 30s timer; the scheduler mints the

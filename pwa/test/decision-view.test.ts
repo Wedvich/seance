@@ -99,6 +99,18 @@ describe("describeDecision", () => {
     );
   });
 
+  test("a record the leader cut says how many it left out, and cut to nothing is still a full fleet", () => {
+    expect(describeDecision(decision, [], NOW, "did").omitted).toBeNull();
+    const cut: Decision = { ...decision, candidates: decision.candidates.slice(0, 1), trimmed: 2 };
+    const summary = describeDecision(cut, [], NOW, "did");
+    expect(summary.headline).toBe("Placed on Mac · default.");
+    expect(summary.others).toEqual([]);
+    expect(summary.omitted).toEqual({ count: 2, text: "2 more not shown — left out to keep the record small" });
+    const none = describeDecision({ at: NOW, chosen: null, candidates: [], trimmed: 5 }, [], NOW, "did");
+    expect(none.headline).toBe("Waiting — no machine can take it yet.");
+    expect(none.omitted?.count).toBe(5);
+  });
+
   test("a candidate whose reasons this build could not read still reads as rejected", () => {
     const unknown: Decision = { at: NOW, chosen: null, candidates: [rejected("lxc", "LXC", [])] };
     expect(describeDecision(unknown, [], NOW, "would").others[0]?.why).toBe(
