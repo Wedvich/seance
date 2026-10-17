@@ -355,9 +355,13 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
   return { machine, deviceId, exclave, clone, ...(window === undefined ? {} : { window }) };
 }
 
-/** A scheduler-set code is worded once in `shared`; a daemon's refusal carries its own message. */
+/**
+ * A scheduler-set code leads with its shared wording, but keeps the raw message: it alone names
+ * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
+ */
 function failureMessage(failure: NonNullable<Task["failure"]>): string {
-  return taskFailureText(failure.code) ?? failure.message;
+  const worded = taskFailureText(failure.code);
+  return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {

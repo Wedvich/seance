@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { reasonText, type Candidate, type Decision, type Machine, type Reason, type Task } from "@seance/shared";
+import {
+  reasonText,
+  TASK_FAILURE_CODES,
+  type Candidate,
+  type Decision,
+  type Machine,
+  type Reason,
+  type Task,
+} from "@seance/shared";
 import { describeDecision, taskHeadline } from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -203,7 +211,8 @@ describe("taskHeadline", () => {
 
   test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
     const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
-    for (const code of ["queue_expired", "dependency_failed", "dependency_missing", "dependency_cycle"]) {
+    // dispatch_unconfirmed has its own headline: it may have reached a machine.
+    for (const code of TASK_FAILURE_CODES.filter((c) => c !== "dispatch_unconfirmed")) {
       expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
     }
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(

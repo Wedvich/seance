@@ -904,14 +904,13 @@ describe("spawn_session on auto", () => {
     expect(text).toContain("failure (repo_not_found): no such repo");
   });
 
-  test("a failure the scheduler set reads in its shared wording, not the raw message", async () => {
-    const failure = { code: "dependency_cycle", message: "t-1 -> t-2 -> t-1" };
+  test("a failure the scheduler set leads with its shared wording and keeps the specifics", async () => {
+    const failure = { code: "dependency_cycle", message: "its dependencies loop: t-1 → t-2 → t-1" };
     const failed = task({ state: "failed", decision, failure });
     const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [failed], at: 6_000 }]);
     const { text, error } = await callAuto(fake);
     expect(error).toBe(true);
-    expect(text).toContain("failure (dependency_cycle): its dependencies wait on each other in a loop");
-    expect(text).not.toContain(failure.message);
+    expect(text).toContain(`failure (dependency_cycle): ${taskFailureText("dependency_cycle")} (${failure.message})`);
   });
 
   test("a prompt over the scheduler's bound is refused here, before anything dials the relay", async () => {
@@ -1070,14 +1069,22 @@ describe("get_queue", () => {
       task({ id, state: "failed", failure: { code, message } });
     const fake = leaderRelay(
       () => new Error("no submit here"),
-      [{ tasks: [failed("t-1", "queue_expired", "raw"), failed("t-2", "repo_not_found", "no such repo")], at: 6_000 }],
+      [
+        {
+          tasks: [
+            failed("t-1", "dispatch_unconfirmed", "the launch ledger no longer reaches back to its reservation"),
+            failed("t-2", "repo_not_found", "no such repo"),
+          ],
+          at: 6_000,
+        },
+      ],
     );
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const result = await client.callTool({ name: "get_queue", arguments: {} });
     const { tasks } = JSON.parse(toolText(result));
     expect(tasks.map((t: { failure: string }) => t.failure)).toEqual([
-      `queue_expired: ${taskFailureText("queue_expired")}`,
+      `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
     ]);
     lazy.stop();
