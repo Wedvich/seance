@@ -1179,17 +1179,23 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   }, 60_000);
 
   // An app's create while the daemon leads is placed by `store-changed`, not by
-  // the 30 s tick: the task leaves `queued` well inside it.
-  test("a task enqueued while a daemon leads is picked up on the store's nudge, not the next tick", async () => {
+  // a tick. The leader's own tick and the status beat (whose registry push also
+  // ticks it) are pushed out for this daemon, so the nudge is the only thing
+  // that can wake it once its boot-time status has landed.
+  test("a task enqueued while a daemon leads is picked up on the store's nudge, not a tick", async () => {
     const id = crypto.randomUUID();
+    await stack.restartDaemon({ quiet: true });
     const app = startApp(stack, { auto: true });
     let window: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
       const ready = await app.waitForApp(
-        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
-        "the leader verified, with the repos listed",
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          fixtureOrigin(state) !== null &&
+          state.relay.machines.some((m) => m.deviceId === stack.deviceId && m.status !== undefined),
+        "the leader verified, with the repos listed and the daemon's boot status in",
       );
       const created = await app.client.createTask({
         id,
@@ -1198,7 +1204,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         createdAt: Date.now(),
       });
       expect(created).toEqual({ ok: true, landedEarlier: false });
-      // Well inside the 30 s tick: only the relay's `store-changed` could have woken the leader.
+      // Neither timer can fire inside the hour: only the relay's `store-changed` could have woken the leader.
       await pollUntil(
         async () => (await stack.queue().get(id))?.body?.state === "running",
         "the leader to run the task on the store's nudge",
@@ -1209,6 +1215,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await app.client.cancel(id).catch(() => null);
       if (window !== null) await killWindow(window);
       app.stop();
+      await stack.restartDaemon();
     }
   }, 60_000);
 

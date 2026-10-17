@@ -135,8 +135,11 @@ export interface Stack {
   /**
    * Restart with identical opts — same state dir, so the same deviceId. `spawnWaitMs`
    * overrides the default budget for the new daemon; pass nothing to get it back.
+   * `quiet` pushes out the leader's tick and the daemon's status beat, so the only
+   * thing that can wake the leader after boot is a `store-changed`; the next
+   * restart without it puts the stack's cadence back.
    */
-  readonly restartDaemon: (opts?: { readonly spawnWaitMs?: number }) => Promise<void>;
+  readonly restartDaemon: (opts?: { readonly spawnWaitMs?: number; readonly quiet?: boolean }) => Promise<void>;
   /**
    * Boot machine B: same config as the suite's daemon bar `name` and tmux
    * session, its own state dir — so its own deviceId — and its own home. A
@@ -216,7 +219,8 @@ export async function startStack(
   // concurrently can stretch past a second.
   const DEFAULT_SPAWN_WAIT_MS = 1_500;
 
-  const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
+  const QUIET_MS = 3_600_000;
+  const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS, quiet = false): Promise<DaemonHandle> =>
     startDaemon({
       config,
       // Stands for a credential-delivered box, the only kind that brokers: the
@@ -227,6 +231,7 @@ export async function startStack(
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
+      ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS } } : {}),
     });
 
   let daemon = await startTestDaemon();
@@ -304,12 +309,12 @@ export async function startStack(
       const advanced = await queue.put(task.id, 1, task);
       if (!advanced.ok) throw new Error(`seeding ${task.id}: ${advanced.code}`);
     },
-    restartDaemon: async (opts: { readonly spawnWaitMs?: number } = {}): Promise<void> => {
+    restartDaemon: async (opts: { readonly spawnWaitMs?: number; readonly quiet?: boolean } = {}): Promise<void> => {
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest
       // of the process. stop() is idempotent, so always stop before starting.
       daemon.stop();
-      daemon = await startTestDaemon(opts.spawnWaitMs);
+      daemon = await startTestDaemon(opts.spawnWaitMs, opts.quiet);
       stack.daemon = daemon;
     },
     startSecondDaemon,
