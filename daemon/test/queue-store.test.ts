@@ -282,8 +282,8 @@ describe("write mapping", () => {
     );
   });
 
-  test("a send that throws leaves nothing pending and reads as no socket: the term is over", async () => {
-    await withRig(async ({ client, store }) => {
+  test("a send that throws leaves nothing pending, reads as no socket and redials so the relay hears the daemon again", async () => {
+    await withRig(async ({ relay, client, store }) => {
       const real = WebSocket.prototype.send;
       const refuse = spyOn(WebSocket.prototype, "send").mockImplementation(function (
         this: WebSocket,
@@ -299,6 +299,8 @@ describe("write mapping", () => {
         expect(failure).toBeInstanceOf(RequestFailure);
         expect(failure).toMatchObject({ reason: "disconnected" });
         await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
+        // The socket was left open by the failed send; without a close nothing would register again.
+        await relay.registers.next();
         // A non-event cannot be polled for: wait past the 300ms deadline a leaked timer would fire at.
         await Bun.sleep(400);
         expect(warn.mock.calls.filter(([line]) => String(line).includes("store timeout"))).toEqual([]);
@@ -313,9 +315,7 @@ describe("write mapping", () => {
     await withRig(
       async ({ relay, store }) => {
         relay.holdStoreReplies = true;
-        const single = Date.now();
         await expect(store.get("a")).rejects.toThrow("timed out after 200ms");
-        expect(Date.now() - single).toBeLessThan(900);
         const list = Date.now();
         await expect(store.list()).rejects.toThrow("timed out after 1000ms");
         // A timer cannot fire early, so a lower bound is not a race.

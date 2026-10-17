@@ -285,7 +285,7 @@ export class RelayClient {
    * leader's writes leave on this socket because the term fence is `holdsTerm(term,
    * socket)`: the socket the term was issued to. Null is a reply this build
    * cannot read. Rejects `RequestFailure`: `disconnected` when nothing was sent
-   * (no open socket), `timeout` or `dropped` when it was and no answer came —
+   * (no open socket, or a send that threw), `timeout` or `dropped` when it was and no answer came —
    * so the write may have landed. Logs only a timeout, and never a key, `env`
    * or `ct`: no line per accepted op (DESIGN.md, "The store").
    */
@@ -316,8 +316,11 @@ export class RelayClient {
       } catch (err) {
         // Nothing left: no reply or timeout may fire for a frame that was never sent, and the
         // adapter reads `disconnected` as the term's end rather than a write that may have landed.
+        // The socket may still read OPEN, so close it: the redial re-registers, which is what
+        // lets the relay nominate a leader that can write instead of keeping this daemon named.
         clearTimeout(timer);
         this.#storePending.delete(frame.id);
+        socket.close();
         reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`));
       }
     });
