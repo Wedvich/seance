@@ -234,7 +234,14 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 export interface QueueAudit {
   readonly submitted: (id: string, taskId: string) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
-  readonly refused: (op: "submit" | "cancel", id: string, code: string, taskId?: string) => Promise<void>;
+  readonly refused: (
+    op: "submit" | "cancel" | "pause" | "resume",
+    id: string,
+    code: string,
+    taskId?: string,
+  ) => Promise<void>;
+  /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
+  readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
 }
 
 /**
@@ -254,6 +261,8 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
+    held: (op, id, account) =>
+      emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
     refused: (op, id, code, taskId) =>
       emit(`op=${op} id=${quote(id)}${taskId === undefined ? "" : ` task=${quote(taskId)}`} refused code=${code}`),
   };

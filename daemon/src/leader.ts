@@ -213,6 +213,7 @@ function startTerm(
     }),
     now,
     onError: report,
+    onAlert: (alert) => log.warn(`scheduler: ${alert.message}`),
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 
