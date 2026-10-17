@@ -158,7 +158,7 @@ let tempSeq = 0;
  * Size doesn't save a small file: the truncate alone hands a reader an empty
  * one, so runtime.json comes through here too.
  */
-async function writeAtomic(path: string, value: unknown): Promise<void> {
+export async function writeAtomic(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   // Per call, not per process: overlapping writers would otherwise share a temp
   // name, and the loser would rename a file the winner already moved.

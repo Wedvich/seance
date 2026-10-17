@@ -1,17 +1,10 @@
 import { BRANCH_MAX_LENGTH, type BranchState, type RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
+import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import type { LaunchLedger, NotedTask } from "./launch-ledger.ts";
 import { log } from "./log.ts";
-import {
-  classifyTip,
-  fetchIfStale,
-  isMerged,
-  patchIndex,
-  reapGit,
-  type FetchOutcome,
-  type PatchIndex,
-} from "./reap-git.ts";
+import { classifyTip, fetchIfStale, isMerged, patchIndex, type FetchOutcome, type PatchIndex } from "./reap-git.ts";
 
 /**
  * Watches every task branch this daemon launched in worktree mode and tells the
@@ -62,7 +55,7 @@ interface Refs {
 }
 
 async function isAncestor(cwd: string, ancestor: string, of: string): Promise<boolean | null> {
-  const result = await reapGit(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
+  const result = await hardenedGit(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
   if (result.exitCode === 0) return true;
   return result.exitCode === 1 ? false : null;
 }
@@ -74,10 +67,10 @@ async function isAncestor(cwd: string, ancestor: string, of: string): Promise<bo
  */
 async function holdsOwnWork(repoPath: string, tip: string, base: string): Promise<boolean> {
   if ((await isAncestor(repoPath, tip, base)) !== false) return false;
-  const fork = await reapGit(repoPath, ["merge-base", tip, base]);
+  const fork = await hardenedGit(repoPath, ["merge-base", tip, base]);
   const forkSha = fork.stdout.trim();
   if (fork.exitCode !== 0 || forkSha === "") return false;
-  const trees = await reapGit(repoPath, ["rev-parse", `${tip}^{tree}`, `${forkSha}^{tree}`]);
+  const trees = await hardenedGit(repoPath, ["rev-parse", `${tip}^{tree}`, `${forkSha}^{tree}`]);
   if (trees.exitCode !== 0) return false;
   const [tipTree, forkTree] = trees.stdout.split("\n");
   return tipTree !== undefined && tipTree !== "" && tipTree !== forkTree;
@@ -89,7 +82,7 @@ const HEADS = "refs/heads/";
 async function readRefs(repoPath: string, branch: string): Promise<Refs | null> {
   const local = `${HEADS}${branch}`;
   const remote = `refs/remotes/origin/${branch}`;
-  const result = await reapGit(repoPath, ["for-each-ref", "--format=%(refname)%00%(objectname)", local, remote]);
+  const result = await hardenedGit(repoPath, ["for-each-ref", "--format=%(refname)%00%(objectname)", local, remote]);
   if (result.exitCode !== 0) return null;
   let localSha: string | undefined;
   let remoteSha: string | undefined;
@@ -115,7 +108,7 @@ async function liveBranch(ctx: RepoContext, note: NotedTask, owner: boolean): Pr
   const checkout = await inspectCheckout(note.path);
   if (checkout.kind !== "linked" || (await canonical(checkout.commonDir)) !== ctx.commonDir) return note.branch;
   // Not `--short`: with a tag of the same name it prints `heads/<branch>`.
-  const head = await reapGit(ctx.repo.path, ["-C", note.path, "symbolic-ref", "--quiet", "HEAD"]);
+  const head = await hardenedGit(ctx.repo.path, ["-C", note.path, "symbolic-ref", "--quiet", "HEAD"]);
   const ref = head.stdout.trim();
   return head.exitCode === 0 && ref.startsWith(HEADS) ? ref.slice(HEADS.length) : undefined;
 }
@@ -124,8 +117,8 @@ async function repoBase(repo: RepoEntry): Promise<RepoContext["base"]> {
   if (repo.defaultBranch === null) return null;
   const ref = `refs/remotes/origin/${repo.defaultBranch}`;
   const [sha, tree] = await Promise.all([
-    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]),
-    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{tree}`]),
+    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]),
+    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{tree}`]),
   ]);
   if (sha.exitCode !== 0 || tree.exitCode !== 0) return null;
   // The sha, not the ref: the ref can move mid-pass, and a verdict and its memo key must be one snapshot.
@@ -162,8 +155,13 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
   let stopped = false;
   /** Re-sent at the start of each pass. */
   const pending = pendingFor(deps.ledger);
-  /** Per repo: consecutive failed fetches and when the next may run (`FETCH_HEAD` does not move on a failure). */
+  /** Per repo: consecutive failed fetches and when the next may run (a failure does not move `lastPruned`). */
   const fetchBackoff = new Map<string, { failures: number; nextAt: number }>();
+  /**
+   * Per common dir: this emitter's last successful `fetch --prune`. Not `FETCH_HEAD`'s mtime — every worktree
+   * spawn refreshes that with a one-branch fetch that prunes nothing, so a busy repo would never fetch here.
+   */
+  const lastPruned = new Map<string, number>();
   /** Repos whose last pass threw, so a run of failures warns once. */
   const failing = new Set<string>();
   /** Latest verdict per task, keyed by every input: an idle branch costs no `classifyTip` per pass. */
@@ -192,7 +190,8 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     if (backoff !== undefined && now() < backoff.nextAt) return;
     // Git Credential Manager ignores GIT_TERMINAL_PROMPT and may raise a GUI on WSL/Windows.
     const env = process.env["GCM_INTERACTIVE"] === undefined ? { GCM_INTERACTIVE: "never" } : undefined;
-    const outcome: FetchOutcome = await fetchRepo(repo.path, commonDir, now(), fetchStaleMs, env);
+    const outcome: FetchOutcome = await fetchRepo(repo.path, lastPruned.get(commonDir) ?? 0, now(), fetchStaleMs, env);
+    if (outcome.kind === "fetched") lastPruned.set(commonDir, now());
     if (outcome.kind !== "failed") {
       fetchBackoff.delete(repo.path);
       return;
@@ -236,7 +235,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       if (grown) tip = refs.local;
     }
     if (tip === undefined && note.tip !== undefined && branch === note.branch) {
-      const kept = await reapGit(ctx.repo.path, ["cat-file", "-e", `${note.tip}^{commit}`]);
+      const kept = await hardenedGit(ctx.repo.path, ["cat-file", "-e", `${note.tip}^{commit}`]);
       if (kept.exitCode === 0) tip = note.tip;
     }
     if (tip === undefined) return;
