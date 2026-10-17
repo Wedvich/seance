@@ -507,7 +507,11 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   - **3. The `QueueStore` adapter** on the store ops (new `daemon/src/queue-store.ts`, wired in
     `leader.ts`); takeover reconciliation over opened, version-checked bodies.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
-    credits-spill detection (logged and shown in the PWA; the push alert is M4).
+    credits-spill detection (logged and shown in the PWA; the push alert is M4). The per-account
+    cap needs its own wording: `reasonText` for `cap_reached` reads `scope` nowhere, so an
+    account-scoped cap shows as the fleet-wide one ("N of M auto tasks already in flight") in
+    both `pwa/src/decision-view.ts` and `daemon/src/mcp.ts`, and an agent would give up on
+    `auto` when only one account is full.
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
   **Removes M2's `submit`** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS`,
   `parseSubmitReply`; the `submit` case in `leader.ts`). Moved here from item 1, where the plan
@@ -517,6 +521,16 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   2026-10-17 — DESIGN.md "MCP server") to `store-put`, in `daemon/src/mcp.ts`: it is the
   other `submit` caller, so it must move in the same PR that drops the op. Its verdict then
   becomes "queued" plus the task id, and its tool descriptions lose the in-memory caveat.
+  Two cleanups left from that MCP PR (#131), both this item's:
+  - **One wording table.** `daemon/src/mcp.ts` carries its own `reasonText` and
+    `SCHEDULER_ERRORS`, restating `pwa/src/decision-view.ts` and `pwa/src/store.ts` (a
+    shortened copy, to keep #131 off the PWA). Lift one table per code into `shared/` and
+    have both surfaces render from it, so a new `Reason` or `SchedulerErrorCode` is worded
+    once; the surfaces may still differ in framing (sentence case, length), not in meaning.
+  - **MCP's follow poll.** After a submit, `spawnAuto` re-reads the whole `queue` (up to
+    `QUEUE_MAX_TASKS`, each with a full decision) every second, up to 20 times, to find one
+    task, while holding its relay lease. With `queue-changed` in place, wait on that push
+    and re-read only when it arrives, as the PWA's follow will.
 
 **Who edits what** — the collision map that makes the waves parallel: `shared/src/types.ts` is
 PR 0's alone (a later PR that finds a shape missing changes it in a PR of its own, not inside
