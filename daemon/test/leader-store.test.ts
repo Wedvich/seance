@@ -84,12 +84,12 @@ const noLocalOps: LocalOps = {
  * builds one, on a store the test holds. The tick is pushed out so a task that
  * moves did so because it was told to, not because a timer came round.
  */
-function leaderOver(relay: TestRelay, store: QueueStore) {
+function leaderOver(relay: TestRelay, store: QueueStore, local: LocalOps = noLocalOps) {
   let resigned = 0;
   const replies: { readonly to: string; readonly response: Plain }[] = [];
   const leader: Leader = createLeader({
     selfDeviceId: "self",
-    local: noLocalOps,
+    local,
     store,
     reply: (to, response) => {
       replies.push({ to, response });
@@ -121,9 +121,10 @@ async function withLeader(
     resigned: () => number;
   }) => Promise<void>,
   store: QueueStore = new MemoryQueueStore(),
+  local: LocalOps = noLocalOps,
 ): Promise<void> {
   const relay = startTestRelay(TOKEN);
-  const { leader, replies, resigned } = leaderOver(relay, store);
+  const { leader, replies, resigned } = leaderOver(relay, store, local);
   try {
     await body({ relay, leader, replies, resigned });
   } finally {
@@ -338,6 +339,43 @@ describe("a revoked term, from the paths that write on an event", () => {
       expect(replies[0]?.response.payload).toMatchObject({ ok: false, code: "not_leader" });
       expect(resigned()).toBe(0);
     }, new RevokedCreate());
+  });
+});
+
+describe("a revoked cancel", () => {
+  test("after its despawn ran is internal_error naming the ended session, not not_leader, and still ends the term", async () => {
+    const store = new Revocable();
+    await store.put("t", 0, task("t", { state: "running", assignment: { ...placedOnB, deviceId: "self" } }));
+    const despawned: unknown[] = [];
+    const local: LocalOps = {
+      ...noLocalOps,
+      // Takeover reconciles the running task against its machine's sessions: this one is alive.
+      sessions: () =>
+        Promise.resolve({
+          sessions: [{ id: "%3", window: "w1", repo: "app", path: "/wt/t", taskId: "t" }],
+          at: Date.now(),
+        }),
+      despawn: (request) => {
+        despawned.push(request);
+        return Promise.resolve({ ok: true, window: "w1", outcome: "exited", sessions: [] });
+      },
+    };
+    await withLeader(
+      async ({ leader, replies, resigned }) => {
+        leader.lead(1);
+        await leader.settled();
+        store.armed = true;
+        leader.deliver(await sealedTo("cancel", { taskId: "t" }, APP_ID));
+        await pollUntil(() => replies.length === 1, "the app to be answered");
+        expect(despawned).toMatchObject([{ id: "%3" }]);
+        expect(replies[0]?.response.payload).toMatchObject({ ok: false, code: "internal_error" });
+        expect(JSON.stringify(replies[0]?.response.payload)).toContain("already have ended");
+        await pollUntil(() => leader.term() === null, "the revoked write to end the term");
+        expect(resigned()).toBe(0);
+      },
+      store,
+      local,
+    );
   });
 });
 

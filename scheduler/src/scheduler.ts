@@ -73,7 +73,7 @@ export type CancelResult =
   | { readonly ok: true; readonly task: Task }
   | {
       readonly ok: false;
-      readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict";
+      readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
     };
 
 interface Held {
@@ -300,7 +300,8 @@ export class Scheduler {
    * leader's own write raises no `store-changed`: it is read back, or a later
    * leader would run an orphan the caller then resubmits. Where even the read
    * fails the error says so, because the caller must check the queue before it
-   * submits again. Once the create has landed this never rejects: the admit
+   * submits again; a read that finds nothing says the task was not stored, as of
+   * that read. Once the create has landed this never rejects: the admit
    * write is a later pass's to retry, and a caller told "failed" would submit
    * the work twice.
    */
@@ -312,11 +313,15 @@ export class Scheduler {
       write = await this.#create(task);
     }
     if (!write.ok) {
-      throw new Error(
-        write.code === "indeterminate"
-          ? `task ${task.id} may have been stored: the store never answered the create or the read-back (check the queue before submitting again)`
-          : `task ${task.id} was not stored (${write.code})`,
-      );
+      if (write.code === "indeterminate") {
+        throw new Error(
+          `task ${task.id} may have been stored: the store never answered the create or the read-back (check the queue before submitting again)`,
+        );
+      }
+      if (write.code === "absent") {
+        throw new Error(`task ${task.id} was not stored: the create got no answer and the read-back found nothing`);
+      }
+      throw new Error(`task ${task.id} was not stored (${write.code})`);
     }
     this.#held.set(task.id, { version: write.version, task });
     // `StoreRevoked` still reaches the host through `onError`, which ends the term.
@@ -324,19 +329,30 @@ export class Scheduler {
     return this.#held.get(task.id)?.task ?? task;
   }
 
-  /** The id is freshly minted, so a readable version-1 record under it is this create, landed. */
-  async #create(task: Task): Promise<StoreWrite> {
+  /**
+   * The id is freshly minted, so a readable version-1 record under it is this create, landed.
+   * `absent`: the create went unanswered and the read-back found no record, so it did not land
+   * as of that read; `indeterminate` stays the read-back itself failing or finding another record.
+   */
+  async #create(task: Task): Promise<StoreWrite | { readonly ok: false; readonly code: "absent" }> {
     const write = await this.#store.put(task.id, 0, task);
     if (write.ok || write.code !== "indeterminate") return write;
     const entry = await this.#store.get(task.id).catch((err: unknown) => {
       // A revoked term must still end; any other read failure leaves the create indeterminate.
       if (err instanceof StoreRevoked) this.#onError(err);
-      return null;
+      // Undefined, not null: the read failed, which is not the same as finding nothing.
+      return undefined;
     });
-    if (entry !== null && entry.reason === undefined && entry.version === 1 && entry.body.id === task.id) {
+    if (
+      entry !== null &&
+      entry !== undefined &&
+      entry.reason === undefined &&
+      entry.version === 1 &&
+      entry.body.id === task.id
+    ) {
       return { ok: true, version: 1 };
     }
-    return write;
+    return entry === null ? { ok: false, code: "absent" } : write;
   }
 
   /** Coalesces: a tick asked for while one runs runs once more after it, never alongside. */
@@ -407,7 +423,9 @@ export class Scheduler {
    * gone nothing can be despawned, so it is cancelled as it stands and marked
    * `leftRunning` — the record says plainly that a session may outlive it. A
    * task that finishes while the despawn is out (its session reported `ended`
-   * first) is answered as it finished.
+   * first) is answered as it finished. A despawn that ran and then lost the
+   * right to write `cancelled` is `unrecorded`: the session is gone, the term
+   * ends, and asking again is safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
     const task = this.task(taskId);
@@ -415,6 +433,7 @@ export class Scheduler {
     const refused = cancelRefusal(task);
     if (refused !== null) return refused;
     const { assignment } = task;
+    let despawned = false;
     const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
     if (assignment !== undefined && !leftRunning && PLACED.includes(task.state)) {
       // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
@@ -427,6 +446,7 @@ export class Scheduler {
       if (pane !== undefined) {
         const reply = await this.#fleet.despawn(assignment.deviceId, { id: pane, client: SCHEDULER_CLIENT });
         if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
+        despawned = true;
       }
     }
     let outcome: CancelResult = { ok: false, code: "conflict" };
@@ -443,6 +463,13 @@ export class Scheduler {
       // What was despawned, or found gone, must still be what is cancelled.
       if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== assignment?.deviceId) return null;
       return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+    }).catch((err: unknown) => {
+      // The session is gone but the record still says otherwise: the term must end, yet the
+      // caller must not read that as "nothing happened".
+      if (!despawned || !(err instanceof StoreRevoked)) throw err;
+      this.#onError(err);
+      outcome = { ok: false, code: "unrecorded" };
+      return null;
     });
     if (next === null) return outcome;
     this.#decisions.delete(taskId);

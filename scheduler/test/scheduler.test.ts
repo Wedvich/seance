@@ -806,6 +806,50 @@ describe("cancel", () => {
     expect(fleet.despawns).toEqual([{ deviceId: "a", id: "%1" }]);
   });
 
+  test("a write revoked after the despawn ran is unrecorded and ends the term through onError", async () => {
+    class Revocable extends MemoryQueueStore {
+      armed = false;
+      override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (this.armed) return Promise.reject(new StoreRevoked("not_leader"));
+        return super.put(id, version, body);
+      }
+    }
+    const store = new Revocable();
+    const fleet = new FakeFleet([machine("a")]);
+    const errors: unknown[] = [];
+    const scheduler = new Scheduler({
+      store,
+      fleet,
+      now: () => NOW,
+      newId: () => "t1",
+      onError: (err) => errors.push(err),
+    });
+    const task = await scheduler.submit(spec());
+    await pass(scheduler);
+    store.armed = true;
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "unrecorded" });
+    expect(fleet.despawns).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(StoreRevoked);
+  });
+
+  test("a write revoked with nothing despawned still throws: nothing happened, so the next leader may be asked", async () => {
+    class Revocable extends MemoryQueueStore {
+      armed = false;
+      override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (this.armed) return Promise.reject(new StoreRevoked("not_leader"));
+        return super.put(id, version, body);
+      }
+    }
+    const store = new Revocable();
+    const fleet = new FakeFleet([machine("a", { connected: false })]);
+    const scheduler = new Scheduler({ store, fleet, now: () => NOW, newId: () => "t1" });
+    const waiting = await scheduler.submit(spec());
+    store.armed = true;
+    await expect(scheduler.cancel(waiting.id)).rejects.toBeInstanceOf(StoreRevoked);
+    expect(fleet.despawns).toEqual([]);
+  });
+
   test("a running task with no known pane is despawned through the session carrying its id", async () => {
     const { fleet, scheduler } = setup();
     fleet.scripts.set("a", (request) => {
@@ -1220,10 +1264,13 @@ describe("submit", () => {
     expect((await store.get(task.id))?.version).toBe(2);
   });
 
-  test("a create whose reply was lost and never landed rejects", async () => {
+  test("a create whose reply was lost and never landed says it was not stored, not that it may have been", async () => {
     const { store, scheduler } = setup();
     store.failNext({ code: "indeterminate" });
-    await expect(scheduler.submit(spec())).rejects.toThrow("may have been stored");
+    const failure = await scheduler.submit(spec()).catch((err: unknown) => err);
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("was not stored");
+    expect(String(failure)).not.toContain("may have been stored");
     expect(await store.list()).toEqual([]);
   });
 
@@ -1245,7 +1292,8 @@ describe("submit", () => {
         onError: (err) => errors.push(err),
       });
       // oxlint-disable-next-line no-await-in-loop -- one store per case
-      await expect(scheduler.submit(spec())).rejects.toThrow("may have been stored");
+      const failed = await scheduler.submit(spec()).catch((err: unknown) => err);
+      expect(String(failed)).toContain("may have been stored");
       // A revoked term still reaches the host, which ends it; another failure is not a fault.
       expect(errors).toEqual(failure instanceof StoreRevoked ? [failure] : []);
     }

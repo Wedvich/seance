@@ -181,6 +181,11 @@ const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code
   finished: schedulerError("finished", "the task has already finished"),
   despawn_failed: schedulerError("despawn_failed", "its machine did not end the session; the task is unchanged"),
   conflict: schedulerError("conflict", "the task changed while the cancel ran; ask again"),
+  // A transport code, so MCP adds its "may have landed anyway": the despawn did run. Asking again is safe.
+  unrecorded: schedulerError(
+    "internal_error",
+    "its session may already have ended, but the cancel was not recorded before this daemon's term ended; check the queue, then cancel again if it still shows",
+  ),
 };
 
 /**
@@ -265,8 +270,10 @@ export interface TermRequests {
   readonly now: () => number;
   readonly tick: () => void;
   /**
-   * The term's own fault path: a `StoreRevoked` out of a request is the relay's
-   * `not_leader` on a store write, which ends the term (`leader.ts`).
+   * The term's own fault path: a `StoreRevoked` ends the term (`leader.ts`). It is the
+   * relay's `not_leader` on a store write, or a store write that could not be sent at
+   * all: no socket, a failed send, or the fenced store after the term ended
+   * (`leader-adapters.ts`).
    */
   readonly fail: (err: unknown) => void;
   /** `LeaderOpts.reply`: the answer leaves on the daemon socket, not the term's leg. */
