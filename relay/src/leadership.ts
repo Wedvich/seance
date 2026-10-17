@@ -1,10 +1,12 @@
-import { DAEMON_ROLES, type DaemonRole } from "@seance/shared";
+import { DAEMON_ROLES, type DaemonRole, type Envelope } from "@seance/shared";
 import { isDeviceId } from "./wire.ts";
 
 /**
- * Scheduler nomination, kept apart from `hub.ts` so it reproduces over plain
- * inputs with no workerd (DESIGN.md, Scheduler, "Leadership"). Nomination is the
- * only election: the relay decides, daemons never vote.
+ * Scheduler nomination and the term's record and checks, kept apart from
+ * `hub.ts` so they reproduce over plain inputs with no workerd (DESIGN.md,
+ * Scheduler, "Leadership"). Nomination is the only election: the relay decides,
+ * daemons never vote. Storage I/O stays in the hub, which owns every write and
+ * its `failed to persist` logging.
  */
 export interface Candidate {
   readonly deviceId: string;
@@ -82,4 +84,62 @@ export function nominate(
     }
   }
   return best?.deviceId ?? null;
+}
+
+/**
+ * The scheduler leader record. In storage rather than on an attachment because
+ * `term` must outlive every socket — it is monotonic for the life of the DO, so
+ * a term a demoted leader holds can never come round again.
+ */
+export const LEADER_KEY = "scheduler:term";
+
+export interface LeaderRecord {
+  readonly term: number;
+  readonly deviceId: string | null;
+  /** The leader socket's accept time: a new socket under the same id is a new term. */
+  readonly connectedAt: number | null;
+  /** The first `lead-proof` that socket sent under this term; a new term starts without one. */
+  readonly proof?: Envelope;
+}
+
+export const NO_LEADER: LeaderRecord = { term: 0, deviceId: null, connectedAt: null };
+
+/** What a term was issued to: a daemon socket's registered id and accept time. */
+export interface LeaderSocket {
+  readonly deviceId: string;
+  readonly connectedAt: number;
+}
+
+/**
+ * The daemon-leg check (`lead-proof`, store writes). The term is public — every
+ * registry push carries it — so a write is the leader's only from the socket the
+ * term was issued to: same `deviceId` and `connectedAt`.
+ */
+export function holdsTerm(record: LeaderRecord, term: number | undefined, socket: LeaderSocket | null): boolean {
+  return (
+    term !== undefined &&
+    socket !== null &&
+    record.term === term &&
+    record.deviceId === socket.deviceId &&
+    record.connectedAt === socket.connectedAt
+  );
+}
+
+/**
+ * The fence for `msg` sent `from: "scheduler"` on the leader's **app-role** leg.
+ * App sockets carry no identity, so it can check only the term. It stops a stale
+ * leader, never a stranger.
+ */
+export function isCurrentTerm(record: LeaderRecord, term: number | undefined, leaderConnected: boolean): boolean {
+  return term !== undefined && leaderConnected && record.deviceId !== null && record.term === term;
+}
+
+/** The record after a re-nomination, or null when nothing moved. A new term starts without a proof. */
+export function nextLeaderRecord(
+  record: LeaderRecord,
+  next: string | null,
+  connectedAt: number | null,
+): LeaderRecord | null {
+  if (next === record.deviceId && connectedAt === record.connectedAt) return null;
+  return { term: record.term + 1, deviceId: next, connectedAt };
 }

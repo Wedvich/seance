@@ -20,28 +20,21 @@ import {
 } from "@seance/shared";
 import { roleForPath, type Role } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { knownRoles, nominate, parseLeaders } from "./leadership.ts";
+import {
+  holdsTerm,
+  isCurrentTerm,
+  knownRoles,
+  LEADER_KEY,
+  nextLeaderRecord,
+  NO_LEADER,
+  nominate,
+  parseLeaders,
+  type LeaderRecord,
+  type LeaderSocket,
+} from "./leadership.ts";
 import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
-
-/**
- * The scheduler leader record. In storage rather than on an attachment because
- * `term` must outlive every socket — it is monotonic for the life of the DO, so
- * a term a demoted leader holds can never come round again.
- */
-const LEADER_KEY = "scheduler:term";
-
-interface LeaderRecord {
-  readonly term: number;
-  readonly deviceId: string | null;
-  /** The leader socket's accept time: a new socket under the same id is a new term. */
-  readonly connectedAt: number | null;
-  /** The first `lead-proof` that socket sent under this term; a new term starts without one. */
-  readonly proof?: Envelope;
-}
-
-const NO_LEADER: LeaderRecord = { term: 0, deviceId: null, connectedAt: null };
 
 /**
  * One shape for every routing line. `iv` is the only per-message identifier a
@@ -354,8 +347,7 @@ export class Hub implements DurableObject {
       return;
     }
     const record = await this.#leaderRecord();
-    const socketAt = (ws.deserializeAttachment() as SocketAttachment | null)?.connectedAt;
-    if (record.deviceId !== deviceId || record.connectedAt !== socketAt || record.term !== term) {
+    if (!holdsTerm(record, term, this.#leaderSocketOf(ws))) {
       wireLog("dropped", env, ` reason=lead-proof-not-leader term=${term}`);
       return;
     }
@@ -383,7 +375,7 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.env.from === SCHEDULER_ID) {
-      if (!(await this.#holdsTerm(frame.term))) {
+      if (!(await this.#isCurrentTerm(frame.term))) {
         const notice: RelayToAppFrame = { t: "undeliverable", to: frame.env.to, iv: frame.env.iv, code: "not_leader" };
         const err = trySend(ws, JSON.stringify(notice));
         wireLog(err === null ? "undeliverable" : "dropped", frame.env, ` code=not_leader term=${frame.term ?? "none"}`);
@@ -731,8 +723,8 @@ export class Hub implements DurableObject {
     }));
     const next = nominate(candidates, record.deviceId, this.#leaders);
     const connectedAt = next === null ? null : (live.get(next)?.connectedAt ?? null);
-    if (next === record.deviceId && connectedAt === record.connectedAt) return;
-    const updated: LeaderRecord = { term: record.term + 1, deviceId: next, connectedAt };
+    const updated = nextLeaderRecord(record, next, connectedAt);
+    if (updated === null) return;
     try {
       await this.#ctx.storage.put(LEADER_KEY, updated);
     } catch (err) {
@@ -763,14 +755,21 @@ export class Hub implements DurableObject {
   }
 
   /**
-   * The fence on an envelope sent as the scheduler. The term is no credential —
-   * every registry push carries it — so this stops a leader that was demoted
-   * without noticing, not a stranger; who may lead at all is nomination's
-   * allowlist, not this.
+   * The fence on an envelope sent as the scheduler on the leader's app-role leg.
+   * Term only (`isCurrentTerm`): an app socket has no identity to check.
    */
-  async #holdsTerm(term: number | undefined): Promise<boolean> {
-    if (term === undefined) return false;
-    return (await this.#schedulerView(this.#liveSockets([])))?.term === term;
+  async #isCurrentTerm(term: number | undefined): Promise<boolean> {
+    const record = await this.#leaderRecord();
+    return isCurrentTerm(record, term, record.deviceId !== null && this.#liveSockets([]).has(record.deviceId));
+  }
+
+  /** Null for anything that cannot hold a term: an app socket, a superseded or unregistered daemon. */
+  #leaderSocketOf(ws: WebSocket): LeaderSocket | null {
+    if (this.#roleOf(ws) !== "daemon") return null;
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (attachment === null || attachment.superseded === true) return null;
+    const deviceId = attachment.identity?.deviceId;
+    return deviceId === undefined ? null : { deviceId, connectedAt: attachment.connectedAt };
   }
 
   /**
