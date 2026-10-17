@@ -533,10 +533,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     detection — `branch-state` live (`Scheduler.onBranchState`), `progress` on takeover, the
     sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
     `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
-    into the library (`keepFinished`, Settled defaults 13): once the store holds `pruneAt` records, after takeover and at the end of a
-    pass (narrowing, not closing, the race with a create naming a finished task; deviates from
-    "after takeover" unconditionally, since leader changes are routine), since
-    an app's `store_full` never reaches the leader, and on `submit`'s own. Left open: no
+    into the library (`keepFinished`, Settled defaults 13). It runs after takeover and at the end
+    of a pass, but only once the store holds `pruneAt` records, and unconditionally on `submit`'s
+    own `store_full`. Per pass, because an app's `store_full` never reaches the leader; gated,
+    because a prune can race a create naming the finished task it deletes, and leader changes
+    are routine (a deviation from "after takeover"; the gate narrows that race, it does not close
+    it). Left open: no
     `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
     never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
     for it is a schema PR of its own. And M2's `submit` still creates `ready`, which
