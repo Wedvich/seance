@@ -177,7 +177,8 @@ task's PR URL, branch, `pushed` and `merged` in `progress` (`TaskProgress`, M3; 
 and no standing traffic). A new leader reads it on takeover, and again when a machine holding
 a task it waits on comes back, so a gap can neither settle a task that ended with an open PR
 as `done` nor hold an `after: merged` dependent past a merge. In a reply the daemon trimmed to
-fit (`progressTrimmed`) a task with no entry is unknown and waits for a later read. The
+fit (`progressTrimmed`) a task with no entry settles by the PR its record already holds, and
+with none is unknown and waits for a later read (DESIGN.md, "Done detection"). The
 session and task ids in a `session-event` are the daemon's own, from its pane map, never copied
 from what the mod sent (DESIGN.md, Local op socket, "Session events"). The plan's `skill` field
 was left out: nothing reads it before M4's skill filter.

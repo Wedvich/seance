@@ -131,6 +131,23 @@ describe("progress, read back", () => {
     expect(scheduler.task("t")?.state).toBe("running");
   });
 
+  test("in a trimmed reply a session-less task whose record holds a PR settles by it, freeing its slot", async () => {
+    const { fleet, scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], progress: [], progressTrimmed: 3 });
+    await scheduler.takeover();
+    expect(scheduler.task("t")).toMatchObject({ state: "awaiting-merge", prUrl: PR });
+
+    // A later untrimmed read still settles the merge the trimmed one could not show.
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      progress: [progress("t", { prUrl: PR, branch: "t", pushed: true, merged: true })],
+    });
+    await scheduler.takeover();
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
   test("a daemon that sends no progress settles a session-less task by the PR its record holds", async () => {
     const { fleet, scheduler, put } = setup();
     await put("withPr", { assignment: ON_A, prUrl: PR });

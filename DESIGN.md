@@ -1712,9 +1712,15 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
   task is connected again after a pass saw it away. In a reply the daemon trimmed
-  (`progressTrimmed`) a session-less task with no entry is unknown and waits for a later
-  read, never settled as PR-less; a daemon that sends no `progress` settles by the PR the
-  record holds. The leader does not yet pass `prUrl`, `progress` or `branch-state` on
+  (`progressTrimmed`) a session-less task with no entry settles by the PR its record
+  already holds (`awaiting-merge`, slot freed — a later read still settles a merge the
+  trimmed one hid); with none on the record it is unknown and waits for a later read,
+  never settled as PR-less. That residual can keep a slot while every read trims the
+  task's entry; accepted (decided 2026-10-17, over accepting the whole leak): the daemon
+  trims only to fit one envelope, oldest first, from at most `SESSIONS_MAX_PROGRESS`
+  entries, so it takes an old, PR-less task on a machine with a long history, and a held
+  slot is no twin risk — the task is never re-dispatched, only late to free its place. A daemon that sends no `progress` settles by
+  the PR the record holds. The leader does not yet pass `prUrl`, `progress` or `branch-state` on
   (M3 item 3), so until then a session that ends is `done`.
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
