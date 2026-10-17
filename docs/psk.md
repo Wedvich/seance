@@ -151,9 +151,10 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is
 delivered and (on systemd ≥ 256) direct unseal is refused — so it cannot hold the key.
-It does not need to. Every tool works, for every machine, except the scheduler's —
-`spawn_session` on `machine: "auto"` and `get_queue` need the key in this process,
-since the broker carries no scheduler request (DESIGN.md "MCP server"):
+It does not need to. Every tool works, for every machine — except `auto`: `spawn_session`
+with `machine: "auto"` and `get_queue` talk to the scheduler, not to one machine, and the
+broker only carries requests to one machine. On this kind of box they answer "needs this
+machine's own key". The rest work like this:
 
 - **This machine**: ops aimed at the box the server runs on take the daemon's local op
   socket, which needs no key — relay up or down.
