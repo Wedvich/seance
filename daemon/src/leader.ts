@@ -296,6 +296,13 @@ async function answer(
       tick();
       return reply;
     }
+    // M3's ops, in the schema ahead of their handlers (M3 items 5 and 6): a
+    // refusal rather than silence, which an app would read as a dead leader.
+    case "cancel":
+    case "mark-done":
+    case "pause":
+    case "resume":
+      return schedulerError("invalid_request", `this leader does not handle ${op} yet`);
   }
 }
 

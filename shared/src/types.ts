@@ -102,7 +102,9 @@ export type DaemonFrame =
    * in the registry entry until the next register — quota for the machine's
    * accounts, never its pressure. DESIGN.md, Presence & identity.
    */
-  | { readonly t: "status"; readonly env: Envelope };
+  | { readonly t: "status"; readonly env: Envelope }
+  /** The leader's store client (M3); writes to a term-fenced prefix carry its term. */
+  | StoreRequestFrame;
 
 /**
  * Layer 1: relay→daemon frames. `lead` tells a daemon the relay nominated it
@@ -114,7 +116,9 @@ export type DaemonFrame =
 export type RelayToDaemonFrame =
   | { readonly t: "msg"; readonly env: Envelope }
   | { readonly t: "lead"; readonly term: number }
-  | { readonly t: "follow" };
+  | { readonly t: "follow" }
+  | StoreReplyFrame
+  | StoreChangedFrame;
 
 /**
  * Layer 1: app→relay frames. `forget` deletes one registry entry — the only
@@ -133,7 +137,9 @@ export type AppFrame =
        */
       readonly term?: number;
     }
-  | { readonly t: "forget"; readonly deviceId: string };
+  | { readonly t: "forget"; readonly deviceId: string }
+  /** Store ops (M3). Never a `term`: on this leg it would authorize nothing (`StorePutFrame.term`). */
+  | AppStoreRequestFrame;
 
 /**
  * Why the relay did not hand an envelope on. `offline`/`unknown`: the target
@@ -191,7 +197,8 @@ export type RelayToAppFrame =
       readonly t: "forget-refused";
       readonly deviceId: string;
       readonly code: ForgetRefusalCode;
-    };
+    }
+  | StoreReplyFrame;
 
 /**
  * Machine registry as persisted by the Durable Object. An entry is overwritten
@@ -227,32 +234,251 @@ export type RegistryView = RegistryEntry & {
   readonly status?: Envelope;
 };
 
-export type OpName =
-  | "sessions"
-  | "spawn"
-  | "despawn"
-  | "rescan"
-  | "machine-info"
-  | "update-available"
-  | "status"
-  | "metrics"
-  | "session-event"
-  | SchedulerOp;
+/**
+ * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
+ * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
+ * put. Plaintext Layer 1 frames, not ops — the relay itself answers them — so
+ * a request carries its own `id` (the client's, as for a routing id: ≤64 of
+ * the deviceId charset, a UUID) and the reply echoes it as `re`. Who may write
+ * is a rule per key prefix (`STORE_PREFIXES`); reads are anyone's, since the
+ * bearer token already lists ciphertext. Records live in DO storage under a
+ * namespace of their own, so no key can alias `device:<id>` or `scheduler:term`.
+ *
+ * A delete under a prefix apps may create into leaves a tombstone: the key and
+ * its last version, no `env`, kept `STORE_TOMBSTONE_MS`. While it stands, a put
+ * there is `version_conflict`, a get reads `null` and a list leaves it out; it
+ * counts toward neither `MAX_TASKS` nor `MAX_RECORDS`. Without it, a token
+ * holder could re-create a deleted task from its own authentic version-1 blob
+ * and run it again, which version binding cannot see. Past its expiry the
+ * reader's age rule (`TaskRecord`) takes over.
+ *
+ * Reserved, not accepted yet: `account:<hmac>` (M4's account records, app-
+ * writable by `expect`), which adds a prefix here when it lands.
+ */
+export const STORE_PREFIXES = {
+  /**
+   * `task:<id>` → a sealed `TaskRecord`. Any app (or the leader) creates at
+   * `expect: 0`, so enqueue needs no leader; every overwrite and delete is the
+   * leader's.
+   */
+  task: { prefix: "task:", appCreate: true, appWrite: false, termFenced: true },
+  /**
+   * `queue:pause` → the sealed `PauseRecord`: what the queue holds, kept here
+   * so a pause outlives the leader that took it (leader changes are routine).
+   * The leader's alone, created included.
+   */
+  queue: { prefix: "queue:", appCreate: false, appWrite: false, termFenced: true },
+} as const;
+
+export type StorePrefix = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES]["prefix"];
+
+/** A key's part after its prefix: a routing id's bounds, so a key stays a short, boring storage key. */
+export const STORE_KEY_ID_MAX_LENGTH = 64;
+
+export const STORE_KEY_PATTERN = new RegExp(
+  `^(?:${Object.values(STORE_PREFIXES)
+    .map((rule) => rule.prefix)
+    .join("|")})[A-Za-z0-9._-]{1,${STORE_KEY_ID_MAX_LENGTH}}$`,
+  "u",
+);
+
+/** The one key under `queue:`. */
+export const PAUSE_KEY = "queue:pause";
 
 /**
- * Ops that expect a response; `machine-info` and `status` are stored blobs,
- * `update-available` a fire-and-forget broadcast and `session-event` a
- * fire-and-forget report to the scheduler — none correlates a reply.
+ * Ciphertext (base64 chars) one record may hold, under the 64 KiB of
+ * `ENVELOPE_MAX_CT_LENGTH`: small enough that a whole prefix is one
+ * `store-listed` frame. 32 KiB seals ~24 KB of JSON — a prompt at
+ * `TASK_REQUEST_LIMITS.prompt` even where every character costs two bytes, plus
+ * a decision record of 15 candidates (~400 B each, measured in parse.test.ts);
+ * an ASCII prompt leaves room for ~45. A fleet that outgrows that has the
+ * leader trim the decision it stores, never the task. A put past it is
+ * `too_large`, so a sealer checks the sealed length first, as the daemon's
+ * transport does a reply.
  */
-export type RequestOp = Exclude<OpName, "machine-info" | "update-available" | "status" | "session-event">;
+export const STORE_MAX_CT_LENGTH = 32 * 1024;
+
+/**
+ * Task records at most, in `task:`. M2 held ≤64 unfinished tasks plus the newest
+ * 50 finished, which fits. Like `MAX_DEVICES` it bounds a bearer-token holder's
+ * junk (the leader skips what does not open), and full means `store_full` on
+ * create — recoverable: the leader can delete what it skips and what has finished.
+ * With `STORE_MAX_CT_LENGTH`, a full prefix lists in 4 MiB, one frame well under
+ * the Workers WebSocket limit (32 MiB).
+ */
+export const MAX_TASKS = 128;
+
+/** Records across every prefix: `MAX_TASKS` plus room for the singletons and M4's account records. 8 MiB at most. */
+export const MAX_RECORDS = 256;
+
+/**
+ * How long a tombstone stands, and the oldest `createdAt` a leader admits from
+ * `queued`: one value, so a record can never outlive its key's tombstone and
+ * still be taken. Thirty days is far past any queue left waiting for a leader.
+ */
+export const STORE_TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Creates per socket per window — the create rate floor, the register limit's
+ * counterpart. Sixty a minute lets one client queue a block of work at once and
+ * keeps a token holder's junk to a trickle the leader can skip. Per socket, so
+ * it bounds one connection's spend, not an attacker's total (`MAX_TASKS` does).
+ */
+export const STORE_CREATE_WINDOW_MS = 60_000;
+export const MAX_STORE_CREATES_PER_WINDOW = 60;
+
+/** Client-side deadline for a store reply — a backstop, as `OP_TIMEOUT_MS` is: the relay answers every store frame it can parse. */
+export const STORE_TIMEOUT_MS = 10_000;
+
+export interface StoreListFrame {
+  readonly t: "store-list";
+  readonly id: string;
+  readonly prefix: StorePrefix;
+}
+
+/** One record: what a `version_conflict` refreshes from, so a lost race costs one read, not the queue unsealed. */
+export interface StoreGetFrame {
+  readonly t: "store-get";
+  readonly id: string;
+  readonly key: string;
+}
+
+export interface StorePutFrame {
+  readonly t: "store-put";
+  readonly id: string;
+  readonly key: string;
+  /** The version the caller last read; 0 creates. Anything else is `version_conflict`. */
+  readonly expect: number;
+  /** The sealed record, `ct` under `STORE_MAX_CT_LENGTH`; its sealed body names the version this put produces. */
+  readonly env: Envelope;
+  /**
+   * Daemon leg only: the leader's term, required on a `termFenced` prefix and
+   * checked as `msg`'s is — and only from the socket the term was issued to.
+   * The app leg has no such field: every registry push carries the term, so
+   * there it is public, and an app frame with one would authorize nothing.
+   */
+  readonly term?: number;
+}
+
+export interface StoreDeleteFrame {
+  readonly t: "store-delete";
+  readonly id: string;
+  readonly key: string;
+  readonly expect: number;
+  /** As on `StorePutFrame`. */
+  readonly term?: number;
+}
+
+export type StoreRequestFrame = StoreListFrame | StoreGetFrame | StorePutFrame | StoreDeleteFrame;
+
+export type AppStoreRequestFrame =
+  | StoreListFrame
+  | StoreGetFrame
+  | Omit<StorePutFrame, "term">
+  | Omit<StoreDeleteFrame, "term">;
+
+export interface StoreRecord {
+  readonly key: string;
+  readonly version: number;
+  readonly env: Envelope;
+}
+
+/**
+ * `version_conflict`: `expect` is not the stored version (0 for none) — the
+ * expected answer to a lost race, and to an enqueue retried after its put landed.
+ * `not_leader`: a write to a term-fenced prefix without the current term, or
+ * not from the leader's socket. `forbidden`: the prefix's rule refuses this leg
+ * the act (an app overwriting a task). `invalid_request`: a key outside
+ * `STORE_KEY_PATTERN`, an unknown prefix, a malformed field. `too_large`: `ct`
+ * past `STORE_MAX_CT_LENGTH`. `rate_limited`: past the create floor.
+ * `store_full`: a create past `MAX_TASKS` or `MAX_RECORDS`.
+ */
+export const STORE_ERROR_CODES = [
+  "version_conflict",
+  "not_leader",
+  "forbidden",
+  "invalid_request",
+  "too_large",
+  "rate_limited",
+  "store_full",
+] as const;
+
+export type StoreErrorCode = (typeof STORE_ERROR_CODES)[number];
+
+/** Relay → app or daemon, correlated on `re`, the request's `id`. */
+export type StoreReplyFrame =
+  | {
+      readonly t: "store-listed";
+      readonly re: string;
+      /**
+       * Every record under the prefix, ascending by key — one frame, unpaged
+       * (`MAX_TASKS`). Paging stays open: it would be `after` on the request,
+       * which a relay without it ignores and answers whole, and `next` on the
+       * reply, which `parseStoreReply` refuses — so a client that predates
+       * paging fails loudly on a page rather than reading it as the whole queue.
+       */
+      readonly records: readonly StoreRecord[];
+    }
+  | { readonly t: "store-record"; readonly re: string; readonly record: StoreRecord | null }
+  /** A put's new version, or the version a delete removed. */
+  | { readonly t: "store-written"; readonly re: string; readonly version: number }
+  /**
+   * A `StoreErrorCode` from this relay. Raw on the wire, as `undeliverable`'s
+   * code is read: a code minted after a client was built must still settle its
+   * request rather than ride the timeout.
+   */
+  | { readonly t: "store-refused"; readonly re: string; readonly code: string };
+
+/**
+ * Relay → the leader's daemon socket, after a write the leader did not make
+ * itself (an app's enqueue): the nudge that makes the loop read the key, so the
+ * leader never polls the store. `version` 0: the key was deleted. The relay
+ * already knows every write it makes, so this tells the leader nothing new
+ * about the relay — and nothing about the record.
+ */
+export interface StoreChangedFrame {
+  readonly t: "store-changed";
+  readonly key: string;
+  readonly version: number;
+}
+
+/**
+ * Ops sealed as data at rest rather than sent: the register blob, the `status`
+ * beat and the store's records. Opened through `openAtRest`, never the replay
+ * guard, and never accepted on a live routing path — one op per kind, so a
+ * stored record can stand in neither for a request nor for another kind of
+ * record. `task` and `pause-state` are sealed to SCHEDULER_ID.
+ */
+export const AT_REST_OPS = {
+  machineInfo: "machine-info",
+  status: "status",
+  task: "task",
+  pauseState: "pause-state",
+} as const;
+
+export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
+
+/**
+ * Fire-and-forget ops — nothing correlates a reply: `update-available` a
+ * broadcast, `session-event` and `branch-state` reports to the scheduler, and
+ * `queue-changed` the scheduler's nudge to every app.
+ */
+export type EventOp = "update-available" | "session-event" | "branch-state" | "queue-changed";
+
+export type OpName = "sessions" | "spawn" | "despawn" | "rescan" | "metrics" | AtRestOp | EventOp | SchedulerOp;
+
+/** Ops that expect a response. */
+export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
 
 /**
  * Request ops an app sends `to: SCHEDULER_ID`, answered by the leader rather
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
- * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it.
+ * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it, and M3
+ * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's;
+ * enqueue is not among them — an app `store-put`s the task itself.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview", "submit"] as const;
+export const SCHEDULER_OPS = ["queue", "route-preview", "submit", "cancel", "mark-done", "pause", "resume"] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -261,6 +487,7 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
  * the daemon returns a structured error on its own — so spawn's ceiling clears
  * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check, and
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
+ * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
@@ -271,6 +498,10 @@ export const OP_TIMEOUT_MS = {
   queue: 10_000,
   "route-preview": 10_000,
   submit: 15_000,
+  cancel: 25_000,
+  "mark-done": 10_000,
+  pause: 10_000,
+  resume: 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -819,6 +1050,29 @@ export interface SessionEvent {
   readonly at: number;
 }
 
+/** A git ref name's length at most, as `branch-state` and a task record carry one. */
+export const BRANCH_MAX_LENGTH = 255;
+
+/**
+ * `op: "branch-state"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
+ * fire-and-forget, on change, for task branches only (M3; docs/scheduler.md,
+ * "Done detection"). Like `SessionEvent`, every field is the daemon's own: the
+ * task id from its pane map or launch ledger, never from a session. `merged` is
+ * reap's verdict (`Merged` in `daemon/src/reap-git.ts`: ancestor, squash or
+ * gone) against the default branch; `pushed`, that the branch's upstream holds
+ * its tip.
+ */
+export interface BranchState {
+  readonly taskId: string;
+  /** The repo key, `RepoEntry.origin`. */
+  readonly repo: string;
+  readonly branch: string;
+  readonly pushed: boolean;
+  readonly merged: boolean;
+  /** Observed at by the daemon, ms. */
+  readonly at: number;
+}
+
 export interface RescanResponse {
   readonly repos: readonly RepoEntry[];
   readonly scannedAt: number;
@@ -838,18 +1092,26 @@ export interface ErrorResponse {
 }
 
 /**
- * The scheduler's task states (docs/scheduler.md, "Task states"): M2's slice.
+ * The scheduler's task states (docs/scheduler.md, "Task states").
  * `scheduler/src/task.ts` holds the one transition table over them. `lost` is
  * a task whose machine stopped answering for it — a running one absent past
  * `lostAfterMs`, or a reservation whose spawn was never confirmed and whose
  * machine was gone at its TTL: held, never dispatched again without proof,
  * until that machine's own `sessions` says what became of it.
+ *
+ * M3 adds three. `queued`: stored, not yet admitted by a leader — the only
+ * state an app creates a task in. `blocked`: admitted, waiting on its `deps`.
+ * `awaiting-merge`: its session ended with a PR open; it frees its slot but
+ * keeps `after: "merged"` dependents blocked.
  */
 export const TASK_STATES = [
+  "queued",
+  "blocked",
   "ready",
   "reserved",
   "running",
   "needs-input",
+  "awaiting-merge",
   "lost",
   "done",
   "failed",
@@ -870,15 +1132,65 @@ export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "tit
 /**
  * Lengths a `TaskRequest` field may reach, in UTF-16 units. A task is held on
  * the leader and echoed in `queue` replies, so its fields are bounded here,
- * not by the envelope alone as a direct spawn's are.
+ * not by the envelope alone as a direct spawn's are. `prompt` is sized so a task
+ * fits one `STORE_MAX_CT_LENGTH` record (M3): a task names its work and the
+ * session gathers the rest with tools (the owner, 2026-10-17). A direct spawn
+ * is not bound by it.
  */
-export const TASK_REQUEST_LIMITS = { repo: 512, prompt: 32_768, title: 200, model: 64, effort: 64 } as const;
+export const TASK_REQUEST_LIMITS = { repo: 512, prompt: 8_192, title: 200, model: 64, effort: 64 } as const;
 
 /** Where a session runs or ran: what pins, lineage and dependency distance are measured against. */
 export interface Placement {
   readonly deviceId: string;
   readonly exclave: string;
 }
+
+/**
+ * How a batch's members share the fleet. `sequential`: one at a time, in
+ * `index` order. `parallel`: at most `max` at once. `auto`: no batch-level
+ * bound — deps and the global and per-account caps decide.
+ */
+export type BatchStrategy =
+  | { readonly mode: "sequential" }
+  | { readonly mode: "parallel"; readonly max: number }
+  | { readonly mode: "auto" };
+
+/**
+ * A task's place in a batch. Every member carries the strategy, since there is
+ * no batch record — one client creates a batch's members together, so they
+ * agree; where they do not, the earliest-created member's wins.
+ */
+export interface BatchMembership {
+  /** `TASK_ID_PATTERN`, minted by the client like a task id. */
+  readonly id: string;
+  readonly index: number;
+  readonly strategy: BatchStrategy;
+}
+
+/**
+ * When a dependency edge releases. `opened`: the predecessor's branch is pushed
+ * with a PR (stacked work, the default a client offers). `merged`: its PR merged.
+ */
+export const DEP_AFTER = ["opened", "merged"] as const;
+
+export type DepAfter = (typeof DEP_AFTER)[number];
+
+/** One hand-declared edge: this task waits for `task` (another task's id). Linear-derived edges are M4's. */
+export interface TaskDep {
+  readonly task: string;
+  readonly after: DepAfter;
+}
+
+/** An optional Linear issue the task is for. Informational in M3; M4 reads relations and Done from it. */
+export interface LinearLink {
+  /** The issue identifier, `ENG-123`. */
+  readonly issue: string;
+  /** `https:` only, as a PR URL. */
+  readonly url?: string;
+}
+
+/** Bounds on `TaskSpec`'s M3 fields, beside `TASK_REQUEST_LIMITS`. */
+export const TASK_SPEC_LIMITS = { deps: 16, parallel: 16, linearIssue: 64, placement: 64 } as const;
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
@@ -888,6 +1200,10 @@ export interface TaskSpec extends TaskRequest {
   readonly lineage?: Placement;
   /** Where the work this task builds on lives (M3 fills it from deps); drives `dependency_distance`. */
   readonly base?: Placement;
+  readonly batch?: BatchMembership;
+  /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */
+  readonly deps?: readonly TaskDep[];
+  readonly linear?: LinearLink;
 }
 
 /** A placement plus the machine-local clone name `spawn` takes. */
@@ -924,7 +1240,13 @@ export type Reason =
   | { readonly code: "auth_missing" }
   | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
   | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
-  | { readonly code: "cap_reached"; readonly inFlight: number; readonly max: number };
+  /** `scope` absent is `global`, as M2's leaders sent it; `account` is M3's per-account cap. */
+  | {
+      readonly code: "cap_reached";
+      readonly inFlight: number;
+      readonly max: number;
+      readonly scope?: "global" | "account";
+    };
 
 export type ReasonCode = Reason["code"];
 
@@ -997,6 +1319,74 @@ export interface Task {
    * despawned there — whatever session it had may still be running.
    */
   readonly leftRunning?: true;
+  /** The newest `https:` PR URL its session reported — what `after: "opened"` and `awaiting-merge` read. */
+  readonly prUrl?: string;
+  /** Its branch, from its machine's `branch-state`. */
+  readonly branch?: string;
+  /** Its branch's upstream held its tip at the last `branch-state`. */
+  readonly pushed?: true;
+  /** With `done`: which signal settled it (docs/scheduler.md, "Done detection"). */
+  readonly doneBy?: DoneSignal;
+  /** When it last entered `needs-input`, ms: the escalation clock, here so a new leader does not restart it. */
+  readonly needsInputSince?: number;
+  /** The needs-input escalation fired for this stay — once, never a kill. */
+  readonly escalated?: true;
+}
+
+/**
+ * `merged`: its branch merged (`branch-state`). `session`: its session ended
+ * with no PR to wait on. `manual`: `mark-done`, which always wins. Linear's
+ * Done joins in M4.
+ */
+export const DONE_SIGNALS = ["merged", "session", "manual"] as const;
+
+export type DoneSignal = (typeof DONE_SIGNALS)[number];
+
+/**
+ * A sealed body that names the version its own put produces (docs/scheduler.md,
+ * "Version binding"): a reader rejects a record whose `version` is not the
+ * relay's, so an authentic old blob put back by a token holder fails like a
+ * forged one.
+ */
+export interface VersionBound {
+  readonly version: number;
+}
+
+/**
+ * Payload of a `task:<id>` record (`op: "task"`, sealed to SCHEDULER_ID, from
+ * its sealer). A reader opens it with `openAtRest` and keeps it only when the
+ * version matches the relay's and `task.id` is the key's own id — without the
+ * second, a token holder could create a fresh key holding another task's
+ * version-1 blob and have it run twice. A leader also admits no `queued` task
+ * whose `createdAt` is more than `STORE_TOMBSTONE_MS` old: past that its key's
+ * tombstone may be gone, and only the age still refuses the blob put back.
+ */
+export interface TaskRecord extends VersionBound {
+  readonly task: Task;
+}
+
+/** `PauseRequest.until`: until a `resume`, or until the account's quota next resets. */
+export const PAUSE_UNTIL = ["resume", "reset"] as const;
+
+export type PauseUntil = (typeof PAUSE_UNTIL)[number];
+
+/** One hold on dispatch. Running sessions are never touched; only new dispatch waits. */
+export interface PauseHold {
+  /** `ExclaveInfo.accountId`; absent holds the whole queue. */
+  readonly account?: string;
+  readonly until: PauseUntil;
+  /** Paused at, ms. */
+  readonly at: number;
+  /** With `until: "reset"`: when the hold lifts, ms — the account's next reset, resolved by the leader when it paused. */
+  readonly resumeAt?: number;
+}
+
+/** Holds at most: one for the queue plus one per account. */
+export const MAX_PAUSE_HOLDS = 32;
+
+/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader). */
+export interface PauseRecord extends VersionBound {
+  readonly holds: readonly PauseHold[];
 }
 
 /**
@@ -1021,6 +1411,18 @@ export const SCHEDULER_ERROR_CODES = [
   "invalid_request",
   /** `submit` only: the leader already holds `MAX_ACTIVE_TASKS` unfinished tasks. */
   "queue_full",
+  /** `cancel`, `mark-done`: the leader holds no task by that id. */
+  "task_not_found",
+  /** `cancel`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
+  "dispatching",
+  /** `cancel`, `mark-done`: the task is already `done`, `failed` or `cancelled`. */
+  "finished",
+  /** `cancel`: its machine answered the despawn with a refusal; the task is unchanged. */
+  "despawn_failed",
+  /** `cancel`, `mark-done`, `pause`, `resume`: the record changed under the request (a lost store race); ask again. */
+  "conflict",
+  /** `pause` with `until: "reset"`: no quota reading says when that account resets. */
+  "reset_unknown",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -1042,6 +1444,46 @@ export const QUEUE_PROMPT_PREVIEW = 120;
 export interface QueueResponse {
   /** `spec.prompt` is cut to `QUEUE_PROMPT_PREVIEW`; a ready task's `decision` is its latest, placed or not. */
   readonly tasks: readonly Task[];
+  readonly at: number;
+  /** What holds dispatch now (M3). Absent from M2's leaders, which have no pause. */
+  readonly holds?: readonly PauseHold[];
+}
+
+/** `op: "cancel"` and `op: "mark-done"`: the task, by id. */
+export interface TaskRef {
+  readonly taskId: string;
+}
+
+/** `cancel` and `mark-done` → the task as it now stands. */
+export interface TaskResponse {
+  readonly task: Task;
+}
+
+/**
+ * `op: "pause"`. `reset` needs an `account` — it is that account's reset; with
+ * no `account` the hold is on the whole queue, and lasts until `resume`.
+ */
+export interface PauseRequest {
+  readonly until: PauseUntil;
+  readonly account?: string;
+}
+
+/** `op: "resume"`: lifts the hold on `account`, or the whole-queue hold when absent. */
+export interface ResumeRequest {
+  readonly account?: string;
+}
+
+/** `pause` and `resume` → every hold after the change. */
+export interface PauseResponse {
+  readonly holds: readonly PauseHold[];
+}
+
+/**
+ * `op: "queue-changed"`, the scheduler → `APP_ID`, fire-and-forget, on every
+ * change an app would show: apps re-fetch `queue` instead of polling. Sent on
+ * the term's leg as `from: SCHEDULER_ID`, so a demoted leader's is fenced.
+ */
+export interface QueueChanged {
   readonly at: number;
 }
 
@@ -1070,3 +1512,5 @@ export const MAX_ACTIVE_TASKS = 64;
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
 export type SubmitReply = SubmitResponse | SchedulerError;
+export type TaskReply = TaskResponse | SchedulerError;
+export type PauseReply = PauseResponse | SchedulerError;

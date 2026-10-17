@@ -197,6 +197,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     at === undefined ? undefined : (machines.find((m) => m.deviceId === at.deviceId)?.name ?? at.deviceId);
   const place = at === undefined ? "" : ` on ${machine ?? ""} · ${at.exclave}`;
   switch (task.state) {
+    case "queued":
+      return "Queued — waiting for the scheduler.";
+    case "blocked":
+      return "Queued — waiting on the tasks it depends on.";
     case "ready":
       return "Queued — waiting for a machine.";
     case "reserved":
@@ -209,6 +213,8 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       return task.absentSince === undefined
         ? `Lost${place} — its machine stopped answering.`
         : `Lost${place} — its machine went away ${formatSeen(task.absentSince, now)}.`;
+    case "awaiting-merge":
+      return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
       return `It finished${place}.`;
     case "failed":

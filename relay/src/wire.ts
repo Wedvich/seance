@@ -11,8 +11,10 @@ import {
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   type AppFrame,
+  type AppStoreRequestFrame,
   type DaemonFrame,
   type Envelope,
+  type StoreRequestFrame,
 } from "@seance/shared";
 
 /**
@@ -96,7 +98,8 @@ export function parseEnvelope(value: unknown, maxCtLength = ENVELOPE_MAX_CT_LENG
   return env;
 }
 
-export function parseDaemonFrame(text: string): DaemonFrame | null {
+/** Store frames are not parsed yet (scheduler M3 item 1), so neither parser returns one. */
+export function parseDaemonFrame(text: string): Exclude<DaemonFrame, StoreRequestFrame> | null {
   const value = parseJson(text);
   if (!isRecord(value)) return null;
   if (value["t"] === "register") {
@@ -130,7 +133,7 @@ export function parseDaemonFrame(text: string): DaemonFrame | null {
   return null;
 }
 
-export function parseAppFrame(text: string): AppFrame | null {
+export function parseAppFrame(text: string): Exclude<AppFrame, AppStoreRequestFrame> | null {
   const value = parseJson(text);
   if (!isRecord(value)) return null;
   if (value["t"] === "forget") {
