@@ -482,7 +482,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
   - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
-    `sequential` is 1 and also holds a member until every lower `index` is over).
+    `sequential` is 1 and also holds a member until every held lower `index` is over).
   - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
     `QueueChanged.tasks`.
 - **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
@@ -533,7 +533,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     detection — `branch-state` live (`Scheduler.onBranchState`), `progress` on takeover, the
     sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
     `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
-    into the library (`keepFinished`, Settled defaults 13): after takeover and, once the store holds `pruneAt` records, a pass, since
+    into the library (`keepFinished`, Settled defaults 13): once the store holds `pruneAt` records, after takeover and at the end of a
+    pass (narrowing, not closing, the race with a create naming a finished task; deviates from
+    "after takeover" unconditionally, since leader changes are routine), since
     an app's `store_full` never reaches the leader, and on `submit`'s own. Left open: no
     `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
     never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
@@ -785,9 +787,9 @@ same PR, with the reason.
 13. **Fifty finished tasks are kept** (`keepFinished`, set with M3 item 4a, 2026-10-17; M2's
     leader kept the same number as `KEEP_FINISHED`): enough for `queue` to show recent
     history, and with M2's 64 unfinished at most still under `MAX_TASKS` (128). Pruned oldest
-    first (ties by id), never one an unfinished task names. A pass prunes only at `pruneAt`
-    (96) records, so a finished task an app is about to name in `deps` outlives the refresh
-    that tells the leader of the create.
+    first (ties by id), never one an unfinished task names. A pass or takeover prunes only at
+    `pruneAt` (96) records, which narrows the window in which a finished task an app is about to
+    name in `deps` is gone before the leader hears of the create; it does not close it.
 
 ## Risks / unknowns
 

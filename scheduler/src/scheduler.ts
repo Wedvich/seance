@@ -148,7 +148,8 @@ export class Scheduler {
    * machine's `progress` (or its record) shows a PR, `done` if the branch merged
    * meanwhile or there was none. An `awaiting-merge` task is read back the same
    * way, for a merge the gap hid. An unanswered machine leaves everything else
-   * as it was. Then finished tasks past the keep are pruned.
+   * as it was. Then finished tasks past the keep are pruned, if the store holds
+   * `pruneAt` records.
    */
   async takeover(): Promise<void> {
     await this.load();
@@ -156,15 +157,15 @@ export class Scheduler {
     await this.#check(
       this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
     );
-    await this.prune();
+    await this.#pruneDue();
   }
 
   /**
    * The store caps `task:` (`MAX_TASKS`), so past `keep` the oldest finished
    * tasks are deleted (`prunable`) — never one with anything left to happen,
-   * nor one an unfinished task names. Runs after takeover, on `submit`'s own
-   * `store_full`, and at the end of a pass once the store holds `pruneAt` records
-   * — an app's create meeting `store_full` is never seen here.
+   * nor one an unfinished task names. Runs on `submit`'s own `store_full`, and
+   * after takeover and at the end of a pass once the store holds `pruneAt`
+   * records — an app's create meeting `store_full` is never seen here.
    */
   async prune(keep = this.#config.keepFinished): Promise<void> {
     for (const task of prunable(this.tasks(), keep)) {
@@ -375,6 +376,15 @@ export class Scheduler {
       this.#launch(reserved, reservation);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
+    await this.#pruneDue();
+  }
+
+  /**
+   * Gated, not unconditional: a create naming a finished task may be in flight
+   * at any pass or takeover, and pruning only past `pruneAt` narrows that race
+   * (it does not close it).
+   */
+  async #pruneDue(): Promise<void> {
     if (this.#held.size + this.#unreadable.size >= this.#config.pruneAt) await this.prune();
   }
 
@@ -478,7 +488,8 @@ export class Scheduler {
       }
       const deviceId = t.assignment?.deviceId;
       if (deviceId === undefined || !connected.has(deviceId)) return false;
-      if (t.state === "awaiting-merge") return sweep || returned.has(deviceId);
+      // A `here` task's merge is never read from a machine (`trusted`): no reply can change it.
+      if (t.state === "awaiting-merge") return t.spec.mode !== "here" && (sweep || returned.has(deviceId));
       if (!PLACED.includes(t.state)) return false;
       return t.state === "lost" || sweep || returned.has(deviceId);
     });

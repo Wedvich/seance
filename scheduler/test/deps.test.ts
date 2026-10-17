@@ -181,14 +181,14 @@ describe("edges that never release", () => {
     expect(states(scheduler, "child", "grandchild")).toEqual({ child: "failed", grandchild: "failed" });
   });
 
-  test("an edge that released stays released when its predecessor is cancelled later; one that never did fails", async () => {
+  test("a cancelled predecessor fails its dependents, whatever its PR: only one already released stays so", async () => {
     const { scheduler, put } = setup(new FakeFleet([]));
     await put("pred", { state: "cancelled", prUrl: PR, pushed: true });
     await put("stacked", after("pred", "opened"));
     await put("landing", after("pred", "merged"));
     await scheduler.load();
     await pass(scheduler);
-    expect(scheduler.task("stacked")?.state).toBe("ready");
+    expect(scheduler.task("stacked")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
     expect(scheduler.task("landing")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 

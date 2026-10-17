@@ -111,7 +111,7 @@ describe("progress, read back", () => {
       progress: [
         progress("open", { prUrl: PR, branch: "open", pushed: true }),
         progress("merged", { prUrl: PR, branch: "merged", pushed: true, merged: true }),
-        progress("waiting", { merged: true }),
+        progress("waiting", { pushed: true, merged: true }),
         progress("live", { prUrl: PR, pushed: true }),
       ],
     });
@@ -151,7 +151,11 @@ describe("progress, read back", () => {
     fleet.fleet = [machine("a", { connected: false })];
     await pass(scheduler);
     fleet.fleet = [machine("a")];
-    fleet.sessionsReply = () => ({ ok: true, sessions: [], progress: [progress("t", { prUrl: PR, merged: true })] });
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      progress: [progress("t", { prUrl: PR, pushed: true, merged: true })],
+    });
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
@@ -175,6 +179,28 @@ describe("branch-state", () => {
     // Merged work on the branch it switched to, once pushed there, is believed.
     await scheduler.onBranchState(branchState("scratch", { pushed: true, merged: true }), "a");
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
+  test("after a branch switch a second report on the new branch still does not settle it on the old branch's PR", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, branch: "feat", pushed: true });
+    await scheduler.load();
+    await scheduler.onBranchState(branchState("scratch", { merged: true }), "a");
+    await scheduler.onBranchState(branchState("scratch", { merged: true }), "a");
+    expect(scheduler.task("t")).toMatchObject({ state: "running", branch: "scratch", prUrl: PR });
+  });
+
+  test("a first-ever report naming a branch counts as its current one: merged without a push does not settle, after a push it does", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("u", { assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onBranchState({ ...branchState("x", { merged: true }), taskId: "t" }, "a");
+    expect(scheduler.task("t")).toMatchObject({ state: "running", branch: "x" });
+
+    await scheduler.onBranchState({ ...branchState("x", { pushed: true }), taskId: "u" }, "a");
+    await scheduler.onBranchState({ ...branchState("x", { merged: true }), taskId: "u" }, "a");
+    expect(scheduler.task("u")).toMatchObject({ state: "done", doneBy: "merged" });
   });
 
   test("pushed never reverts within one branch", async () => {
@@ -206,7 +232,10 @@ describe("the sweep", () => {
     fleet.sessionsReply = () => ({
       ok: true,
       sessions: [{ id: "%1", window: "w1", repo: "app", path: "/wt/live", taskId: "live" }],
-      progress: [progress("live", { prUrl: PR, branch: "live", pushed: true }), progress("waiting", { merged: true })],
+      progress: [
+        progress("live", { prUrl: PR, branch: "live", pushed: true }),
+        progress("waiting", { pushed: true, merged: true }),
+      ],
     });
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual([]);
@@ -216,6 +245,17 @@ describe("the sweep", () => {
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task("live")).toMatchObject({ state: "running", prUrl: PR, branch: "live", pushed: true });
     expect(scheduler.task("waiting")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+});
+
+describe("a `here` task awaiting merge", () => {
+  test("is left out of the sweep: no reply can change it", async () => {
+    const { fleet, clock, scheduler, put } = setup();
+    await put("t", { state: "awaiting-merge", assignment: ON_A, prUrl: PR, spec: spec({ mode: "here" }) });
+    await scheduler.load();
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual([]);
   });
 });
 

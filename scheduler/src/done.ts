@@ -46,16 +46,16 @@ function absorb(task: Task, entry: Progress): Task {
 }
 
 /**
- * Whether a `merged` verdict may be believed. Reap's `Merged` reads a branch
- * with no commits past the default branch as merged (an ancestor), which is
- * every task branch before its first commit; one pushed has work on it, so its
- * merge is one. A PR URL is not tied to a branch, so after a branch switch only
- * a PR this entry brought counts, never the old branch's.
+ * Whether a `merged` verdict may be believed: only of a branch seen pushed.
+ * Reap's `Merged` reads a branch with no commits past the default branch as
+ * merged (an ancestor), which is every task branch before its first commit; a
+ * pushed one has work on it. `pushed` is per branch (`absorb`) and stays true
+ * once seen, so a remote branch deleted after its merge still reads as pushed on
+ * takeover. A PR URL is no evidence: it is not tied to a branch, so after a
+ * switch it is the old branch's.
  */
-function hasWork(before: Task, after: Task, entry: Progress): boolean {
-  if (after.pushed === true) return true;
-  if (!switched(before, entry)) return after.prUrl !== undefined;
-  return entry.prUrl !== undefined && entry.prUrl !== before.prUrl;
+function hasWork(after: Task): boolean {
+  return after.pushed === true;
 }
 
 /**
@@ -68,7 +68,7 @@ export function progressed(task: Task, entry: Progress | undefined): Task {
   if (entry === undefined) return task;
   const seen = trusted(task, entry);
   const next = absorb(task, seen);
-  if (seen.merged === true && hasWork(task, next, seen)) return advance(next, "done", { doneBy: "merged" });
+  if (seen.merged === true && hasWork(next)) return advance(next, "done", { doneBy: "merged" });
   return next;
 }
 
@@ -82,7 +82,7 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   const view: Task = { ...task, ...fields };
   const seen = entry === undefined ? undefined : trusted(view, entry);
   const known = seen === undefined ? view : absorb(view, seen);
-  if (seen?.merged === true && hasWork(view, known, seen)) return advance(known, "done", { doneBy: "merged" });
+  if (seen?.merged === true && hasWork(known)) return advance(known, "done", { doneBy: "merged" });
   if (known.prUrl !== undefined) return advance(known, "awaiting-merge");
   return advance(known, "done", { doneBy: "session" });
 }

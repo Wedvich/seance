@@ -625,6 +625,17 @@ describe("prune", () => {
     expect(fleet.spawns).toEqual([]);
   });
 
+  test("takeover below pruneAt prunes nothing: a create naming a finished task may be in flight", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 4 };
+    const { store, scheduler } = setup(new FakeFleet([machine("a")]), config);
+    for (const [i, id] of ["f1", "f2", "f3"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW - 10 + i });
+    }
+    await scheduler.takeover();
+    expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
+  });
+
   test("takeover and a pass at pruneAt prune to the configured keep", async () => {
     const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 2 };
     const { store, fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), config);

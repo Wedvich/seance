@@ -3,9 +3,9 @@ import {
   STORE_TOMBSTONE_MS,
   TASK_FAILURE_LIMITS,
   type DepAfter,
-  type TaskDep,
   type TaskFailureCode,
 } from "@seance/shared";
+import { orderEdges } from "./batch.ts";
 import { FINISHED, type Task } from "./task.ts";
 
 /**
@@ -78,14 +78,13 @@ export function admission(
       if (pred === undefined) {
         if (unreadable.has(dep.task) || now - task.createdAt < DEP_MISSING_GRACE_MS) blocked = true;
         else return failure("dependency_missing", `its dependency ${dep.task} is not in the queue`);
-      } else if (released(pred, dep.after)) {
-        // Before the failure check: a release is a fact, so a later failure or cancel cannot take it back.
-        continue;
       } else if (failed.has(pred.id) || pred.state === "failed" || pred.state === "cancelled") {
         return failure(
           "dependency_failed",
           `its dependency ${pred.id} ended ${failed.has(pred.id) ? "failed" : pred.state}`,
         );
+      } else if (released(pred, dep.after)) {
+        continue;
       } else {
         blocked = true;
       }
@@ -140,9 +139,12 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
   let next = 0;
 
   // A finished task's edges have released or failed its dependents, so they cannot be what a loop waits on.
-  const edgesOf = (id: string): readonly TaskDep[] => {
+  // A sequential member also waits on the lower index before it (`batchCap`), so that wait is an edge.
+  const ordered = orderEdges(tasks);
+  const edgesOf = (id: string): readonly string[] => {
     const task = byId.get(id);
-    return task === undefined || FINISHED.includes(task.state) ? [] : (task.spec.deps ?? []);
+    if (task === undefined || FINISHED.includes(task.state)) return [];
+    return [...(task.spec.deps ?? []).map((d) => d.task), ...(ordered.get(id) ?? [])];
   };
 
   const visit = (id: string): void => {
@@ -151,13 +153,13 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
     next += 1;
     stack.push(id);
     onStack.add(id);
-    for (const dep of edgesOf(id)) {
-      if (!byId.has(dep.task)) continue;
-      if (!index.has(dep.task)) {
-        visit(dep.task);
-        low.set(id, Math.min(low.get(id) ?? 0, low.get(dep.task) ?? 0));
-      } else if (onStack.has(dep.task)) {
-        low.set(id, Math.min(low.get(id) ?? 0, index.get(dep.task) ?? 0));
+    for (const to of edgesOf(id)) {
+      if (!byId.has(to)) continue;
+      if (!index.has(to)) {
+        visit(to);
+        low.set(id, Math.min(low.get(id) ?? 0, low.get(to) ?? 0));
+      } else if (onStack.has(to)) {
+        low.set(id, Math.min(low.get(id) ?? 0, index.get(to) ?? 0));
       }
     }
     if (low.get(id) !== index.get(id)) return;
@@ -169,7 +171,7 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
       component.push(member);
       if (member === id) break;
     }
-    const selfEdge = edgesOf(id).some((d) => d.task === id);
+    const selfEdge = edgesOf(id).includes(id);
     if (component.length < 2 && !selfEdge) return;
     const loop = component.toReversed();
     for (const member of component) out.set(member, loop);

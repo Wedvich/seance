@@ -29,15 +29,19 @@ function strategyOf(batchId: string, tasks: readonly Task[]): BatchStrategy | un
 const BATCH_HELD: ReadonlySet<TaskState> = new Set([...IN_FLIGHT, "lost"]);
 
 /** Past its session: finished, or `awaiting-merge` (no slot, no session). */
-function over(t: Task): boolean {
+export function over(t: Task): boolean {
   return FINISHED.includes(t.state) || t.state === "awaiting-merge";
 }
 
 /**
  * `cap_reached` scope `batch` when `task`'s batch already holds its bound, or,
- * for `sequential`, while a lower-`index` member is not over yet — one that is
- * unroutable this pass, `blocked`, or not in the store yet holds the next, so
- * `index` order is what runs, not whichever member routes first. Null otherwise.
+ * for `sequential`, while a lower-`index` member the scheduler holds is not over
+ * yet — one unroutable this pass or `blocked` holds the next, so `index` order
+ * is what runs, not whichever member routes first. Order is among held members:
+ * a lower index never put, not yet refreshed, or pruned holds nothing, so gaps,
+ * 1-based numbering and pruning never wedge a batch, and the cost is the
+ * members, not the `index`. The hold reports `inFlight: 1` of `max: 1`: the
+ * schema has no reason for "an earlier member is not over".
  */
 export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const { batch } = task.spec;
@@ -50,11 +54,45 @@ export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const held = others.filter((t) => BATCH_HELD.has(t.state)).length;
   if (held >= max) return { code: "cap_reached", inFlight: held, max, scope: "batch" };
   if (strategy?.mode !== "sequential") return null;
-  let ahead = 0;
-  for (let i = 0; i < batch.index; i += 1) {
-    if (!others.some((t) => t.spec.batch?.index === i && over(t))) ahead += 1;
+  const earlier = others.some((t) => (t.spec.batch?.index ?? 0) < batch.index && !over(t));
+  return earlier ? { code: "cap_reached", inFlight: 1, max, scope: "batch" } : null;
+}
+
+/**
+ * For each `sequential` member not over, the held members it waits on for
+ * order: those of the nearest lower `index` not over — the rest are reached
+ * through them, so a loop through any lower member is a loop through these.
+ * Lets cycle detection see an order wait as an edge.
+ */
+export function orderEdges(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> {
+  const byBatch = new Map<string, Task[]>();
+  for (const t of tasks) {
+    const id = t.spec.batch?.id;
+    if (id === undefined || over(t)) continue;
+    byBatch.set(id, [...(byBatch.get(id) ?? []), t]);
   }
-  return ahead > 0 ? { code: "cap_reached", inFlight: ahead, max, scope: "batch" } : null;
+  const out = new Map<string, readonly string[]>();
+  for (const [id, members] of byBatch) {
+    if (strategyOf(id, tasks)?.mode !== "sequential") continue;
+    const sorted = members.toSorted((a, b) => indexOf(a) - indexOf(b));
+    let previous: readonly string[] = [];
+    let group: string[] = [];
+    let groupIndex = Number.NaN;
+    for (const t of sorted) {
+      if (indexOf(t) !== groupIndex) {
+        previous = group;
+        group = [];
+        groupIndex = indexOf(t);
+      }
+      out.set(t.id, previous);
+      group.push(t.id);
+    }
+  }
+  return out;
+}
+
+function indexOf(t: Task): number {
+  return t.spec.batch?.index ?? 0;
 }
 
 /**

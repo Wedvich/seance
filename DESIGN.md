@@ -1502,11 +1502,11 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   when one never can. An edge releases when its predecessor is `done`, whatever settled
   it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
   `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
-"merged"` only at `done`, a merge being what makes a task done. A release is a fact: an
-  edge whose condition already holds stays released when its predecessor later fails or is
-  cancelled (a `cancelled` predecessor with a PR and a pushed branch still releases
-  `opened`), checked before the failure so the outcome never depends on which pass saw it
-  first. A `lost` predecessor is waited on, since it may still finish. Three ways an edge
+"merged"` only at `done`, a merge being what makes a task done. A `failed` or
+  `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
+  predecessor with a PR and a pushed branch fails `opened` too. A dependent already
+  released has left `blocked` and is not judged again, so an outcome can depend on whether a
+  pass saw the predecessor fail before the release; accepted. A `lost` predecessor is waited on, since it may still finish. Three ways an edge
   never releases, each a
   `TaskFailureCode`: `dependency_failed`, a `failed` or `cancelled` predecessor — computed
   to a fixpoint in one call, so a chain fails in one pass rather than one link per pass;
@@ -1514,7 +1514,9 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   passed since the dependent's own `createdAt` (a client puts a batch one record at a
   time), where an id held as an unreadable record waits, being in the store; and
   `dependency_cycle`, every `queued` or `blocked` member of a strongly connected component
-  over every held task, a self-edge included, so a loop a later create closes fails the
+  over every held task, a self-edge included, and a `sequential` member's wait on the
+  nearest lower `index` not over counted as an edge (a lower index depending on a higher
+  one of its batch would otherwise deadlock silently), so a loop a later create closes fails the
   member already blocked too — leaving out the edges of a finished task, whose dependents
   its outcome has already released or failed, so a `cancelled` member's dependent fails
   `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
@@ -1532,10 +1534,15 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   that only sleeps, so the next `sequential` member would run beside it. `sequential` also
   enforces `index` order, which routing order alone cannot (a member whose predecessor is
   unroutable this pass would go first): a member is held, with the same `cap_reached`
-  (`inFlight` the lower indexes not yet over), until every lower index is over — finished
-  in any state, `failed` and `cancelled` included, or `awaiting-merge`. A lower index not
-  yet in the store holds it too, since a client puts a batch one record at a time, and so
-  does one still `blocked`. A pass routes ready tasks
+  (`inFlight` the lower indexes not yet over), until every held lower index is over —
+  finished in any state, `failed` and `cancelled` included, or `awaiting-merge` — with
+  `inFlight: 1` of `max: 1`, one earlier member holding the sequential slot (the schema has
+  no reason for "an earlier member is not over"; a `batch_order` reason is a schema
+  follow-up). One still `blocked` or unroutable holds it. Order is enforced among held
+  members only: a lower index not in the store (never put, not yet refreshed, or pruned)
+  holds nothing, so gaps, 1-based numbering and pruning never wedge a batch, and the check
+  costs the members, not the `index`. One client puts a batch together, so the window is a
+  refresh. A pass routes ready tasks
   oldest first, except that one batch's members go in `index` order from where its oldest
   ready member would have gone.
 - **Done detection** (`done.ts`, M3 item 4a). A session that ends with a PR known — the
@@ -1547,14 +1554,17 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   within one branch, so the first pushed report with a PR releases `opened` for good — and
   a merge makes the task `done`, `doneBy: "merged"`, a session still running included. A
   report naming a different branch than the one recorded starts it unpushed. A `merged`
-  verdict is believed only of a branch with work on it (pushed there, or with a PR on the
-  same branch — no PR URL is tied to a branch, so after a switch only one the report
-  itself brings counts): reap's `Merged` reads a branch with no commits past the default
+  verdict is believed only of a branch seen pushed (`pushed` is per branch, sticky within
+  one, so a remote branch deleted after its merge still reports pushed on takeover; a PR URL
+  is no evidence, being tied to no branch, so it is the old branch's after a switch; a
+  first report naming a branch has no prior to compare): reap's `Merged` reads a branch with no commits past the default
   branch as an ancestor, which is every task branch before its first commit, and a task
   that switched branches would otherwise be `done` with its PR unmerged. A `here` task
   ignores `pushed` and `merged` altogether: its branch is the checkout's, often the
   default branch, pushed and trivially merged; its `opened` comes from its PR and its
-  `merged` only at `done`. What `branch-state` carried while no leader
+  `merged` only at `done`: an `awaiting-merge` `here` task is left out of the sweep, since no
+  reply can change it, and reaches `done` only by mark-done (items 5/6), so its `after:
+"merged"` dependents wait for that. What `branch-state` carried while no leader
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
   task is connected again after a pass saw it away. In a reply the daemon trimmed
@@ -1565,10 +1575,11 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
   deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
-  defaults 13) after takeover, on `submit`'s `store_full`, and at the end of a pass only
-  once the store holds `pruneAt` records (96, held plus unreadable; under `MAX_TASKS` so
-  creates still fit): pruning every pass would delete a finished task an app is naming in
-  a create still on its way to us, and the dependent would fail `dependency_missing`. It
+  defaults 13) on `submit`'s `store_full` unconditionally, and after takeover and at the
+  end of a pass only once the store holds `pruneAt` records (96, held plus unreadable;
+  under `MAX_TASKS` so creates still fit): pruning every time would delete a finished task
+  an app is naming in a create still on its way to us, and the dependent would fail
+  `dependency_missing`. `pruneAt` narrows that race, it does not close it. It
   writes only when something is over the keep; never a task an unfinished one names in
   `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
   there. Equally old tasks go in id order, so two leaders prune the same ones. M2's `submit` also prunes

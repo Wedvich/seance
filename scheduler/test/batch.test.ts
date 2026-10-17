@@ -95,8 +95,9 @@ describe("batches", () => {
     expect(dispatched(parallel.fleet)).toEqual([]);
 
     const sequential = setup();
-    await sequential.member("s0", 0, { mode: "sequential" }, lost);
+    // The lost member has the higher index, so only the bound's count, not index order, can hold s1.
     await sequential.member("s1", 1, { mode: "sequential" });
+    await sequential.member("s5", 5, { mode: "sequential" }, lost);
     await sequential.scheduler.load();
     await pass(sequential.scheduler);
     expect(dispatched(sequential.fleet)).toEqual([]);
@@ -117,18 +118,48 @@ describe("batches", () => {
       );
     });
 
-    test("members put before index 0 is in the store wait for it", async () => {
+    test("a lower index not in the store holds nothing: gaps, 1-based numbering and pruned members never wedge a batch", async () => {
       const { fleet, scheduler, member } = setup();
-      await member("third", 2, sequential);
+      await member("third", 3, sequential);
+      await member("second", 2, sequential);
+      await scheduler.load();
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual(["second"]);
+    });
+
+    test("the next member starts when the previous one is awaiting-merge", async () => {
+      const { fleet, scheduler, member } = setup();
+      await member("first", 0, sequential, { state: "awaiting-merge", prUrl: "https://github.com/acme/app/pull/1" });
       await member("second", 1, sequential);
       await scheduler.load();
       await pass(scheduler);
-      expect(dispatched(fleet)).toEqual([]);
+      expect(dispatched(fleet)).toEqual(["second"]);
+    });
 
+    test("a huge index routes promptly: the hold costs the members, not the index", async () => {
+      const { fleet, scheduler, member } = setup();
       await member("first", 0, sequential);
-      await scheduler.refresh("first");
+      await member("last", Number.MAX_SAFE_INTEGER, sequential);
+      await scheduler.load();
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual(["first"]);
+      expect(scheduler.lastDecision("last")?.candidates[0]?.rejected).toContainEqual({
+        code: "cap_reached",
+        inFlight: 1,
+        max: 1,
+        scope: "batch",
+      });
+    });
+
+    test("a lower index that depends on a higher one of its sequential batch is a loop: both fail at admission", async () => {
+      const { scheduler, member } = setup();
+      await member("low", 0, sequential, { state: "queued" }, { deps: [{ task: "high", after: "opened" }] });
+      await member("high", 1, sequential, { state: "queued" });
+      await scheduler.load();
+      await pass(scheduler);
+      for (const id of ["low", "high"]) {
+        expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_cycle" } });
+      }
     });
 
     test("an index 0 still blocked on a dependency holds index 1", async () => {
