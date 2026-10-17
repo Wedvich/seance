@@ -8,6 +8,8 @@ import {
   MACHINES_ID,
   MAX_REGISTER_ROLES,
   parseEnvelope as parseEnvelopeShape,
+  ROUTING_ID_CHARS,
+  ROUTING_ID_MAX_LENGTH,
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   type AppFrame,
@@ -23,10 +25,10 @@ import {
  * oversized values — not to prove an id well-formed. Enforcing exact UUIDs
  * would buy no security property the length and charset caps don't.
  */
-const MAX_ID_LENGTH = 64;
+const MAX_ID_LENGTH = ROUTING_ID_MAX_LENGTH;
 const MAX_IV_LENGTH = 32;
 
-const SAFE_ID = /^[A-Za-z0-9._-]+$/u;
+const SAFE_ID = new RegExp(`^[${ROUTING_ID_CHARS}]+$`, "u");
 
 /**
  * A `lead-proof` seals one small fixed-shape payload (`{ term }` plus the

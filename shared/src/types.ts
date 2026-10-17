@@ -14,11 +14,24 @@ export const MACHINES_ID = "machines";
 
 /**
  * The scheduler's wire address. The relay routes an envelope addressed here to
- * whichever daemon it nominated leader (DESIGN.md, "Scheduler leadership"), and
+ * whichever daemon it nominated leader (DESIGN.md, Scheduler, "Leadership"), and
  * the leader's app-role leg sends as it, fenced by its term. Reserved like
  * `APP_ID` and `MACHINES_ID`: no daemon may register under it.
  */
 export const SCHEDULER_ID = "scheduler";
+
+/**
+ * A routing id's bounds: a `deviceId`, a task id, a store key's id part, a
+ * store frame's `id`. Each reaches storage keys and logs, so it stays short and
+ * boring. The one copy — the relay's frame bounds, `TASK_ID_PATTERN` and
+ * `STORE_KEY_PATTERN` derive from it, so a task id is always a valid key part.
+ */
+export const ROUTING_ID_MAX_LENGTH = 64;
+
+/** A routing id's characters, as a regex character-class body. */
+export const ROUTING_ID_CHARS = "A-Za-z0-9._-";
+
+export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}$`, "u");
 
 /**
  * Plaintext `register.roles` values — the one capability the relay itself
@@ -118,8 +131,8 @@ export type DaemonFrame =
  * Layer 1: relay→daemon frames. `lead` tells a daemon the relay nominated it
  * scheduler leader under `term`; `follow` that it no longer is. Plaintext relay
  * assertions: the relay is the only party that decides leadership, and what a
- * leader does with the role is sealed and term-fenced (DESIGN.md, "Scheduler
- * leadership").
+ * leader does with the role is sealed and term-fenced (DESIGN.md, Scheduler,
+ * "Leadership"). The store frames are M3's: no relay sends them yet.
  */
 export type RelayToDaemonFrame =
   | { readonly t: "msg"; readonly env: Envelope }
@@ -151,16 +164,19 @@ export type AppFrame =
 
 /**
  * Why the relay did not hand an envelope on. `offline`/`unknown`: the target
- * daemon has no open socket — for `to: SCHEDULER_ID`, no leader is nominated.
- * `not_leader`: the envelope was sent as the scheduler under a term that is not
- * the current leader's.
+ * daemon has no open socket, and the registry does or does not hold its entry.
+ * `to: SCHEDULER_ID` is only ever `offline` — no leader holds a socket now, but
+ * the address is real and one will be back. `not_leader`: the envelope was sent
+ * as the scheduler under a term that is not the current leader's.
  */
 export type UndeliverableCode = "offline" | "unknown" | "not_leader";
 
 /**
  * The nominated scheduler leader, as the registry push carries it — null when
- * no connected daemon is capable. `term` is the relay's monotonic counter,
- * bumped on every change of leader or of the leader's socket.
+ * no connected daemon is both capable (signed `roles`) and on the relay's
+ * `SCHEDULER_LEADERS` allowlist; unset, that list nominates nobody. `term` is
+ * the relay's monotonic counter, bumped on every change of leader or of the
+ * leader's socket.
  */
 export interface SchedulerLeader {
   readonly deviceId: string;
@@ -260,9 +276,10 @@ export type RegistryView = RegistryEntry & {
 /**
  * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
  * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
- * put. Plaintext Layer 1 frames, not ops — the relay itself answers them — so
- * a request carries its own `id` (the client's, as for a routing id: ≤64 of
- * the deviceId charset, a UUID) and the reply echoes it as `re`. Who may write
+ * put. Not built yet: no relay accepts these frames before M3 item 1, and no
+ * client sends them before item 2. Plaintext Layer 1 frames, not ops — the
+ * relay itself answers them — so a request carries its own `id` (a routing id,
+ * `ROUTING_ID_PATTERN`; a UUID fits) and the reply echoes it as `re`. Who may write
  * is a rule per key prefix (`STORE_PREFIXES`); reads are anyone's, since the
  * bearer token already lists ciphertext. Records live in DO storage under a
  * namespace of their own, so no key can alias `device:<id>` or `scheduler:term`.
@@ -295,13 +312,11 @@ export const STORE_PREFIXES = {
 
 export type StorePrefix = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES]["prefix"];
 
-/** A key's part after its prefix: a routing id's bounds, so a key stays a short, boring storage key. */
-export const STORE_KEY_ID_MAX_LENGTH = 64;
-
+/** A known prefix, then a routing id — so a key stays a short, boring storage key, and a task id is one as it stands. */
 export const STORE_KEY_PATTERN = new RegExp(
   `^(?:${Object.values(STORE_PREFIXES)
     .map((rule) => rule.prefix)
-    .join("|")})[A-Za-z0-9._-]{1,${STORE_KEY_ID_MAX_LENGTH}}$`,
+    .join("|")})[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}$`,
   "u",
 );
 
@@ -311,27 +326,44 @@ export const PAUSE_KEY = "queue:pause";
 /**
  * Ciphertext (base64 chars) one record may hold, under the 64 KiB of
  * `ENVELOPE_MAX_CT_LENGTH`: small enough that a whole prefix is one
- * `store-listed` frame. 32 KiB seals ~24 KB of JSON — a prompt at
- * `TASK_REQUEST_LIMITS.prompt` even where every character costs two bytes, plus
- * a decision record of 15 candidates (~400 B each, measured in parse.test.ts);
- * an ASCII prompt leaves room for ~45. A fleet that outgrows that has the
- * leader trim the decision it stores, never the task. A put past it is
- * `too_large`, so a sealer checks the sealed length first, as the daemon's
- * transport does a reply.
+ * `store-listed` frame. A put past it is `too_large`, so a sealer checks the
+ * sealed length first, as the daemon's transport does a reply.
+ *
+ * A task record grows as the leader writes it — reservation, assignment,
+ * decision, PR, branch, failure — so creates get less
+ * (`STORE_CREATE_MAX_CT_LENGTH`): created at the full size, the leader's first
+ * write would be `too_large` and the task would sit `queued` for good. All the
+ * leader adds is bounded but the decision, so a write that would not fit trims
+ * the decision first (`Decision.trimmed`), never the task. 40 KiB, not the
+ * 32 first planned: at every bound the leader's fields seal to ~8 KB, which a
+ * create holding a full prompt left no room for (measured in parse.test.ts).
  */
-export const STORE_MAX_CT_LENGTH = 32 * 1024;
+export const STORE_MAX_CT_LENGTH = 40 * 1024;
+
+/**
+ * Ciphertext a create (`expect: 0`) may hold — the relay refuses a larger one
+ * `too_large` on either leg, and the app checks its sealed length before
+ * sending. 28 KiB holds a task with every field at its bound and a prompt at
+ * `TASK_REQUEST_LIMITS.prompt` where each character costs two UTF-8 bytes;
+ * three-byte text (CJK) fits about 5,800 characters, and the sealer's check
+ * refuses more. The 12 KiB left holds all the leader adds at every bound plus a
+ * decision of ten candidates (both measured in parse.test.ts).
+ */
+export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
 
 /**
  * Task records at most, in `task:`. M2 held ≤64 unfinished tasks plus the newest
  * 50 finished, which fits. Like `MAX_DEVICES` it bounds a bearer-token holder's
  * junk (the leader skips what does not open), and full means `store_full` on
- * create — recoverable: the leader can delete what it skips and what has finished.
- * With `STORE_MAX_CT_LENGTH`, a full prefix lists in 4 MiB, one frame well under
- * the Workers WebSocket limit (32 MiB).
+ * create. The leader prunes finished tasks to keep room; a record it cannot read
+ * it reports and never deletes on its own — after a PSK rotation that would be
+ * the whole queue — so clearing junk is a person's act. With
+ * `STORE_MAX_CT_LENGTH`, a full prefix lists in 5 MiB: Cloudflare caps a
+ * received WebSocket message at 32 MiB and states no cap on a sent one.
  */
 export const MAX_TASKS = 128;
 
-/** Records across every prefix: `MAX_TASKS` plus room for the singletons and M4's account records. 8 MiB at most. */
+/** Records across every prefix: `MAX_TASKS` plus room for the singletons and M4's account records. 10 MiB at most. */
 export const MAX_RECORDS = 256;
 
 /**
@@ -372,7 +404,10 @@ export interface StorePutFrame {
   readonly key: string;
   /** The version the caller last read; 0 creates. Anything else is `version_conflict`. */
   readonly expect: number;
-  /** The sealed record, `ct` under `STORE_MAX_CT_LENGTH`; its sealed body names the version this put produces. */
+  /**
+   * The sealed record, `ct` under `STORE_MAX_CT_LENGTH` (`STORE_CREATE_MAX_CT_LENGTH`
+   * for a create); its sealed body names the version this put produces.
+   */
   readonly env: Envelope;
   /**
    * Daemon leg only: the leader's term, required on a `termFenced` prefix and
@@ -413,8 +448,9 @@ export interface StoreRecord {
  * not from the leader's socket. `forbidden`: the prefix's rule refuses this leg
  * the act (an app overwriting a task). `invalid_request`: a key outside
  * `STORE_KEY_PATTERN`, an unknown prefix, a malformed field. `too_large`: `ct`
- * past `STORE_MAX_CT_LENGTH`. `rate_limited`: past the create floor.
- * `store_full`: a create past `MAX_TASKS` or `MAX_RECORDS`.
+ * past `STORE_MAX_CT_LENGTH`, or a create's past `STORE_CREATE_MAX_CT_LENGTH`.
+ * `rate_limited`: past the create floor. `store_full`: a create past
+ * `MAX_TASKS` or `MAX_RECORDS`.
  */
 export const STORE_ERROR_CODES = [
   "version_conflict",
@@ -470,7 +506,8 @@ export interface StoreChangedFrame {
  * beat, the leader's `lead-proof` and the store's records. Opened through `openAtRest`, never the replay
  * guard, and never accepted on a live routing path — one op per kind, so a
  * stored record can stand in neither for a request nor for another kind of
- * record. `task` and `pause-state` are sealed to SCHEDULER_ID.
+ * record. `task` and `pause-state` are sealed to SCHEDULER_ID, and by nobody
+ * yet (M3 item 2).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -499,8 +536,9 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
  * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it, and M3
- * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's;
- * enqueue is not among them — an app `store-put`s the task itself.
+ * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's: no
+ * client sends them yet, and today's leaders answer them `invalid_request`.
+ * Enqueue is not among them — an app `store-put`s the task itself.
  */
 export const SCHEDULER_OPS = ["queue", "route-preview", "submit", "cancel", "mark-done", "pause", "resume"] as const;
 
@@ -951,8 +989,12 @@ export interface SpawnRequest {
   readonly taskId?: string;
 }
 
-/** What `SpawnRequest.taskId` may hold: a UUID or a scheduler key fits, a shell metacharacter or a separator doesn't. */
-export const TASK_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/u;
+/**
+ * What `SpawnRequest.taskId` may hold: a routing id, so a UUID fits and a shell
+ * metacharacter, a separator or a `:` doesn't — and the id is a `task:` key's
+ * id part as it stands.
+ */
+export const TASK_ID_PATTERN = ROUTING_ID_PATTERN;
 
 export const SPAWN_ERROR_CODES = [
   "repo_not_found",
@@ -1048,6 +1090,46 @@ export interface SessionsResponse {
    * prove nothing (DESIGN.md, "Session events").
    */
   readonly ledgerSince?: number;
+  /**
+   * What this daemon last knew of each task's PR and branch, live or ended —
+   * the sum of the `session-event`s and `branch-state`s it sent, which are
+   * fire-and-forget and lost while no leader listens. A leader reads it on
+   * takeover and when a machine holding a task it waits on comes back, so a gap
+   * cannot settle a task that ended with an open PR as `done`, or hold an
+   * `after: "merged"` dependent past a merge it missed. At most
+   * `SESSIONS_MAX_PROGRESS`; absent from older daemons and when there is none.
+   * Not sent yet (M3 item 4b).
+   */
+  readonly progress?: readonly TaskProgress[];
+  /**
+   * Present only when the daemon dropped entries from `progress` to fit the
+   * reply in one envelope, oldest first: how many. In a trimmed reply a task
+   * with no entry is unknown, not progress-free, and a reader waits for a later
+   * read rather than settle it.
+   */
+  readonly progressTrimmed?: number;
+}
+
+/** `SessionsResponse.progress` entries at most: the launch ledger's own bound. */
+export const SESSIONS_MAX_PROGRESS = 128;
+
+/**
+ * One task's PR and branch as its daemon last saw them. Every field is the
+ * daemon's own, as on `SessionEvent` and `BranchState`; each is `true` or
+ * absent, since none of them goes back.
+ */
+export interface TaskProgress {
+  readonly taskId: string;
+  /** The newest `https:` PR URL its session reported. */
+  readonly prUrl?: string;
+  /** Absent for a `here` session, which has no task branch of its own. */
+  readonly branch?: string;
+  /** Its upstream held its tip. */
+  readonly pushed?: true;
+  /** `BranchState.merged`'s verdict. */
+  readonly merged?: true;
+  /** When the daemon last observed any of these, ms. */
+  readonly at: number;
 }
 
 /** What a session is doing, as `session-event` reports it (docs/scheduler.md). */
@@ -1084,7 +1166,8 @@ export const BRANCH_MAX_LENGTH = 255;
  * task id from its pane map or launch ledger, never from a session. `merged` is
  * reap's verdict (`Merged` in `daemon/src/reap-git.ts`: ancestor, squash or
  * gone) against the default branch; `pushed`, that the branch's upstream holds
- * its tip.
+ * its tip. A leader that missed one reads the same state back from
+ * `SessionsResponse.progress`. Not sent yet (M3 item 4b).
  */
 export interface BranchState {
   readonly taskId: string;
@@ -1157,9 +1240,9 @@ export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "tit
  * Lengths a `TaskRequest` field may reach, in UTF-16 units. A task is held on
  * the leader and echoed in `queue` replies, so its fields are bounded here,
  * not by the envelope alone as a direct spawn's are. `prompt` is sized so a task
- * fits one `STORE_MAX_CT_LENGTH` record (M3): a task names its work and the
- * session gathers the rest with tools (the owner, 2026-10-17). A direct spawn
- * is not bound by it.
+ * fits one create (`STORE_CREATE_MAX_CT_LENGTH`, M3): a task names its work and
+ * the session gathers the rest with tools (the owner, 2026-10-17). A direct
+ * spawn is not bound by it.
  */
 export const TASK_REQUEST_LIMITS = { repo: 512, prompt: 8_192, title: 200, model: 64, effort: 64 } as const;
 
@@ -1192,14 +1275,37 @@ export interface BatchMembership {
 }
 
 /**
- * When a dependency edge releases. `opened`: the predecessor's branch is pushed
- * with a PR (stacked work, the default a client offers). `merged`: its PR merged.
+ * When a dependency edge releases. `opened`: the predecessor has a PR and its
+ * branch is pushed (stacked work, the default a client offers), in whatever
+ * state it is — `running` included. `merged`: its branch merged. A `done`
+ * predecessor releases both, whatever settled it, since `mark-done` always
+ * wins. A `here` predecessor has no task branch, so `opened` releases on its PR
+ * alone and `merged` only at `done`.
  */
 export const DEP_AFTER = ["opened", "merged"] as const;
 
 export type DepAfter = (typeof DEP_AFTER)[number];
 
-/** One hand-declared edge: this task waits for `task` (another task's id). Linear-derived edges are M4's. */
+/**
+ * How long a dependent may name a task the store does not hold before it fails
+ * `dependency_missing`, from its own `createdAt`: a client puts a batch one
+ * record at a time, so a predecessor can land after its dependent.
+ */
+export const DEP_MISSING_GRACE_MS = 5 * 60_000;
+
+/**
+ * One hand-declared edge: this task waits for `task` (another task's id).
+ * Linear-derived edges are M4's. An edge that can never release fails the
+ * dependent with a `TaskFailureCode`, never holds it `blocked` for good:
+ * - `dependency_failed`: the predecessor ended `failed` or `cancelled`. It
+ *   cascades, so nothing runs on work that is not there. A `lost` predecessor
+ *   is waited on, since it may still finish.
+ * - `dependency_missing`: no task by that id past `DEP_MISSING_GRACE_MS` — a
+ *   typo, junk, or a task pruned before it was named. Pruning never deletes a
+ *   task an unfinished one names.
+ * - `dependency_cycle`: the edges loop, a self-edge included; every member
+ *   fails, at admission.
+ */
 export interface TaskDep {
   readonly task: string;
   readonly after: DepAfter;
@@ -1214,7 +1320,12 @@ export interface LinearLink {
 }
 
 /** Bounds on `TaskSpec`'s M3 fields, beside `TASK_REQUEST_LIMITS`. */
-export const TASK_SPEC_LIMITS = { deps: 16, parallel: 16, linearIssue: 64, placement: 64 } as const;
+export const TASK_SPEC_LIMITS = {
+  deps: 16,
+  parallel: 16,
+  linearIssue: 64,
+  placement: ROUTING_ID_MAX_LENGTH,
+} as const;
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
@@ -1229,6 +1340,15 @@ export interface TaskSpec extends TaskRequest {
   readonly deps?: readonly TaskDep[];
   readonly linear?: LinearLink;
 }
+
+/**
+ * Lengths, in UTF-16 units, of the names a leader writes into a task: a clone
+ * (a repo name), a machine's display name, a tmux window (a task's title, or
+ * its worktree's slug). With a `Placement`'s routing-id bounds they keep all a
+ * leader adds to a record bounded but the decision (`STORE_MAX_CT_LENGTH`). A
+ * reader refuses past them, so a writer cuts first.
+ */
+export const TARGET_LIMITS = { clone: TASK_REQUEST_LIMITS.repo, machine: 256, window: 256 } as const;
 
 /** A placement plus the machine-local clone name `spawn` takes. */
 export interface Target extends Placement {
@@ -1264,12 +1384,16 @@ export type Reason =
   | { readonly code: "auth_missing" }
   | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
   | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
-  /** `scope` absent is `global`, as M2's leaders sent it; `account` is M3's per-account cap. */
+  /**
+   * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
+   * per-account cap; `batch`, the task's batch at its strategy's bound
+   * (`sequential` is a bound of 1).
+   */
   | {
       readonly code: "cap_reached";
       readonly inFlight: number;
       readonly max: number;
-      readonly scope?: "global" | "account";
+      readonly scope?: "global" | "account" | "batch";
     };
 
 export type ReasonCode = Reason["code"];
@@ -1310,12 +1434,27 @@ export interface Candidate {
   readonly spill?: { readonly window: string; readonly projectedPct: number };
 }
 
+/**
+ * Candidates one decision lists at most, and reasons one candidate carries: a
+ * reader refuses more. The candidate bound is a fleet at the relay's 32
+ * machines with two exclaves each; a larger one has the leader trim.
+ */
+export const DECISION_MAX_CANDIDATES = 64;
+export const CANDIDATE_MAX_REASONS = 32;
+
 /** One routing outcome: what `route-preview` returns and a task's record carries. */
 export interface Decision {
   readonly at: number;
   readonly chosen: Target | null;
   /** Scored candidates first, lowest total first; then the rejected, in fleet order. */
   readonly candidates: readonly Candidate[];
+  /**
+   * Present only when the leader cut candidates — past
+   * `DECISION_MAX_CANDIDATES`, or to fit the record (`STORE_MAX_CT_LENGTH`) —
+   * from the end, rejected ones first: how many. The list is then partial, and
+   * a reader says so rather than read it as every loser.
+   */
+  readonly trimmed?: number;
 }
 
 export interface Task {
@@ -1327,7 +1466,11 @@ export interface Task {
   readonly assignment?: Assignment;
   /** The routing decision that placed it — written with the reservation, never per tick. */
   readonly decision?: Decision;
-  /** A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code minted later still parses. */
+  /**
+   * A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code
+   * minted later still parses. Bounded by `TASK_FAILURE_LIMITS`: the message is
+   * often a daemon's, and it is stored.
+   */
   readonly failure?: { readonly code: string; readonly message: string };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
@@ -1378,16 +1521,43 @@ export interface VersionBound {
 
 /**
  * Payload of a `task:<id>` record (`op: "task"`, sealed to SCHEDULER_ID, from
- * its sealer). A reader opens it with `openAtRest` and keeps it only when the
- * version matches the relay's and `task.id` is the key's own id — without the
- * second, a token holder could create a fresh key holding another task's
- * version-1 blob and have it run twice. A leader also admits no `queued` task
- * whose `createdAt` is more than `STORE_TOMBSTONE_MS` old: past that its key's
- * tombstone may be gone, and only the age still refuses the blob put back.
+ * its sealer). A reader opens it with `openAtRest`, then keeps it only through
+ * `bindTaskRecord`, which holds every rule but the crypto (each a
+ * `RecordUnreadable` reason):
+ * - its version is the relay's, and `task.id` the key's own id — without the
+ *   second, a token holder could create a fresh key holding another task's
+ *   version-1 blob and have it run twice;
+ * - a version-1 record is `queued`, since a create is an app's enqueue and
+ *   only the leader moves a task on — so no client can create one running;
+ * - its `createdAt` is at most `REPLAY_WINDOW_MS` ahead of the reader's clock,
+ *   or a far-future stamp would let a blob outlive the admit rule below.
+ *
+ * A leader also admits no `queued` task whose `createdAt` is more than
+ * `STORE_TOMBSTONE_MS` old: past that its key's tombstone may be gone, and only
+ * the age still refuses the blob put back. That one is the admission's, not the
+ * reader's — the record still reads, to be failed and pruned.
  */
 export interface TaskRecord extends VersionBound {
   readonly task: Task;
 }
+
+/**
+ * Why a stored record was not read: `unopenable`, it did not decrypt or its
+ * `op` was not the slot's (`openAtRest`); `malformed`, its body failed the
+ * parser; the rest are `bindTaskRecord`'s rules. A reader skips and reports
+ * such a record and never deletes it on its own: after a PSK rotation every
+ * record is `unopenable`, and deleting them would wipe the queue.
+ */
+export const RECORD_UNREADABLE_REASONS = [
+  "unopenable",
+  "malformed",
+  "version_mismatch",
+  "key_mismatch",
+  "created_unqueued",
+  "created_ahead",
+] as const;
+
+export type RecordUnreadable = (typeof RECORD_UNREADABLE_REASONS)[number];
 
 /** `PauseRequest.until`: until a `resume`, or until the account's quota next resets. */
 export const PAUSE_UNTIL = ["resume", "reset"] as const;
@@ -1408,7 +1578,7 @@ export interface PauseHold {
 /** Holds at most: one for the queue plus one per account. */
 export const MAX_PAUSE_HOLDS = 32;
 
-/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader). */
+/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; M3 item 5, not written yet). */
 export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
 }
@@ -1418,11 +1588,25 @@ export interface PauseRecord extends VersionBound {
  * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
  * later, could neither show the session nor prove it never started (an older
  * daemon, or a ledger pruned past the reservation). Terminal: re-dispatching
- * could start a twin.
+ * could start a twin. `dependency_failed`, `dependency_missing` and
+ * `dependency_cycle`: an edge that can never release (`TaskDep`; M3, not set
+ * yet).
  */
-export const TASK_FAILURE_CODES = ["dispatch_unconfirmed"] as const;
+export const TASK_FAILURE_CODES = [
+  "dispatch_unconfirmed",
+  "dependency_failed",
+  "dependency_missing",
+  "dependency_cycle",
+] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
+
+/**
+ * `Task.failure` bounds, in UTF-16 units. A code is an identifier; a message a
+ * line for a person, cut by the writer — a daemon's can carry a whole stderr —
+ * and by a reader too, so an older leader's long one costs its tail, not the task.
+ */
+export const TASK_FAILURE_LIMITS = { code: 64, message: 512 } as const;
 
 /**
  * `not_leader`: the daemon the relay routed the request to runs no term — it
@@ -1464,7 +1648,17 @@ export const QUEUE_MAX_TASKS = 20;
 /** A `queue` reply's prompts are cut to this many UTF-16 units — enough to name a task, not to re-read it. */
 export const QUEUE_PROMPT_PREVIEW = 120;
 
-/** `op: "queue"` (no payload) → the leader's newest tasks, each with its latest decision. */
+/**
+ * `op: "queue"` → the leader's newest tasks, each with its latest decision.
+ * `tasks` asks for those ids only (at most `QUEUE_MAX_TASKS`) — what a
+ * `queue-changed` named, or the one task a verdict follows. M2's leaders ignore
+ * the payload and answer the newest, so a reader filters the reply again. Not
+ * sent yet (M3).
+ */
+export interface QueueRequest {
+  readonly tasks?: readonly string[];
+}
+
 export interface QueueResponse {
   /** `spec.prompt` is cut to `QUEUE_PROMPT_PREVIEW`; a ready task's `decision` is its latest, placed or not. */
   readonly tasks: readonly Task[];
@@ -1509,6 +1703,12 @@ export interface PauseResponse {
  */
 export interface QueueChanged {
   readonly at: number;
+  /**
+   * The tasks that changed, at most `QUEUE_MAX_TASKS`, so an app re-fetches
+   * those (`QueueRequest.tasks`) rather than the queue. Absent: more changed,
+   * or a holds change — re-fetch it whole. Not sent yet (M3 item 6).
+   */
+  readonly tasks?: readonly string[];
 }
 
 /** `op: "route-preview"` (a `TaskRequest`) → what routing would decide now, reserving nothing. */
