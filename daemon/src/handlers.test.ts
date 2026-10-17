@@ -301,12 +301,12 @@ describe("a task's launch is recorded before it runs", () => {
     const handle = createHandler(taskCtx);
     const spawning = handle(spawnTask("t-1"));
     await Bun.sleep(0);
-    const answered: SessionsResponse[] = [];
+    const answered: unknown[] = [];
     const overRelay = sessionsOf(handle).then((reply) => answered.push(reply));
     // The leader reaching its own machine, in process: the same wait.
     const inProcess = createLocalOps(taskCtx, "leader")
       .sessions()
-      .then((reply) => answered.push(reply as SessionsResponse));
+      .then((reply) => answered.push(reply));
     await Bun.sleep(10);
     expect(answered).toEqual([]);
     gate.resolve();
