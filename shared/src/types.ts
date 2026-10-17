@@ -359,9 +359,10 @@ export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
  * create. The leader prunes finished tasks to keep room; a record it cannot read
  * it reports and never deletes on its own — after a PSK rotation that would be
  * the whole queue — so clearing junk is a person's act. With
- * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; whether Cloudflare
- * sends a DO message that large is unverified (DESIGN.md, "The store", _Send
- * size_, which holds the arithmetic), and paging is the fix if it does not.
+ * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; a deployed relay sent
+ * one intact to a daemon and a Bun app leg, a browser's is unchecked (DESIGN.md,
+ * "The store", _Send size_, which holds the arithmetic), and paging is the fix
+ * if an app leg refuses it.
  */
 export const MAX_TASKS = 128;
 

@@ -273,7 +273,7 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
   item 4a), with `scheduler/src/task.ts` the table that runs; the store's half of takeover is
   below.
 
-**The store adapter (M3 item 3, landed 2026-10-17).** The leader runs on the relay's store;
+**The store adapter (M3 item 3, landed 2026-10-18).** The leader runs on the relay's store;
 `MemoryQueueStore` is the library's reference store and its tests'. The `QueueStore` is
 `daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as the store port
 left it (DESIGN.md _Scheduler_, "The queue store"). The library sees plain task bodies, plus each
@@ -400,8 +400,8 @@ surviving `follow` (daemon); and every filter reason, score component, stickines
 **Gaps, until later milestones close them.** (The queue was in memory on the leader — a
 leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the queue is the
 relay's and the next leader takes it over; `submit` is still the only way in for the PWA and MCP
-until item 6 moves them to `store-put`.) No deps, no batches,
-no caps beyond the global max, no pause, no alerts; the PWA polls `queue` for a task's progress
+until item 6 moves them to `store-put`.) Deps, batches, caps, `pause` and the escalation and
+spill alerts have landed (items 4a and 5); the PWA polls `queue` for a task's progress
 instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
@@ -452,7 +452,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
     `store-refused` with a `STORE_ERROR_CODES` code.
   - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
-    `task:` prefix lists in one frame (unverified in production; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
+    `task:` prefix lists in one frame (checked in production 2026-10-18 on the daemon leg and the app leg from Bun, not yet in a browser or WKWebView; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
     which an older relay ignores and answers whole, and `next` on the reply, which today's
     clients refuse rather than read a page as the whole queue.
   - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
@@ -601,10 +601,11 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     app-leg client: at least the PWA in a browser, ideally also the iOS WKWebView. A refused send
     is a client timeout plus a `store reply not sent` relay log line, or a closed socket. If it
     does not arrive, page with the reserved `after`/`next`.
-    **Landed 2026-10-17** (DESIGN.md _Scheduler_, "The queue store", "The leader"). Not done:
-    the production check above (no token or PSK was available to the implementer — a read-only
-    `store-list` with the production token answers it, and also shows whether junk is already
-    stored), and the Exit bullet's "kill the leader between spawn and verdict" e2e. `submit`
+    **Landed 2026-10-18** (DESIGN.md _Scheduler_, "The queue store", "The leader"). The
+    production check above passed on 2026-10-18 for the daemon leg and the app leg from Bun (128
+    records at 40 KiB listed intact as one 5.26 MB frame, DESIGN.md "The store", _Send size_);
+    the browser and the iOS WKWebView app leg are still open, and paging stays the fallback. Not
+    done: the Exit bullet's "kill the leader between spawn and verdict" e2e. `submit`
     admits inside its call rather than in the next pass, so its reply still carries `ready` for
     MCP's placement follow and the PWA's `auto` verdict.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
@@ -850,7 +851,7 @@ same PR, with the reason.
 11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
     (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 40 KiB (`STORE_MAX_CT_LENGTH`) and a
     create's 28 KiB (`STORE_CREATE_MAX_CT_LENGTH`), and `task:` holds 128 (`MAX_TASKS`), so the
-    whole queue lists in one frame with no paging (unverified in production; DESIGN.md "The store"). A task names its work ("implement this
+    whole queue lists in one frame with no paging (checked in production 2026-10-18, browser and WKWebView apart; DESIGN.md "The store"). A task names its work ("implement this
     Linear issue, and here are the details") and the session gathers the rest with tools; 8K
     characters is far more than that takes. A direct spawn is not bound by it. Measured: a
     create with every field at its bound and the prompt in two-byte characters fits the create

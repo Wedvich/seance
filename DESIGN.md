@@ -1243,7 +1243,7 @@ enforces is what it can see: who is asking, the key, a version and a size.
 
 - **Four requests, four replies, on both legs.** `store-list { id, prefix }` answers
   `store-listed { re, records }`: every live record under `task:` or `queue:`, ascending by key, as
-  one frame (unverified in production, sized in _Send size_ below; paging stays
+  one frame (checked in production 2026-10-18, sized in _Send size_ below; paging stays
   open — an `after` is ignored and answered whole, and `parseStoreReply` refuses a reply carrying
   `next`). `store-get { id, key }` answers
   `store-record { re, record }`, `null` for an absent or tombstoned key. `store-put` and
@@ -1341,22 +1341,24 @@ enforces is what it can see: who is asking, the key, a version and a size.
   putting at the new version would apply the write twice. In production a failed storage write
   is expected to reset the object and close the socket, so the client would see a dropped
   connection, not a reply; unverified (Cloudflare's docs say nothing on it).
-- **Send size is unverified in production.** Cloudflare's Durable Objects limits page lists
+- **Send size, checked in production 2026-10-18.** Cloudflare's Durable Objects limits page lists
   "WebSocket message size: 32 MiB (only for received messages)" for both SQLite- and KV-backed
   objects; the Workers limits page lists no WebSocket message limit; and the 2025-10-31 changelog
   that raised it from 1 MiB to 32 MiB names no direction. No limit on a message a DO _sends_ is
-  documented. The relay suite lists a full prefix through local workerd, which says nothing about
-  the deployed limit, so a full `store-listed` (`MAX_TASKS` 128 × `STORE_MAX_CT_LENGTH` 40 KiB,
-  about 5 MiB — the one place the arithmetic lives) sent by a deployed relay is unchecked. Item 2's
-  `RelayClient.listTasks` already lists `task:` in one frame on the app leg, so the check must
-  cover both legs: a full listing arrives intact at the daemon (Bun client) and at an app-leg
-  client — at least the PWA in a browser, ideally also the iOS WKWebView it runs in. Item 3's
-  takeover relies on one `store-list` (docs/scheduler.md) and its suite reads a full 128 × 40 KiB
-  listing through the adapter, but against the harness double, which says nothing about the
-  deployed limit: the production check stays open. If production refuses it, the fix is the
-  reserved `after`/`next` paging; until then a listing the adapter cannot read is a failed,
-  retried takeover, never a short queue. A refused send looks like a client timeout
-  plus a `store reply not sent` line on the relay, or a closed socket.
+  documented, and the relay suite lists a full prefix through local workerd, which says nothing
+  about the deployed limit. So a full `store-listed` (`MAX_TASKS` 128 × `STORE_MAX_CT_LENGTH`
+  40 KiB, about 5 MiB — the one place the arithmetic lives) was sent by a deployed relay: a
+  throwaway Worker on workers.dev from `relay/wrangler.jsonc` as it stands (only the `HUB` DO
+  binding), 128 `task:` records at 40 KiB ciphertext, each created at 28 KiB and overwritten at
+  40 KiB through the daemon leg's `store-put` as the nominated leader. `store-list task:` returned
+  one 5,262,028-byte `store-listed` frame, intact (count, keys, lengths, content, versions), on the
+  daemon leg (Bun relay client, 103–182 ms over 3 runs) and on the app leg from Bun (a raw `/app`
+  socket, 214–241 ms over 3 runs, and `RelayClient.listTasks`, 174 ms). `wrangler tail` showed no
+  `store reply not sent` and no error-level line, and no socket closed. **Not checked:** a browser
+  or the iOS WKWebView app leg, so the PWA's own read of a full listing stays open. If an app leg
+  refuses it, the fix is the reserved `after`/`next` paging; a listing the adapter cannot read is
+  a failed, retried takeover, never a short queue. A refused send looks like a client timeout plus
+  a `store reply not sent` line on the relay, or a closed socket.
 - **Older and newer clients.** Unknown fields are ignored (`after` on a list); an unknown `t`
   parses to null and is dropped; a store frame with no usable `id` is dropped and logged, the
   socket stays usable (the relay cannot answer what it cannot correlate); one with an `id` and a
@@ -1379,7 +1381,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
 - **One term is one run.** `lead { term }` builds the term's app-role leg, the `Fleet` over it, a
   `Scheduler` and its 30s tick timer; the same term again is a no-op, a different one ends the
   running term first. A term ends on `follow`, on the daemon's own relay socket dropping, on a
-  `not_leader` answer to anything it sent, on its leg's token being rejected (which also hands the
+  `not_leader` answer to anything it sent, on a `StoreRevoked` out of any store write (the tick,
+  a session event, a branch state, an app's request — one met in a request is answered
+  `not_leader`, so the app asks the next leader), on its leg's token being rejected (which also hands the
   role back to the relay, below), and with the daemon
   handle — and ending it stops the timer, drops the listener and stops the leg, so nothing of a
   term outlives it (the broker's discipline; the daemon suite counts timers back to baseline under
@@ -1478,7 +1482,11 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   the task is placed without waiting for the 30s timer; the scheduler mints the task id, never
   the app. The create is `queued` because the store refuses a version-1 record in any other
   state; one whose reply was lost is read back, since the leader's own write raises no
-  `store-changed` and a later leader would otherwise run an orphan the caller then resubmits. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
+  `store-changed` and a later leader would otherwise run an orphan the caller then resubmits. Where
+  the read-back fails too, the error says the task may have been stored (MCP and the PWA word an
+  `internal_error` as "may have queued": check the queue before submitting again). Once the create
+  has landed `submit` never rejects: a failed admit goes to `onError` and the next pass admits the
+  task, since a rejection would have the caller resubmit work that is already stored. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
   count and the submit it admits sit either side of awaits, so two arriving together would
   otherwise both pass it. `cancel` (`TaskRef`) is `Scheduler.cancel` (_The library_, below),
   answered with the task as it now stands (`TaskResponse`), and ticks, since a cancelled task
@@ -1925,7 +1933,7 @@ reuses the record helpers.
   A listing is checked too: a key outside `task:`, or listed twice, reads `key_mismatch` for
   every copy (`openTaskListing`).
 
-### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-17, M3 item 3
+### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
 The leader's `QueueStore` over the relay's store ops, so a task waiting for capacity survives a
 leader change and an app can enqueue with no leader at all. It is the adapter the library's port
@@ -1950,7 +1958,9 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   is `refused`. A `store-written` whose version is not the one expected, a timeout and a dropped
   socket are `indeterminate` — the write may have landed — which the library settles by reading
   the key again. `not_leader` and a disconnected daemon socket throw `StoreRevoked`, ending the
-  term: the relay no longer thinks it leads, or no reply can ever come. `delete` maps the same
+  term wherever it surfaces — `leader.ts`'s one `fail` takes it from the tick, the event paths,
+  takeover and an app's request alike: the relay no longer thinks it leads, or no reply can ever
+  come. `delete` maps the same
   way; the relay refuses a `queue:` delete, which the adapter never sends.
 - **The pause slot.** `getPause`/`putPause` seal and open `queue:pause` as op `pause-state`
   (`openAtRest` plus `parsePauseRecord`); an unreadable record reads as `key_mismatch`,
@@ -1959,8 +1969,10 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
 - **The relay client's store leg** (`RelayClient.store`). Store frames correlate on their own
   `id` in a pending map apart from sealed requests, as the app-client's do, and a reply counts
   only from the socket the request left on. A reply that does not parse settles `null`; a timeout
-  (`STORE_TIMEOUT_MS`, logged by id and `t` only — never a key, `env` or `ct`), a drop or `stop()`
-  fails the pending request; a reply with nothing pending is dropped. `store-changed` goes to
+  (`STORE_TIMEOUT_MS`, or `STORE_LIST_TIMEOUT_MS` for a `store-list`, whose full reply is about
+  5.2 MB; logged by id and `t` only — never a key, `env` or `ct`), a drop or `stop()` fails the
+  pending request, as does a send that throws (`disconnected`: nothing left, so the adapter ends
+  the term); a reply with nothing pending is dropped. `store-changed` goes to
   `onStoreChanged` (`parseStoreChanged`). No line is logged per accepted store read or write.
 - **Rejected: `MemoryQueueStore` as a fallback.** A leader that cannot reach the store must not
   run on a queue the next leader will not see; the option is a type error. The daemon suites run
