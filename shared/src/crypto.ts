@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, type Envelope, type OpName, type Plain } from "./types.ts";
+import { PROTOCOL_VERSION, type AtRestOp, type Envelope, type Plain } from "./types.ts";
 
 const IV_BYTES = 12;
 const PSK_BYTES = 32;
@@ -75,10 +75,24 @@ export async function open(key: CryptoKey, env: Envelope): Promise<Plain> {
   return JSON.parse(new TextDecoder().decode(pt)) as Plain;
 }
 
+/**
+ * `seal` for data at rest (`AT_REST_OPS`): a record or beat a reader opens with
+ * `openAtRest`, never a request. The id and ts are there because `Plain` has
+ * them; no reader checks either, since no replay guard sees the blob.
+ */
+export async function sealAtRest(
+  key: CryptoKey,
+  route: { readonly to: string; readonly from: string },
+  op: AtRestOp,
+  payload: unknown,
+): Promise<Envelope> {
+  return seal(key, route, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
+}
+
 /** A blob that opened under the PSK but was sealed for another op than the slot it arrived in. */
 export class OpMismatchError extends Error {
   constructor(
-    readonly expected: OpName,
+    readonly expected: AtRestOp,
     readonly actual: unknown,
   ) {
     super(`expected op ${expected}, got ${String(actual)}`);
@@ -87,13 +101,13 @@ export class OpMismatchError extends Error {
 }
 
 /**
- * `open` for data at rest — a blob the relay re-sends on every push, so the
- * replay guard must not see it. With no guard, the AAD `from` binds it to its
- * machine and `op` is all that says what kind of blob it is: payload shape
- * alone would let a `status` (or a later `task`) read as whatever its slot
- * expects. Throws `OpMismatchError` unless `plain.op === op`.
+ * `open` for data at rest — a blob the relay re-sends on every push, or holds
+ * in its store, so the replay guard must not see it. With no guard, the AAD
+ * `from` binds it to its sealer and `op` is all that says what kind of blob it
+ * is: payload shape alone would let a `status` (or a `task`) read as whatever
+ * its slot expects. Throws `OpMismatchError` unless `plain.op === op`.
  */
-export async function openAtRest(key: CryptoKey, env: Envelope, op: OpName): Promise<Plain> {
+export async function openAtRest(key: CryptoKey, env: Envelope, op: AtRestOp): Promise<Plain> {
   const plain = await open(key, env);
   if (plain.op !== op) throw new OpMismatchError(op, plain.op);
   return plain;
