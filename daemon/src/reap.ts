@@ -5,6 +5,7 @@ import type { RepoEntry } from "@seance/shared";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
+import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import { runDir } from "./paths.ts";
 import {
@@ -20,7 +21,7 @@ import {
   patchIndex,
   pendingChanges,
   pruneWorktrees,
-  reapGit,
+  readPruneLog,
   removeWorktree,
   resolveRemoteHead,
   type BranchVerdict,
@@ -29,7 +30,7 @@ import {
 } from "./reap-git.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { classifyPane, listPanes, paneInfo, type PaneState } from "./sessions.ts";
-import { pidAlive } from "./state.ts";
+import { pidAlive, writeAtomic } from "./state.ts";
 import { tmux } from "./tmux.ts";
 
 /** Repos worked at once: each is a handful of git processes, and a fetch may sit on the network. */
@@ -56,6 +57,11 @@ export interface ReapOptions {
   /** Stops between repos — the daemon's stop() ends a scheduled run here. */
   readonly signal?: AbortSignal;
   readonly deadPaneMinAgeMs?: number;
+  /**
+   * Where reap records its prunes (`PruneLog`). Required, not defaulted to
+   * `pruneLogPath()`: a test that forgot it would write the developer's real state dir.
+   */
+  readonly pruneLogPath: string;
 }
 
 export interface RepoReport {
@@ -161,14 +167,21 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   const paneDirs = await Promise.all((await listPanes()).map((pane) => canonical(pane.path)));
 
   const { targets, refused } = await mainClones(opts.repos);
+  const pruneLog = opts.dryRun ? {} : await readPruneLog(opts.pruneLogPath);
   const reaped = await mapLimit(targets, REPO_CONCURRENCY, async ({ repo, commonDir }) =>
     opts.signal?.aborted === true
       ? skipped(repo.name, "stopped before reaching it")
-      : reapRepo(repo, commonDir, opts, now, paneDirs),
+      : reapRepo(repo, commonDir, opts, now, paneDirs, pruneLog[commonDir] ?? 0),
   );
   const repos = [...reaped, ...refused];
 
   if (!opts.dryRun) {
+    const pruned = targets.filter((_, i) => reaped[i]?.fetch?.kind === "fetched");
+    if (pruned.length > 0) {
+      const next = { ...pruneLog, ...Object.fromEntries(pruned.map(({ commonDir }) => [commonDir, now])) };
+      // Unwritten, the next run fetches again — never worth failing a run that already reaped.
+      await writeAtomic(opts.pruneLogPath, next).catch(() => {});
+    }
     await opts.audit.done({
       worktrees: repos.reduce((sum, repo) => sum + repo.removedWorktrees.length, 0),
       branches: repos.reduce((sum, repo) => sum + repo.deletedBranches.length, 0),
@@ -317,9 +330,10 @@ async function reapRepo(
   opts: ReapOptions,
   now: number,
   paneDirs: readonly string[],
+  lastPrunedAt: number,
 ): Promise<RepoReport> {
   // A dry run writes nothing, a fetch's refs included, so it judges by the refs on disk.
-  const fetch = opts.dryRun ? undefined : await fetchIfStale(repo.path, commonDir, now);
+  const fetch = opts.dryRun ? undefined : await fetchIfStale(repo.path, lastPrunedAt, now);
   let defaultBranch = repo.defaultBranch;
   if (defaultBranch === null && !opts.dryRun && (await resolveRemoteHead(repo.path))) {
     defaultBranch = await readDefaultBranch(repo.path);
@@ -332,7 +346,7 @@ async function reapRepo(
   }
   const base = `refs/remotes/origin/${defaultBranch}`;
   const [baseTreeOut, worktrees, branches] = await Promise.all([
-    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", `${base}^{tree}`]),
+    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${base}^{tree}`]),
     listWorktrees(repo.path),
     listBranches(repo.path),
   ]);

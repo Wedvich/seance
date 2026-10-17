@@ -202,7 +202,9 @@ the same op:
   Old daemons ignore the field, so the leader only reserves against daemons advertising it.
 - `baseBranch?: string` (M4, stacked deps) — start the worktree from this branch instead of
   the default. Resolved against the repo's refs (`origin/<b>` or local), never interpolated;
-  unresolvable → new code `base_not_found`. Through `shq()` if it ever reaches the shell
+  unresolvable → new code `base_not_found`. Fetched before launch the way the default branch
+  already is (`base-fetch.ts`, DESIGN.md "Worktree spawns fetch first"), so a stacked task never
+  starts from a stale `origin/<b>`. Through `shq()` if it ever reaches the shell
   string. Useful from the PWA directly too. Old daemons ignoring it is wrong rather than
   harmless (B would start from main), so the scheduler only sends it to daemons that advertise
   support.

@@ -76,11 +76,12 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     expect(repos[0]?.defaultBranch).toBe("main");
   });
 
-  // The base itself is claude's (`--worktree` branches from origin/<default>
+  // The worktree itself is claude's (`--worktree` branches from origin/<default>
   // unless the machine sets worktree.baseRef to "head"), and the stub never
-  // creates a worktree — so what is asserted here is the daemon's whole share:
-  // the flag goes out, and the checkout is left exactly as it was found.
-  test("worktree spawn: passes --worktree, touches no git state, detection sees it", async () => {
+  // creates one — so what is asserted here is the daemon's whole share: the
+  // flag goes out, origin/<default> is fetched up to origin's tip, and the
+  // checkout is otherwise left exactly as it was found.
+  test("worktree spawn: passes --worktree, fetches the base, leaves HEAD, detection sees it", async () => {
     await fixture.advanceOrigin();
     const before = await headOf(fixture.repoPath);
     const beforeTracking = await headOf(fixture.repoPath, "origin/main");
@@ -99,11 +100,12 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const argv = await stub.argv();
     expect(argv[argv.indexOf("--worktree") + 1]).toBe("fix-tests");
 
-    // The guard for the deleted preparation, with origin ahead of the clone so
-    // both halves can move: HEAD stays put (no ff-only merge) and the tracking
-    // ref stays stale (no fetch) — claude owns both, and the stub is not claude.
+    // With origin ahead of the clone, both halves could move: the tracking ref
+    // reaches origin's tip (the base claude will branch from), while HEAD stays
+    // put — the deleted ff-only merge must not come back with the fetch.
     expect(await headOf(fixture.repoPath)).toBe(before);
-    expect(await headOf(fixture.repoPath, "origin/main")).toBe(beforeTracking);
+    expect(await headOf(fixture.repoPath, "origin/main")).not.toBe(beforeTracking);
+    expect(await headOf(fixture.repoPath, "origin/main")).toBe(await headOf(fixture.barePath, "main"));
 
     // the window exists in the main session and the pane survived
     const windows = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"]);
@@ -221,6 +223,64 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     } finally {
       await git(fixture.repoPath, ["checkout", "-q", "main"]);
       await git(fixture.repoPath, ["branch", "-qD", "side"]);
+    }
+  });
+
+  // Parallel spawns into one clone share a fetch: two racing for the tracking
+  // ref's lock would leave the loser reporting a failure that never happened.
+  test("parallel worktree spawns into one clone: both land on the fetched tip, no note", async () => {
+    await fixture.advanceOrigin();
+    const outcomes = await Promise.all(
+      ["Twin A", "Twin B"].map((title) => spawnSession({ repo: "myrepo", mode: "worktree", title }, repos, WAIT)),
+    );
+    expect(outcomes.map((o) => o.note)).toEqual([undefined, undefined]);
+    expect(await headOf(fixture.repoPath, "origin/main")).toBe(await headOf(fixture.barePath, "main"));
+    await Promise.all(outcomes.map((o) => killWindow(o.window)));
+  });
+
+  // Offline or auth-less is no reason to refuse a spawn: it goes ahead on the
+  // refs on disk, and the note is the only place the staleness can surface.
+  test("unreachable origin: the spawn still lands, and the note says the base may be stale", async () => {
+    // Own fetch first, so "last fetched" holds without an earlier test having fetched.
+    await git(fixture.repoPath, ["fetch", "-q", "origin"]);
+    await git(fixture.repoPath, ["remote", "set-url", "origin", join(base, "nowhere.git")]);
+    try {
+      const outcome = await spawnSession({ repo: "myrepo", mode: "worktree", title: "Offline" }, repos, WAIT);
+      expect(outcome.registered).toBe(true);
+      expect(outcome.note).toContain("couldn't fetch origin/main");
+      expect(outcome.note).toContain("last fetched");
+      await killWindow(outcome.window);
+    } finally {
+      await git(fixture.repoPath, ["remote", "set-url", "origin", fixture.barePath]);
+    }
+  });
+
+  test("here spawn on a checkout behind origin: notes how far, and never moves HEAD", async () => {
+    await fixture.advanceOrigin();
+    const before = await headOf(fixture.repoPath);
+    const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Behind" }, repos, WAIT);
+    const behind = (await git(fixture.repoPath, ["rev-list", "--count", "HEAD..origin/main"])).stdout.trim();
+    expect(Number(behind)).toBeGreaterThan(0);
+    expect(outcome.note).toContain(`${behind} commit`);
+    expect(await headOf(fixture.repoPath)).toBe(before);
+    expect(await headOf(fixture.repoPath, "origin/main")).toBe(await headOf(fixture.barePath, "main"));
+    await killWindow(outcome.window);
+  });
+
+  // "Behind" is measured against the default branch, so a checkout on any
+  // other branch has nothing to measure — and no fetch is worth running for it.
+  test("here spawn on a feature branch: no fetch, no note", async () => {
+    await fixture.advanceOrigin();
+    const beforeTracking = await headOf(fixture.repoPath, "origin/main");
+    await git(fixture.repoPath, ["checkout", "-q", "-b", "side-here"]);
+    try {
+      const outcome = await spawnSession({ repo: "myrepo", mode: "here", title: "Side Here" }, repos, WAIT);
+      expect(outcome.note).toBeUndefined();
+      expect(await headOf(fixture.repoPath, "origin/main")).toBe(beforeTracking);
+      await killWindow(outcome.window);
+    } finally {
+      await git(fixture.repoPath, ["checkout", "-q", "main"]);
+      await git(fixture.repoPath, ["branch", "-qD", "side-here"]);
     }
   });
 

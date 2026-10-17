@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
+import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
 import { isRegistered, listPanes, paneRunningTask } from "./sessions.ts";
@@ -112,18 +113,20 @@ interface Prepared {
 }
 
 /**
- * Worktree mode does no git work, deliberately. `claude --worktree` resolves the
- * default branch, fetches, and runs `git worktree add --no-track -B <branch>
- * <path> origin/<default>` itself — its `worktree.baseRef` setting defaults to
+ * Worktree mode creates no worktree, deliberately. `claude --worktree` resolves
+ * the default branch and runs `git worktree add --no-track -B <branch> <path>
+ * origin/<default>` itself — its `worktree.baseRef` setting defaults to
  * `"fresh"`, meaning exactly that, and only a machine that sets it to `"head"`
- * branches off the checkout instead.
+ * branches off the checkout instead. Claude fetches only when `FETCH_HEAD` is
+ * over a day old, though, so `freshenBase` fetches first (DESIGN.md, "Worktree
+ * spawns fetch first").
  *
- * This used to fetch and then `git merge --ff-only origin/<default>` in the main
+ * This used to also `git merge --ff-only origin/<default>` in the main
  * checkout, ported from `/spawn` on the belief that claude branches off HEAD.
  * That belief was already wrong: the ff never moved the base, only the machine
  * owner's HEAD, and the two notes it emitted when the checkout was dirty or on
  * another branch told the phone something untrue. Don't restore it — a remote
- * spawn has no business moving a local HEAD, and the fetch is claude's.
+ * spawn has no business moving a local HEAD.
  */
 function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
@@ -331,6 +334,10 @@ async function spawnUntracked(
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
   }
 
+  // Network, so it runs beside the local steps; it never throws, so nothing
+  // between here and its await can leave it rejecting unobserved.
+  const freshened = freshenBase(repo, request.mode);
+
   // answer claude's trust dialog before it can block the session (fails open — see trust.ts)
   await ensureRepoTrusted(repo.path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
 
@@ -340,6 +347,8 @@ async function spawnUntracked(
 
   const prepared = request.mode === "here" ? prepareHere(repo) : prepareWorktree(repo, worktreeName);
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
+  // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
+  const note = await freshened;
 
   // For the tmux-rename mod (claude-mods/), which keeps exactly this suffix on a
   // `/rename`'s session name and off its window. Per window as well as
@@ -380,5 +389,11 @@ async function spawnUntracked(
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
 
-  return { window: windowName, path: prepared.resultPath, registered, handle: windowId };
+  return {
+    window: windowName,
+    path: prepared.resultPath,
+    registered,
+    handle: windowId,
+    ...(note === undefined ? {} : { note }),
+  };
 }

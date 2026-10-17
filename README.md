@@ -366,15 +366,15 @@ a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
-`worktree-<slug>` branch. Claude Code does the git work — it branches from
-`origin/<default>` and fetches when its copy is a day stale — so what your checkout is
-on, and whether it is clean, changes nothing and is left untouched. If it can't reach
-origin it says so in the session and branches off your checkout instead, so a spawn
-that reports success on an offline machine may be on an older base than you expect.
-(A machine whose
+`worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
+then Claude Code branches from it, so what your checkout is on, and whether it is
+clean, changes nothing and is left untouched. If origin can't be reached the spawn
+still goes ahead on the last-fetched `origin/<default>`, and its reply carries a note
+saying so and how old that fetch is. (A machine whose
 `settings.json` sets `worktree.baseRef` to `"head"` branches from its checkout
 instead; that is claude's setting, not séance's.) `--here` skips the worktree and runs
-in the checkout you already have.
+in the checkout you already have, as it is — the daemon never pulls it, but when it is
+on the default branch and behind origin, the reply notes by how many commits.
 
 `despawn` closes the window only. A worktree session is told to keep its worktree on
 the way out, so the work stays where it was; cleaning up worktrees and branches is

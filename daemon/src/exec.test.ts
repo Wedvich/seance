@@ -25,6 +25,17 @@ describe("exec stdin", () => {
   });
 });
 
+describe("exec timeout", () => {
+  // What a fetch on a dead network looks like: git killed, its transport child
+  // still alive and still holding the pipes the result reads to EOF.
+  test("killGroup ends at the timeout even when a grandchild holds the pipes", async () => {
+    const started = Date.now();
+    const result = await exec(["sh", "-c", "sleep 30 & wait"], { timeoutMs: 250, killGroup: true });
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});
+
 describe("exec environment", () => {
   // The tmux server the daemon may cold-boot inherits this env, and every
   // Claude session on the box inherits it from there — so a leak here is a leak
