@@ -1383,7 +1383,11 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   running term first. A term ends on `follow`, on the daemon's own relay socket dropping, on a
   `not_leader` answer to anything it sent, on a `StoreRevoked` out of any store write (the tick,
   a session event, a branch state, an app's request — one met in a request is answered
-  `not_leader`, so the app asks the next leader), on its leg's token being rejected (which also hands the
+  `not_leader`, so the app asks the next leader, except where a write had already succeeded or
+  an effect had already run: a revoked admit after a submit's create returns the task as queued,
+  a revoked read-back after a lost create is `internal_error` "may have been stored", and a
+  revoked `cancelled` write after its despawn is `internal_error` too — the session may already
+  have ended, and asking again is safe), on its leg's token being rejected (which also hands the
   role back to the relay, below), and with the daemon
   handle — and ending it stops the timer, drops the listener and stops the leg, so nothing of a
   term outlives it (the broker's discipline; the daemon suite counts timers back to baseline under
@@ -1459,8 +1463,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `T | SchedulerError` (`SCHEDULER_ERROR_CODES`): `invalid_request`, `not_ready` while takeover
   runs (the queue is the store's unreconciled view until then), `queue_full` (`submit` past
   `MAX_ACTIVE_TASKS`), `cancel`'s own (`task_not_found`, `dispatching`, `finished`,
-  `despawn_failed`, `conflict`), `internal_error` when the handler throws, and `not_leader`
-  (below). `queue`
+  `despawn_failed`, `conflict`), `internal_error` when the handler throws or a cancel's despawn
+  ran and the `cancelled` write was then revoked (`unrecorded` in the library: the session may
+  already have ended, the term ends, and MCP adds its "may have landed anyway" because
+  `internal_error` is a transport code), and `not_leader` (below). `queue`
   replies with the newest `QUEUE_MAX_TASKS` tasks, prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
   its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
   3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
@@ -1484,7 +1490,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   state; one whose reply was lost is read back, since the leader's own write raises no
   `store-changed` and a later leader would otherwise run an orphan the caller then resubmits. Where
   the read-back fails too, the error says the task may have been stored (MCP and the PWA word an
-  `internal_error` as "may have queued": check the queue before submitting again). Once the create
+  `internal_error` as "may have queued": check the queue before submitting again); a read-back
+  that answers and finds nothing says the task was not stored, as of that read. Once the create
   has landed `submit` never rejects: a failed admit goes to `onError` and the next pass admits the
   task, since a rejection would have the caller resubmit work that is already stored. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
   count and the submit it admits sit either side of awaits, so two arriving together would
@@ -1972,7 +1979,8 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   (`STORE_TIMEOUT_MS`, or `STORE_LIST_TIMEOUT_MS` for a `store-list`, whose full reply is about
   5.2 MB; logged by id and `t` only — never a key, `env` or `ct`), a drop or `stop()` fails the
   pending request, as does a send that throws (`disconnected`: nothing left, so the adapter ends
-  the term); a reply with nothing pending is dropped. `store-changed` goes to
+  the term; the socket is closed too, since it may still read open and only a redial
+  re-registers, which is what stops the relay naming this daemon leader); a reply with nothing pending is dropped. `store-changed` goes to
   `onStoreChanged` (`parseStoreChanged`). No line is logged per accepted store read or write.
 - **Rejected: `MemoryQueueStore` as a fallback.** A leader that cannot reach the store must not
   run on a queue the next leader will not see; the option is a type error. The daemon suites run
