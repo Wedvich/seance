@@ -541,7 +541,7 @@ async function spawnAuto(
         );
       }
       return errorResult(
-        `task ${id} was queued, then left the queue before it was placed — it may have been cancelled or pruned. Check get_sessions before submitting again.`,
+        `task ${id} was queued, then left the queue before it was placed — most likely a mixed-fleet rollout: a leader still running an older seanced took over and does not hold it. Check get_sessions before submitting again.`,
       );
     }
     task = found;

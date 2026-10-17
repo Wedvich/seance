@@ -873,12 +873,14 @@ describe("spawn_session on auto", () => {
     expect(fake.requests.filter((r) => r.op === "queue")).toHaveLength(1);
   });
 
-  test("a task that leaves the queue before it is placed says so, without blaming the leader", async () => {
+  test("a task that leaves the queue before it is placed names a mixed-fleet leader, not a cancel or a prune", async () => {
     const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [], at: 6_000 }]);
     const { text, error } = await callAuto(fake);
     expect(error).toBe(true);
     expect(text).toContain("left the queue before it was placed");
-    expect(text).not.toContain("leader");
+    expect(text).toContain("a leader still running an older seanced took over");
+    // A cancelled task stays visible and only a finished one is pruned, so neither can be the cause.
+    expect(text).not.toMatch(/cancelled|pruned/u);
   });
 
   test("a task pushed out of a full queue view is not reported as dropped", async () => {
