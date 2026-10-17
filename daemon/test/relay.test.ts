@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,6 +117,50 @@ async function registerWithRepo(relay: TestRelay, repoName: string): Promise<{ d
     }
   }
   throw new Error(`no register with repo ${repoName}`);
+}
+
+/**
+ * A `git` first on PATH that parks the first `symbolic-ref` run in a `slowrepo`
+ * until released, then execs the real one. The daemon resolves git through PATH
+ * at each exec, so this holds one scan at the boundary without touching
+ * daemon/src.
+ */
+async function holdGitInSlowrepo(dir: string): Promise<{
+  readonly heldMarker: string;
+  readonly release: () => Promise<void>;
+  readonly dispose: () => void;
+}> {
+  const realGit = Bun.which("git");
+  if (realGit === null) throw new Error("git not on PATH");
+  const shimDir = join(dir, "shim");
+  await mkdir(shimDir);
+  const heldMarker = join(dir, "held");
+  const releaseMarker = join(dir, "release");
+  const shim = join(shimDir, "git");
+  await writeFile(
+    shim,
+    [
+      "#!/bin/bash",
+      `if [ "$1" = symbolic-ref ] && [ "\${PWD##*/}" = slowrepo ] && mkdir "${heldMarker}" 2>/dev/null; then`,
+      `  while [ ! -e "${releaseMarker}" ]; do sleep 0.02; done`,
+      "fi",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // Pays macOS's first-exec scan here rather than inside the poll for the hold.
+  await Bun.spawn([shim, "--version"], { stdout: "ignore" }).exited;
+  const previousPath = process.env["PATH"];
+  process.env["PATH"] = `${shimDir}:${previousPath ?? ""}`;
+  return {
+    heldMarker,
+    release: () => writeFile(releaseMarker, ""),
+    dispose: () => {
+      if (previousPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previousPath;
+    },
+  };
 }
 
 async function appRequest(
@@ -319,6 +364,47 @@ describe("daemon ↔ relay integration", () => {
     } finally {
       daemon.stop();
       relay.stop();
+      await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
+    }
+  });
+
+  test("a rescan asked for mid-scan runs after it, so the older scan never takes the new clone back out", async () => {
+    // The boot rescan is held at its git boundary: a clone with no origin HEAD
+    // file costs a `git symbolic-ref`, which a PATH shim parks until released.
+    // Overlapping, the app's scan committed first and the held one — listed
+    // before `newrepo` existed — landed last, dropping it from the registered set.
+    const dir = await mkdtemp(join(base, "held-"));
+    process.env["SEANCE_STATE_DIR"] = join(dir, "state");
+    const slowRoot = join(dir, "slow");
+    await mkdir(join(slowRoot, "slowrepo", ".git"), { recursive: true });
+    const shim = await holdGitInSlowrepo(dir);
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, { extraRoots: [slowRoot] });
+    try {
+      // Fresh state, so the boot register carries no repos to match on.
+      const { deviceId } = await relay.registers.next();
+      await pollUntil(() => existsSync(shim.heldMarker), "the boot rescan to reach git");
+      await mkdir(join(fixture.root, "newrepo", ".git"), { recursive: true });
+      const { id } = await appRequest(relay, deviceId, "rescan", {});
+      // A non-event, so a sleep: the answer must wait for the held scan.
+      await Bun.sleep(300);
+      expect(relay.messages.size).toBe(0);
+      await shim.release();
+      const response = await appReceive(relay);
+      expect(response.re).toBe(id);
+      expect((response.payload as RescanResponse).repos.map((r) => r.name)).toContain("newrepo");
+      // Same socket, register first: every register either scan sent is queued by now.
+      const registers: string[][] = [];
+      while (relay.registers.size > 0) {
+        const plain = await open(appKey, (await relay.registers.next()).info);
+        registers.push((plain.payload as MachineInfo).repos.map((r) => r.name));
+      }
+      expect(registers.at(-1)).toEqual(["myrepo", "newrepo", "slowrepo"]);
+    } finally {
+      await shim.release();
+      daemon.stop();
+      relay.stop();
+      shim.dispose();
       await rm(join(fixture.root, "newrepo"), { recursive: true, force: true });
     }
   });

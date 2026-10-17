@@ -144,6 +144,13 @@ product code touched:
   `PATH="<shim dir>:$PATH" bun run test daemon/test/relay.test.ts` made the
   status test's stale-stamp race fail every run (#83).
 
+- **A held git.** The same PATH trick for `git`. A repo scan is file reads
+  except for a clone with no `origin/HEAD` on disk, which costs one
+  `git symbolic-ref` — so a `.git` dir with nothing in it, under an extra repo
+  root, gives a scan a call to park. `holdGitInSlowrepo` in
+  `daemon/test/relay.test.ts` holds the boot rescan there until the test
+  releases it, which made two overlapping rescans drop a new clone every run.
+
 - **A tmux setting.** The private servers read the developer's config, and tmux
   loads `$XDG_CONFIG_HOME/tmux/tmux.conf` after `~/.tmux.conf`, so a file there
   overrides it for every server a run boots. `set -g automatic-rename-format ''`
