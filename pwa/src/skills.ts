@@ -42,6 +42,8 @@ export function skillIndex(machines: readonly Machine[]): SkillIndex {
     const perSkill = new Map<string, string[]>();
     for (const exclave of exclaves) {
       for (const name of exclave.skills) {
+        // Whitespace can't sit inside the `/name` token, so it could never be typed or completed.
+        if (/\s/u.test(name)) continue;
         const ids = perSkill.get(name) ?? [];
         if (!ids.includes(exclave.id)) ids.push(exclave.id);
         perSkill.set(name, ids);

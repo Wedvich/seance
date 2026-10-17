@@ -24,6 +24,11 @@ function machine(name: string, exclaves?: readonly ExclaveInfo[], connected = tr
 const names = (entries: readonly { name: string }[]): readonly string[] => entries.map((e) => e.name);
 
 describe("skillIndex", () => {
+  test("names with whitespace are skipped: they can't form a /name token", () => {
+    const index = skillIndex([machine("A", [exclave("default", ["ok", "has space", "tab\tname"])])]);
+    expect(names(index.skills)).toEqual(["ok"]);
+  });
+
   test("unions names across machines and exclaves, once each, with where they come from", () => {
     const index = skillIndex([
       machine("Studio", [exclave("default", ["ship", "dataviz"])]),
@@ -111,6 +116,20 @@ describe("describeSources", () => {
     expect(ship === undefined ? null : describeSources(ship, index.machines)).toBe(
       "MacBook Pro (default, work) · Tower",
     );
+  });
+
+  test("a skill in only one of several exclaves names just that one", () => {
+    const index = skillIndex([
+      machine("MacBook Pro", [exclave("default", []), exclave("work", ["ship"])]),
+      machine("Tower", [exclave("default", ["x"])]),
+    ]);
+    const ship = index.skills.find((s) => s.name === "ship");
+    expect(ship === undefined ? null : describeSources(ship, index.machines)).toBe("MacBook Pro (work)");
+  });
+
+  test("the same exclave id listed twice on a machine counts once", () => {
+    const index = skillIndex([machine("A", [exclave("work", ["ship"]), exclave("work", ["ship"])])]);
+    expect(index.skills[0]?.sources[0]?.exclaves).toEqual(["work"]);
   });
 
   test("one reporting machine: its name, not a count", () => {

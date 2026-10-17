@@ -111,6 +111,17 @@ describe("describeExclave", () => {
     expect(info.skills).toEqual(["kept", "linked"]);
   });
 
+  test("a SKILL.md that is a symlink to a regular file counts: stat follows it", async () => {
+    const home = await makeHome();
+    const configDir = join(home, ".claude-work");
+    const dir = join(configDir, "skills", "linked-md");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(home, "real-skill.md"), "");
+    await symlink(join(home, "real-skill.md"), join(dir, "SKILL.md"));
+    const info = await describeExclave(named(home, "work"));
+    expect(info.skills).toEqual(["linked-md"]);
+  });
+
   test("signed out: no config dir, unparsable json, or no oauthAccount", async () => {
     const home = await makeHome();
     const signedOut = { accountId: null, extraUsageEnabled: null, authOk: false, skills: [] };

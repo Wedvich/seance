@@ -3157,7 +3157,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   keyboard could cover; it opens from the prompt text, never focus, and its rows take
   `pointerdown` without default so a tap neither blurs the field nor drops the keyboard. With
   matches, Enter and Tab pick and never spawn; with none it says the name goes as typed and the
-  keys behave as without it — an unknown name is not an error (the filter lets it pass).
+  keys behave as without it — an unknown name is not an error (M4's routing filter, still open, will let it pass).
 
 ## MCP server (`seanced mcp`) — designed 2026-08-03
 

@@ -386,14 +386,18 @@ export function SpawnScreen(props: {
   const skills = useMemo(() => skillIndex(machines), [machines]);
   const query = skillQuery(form.prompt);
   const [dismissed, setDismissed] = useState<string | null>(null);
+  // Escape hides only until the next edit: once the prompt differs, forget it,
+  // or typing back to the same text would stay hidden.
+  if (dismissed !== null && dismissed !== form.prompt) setDismissed(null);
   const pickerOpen = query !== null && skills.skills.length > 0 && dismissed !== form.prompt;
   const matches = useMemo(
     () => (pickerOpen && query !== null ? matchSkills(skills.skills, query) : []),
     [pickerOpen, query, skills],
   );
-  // Tied to the query it was moved under, so typing resets the highlight to the
-  // top without an effect, and a shrinking list can't leave it past the end.
-  const [cursor, setCursor] = useState({ query: "", index: 0 });
+  // Reset to the top on every query change (render-time, no effect), so editing
+  // away and back never restores an old highlight; clamped if the list shrinks.
+  const [cursor, setCursor] = useState<{ query: string | null; index: number }>({ query, index: 0 });
+  if (cursor.query !== query) setCursor({ query, index: 0 });
   const active = cursor.query === query && cursor.index < matches.length ? cursor.index : 0;
   const pickSkill = (name: string): void => {
     actions.setPrompt(completeSkill(name));
@@ -408,12 +412,17 @@ export function SpawnScreen(props: {
     // With nothing to pick the prompt goes as typed: Enter is a newline and
     // Cmd/Ctrl+Enter still spawns.
     if (matches.length === 0 || query === null) return false;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const plain = !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey);
+    if (plain && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
       const step = event.key === "ArrowDown" ? 1 : -1;
       setCursor({ query, index: (active + step + matches.length) % matches.length });
       return true;
     }
-    if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
+    // Cmd/Ctrl+Enter falls through to spawn, Shift+Enter to a newline.
+    const pick =
+      (event.key === "Enter" && !(event.metaKey || event.ctrlKey || event.shiftKey)) ||
+      (event.key === "Tab" && !event.shiftKey);
+    if (pick) {
       const entry = matches[active];
       if (entry !== undefined) pickSkill(entry.name);
       return true;
@@ -456,6 +465,8 @@ export function SpawnScreen(props: {
             className={pickerOpen ? "prompt-input prompt-input-compact" : "prompt-input"}
             rows={pickerOpen ? 1 : undefined}
             aria-labelledby="prompt-label"
+            role="combobox"
+            aria-expanded={pickerOpen}
             aria-autocomplete="list"
             aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
             aria-activedescendant={pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined}
