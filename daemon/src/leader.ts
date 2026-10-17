@@ -1,17 +1,11 @@
-import {
-  MemoryQueueStore,
-  StoreRevoked,
-  Scheduler,
-  type QueueStore,
-  type SchedulerConfig,
-  type SessionSource,
-} from "@seance/scheduler";
+import { StoreRevoked, Scheduler, type QueueStore, type SchedulerConfig, type SessionSource } from "@seance/scheduler";
 import {
   APP_ID,
   isSchedulerOp,
   parseBranchState,
   parseSessionEvent,
   quote,
+  STORE_PREFIXES,
   type BranchState,
   type Envelope,
   type Plain,
@@ -23,14 +17,15 @@ import type { LocalOps } from "./handlers.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
+import { createQueueStore, type StoreLeg } from "./queue-store.ts";
 
 /**
  * The scheduler role (docs/scheduler.md, "`leader.ts`"; DESIGN.md, Scheduler):
- * the term lifecycle and the daemon's entry to it. With its store and fleet
- * adapters (`leader-adapters.ts`) and its app-request handlers
- * (`leader-requests.ts`), the only daemon modules that import `scheduler/`
- * — `LEADER_MODULES` in the layering test enforces it — so the library can move to a
- * fixed box behind two new adapters.
+ * the term lifecycle and the daemon's entry to it. With its store adapter
+ * (`queue-store.ts`), fleet adapter (`leader-adapters.ts`) and app-request
+ * handlers (`leader-requests.ts`), the only daemon modules that import
+ * `scheduler/` — `LEADER_MODULES` in the layering test enforces it — so the
+ * library can move to a fixed box behind two new adapters.
  *
  * One term is one run: `lead { term }` builds an app-role leg of its own, the
  * `Fleet` over it, a `Scheduler`, and a tick timer. `follow`, the daemon's
@@ -45,7 +40,7 @@ import { log } from "./log.ts";
  */
 
 // For the daemon's tests, which the layering rule keeps from importing `scheduler/` themselves.
-export { MemoryQueueStore, type QueueStore, type Task } from "@seance/scheduler";
+export { MemoryQueueStore, StoreRevoked, type QueueStore, type StoreEntry, type Task } from "@seance/scheduler";
 
 /** The library's own cadence for ready tasks (docs/scheduler.md, Routing). */
 const TICK_INTERVAL_MS = 30_000;
@@ -60,7 +55,20 @@ export interface LeaderRelay extends AppRelay {
   readonly deliver: (env: Envelope) => Promise<void>;
 }
 
-export interface LeaderOpts {
+/**
+ * Where the leader's tasks live. Production gives `storeLeg` and `key`, and
+ * each term gets its own adapter over them (`createQueueStore`), so a late
+ * pass can never write under its successor's term. `store` is for tests: one
+ * store across every term, what `MemoryQueueStore` stands in for. There is no
+ * default — a leader that fell back to memory silently would lose its queue.
+ */
+export type LeaderStore =
+  | { readonly store: QueueStore; readonly storeLeg?: undefined; readonly key?: undefined }
+  | { readonly storeLeg: StoreLeg; readonly key: CryptoKey; readonly store?: undefined };
+
+export type LeaderOpts = LeaderBaseOpts & LeaderStore;
+
+export interface LeaderBaseOpts {
   /** This machine. The leader reaches it through `local`, never a relay round trip back to itself. */
   readonly selfDeviceId: string;
   /**
@@ -83,12 +91,6 @@ export interface LeaderOpts {
    * own — the relay hears nothing else of it (`RelayClient.resign`).
    */
   readonly resign: () => void;
-  /**
-   * Outlives terms, as the relay's store will (M3): a demoted-then-repromoted
-   * daemon picks up what it left and reconciles it. Defaults to the library's
-   * `MemoryQueueStore`, which is M2's queue.
-   */
-  readonly store?: QueueStore;
   readonly config?: SchedulerConfig;
   readonly tickIntervalMs?: number;
   readonly now?: () => number;
@@ -109,17 +111,27 @@ export interface Leader {
    * A `session-event` from this machine, in process (`run.ts`): the leader
    * reaches itself only locally. Other machines' arrive through the term's leg.
    * `from` is where the event came from, which is what lets one resolve a task
-   * still reserved (`Scheduler.onSession`). Dropped outside a running term —
-   * takeover reads the same state from `sessions` — so it never queues behind
-   * a takeover in flight.
+   * still reserved (`Scheduler.onSession`); `prUrl` is the event's own, which
+   * is what makes an ended session `awaiting-merge`. Dropped outside a running
+   * term — takeover reads the same state from `sessions` — so it never queues
+   * behind a takeover in flight.
    */
-  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
+  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   /**
    * A `branch-state` from this machine, in process (`run.ts`), as `onSession`
    * is; other machines' arrive through the term's leg. `from` is the sealing
-   * daemon (one sealed `from: "app"` is dropped). A sink until the library takes branch state in (M3 item 3).
+   * daemon (one sealed `from: "app"` is dropped). Feeds `Scheduler.onBranchState`;
+   * dropped outside a running term, as `onSession` is.
    */
   readonly onBranchState: (state: BranchState, from: string) => void;
+  /**
+   * The relay's nudge after an app-leg write to the store (`store-changed`;
+   * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
+   * Buffered while the term is taking over, so a create landing between
+   * takeover's `list` and its end is not lost; ignored with no term, and for
+   * a key outside `task:`.
+   */
+  readonly onStoreChanged: (key: string, version: number) => void;
   /** The term being run, or null while following. */
   readonly term: () => number | null;
   /** Resolves once the current term has taken over and is ticking, or has ended; tests await it. */
@@ -131,8 +143,9 @@ interface TermRun {
   readonly term: number;
   readonly settled: Promise<void>;
   readonly deliver: (env: Envelope) => void;
-  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
+  readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
+  readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
 
@@ -146,27 +159,67 @@ interface Demotion {
   readonly resign: boolean;
 }
 
-// Deliberately a no-op: item 3 feeds it to the library (`Scheduler` has no branch-state entry until 4a adds one).
-function onBranchState(_state: BranchState, _from: string): void {}
-
 function report(err: unknown): void {
   // A pass the term's end cut short; the next term reconciles whatever it left.
   if (err instanceof StoreRevoked) return;
   log.warn(`scheduler: ${String(err)}`);
 }
 
-function startTerm(
-  term: number,
-  opts: LeaderOpts & { readonly store: QueueStore },
-  demote: (demotion: Demotion) => void,
-): TermRun {
+function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) => void): TermRun {
   let live = true;
   let running = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   const now = opts.now ?? Date.now;
+  // The relay answered `not_leader` to a write: `fencedStore` throws only once
+  // `!live`, so a `StoreRevoked` while live can only be that, and the term is no
+  // longer this daemon's to run. One arriving after the term ended is `report`'s.
+  const fail = (err: unknown): void => {
+    if (err instanceof StoreRevoked) {
+      if (live) demote({ why: `the relay revoked the term's store writes (${err.message})`, resign: false });
+      return;
+    }
+    report(err);
+  };
   // Declared before the leg that calls it; it reads `scheduler` only once a term is running.
-  const onSession = async (taskId: string, state: SessionState, from?: SessionSource): Promise<void> => {
-    if (live && running) await scheduler.onSession(taskId, state, from).catch(report);
+  const onSession = async (
+    taskId: string,
+    state: SessionState,
+    from?: SessionSource,
+    prUrl?: string,
+  ): Promise<void> => {
+    if (live && running) await scheduler.onSession(taskId, state, from, prUrl).catch(fail);
+  };
+  const onBranchState = (state: BranchState, from: string): void => {
+    if (live && running) scheduler.onBranchState(state, from).catch(fail);
+  };
+  // Task ids a `store-changed` named while the term was still taking over, or
+  // whose refresh failed: takeover's `load` replaces the held view, so a refresh
+  // before it ends would be overwritten, and one that failed must not be lost —
+  // the term never lists the store again.
+  const changed = new Set<string>();
+  const refreshChanged = (): Promise<unknown> => {
+    const pending = [...changed];
+    changed.clear();
+    return Promise.all(
+      pending.map((id) =>
+        scheduler.refresh(id).catch((err: unknown) => {
+          changed.add(id);
+          fail(err);
+        }),
+      ),
+    );
+  };
+  const onStoreChanged = (key: string, _version: number): void => {
+    if (!live || !key.startsWith(STORE_PREFIXES.task.prefix)) return;
+    const id = key.slice(STORE_PREFIXES.task.prefix.length);
+    if (!running) {
+      changed.add(id);
+      return;
+    }
+    scheduler.refresh(id).then(tick, (err: unknown) => {
+      changed.add(id);
+      fail(err);
+    });
   };
   // Like `onSession`, built before the leg and reading `scheduler` and `tick` only once running.
   const onRequest = requestHandler({
@@ -182,7 +235,7 @@ function startTerm(
   // are its daemon's own binding, re-validated here — the PR URL above all.
   const onEvent: SchedulerEventHandler = (plain, from) => {
     if (isSchedulerOp(plain.op)) {
-      onRequest(plain, plain.op, from).catch(report);
+      onRequest(plain, plain.op, from).catch(fail);
       return;
     }
     // Only a daemon observes branches: an app's would let any holder of the PSK settle a task done.
@@ -198,12 +251,16 @@ function startTerm(
       log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event or branch state`);
       return;
     }
-    void onSession(event.taskId, event.state, { deviceId: from, pane: event.session });
+    void onSession(event.taskId, event.state, { deviceId: from, pane: event.session }, event.prUrl);
   };
   const relay = opts.createRelay(term, onEvent);
   const isLive = (): boolean => live;
   const scheduler = new Scheduler({
-    store: fencedStore(opts.store, term, isLive),
+    store: fencedStore(
+      opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now }),
+      term,
+      isLive,
+    ),
     fleet: termFleet({
       relay,
       selfDeviceId: opts.selfDeviceId,
@@ -212,13 +269,21 @@ function startTerm(
       demote: (why) => demote({ why, resign: false }),
     }),
     now,
-    onError: report,
+    onError: fail,
     onAlert: (alert) => log.warn(`scheduler: ${alert.message}`),
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 
   const tick = (): void => {
-    if (live && running) scheduler.tick().catch(report);
+    if (!live || !running) return;
+    if (changed.size === 0) {
+      scheduler.tick().catch(fail);
+      return;
+    }
+    // A nudge whose refresh failed is retried here, before the pass reads the held view.
+    refreshChanged()
+      .then(() => (live && running ? scheduler.tick() : undefined))
+      .catch(fail);
   };
 
   // Takeover waits for an authoritative registry: before it, an empty machine
@@ -269,7 +334,10 @@ function startTerm(
         await scheduler.takeover();
         break;
       } catch (err) {
-        if (err instanceof StoreRevoked) return;
+        if (err instanceof StoreRevoked) {
+          fail(err);
+          return;
+        }
         log.warn(`scheduler: term ${term} takeover failed, retrying in ${intervalMs}ms: ${String(err)}`);
       }
       // oxlint-disable-next-line no-await-in-loop -- the wait between attempts
@@ -277,20 +345,26 @@ function startTerm(
     }
     if (!live) return;
     running = true;
+    // Takeover's `load` replaced the held view, so only now can a nudge it buffered be applied.
+    await refreshChanged();
+    if (!live) return;
     seen = relay.getState().machines;
     timer = setInterval(tick, intervalMs);
-    log.info(`scheduler: term ${term} took over ${scheduler.tasks().length} tasks — dispatching`);
+    log.info(
+      `scheduler: term ${term} took over ${scheduler.tasks().length} tasks (${scheduler.unreadable().length} unreadable) — dispatching`,
+    );
     tick();
-  })().catch(report);
+  })().catch(fail);
 
   return {
     term,
     settled,
     deliver: (env) => {
-      if (live) relay.deliver(env).catch(report);
+      if (live) relay.deliver(env).catch(fail);
     },
     onSession,
     onBranchState,
+    onStoreChanged,
     end: () => {
       live = false;
       running = false;
@@ -307,7 +381,7 @@ function startTerm(
 }
 
 export function createLeader(options: LeaderOpts): Leader {
-  const opts = { ...options, store: options.store ?? new MemoryQueueStore() };
+  const opts = options;
   let current: TermRun | null = null;
   let stopped = false;
 
@@ -347,8 +421,9 @@ export function createLeader(options: LeaderOpts): Leader {
       current.deliver(env);
       return true;
     },
-    onSession: async (taskId, state, from) => current?.onSession(taskId, state, from),
+    onSession: async (taskId, state, from, prUrl) => current?.onSession(taskId, state, from, prUrl),
     onBranchState: (state, from) => current?.onBranchState(state, from),
+    onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,
     settled: async () => current?.settled,
     stop: () => {
