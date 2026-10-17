@@ -20,6 +20,7 @@ import {
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connectDaemon, newDeviceId, register, startRelay, type TestRelay } from "../../relay/test/harness.ts";
 import type { ServerWebSocket } from "bun";
+import { pollUntil } from "./poll.ts";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
@@ -133,15 +134,6 @@ function startClient(
  * than the line that never arrived. A copy of `daemon/test/fixtures.ts`'s, on
  * purpose: a pwa suite has no business importing the daemon's fixtures.
  */
-async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (ready()) return;
-    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
-    await Bun.sleep(10);
-  }
-}
-
 describe("connection", () => {
   test("reaches open and receives the registry", async () => {
     const { client, waitFor } = startClient();

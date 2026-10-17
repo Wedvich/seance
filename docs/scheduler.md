@@ -574,6 +574,11 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   2026-10-17 — DESIGN.md "MCP server") to `store-put`, in `daemon/src/mcp.ts`: it is the
   other `submit` caller, so it must move in the same PR that drops the op. Its verdict then
   becomes "queued" plus the task id, and its tool descriptions lose the in-memory caveat.
+  **Ships after item 1's relay store is deployed**: a relay without store ops drops the app's
+  store frames as `malformed-app-frame`, unanswered, so every call ends in a 10 s `timeout`
+  (`STORE_TIMEOUT_MS`), not a clear refusal. `failureReasonText` words a `timeout` as "the machine
+  may be asleep", wrong for a frame the relay itself answers; reword it when this item surfaces
+  store failures.
 
 **Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
 `parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
