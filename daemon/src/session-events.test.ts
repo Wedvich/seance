@@ -104,6 +104,32 @@ describe("EndedTasks", () => {
     expect(ended.report(new Set(["c"]))).toEqual({ ended: ["a", "b"], ledgerSince: 5 });
   });
 
+  test("every landed launch starts the task's note afresh: a site notes it, `here` clears it", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
+    await (
+      await ended.launch("t1")
+    )(true, site);
+    await ledger.note("t1", { branch: "worktree-x", ahead: true, pushed: true, prUrl: "https://x.test/1" });
+    // The same id relaunched to the same path: nothing of the first attempt carries over.
+    await (
+      await ended.launch("t1")
+    )(true, site);
+    expect(ledger.notes()).toEqual([expect.objectContaining({ taskId: "t1", repo: "/r", path: site.worktree })]);
+    expect(ledger.notes()[0]).not.toHaveProperty("ahead");
+    expect(ledger.notes()[0]).not.toHaveProperty("prUrl");
+    await (
+      await ended.launch("t1")
+    )(true);
+    expect(ledger.notes()).toEqual([]);
+    await ledger.note("t1", { repo: "/r", path: site.worktree });
+    await (
+      await ended.launch("t1")
+    )(false, site);
+    expect(ledger.notes()).toHaveLength(1);
+  });
+
   test("ended events are bounded by age and by count", () => {
     const clock = { now: 0 };
     const ended = new EndedTasks(LaunchLedger.memory(), () => clock.now);

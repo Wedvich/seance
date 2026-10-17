@@ -270,7 +270,7 @@ export class EndedTasks {
     return async (launched, site) => {
       if (launched) launches.landed = true;
       try {
-        if (launched && site !== undefined) await this.#ledger.note(taskId, { repo: site.repo, path: site.worktree });
+        if (launched) await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree });
       } finally {
         await finish();
       }

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTaskProgressList } from "@seance/shared";
-import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS } from "./launch-ledger.ts";
+import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
 
 let dir: string;
 let path: string;
@@ -259,6 +259,31 @@ describe("LaunchLedger progress notes", () => {
     clock.now = 4;
     await ledger.note("t1", { repo: "/r", path: "/w2" });
     expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 4, repo: "/r", path: "/w2" });
+  });
+
+  test("a landed relaunch starts the note afresh, to the same path or none, and only for a launched id", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    const worked: TaskNote = {
+      repo: "/r",
+      path: "/w",
+      branch: "b",
+      tip: TIP,
+      ahead: true,
+      pushed: true,
+      prUrl: "https://x.test/1",
+    };
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, repo: "/r", path: "/w" }]);
+
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1");
+    expect(ledger.notes()).toEqual([]);
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("progress");
+
+    await ledger.startNote("ghost", { repo: "/r", path: "/w" });
+    expect(ledger.notes()).toEqual([]);
   });
 
   test("a failed write resolves, and the note stays in memory", async () => {

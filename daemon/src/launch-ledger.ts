@@ -60,7 +60,7 @@ export interface TaskNote {
   /** Absolute worktree path. */
   readonly path?: string;
   readonly branch?: string;
-  /** Last-seen tip sha, 40 or 64 hex. */
+  /** The last tip that held own work (ahead of the default), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
   readonly tip?: string;
   /** The tip once held a commit not reachable from `origin/<default>`: sticky, gates pushed and merged. */
   readonly ahead?: true;
@@ -309,6 +309,25 @@ export class LaunchLedger {
     const next = mergeNote(taskId, base, patch);
     if (old !== undefined && base !== undefined && sameNote(old, next)) return;
     this.#notes.set(taskId, { ...next, at: this.#now() });
+    try {
+      await this.#persist();
+    } catch (err) {
+      log.warn(`launch ledger: could not record task progress (${String(err)})`);
+    }
+  }
+
+  /**
+   * A launch of this id landed: its note starts afresh — `{repo, path}` for a
+   * worktree launch, nothing for `here` — whatever an earlier launch of the id
+   * left. Sticky `ahead`/`pushed`/`merged` and the PR URL describe a worktree
+   * that no longer is this task's; carried over, they could settle it merged.
+   * Best-effort like `note`.
+   */
+  async startNote(taskId: string, site?: { readonly repo: string; readonly path: string }): Promise<void> {
+    if (!this.#tasks.has(taskId)) return;
+    if (site === undefined) {
+      if (!this.#notes.delete(taskId)) return;
+    } else this.#notes.set(taskId, { taskId, at: this.#now(), repo: site.repo, path: site.path });
     try {
       await this.#persist();
     } catch (err) {
