@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
-import { MemoryQueueStore } from "../daemon/src/leader.ts";
+import type { QueueStore, Task } from "../daemon/src/leader.ts";
+import { createQueueStore } from "../daemon/src/queue-store.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { loadOrInitState } from "../daemon/src/state.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
@@ -118,10 +119,19 @@ export interface Stack {
   readonly deviceId: string;
   daemon: DaemonHandle;
   /**
-   * The queue the suite's daemon leads over, kept across `restartDaemon` as the
-   * relay's store will be (M3): a task put here is the next term's to take over.
+   * The relay's queue, read through the daemon's own adapter on its current
+   * term: the real store, so it survives `restartDaemon` as the next term's
+   * to take over. Reads only matter to a test; writes go through `seedTask`.
    */
-  readonly leaderStore: MemoryQueueStore;
+  readonly queue: () => QueueStore;
+  /**
+   * Put a task into the relay's queue as a leader would have left it: waits for
+   * the daemon to hold a term, then writes through its own socket (a write is
+   * fenced on the term and that socket). Those writes send no `store-changed`,
+   * so the running term never sees them: call `restartDaemon` afterwards so the
+   * next term takes them over.
+   */
+  readonly seedTask: (task: Task) => Promise<void>;
   /**
    * Restart with identical opts — same state dir, so the same deviceId. `spawnWaitMs`
    * overrides the default budget for the new daemon; pass nothing to get it back.
@@ -205,7 +215,6 @@ export async function startStack(
   // of dead: the failing stub is bash + sleep 0.3, which the shards running
   // concurrently can stretch past a second.
   const DEFAULT_SPAWN_WAIT_MS = 1_500;
-  const leaderStore = new MemoryQueueStore();
 
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS): Promise<DaemonHandle> =>
     startDaemon({
@@ -218,7 +227,6 @@ export async function startStack(
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
-      leader: { store: leaderStore },
     });
 
   let daemon = await startTestDaemon();
@@ -279,7 +287,23 @@ export async function startStack(
     appKey,
     deviceId,
     daemon,
-    leaderStore,
+    queue: (): QueueStore =>
+      createQueueStore({ leg: daemon.client, key: appKey, term: daemon.leader.term() ?? 0, now: Date.now }),
+    seedTask: async (task: Task): Promise<void> => {
+      await pollUntil(() => daemon.leader.term() !== null, "the suite's daemon to lead before seeding", 10_000);
+      const queue = stack.queue();
+      // Version 1 must be `queued`: the adapter refuses any other first write.
+      const created = await queue.put(task.id, 0, {
+        id: task.id,
+        spec: task.spec,
+        state: "queued",
+        createdAt: task.createdAt,
+      });
+      if (!created.ok) throw new Error(`seeding ${task.id}: ${created.code}`);
+      if (task.state === "queued") return;
+      const advanced = await queue.put(task.id, 1, task);
+      if (!advanced.ok) throw new Error(`seeding ${task.id}: ${advanced.code}`);
+    },
     restartDaemon: async (opts: { readonly spawnWaitMs?: number } = {}): Promise<void> => {
       // A failed test's finally can land here with the old daemon still live;
       // an orphan would share the state dir, deviceId and tmux for the rest

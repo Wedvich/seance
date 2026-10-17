@@ -745,6 +745,11 @@ describe("scheduler leadership ↔ real daemons", () => {
   });
 });
 
+/** The origin key the fixture clone is listed under, once a machine has listed its repos. */
+function fixtureOrigin(state: AppState): string | null {
+  return state.relay.machines.flatMap((m) => m.repos).find((repo) => repo.origin !== undefined)?.origin ?? null;
+}
+
 /** Single-quoted for `sh -c`, as `spawn.ts` quotes its one shell string. */
 function q(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
@@ -763,7 +768,7 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
       const minted = await stack.startSecondDaemon({ name: "EventBox" });
       const b = minted.deviceId;
       await minted.stop();
-      await stack.leaderStore.put(taskId, 0, {
+      await stack.seedTask({
         id: taskId,
         spec: { repo: "github.com/acme/app", mode: "worktree" },
         state: "reserved",
@@ -773,7 +778,7 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
       await stack.restartDaemon();
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
-      expect((await stack.leaderStore.get(taskId))?.body?.state).toBe("reserved");
+      expect((await stack.queue().get(taskId))?.body?.state).toBe("reserved");
       // Same state dir, same id; connected later, so it follows.
       second = await stack.startSecondDaemon({ name: "EventBox" });
       expect(second.deviceId).toBe(b);
@@ -809,11 +814,11 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
       await Bun.write(go, "");
 
       await pollUntil(
-        async () => (await stack.leaderStore.get(taskId))?.body?.state === "done",
+        async () => (await stack.queue().get(taskId))?.body?.state === "done",
         "the leader to take the event",
         10_000,
       );
-      expect((await stack.leaderStore.get(taskId))?.body?.assignment).toMatchObject({ deviceId: b, pane });
+      expect((await stack.queue().get(taskId))?.body?.assignment).toMatchObject({ deviceId: b, pane });
     } finally {
       if (pane !== null) await tmux(["kill-session", "-t", "e2e-event-sender"]);
       await second?.stop();
@@ -969,7 +974,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (preview?.kind !== "ok") throw new Error(`no preview: ${JSON.stringify(preview)}`);
       expect(preview.decision.chosen?.deviceId).toBe(stack.deviceId);
       expect(stack.daemon.leader.term()).not.toBeNull();
-      expect((await stack.leaderStore.list()).filter((t) => t.body?.state === "reserved")).toEqual([]);
+      expect((await stack.queue().list()).filter((t) => t.body?.state === "reserved")).toEqual([]);
       // A drop leaves the leader as it was, and the form still asks again once back — a
       // preview the drop failed in flight would otherwise stand until tapped.
       app.client.reconnect();
@@ -1078,7 +1083,6 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const app = startApp(stack, { auto: true });
     let second: SecondDaemon | null = null;
     let window: string | null = null;
-    let down = false;
     try {
       // Not on SCHEDULER_LEADERS, so the suite's daemon leads again once it is back.
       second = await stack.startSecondDaemon({ name: "CancelBox" });
@@ -1099,9 +1103,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (pane === undefined) throw new Error("the spawned session is not listed");
 
       // The leader's queue holds the task running there, as a dispatch would have left it.
-      stack.daemon.stop();
-      down = true;
-      await stack.leaderStore.put(taskId, 0, {
+      await stack.seedTask({
         id: taskId,
         spec: { repo: "github.com/acme/app", mode: "here" },
         state: "running",
@@ -1109,11 +1111,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         assignment: { deviceId: b, exclave: "default", clone: "myrepo", window, pane },
       });
       await stack.restartDaemon();
-      down = false;
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
       await stack.daemon.leader.settled();
       // Takeover asked B and found the session, so the task is still running.
-      expect((await stack.leaderStore.get(taskId))?.body?.state).toBe("running");
+      expect((await stack.queue().get(taskId))?.body?.state).toBe("running");
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
 
       const reply = await app.client.cancel(taskId);
@@ -1130,10 +1131,84 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         .find((line) => line.includes("audit despawn origin=relay") && line.includes(`target=${JSON.stringify(pane)}`));
       expect(despawn).toContain('client="scheduler"');
     } finally {
-      if (down) await stack.restartDaemon();
       if (window !== null) await killWindow(window);
       app.stop();
       await second?.stop();
+    }
+  }, 60_000);
+
+  // M3's first Exit bullet: the queue is the relay's, so an enqueue needs no
+  // leader and the next one to lead runs it.
+  test("a task enqueued while no daemon leads runs once one does", async () => {
+    const id = crypto.randomUUID();
+    const app = startApp(stack, { auto: true });
+    let down = false;
+    let window: string | null = null;
+    try {
+      const up = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the suite's daemon verified as leader, with its repos listed",
+      );
+      stack.daemon.stop();
+      down = true;
+      await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
+      const created = await app.client.createTask({
+        id,
+        spec: { repo: fixtureOrigin(up) ?? "", mode: "worktree", prompt: "durable" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+
+      await stack.restartDaemon();
+      down = false;
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.daemon.leader.settled();
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the enqueued task to run under the new term",
+        20_000,
+      );
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+    } finally {
+      if (down) await stack.restartDaemon();
+      await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  }, 60_000);
+
+  // An app's create while the daemon leads is placed by `store-changed`, not by
+  // the 30 s tick: the task leaves `queued` well inside it.
+  test("a task enqueued while a daemon leads is picked up on the store's nudge, not the next tick", async () => {
+    const id = crypto.randomUUID();
+    const app = startApp(stack, { auto: true });
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const ready = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the leader verified, with the repos listed",
+      );
+      const created = await app.client.createTask({
+        id,
+        spec: { repo: fixtureOrigin(ready) ?? "", mode: "worktree", prompt: "nudged" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+      // Well inside the 30 s tick: only the relay's `store-changed` could have woken the leader.
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the leader to run the task on the store's nudge",
+        10_000,
+      );
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+    } finally {
+      await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window);
+      app.stop();
     }
   }, 60_000);
 
