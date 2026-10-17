@@ -39,6 +39,8 @@ let socket: LocalSocketHandle;
 let events: SessionEvents;
 let scan: ExclaveScan;
 const forwarded: SessionEvent[] = [];
+/** Every frame the socket handed the handler, with the kernel's pid and the reply. */
+const handled: { readonly peer: number | null; readonly reply: unknown }[] = [];
 const quota = new SessionQuota();
 const ended = new EndedTasks();
 
@@ -96,7 +98,15 @@ beforeAll(async () => {
     },
     "local",
   );
-  socket = await startLocalSocket({ handle, sessionEvents: events.handle, path: sockPath });
+  socket = await startLocalSocket({
+    handle,
+    sessionEvents: async (raw, peer) => {
+      const reply = await events.handle(raw, peer);
+      handled.push({ peer, reply });
+      return reply;
+    },
+    path: sockPath,
+  });
 });
 
 afterAll(async () => {
@@ -236,6 +246,61 @@ describe("binding", () => {
     expect(JSON.parse(reply)).toEqual({ ok: false, code: "unbound" });
     // The reply follows the handling, so nothing forwarded by now never will be.
     expect(forwardedFor("task-c")).toEqual([]);
+  });
+});
+
+function frameNaming(pane: string): object {
+  return { v: SESSION_EVENT_VERSION, kind: SESSION_EVENT_KIND, state: "ended", pane };
+}
+
+describe("binding without a peer pid", () => {
+  // macOS's LOCAL_PEERPID fails once the peer has closed, so a sender that
+  // writes and exits fast reaches the handler with no pid — on a host that
+  // names every other connection's. Its claim must not decide the pane.
+  test("a sender that writes a frame naming another pane and exits at once is refused", async () => {
+    const target = await senderPane("fast-target", base, "true", "task-fast");
+    const script = join(base, "fast.send.ts");
+    await writeFile(
+      script,
+      `const frame = ${JSON.stringify(`${JSON.stringify(frameNaming(target.pane))}
+`)};
+await Bun.connect({ unix: ${JSON.stringify(sockPath)}, socket: {
+  open: (s) => { s.write(frame); s.end(); process.exit(0); },
+  data: () => {},
+} });
+`,
+    );
+    const before = handled.length;
+    const sender = Bun.spawn([process.execPath, script], { stdout: "ignore", stderr: "ignore" });
+    await sender.exited;
+    await pollUntil(() => handled.length > before, "the fast sender's frame to be handled");
+    expect(handled.at(-1)?.reply).toEqual({ ok: false, code: "unbound" });
+    expect(forwardedFor("task-fast")).toEqual([]);
+  });
+
+  test("per host, not per connection: a missing pid is refused where the host names peers, and the pane decides only where it names none", async () => {
+    const target = await senderPane("hostless", base, "true", "task-hostless");
+    const onHost = (hostNamesPeers: boolean): SessionEvents =>
+      createSessionEvents({
+        panes: listPanePids,
+        exclaves: () => scan.exclaves,
+        forward: (event) => void forwarded.push(event),
+        quota,
+        ended,
+        coalesceMs: 0,
+        hostNamesPeers: () => hostNamesPeers,
+      });
+    const naming = onHost(true);
+    const peerless = onHost(false);
+    try {
+      expect(await naming.handle(frameNaming(target.pane), null)).toEqual({ ok: false, code: "unbound" });
+      expect(forwardedFor("task-hostless")).toEqual([]);
+      expect(await peerless.handle(frameNaming(target.pane), null)).toEqual({ ok: true });
+      expect(forwardedFor("task-hostless")).toMatchObject([{ session: target.pane, state: "ended" }]);
+    } finally {
+      naming.stop();
+      peerless.stop();
+    }
   });
 });
 

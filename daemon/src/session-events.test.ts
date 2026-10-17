@@ -12,6 +12,7 @@ import {
   ENDED_TTL_MS,
   EndedTasks,
   parsePanePids,
+  peerBindingProblem,
   parseSessionEventFrame,
   quotaFromRateLimits,
   SessionQuota,
@@ -171,6 +172,13 @@ describe("EndedTasks", () => {
   });
 });
 
+describe("peer binding probe", () => {
+  // The fd is a field Bun leaves undocumented; this is the check an upgrade that drops it fails.
+  test("on this runtime a self-connect yields an fd and the kernel names this process", async () => {
+    expect(await peerBindingProblem()).toBeNull();
+  });
+});
+
 describe("coalescing", () => {
   const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
 
@@ -183,8 +191,9 @@ describe("coalescing", () => {
       quota: new SessionQuota(),
       ended: new EndedTasks(),
       coalesceMs,
+      // A host that names no peer: the fallback binding, by the frame's own pane.
+      hostNamesPeers: () => false,
     });
-    // No peer pid: the fallback binding, by the frame's own pane.
     const send = (fields: object): Promise<unknown> => events.handle(frame({ pane: "%1", ...fields }), null);
     return { forwarded, events, send };
   }
