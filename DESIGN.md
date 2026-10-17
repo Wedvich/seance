@@ -2231,7 +2231,10 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   the fetch" rejection in the next bullet). Before launch, `base-fetch.ts`
   runs `git fetch origin +refs/heads/<default>:refs/remotes/origin/<default>`
   in the clone: 5s timeout, through `git-hardened.ts` (reap's runner: hooks
-  and fsmonitor off, no prompt, ignored stdin). Evidence: four spawns on one
+  and fsmonitor off, no prompt, ignored stdin). The process group is what times
+  out (`exec`'s `killGroup`). Killing git alone left its `ssh` or
+  `git-remote-https` holding the output pipes, so the result waited out the
+  transport's own connect timeout, whatever the cap said. Evidence: four spawns on one
   Mac started 23 commits behind `main`, branched from an `origin/main` fetched
   12h earlier. Claude Code 2.1.302 fetches only when `FETCH_HEAD` is over 24h
   old, and exclave clones (below) sit unfetched for hours because only the tree

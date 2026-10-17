@@ -9,7 +9,11 @@ import { readDefaultBranch } from "./scan.ts";
 /** Claude's own `--worktree` fetch timeout: an unreachable origin costs a spawn this much, no more. */
 const FETCH_TIMEOUT_MS = 5_000;
 
-type FetchResult = { readonly ok: true } | { readonly ok: false; readonly detail: string };
+/**
+ * `before` is read ahead of the fetch: git truncates `FETCH_HEAD` before the
+ * transfer, so a fetch killed mid-pack leaves it looking minutes old.
+ */
+type FetchResult = { readonly ok: true } | { readonly ok: false; readonly detail: string; readonly before: number };
 
 /**
  * Fetches in flight per common dir. Parallel spawns into one clone share a
@@ -28,13 +32,15 @@ const inFlight = new Map<string, Promise<FetchResult>>();
 function fetchDefault(repoPath: string, commonDir: string, branch: string): Promise<FetchResult> {
   const running = inFlight.get(commonDir);
   if (running !== undefined) return running;
-  const run = hardenedGit(
-    repoPath,
-    ["fetch", "--quiet", "--no-recurse-submodules", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
-    FETCH_TIMEOUT_MS,
-  )
-    .then((result): FetchResult => (result.exitCode === 0 ? { ok: true } : { ok: false, detail: execFailure(result) }))
-    .finally(() => inFlight.delete(commonDir));
+  const run = (async (): Promise<FetchResult> => {
+    const before = await lastFetchedAt(commonDir);
+    const result = await hardenedGit(
+      repoPath,
+      ["fetch", "--quiet", "--no-recurse-submodules", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+      FETCH_TIMEOUT_MS,
+    );
+    return result.exitCode === 0 ? { ok: true } : { ok: false, detail: execFailure(result), before };
+  })().finally(() => inFlight.delete(commonDir));
   inFlight.set(commonDir, run);
   return run;
 }
@@ -60,8 +66,7 @@ function age(ms: number): string {
   return hours < 48 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }
 
-async function lastFetchedNote(commonDir: string, branch: string, detail: string): Promise<string> {
-  const at = await lastFetchedAt(commonDir);
+function lastFetchedNote(branch: string, detail: string, at: number): string {
   const when = at === 0 ? "never fetched" : `last fetched ${age(Date.now() - at)} ago`;
   return `couldn't fetch origin/${branch} (${detail}) — it may be stale: ${when}`;
 }
@@ -93,7 +98,7 @@ export async function freshenBase(repo: RepoEntry, mode: SpawnMode): Promise<str
     }
 
     const fetched = await fetchDefault(repo.path, commonDir, branch);
-    const fetchNote = fetched.ok ? undefined : await lastFetchedNote(commonDir, branch, fetched.detail);
+    const fetchNote = fetched.ok ? undefined : lastFetchedNote(branch, fetched.detail, fetched.before);
     if (mode === "worktree") return fetchNote;
 
     const behind = await hardenedGit(repo.path, ["rev-list", "--count", `HEAD..refs/remotes/origin/${branch}`], 5_000);

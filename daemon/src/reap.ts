@@ -29,9 +29,8 @@ import {
   type Merged,
 } from "./reap-git.ts";
 import { readDefaultBranch } from "./scan.ts";
-import { writeAtomic } from "./state.ts";
 import { classifyPane, listPanes, paneInfo, type PaneState } from "./sessions.ts";
-import { pidAlive } from "./state.ts";
+import { pidAlive, writeAtomic } from "./state.ts";
 import { tmux } from "./tmux.ts";
 
 /** Repos worked at once: each is a handful of git processes, and a fetch may sit on the network. */

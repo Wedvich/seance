@@ -35,6 +35,8 @@ export async function hardenedGit(
       cwd,
       timeoutMs,
       env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", ...env },
+      // a timed-out fetch would otherwise wait on its transport child, timeout or not
+      killGroup: true,
       ...(stdin === undefined ? {} : { stdin }),
     },
   );

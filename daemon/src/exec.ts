@@ -41,6 +41,13 @@ export async function exec(
     readonly timeoutMs?: number;
     readonly stdin?: string;
     readonly env?: Readonly<Record<string, string | undefined>>;
+    /**
+     * Run the child in its own process group and time out the whole group.
+     * Otherwise the timeout kills only the child, and the result still waits for
+     * every grandchild holding its stdout/stderr — a fetch's `ssh` or
+     * `git-remote-https` on a dead network keeps it for its own connect timeout.
+     */
+    readonly killGroup?: boolean;
   } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
@@ -49,11 +56,20 @@ export async function exec(
     stdin: opts.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    detached: opts.killGroup === true,
   });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    proc.kill();
+    if (opts.killGroup !== true) {
+      proc.kill();
+      return;
+    }
+    try {
+      process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      // group already gone
+    }
   }, opts.timeoutMs ?? 60_000);
   const sink = proc.stdin;
   if (opts.stdin !== undefined && sink !== undefined && typeof sink !== "number") {
