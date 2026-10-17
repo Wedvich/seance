@@ -290,20 +290,37 @@ export class Scheduler {
   }
 
   /**
-   * M2's in-memory enqueue, created `ready` and so past admission; M3 item 6
-   * replaces it with an app's `queued` create. A full store is pruned once and
-   * the create tried again.
+   * M2's enqueue, until M3 item 6 replaces it with an app's `queued` create.
+   * Created `queued` — `bindTaskRecord` refuses a version-1 record that is not
+   * (`created_unqueued`) — and admitted in the same call, so the reply carries
+   * the admitted state (`ready` with no deps) that MCP's placement follow and
+   * the PWA's `auto` verdict read. A full store is pruned once and the create
+   * tried again. A create the store never answered may have landed, and the
+   * leader's own write raises no `store-changed`: it is read back, or a later
+   * leader would run an orphan the caller then resubmits.
    */
   async submit(spec: TaskSpec): Promise<Task> {
-    const task: Task = { id: this.#newId(), spec, state: "ready", createdAt: this.#now() };
-    let write = await this.#store.put(task.id, 0, task);
+    const task: Task = { id: this.#newId(), spec, state: "queued", createdAt: this.#now() };
+    let write = await this.#create(task);
     if (!write.ok && write.code === "store_full") {
       await this.prune();
-      write = await this.#store.put(task.id, 0, task);
+      write = await this.#create(task);
     }
     if (!write.ok) throw new Error(`task ${task.id} was not stored (${write.code})`);
     this.#held.set(task.id, { version: write.version, task });
-    return task;
+    await this.#admit();
+    return this.#held.get(task.id)?.task ?? task;
+  }
+
+  /** The id is freshly minted, so a readable version-1 record under it is this create, landed. */
+  async #create(task: Task): Promise<StoreWrite> {
+    const write = await this.#store.put(task.id, 0, task);
+    if (write.ok || write.code !== "indeterminate") return write;
+    const entry = await this.#store.get(task.id).catch(() => null);
+    if (entry !== null && entry.reason === undefined && entry.version === 1 && entry.body.id === task.id) {
+      return { ok: true, version: 1 };
+    }
+    return write;
   }
 
   /** Coalesces: a tick asked for while one runs runs once more after it, never alongside. */

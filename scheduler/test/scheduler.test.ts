@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import {
+  bindTaskRecord,
+  MAX_TASKS,
+  REPLAY_WINDOW_MS,
+  taskKey,
+  type DespawnRequest,
+  type DespawnResponse,
+} from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -7,6 +14,7 @@ import {
   SCHEDULER_CLIENT,
   UNDELIVERED,
   type StoredTask,
+  type StoreWrite,
   type Task,
   type TaskSpawnReply,
 } from "../src/index.ts";
@@ -65,8 +73,8 @@ describe("dispatch", () => {
     expect(after?.body.state).toBe("running");
     expect(after?.body.assignment).toEqual({ deviceId: "a", exclave: "main", clone: "app", window: "w1", pane: "%1" });
     expect(after?.body.reservation).toBeUndefined();
-    // Create, reserve, run: one write per transition.
-    expect(after?.version).toBe(3);
+    // Create, admit, reserve, run: one write per transition.
+    expect(after?.version).toBe(4);
     expect(after?.body.decision?.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
   });
 
@@ -83,7 +91,7 @@ describe("dispatch", () => {
     const task = await scheduler.submit(spec());
     await pass(scheduler);
     await pass(scheduler);
-    expect((await stored(store, task.id))?.version).toBe(1);
+    expect((await stored(store, task.id))?.version).toBe(2);
     expect(scheduler.lastDecision(task.id)?.candidates[0]?.rejected).toEqual([{ code: "offline" }]);
   });
 
@@ -1164,5 +1172,58 @@ describe("writes to one task never race", () => {
     await scheduler.onSession(task.id, "needs-input", { deviceId: "a", pane: "%1" });
     expect((await store.get(task.id))?.body).toMatchObject({ state: "needs-input", spec: { title: "renamed" } });
     expect(fleet.spawns).toHaveLength(1);
+  });
+});
+
+describe("submit", () => {
+  test("creates its task queued at version 1, passing bindTaskRecord, and returns it admitted", async () => {
+    const puts: { expect: number; body: Task }[] = [];
+    class Recording extends MemoryQueueStore {
+      override async put(id: string, version: number, body: Task): Promise<StoreWrite> {
+        puts.push({ expect: version, body });
+        return super.put(id, version, body);
+      }
+    }
+    const store = new Recording();
+    const scheduler = new Scheduler({
+      store,
+      fleet: new FakeFleet([machine("a")]),
+      now: () => NOW,
+      newId: () => "t1",
+    });
+    const task = await scheduler.submit(spec());
+
+    const first = puts[0];
+    if (first === undefined) throw new Error("no put");
+    expect(first.expect).toBe(0);
+    expect(first.body.state).toBe("queued");
+    const bound = bindTaskRecord({ version: 1, task: first.body }, { key: taskKey(first.body.id), version: 1 }, NOW);
+    expect(typeof bound).not.toBe("string");
+    expect(task.state).toBe("ready");
+    expect((await store.get("t1"))?.version).toBe(2);
+  });
+
+  test("a create whose reply was lost but landed is adopted and admitted", async () => {
+    const { store, scheduler } = setup();
+    store.failNext({ code: "indeterminate", commit: true });
+    const task = await scheduler.submit(spec());
+    expect(task.state).toBe("ready");
+    expect((await store.get(task.id))?.version).toBe(2);
+  });
+
+  test("a create whose reply was lost and never landed rejects", async () => {
+    const { store, scheduler } = setup();
+    store.failNext({ code: "indeterminate" });
+    await expect(scheduler.submit(spec())).rejects.toThrow("indeterminate");
+    expect(await store.list()).toEqual([]);
+  });
+
+  test("every other refusal still throws", async () => {
+    for (const code of ["version_conflict", "refused", "too_large"] as const) {
+      const { store, scheduler } = setup();
+      store.failNext({ code });
+      // oxlint-disable-next-line no-await-in-loop -- one store per case
+      await expect(scheduler.submit(spec())).rejects.toThrow(code);
+    }
   });
 });
