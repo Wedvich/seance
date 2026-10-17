@@ -5,6 +5,7 @@ import type { RepoEntry } from "@seance/shared";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
+import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import { runDir } from "./paths.ts";
 import {
@@ -20,7 +21,6 @@ import {
   patchIndex,
   pendingChanges,
   pruneWorktrees,
-  reapGit,
   removeWorktree,
   resolveRemoteHead,
   type BranchVerdict,
@@ -332,7 +332,7 @@ async function reapRepo(
   }
   const base = `refs/remotes/origin/${defaultBranch}`;
   const [baseTreeOut, worktrees, branches] = await Promise.all([
-    reapGit(repo.path, ["rev-parse", "--verify", "--quiet", `${base}^{tree}`]),
+    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${base}^{tree}`]),
     listWorktrees(repo.path),
     listBranches(repo.path),
   ]);

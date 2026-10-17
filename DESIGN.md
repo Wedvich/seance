@@ -2221,8 +2221,43 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   wire codes and still rendered by the clients — no path reaches them since
   the bullet below deleted the git preparation, but a daemon a version behind
   emits them and must not degrade to the unknown-code fallback. The `note`
-  field has one emitter again — the stuck-spawn detection below — and stays a
-  documented `SessionBackend` fork seam besides.
+  field has two emitters — the pre-launch fetch below (a failed fetch, a
+  `here` checkout behind origin) and the stuck-spawn detection — joined by a
+  blank line in `handleSpawn`, and stays a documented `SessionBackend` fork
+  seam besides.
+- **Worktree spawns fetch first** (revised 2026-10-17; supersedes the "keeping
+  the fetch" rejection in the next bullet). Before launch, `base-fetch.ts`
+  runs `git fetch origin +refs/heads/<default>:refs/remotes/origin/<default>`
+  in the clone: 5s timeout, through `git-hardened.ts` (reap's runner: hooks
+  and fsmonitor off, no prompt, ignored stdin). Evidence: four spawns on one
+  Mac started 23 commits behind `main`, branched from an `origin/main` fetched
+  12h earlier. Claude Code 2.1.302 fetches only when `FETCH_HEAD` is over 24h
+  old, and exclave clones (below) sit unfetched for hours because only the tree
+  you work in gets pulled. The old rejection called this a _second_ fetch per
+  spawn; it isn't one. Claude keys its fetch on `FETCH_HEAD`'s mtime, which
+  this fetch writes, so claude skips its own, and a spawn still makes at most
+  one. What it still doesn't do is create the worktree, move HEAD, or touch
+  the checkout — only the tracking ref moves. The default branch comes from
+  the clone's `origin/HEAD` (`readDefaultBranch`), never the wire, and goes to
+  git as one argv element. None on disk → no fetch: claude forces its own
+  when the tracking ref is missing. Parallel spawns into one clone share one
+  in-flight fetch per common dir, since two racing for the ref lock would
+  make the loser report a failure for a fetch that landed. **Fail-open**: a
+  timeout or error never fails the spawn (unlike the old `fetch_failed`). The
+  spawn proceeds on the refs on disk and `note` says the fetch failed and how
+  old the last one is — the only place that staleness surfaces. `here` mode
+  runs the same fetch only when the checkout is on the default branch, then
+  notes "N commits behind origin/<default>" if it is. It never pulls or
+  fast-forwards: a remote spawn still has no business moving a local HEAD.
+  Every origin gets this, the scheduler's `leader` included, because they all
+  reach `spawnSession`; no wire or capability change, so an older daemon keeps
+  the 24h window. Costs: up to 5s per spawn (typically about a second, before
+  `new-window`, so outside the registration wait), and a wasted fetch on a
+  `baseRef: "head"` machine. Rejected: a periodic fetch (network on every
+  scanned clone in every exclave, most never spawned in, and it still leaves a
+  window); "behind by N" for worktree mode (after the fetch the base _is_ the
+  tip); a base parameter now (that is M4's `baseBranch`, docs/scheduler.md,
+  which will reuse this fetch for its branch).
 - **Worktree mode does no git preparation** (revised 2026-08-31). This ran a
   fetch and then `git merge --ff-only origin/<default>` in the main checkout,
   ported from `/spawn` on the belief that `claude --worktree` branches off the
@@ -2236,22 +2271,27 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   the checkout was dirty or on another branch ("worktree bases on current
   HEAD") told the phone something that was never true. All of it is deleted;
   `--worktree` is passed and claude does the rest. Three costs accepted with
-  eyes open. Claude re-fetches only when `FETCH_HEAD` is over 24h old, so a
-  spawn can sit on an origin up to a day stale (the daemon's own fetch used to
-  close that window incidentally). A machine that sets `baseRef: "head"` opts
+  eyes open. ~~Claude re-fetches only when `FETCH_HEAD` is over 24h old, so a
+  spawn can sit on an origin up to a day stale~~ — no longer accepted, see
+  "Worktree spawns fetch first" above. A machine that sets `baseRef: "head"` opts
   itself out with no CLI flag to override it — the machine owner's call to
   make. And the failure modes go quiet: an unreachable origin or a clone with
   no `origin/HEAD` used to reach the phone as `fetch_failed` /
   `no_default_branch` before anything launched, where claude warns in the pane
   and bases the worktree on the local HEAD, so the spawn reports `ok` and the
-  session is quietly on the checkout's commit. Not a hang, at least: claude's
+  session is quietly on the checkout's commit. (Narrower than this reads:
+  claude falls back to HEAD only when `origin/<default>` is missing, and with
+  the tracking ref present it branches from that, however old. The daemon's
+  fetch note now covers the unreachable-origin case.) Not a hang, at least: claude's
   fetch runs `stdin: "ignore"` with `GIT_TERMINAL_PROMPT=0`,
   `credential.interactive=false` and a 5s timeout, so a repo needing
   credentials fails fast rather than blocking the pane on a prompt. Rejected: creating the worktree in the daemon to name
   the base explicitly (implemented, then reverted — it moves worktree removal
   on failure and a second trust entry per spawn onto the daemon, to buy
-  behaviour claude already has); keeping the fetch for freshness alone (a
-  second fetch on every spawn to narrow a 24h window claude manages itself).
+  behaviour claude already has, and still rejected); keeping the fetch for
+  freshness alone (a second fetch on every spawn to narrow a 24h window claude
+  manages itself — reversed 2026-10-17: it is not a second fetch, and the
+  window is what left spawns a day behind).
 - **No `--permission-mode` flag by default** (revised from `/spawn`'s `auto`).
   Passing one unconditionally would override the machine's own `settings.json`
   default, so a box configured for `bypassPermissions` still got prompted for

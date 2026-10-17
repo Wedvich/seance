@@ -1,34 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { exec, execFailure, type ExecResult } from "./exec.ts";
-
-/**
- * Every git call `seanced reap` makes. Reap is the first code to run git in
- * every scanned repo, and repo-local config executes: `core.fsmonitor` would
- * start a hook (or a daemon) per worktree and hooks run on ref updates, so both
- * are off for every call. `GIT_OPTIONAL_LOCKS=0` keeps `status` from refreshing
- * the index — whose mtime is one of the age signals, and reap must not reset the
- * age it is measuring. `GIT_TERMINAL_PROMPT=0` plus exec's ignored stdin and a
- * timeout keep a fetch that wants credentials from hanging, as Claude Code does;
- * `stdin` is for the plumbing that reads it (`patch-id`, `diff-tree --stdin`), never a fetch.
- * What still runs is what a fetch needs — credential helpers, `core.sshCommand`.
- * The branch-state emitter (`branch-state.ts`) makes its calls through it too.
- */
-export async function reapGit(
-  cwd: string,
-  args: readonly string[],
-  timeoutMs = 15_000,
-  stdin?: string,
-  env: Readonly<Record<string, string | undefined>> = {},
-): Promise<ExecResult> {
-  return exec(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
-    cwd,
-    timeoutMs,
-    env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", ...env },
-    ...(stdin === undefined ? {} : { stdin }),
-  });
-}
+import { execFailure, type ExecResult } from "./exec.ts";
+import { hardenedGit } from "./git-hardened.ts";
 
 /** Claude Code's rule for its own `--worktree` fetch: only when the last one is over a day old. */
 export const FETCH_STALE_MS = 24 * 60 * 60 * 1000;
@@ -48,7 +22,7 @@ export type FetchOutcome =
  * The newest `FETCH_HEAD` across the clone and its worktrees: a fetch run inside
  * a linked worktree may record it in that worktree's own git dir.
  */
-async function lastFetchedAt(commonDir: string): Promise<number> {
+export async function lastFetchedAt(commonDir: string): Promise<number> {
   const worktrees = await readdir(join(commonDir, "worktrees")).catch(() => [] as string[]);
   const candidates = [
     join(commonDir, "FETCH_HEAD"),
@@ -67,7 +41,7 @@ export async function fetchIfStale(
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<FetchOutcome> {
   if (now - (await lastFetchedAt(commonDir)) < staleMs) return { kind: "fresh" };
-  const result = await reapGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS, undefined, env);
+  const result = await hardenedGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS, undefined, env);
   return result.exitCode === 0
     ? { kind: "fetched" }
     : {
@@ -82,7 +56,7 @@ export async function fetchIfStale(
  * clones — which reap needs to know what "merged" is measured against.
  */
 export async function resolveRemoteHead(repoPath: string): Promise<boolean> {
-  const result = await reapGit(repoPath, ["remote", "set-head", "origin", "--auto"], FETCH_TIMEOUT_MS);
+  const result = await hardenedGit(repoPath, ["remote", "set-head", "origin", "--auto"], FETCH_TIMEOUT_MS);
   return result.exitCode === 0;
 }
 
@@ -127,7 +101,7 @@ export function parseWorktreeList(raw: string): readonly WorktreeRecord[] {
 }
 
 export async function listWorktrees(repoPath: string): Promise<readonly WorktreeRecord[] | null> {
-  const result = await reapGit(repoPath, ["worktree", "list", "--porcelain", "-z"]);
+  const result = await hardenedGit(repoPath, ["worktree", "list", "--porcelain", "-z"]);
   return result.exitCode === 0 ? parseWorktreeList(result.stdout) : null;
 }
 
@@ -152,7 +126,7 @@ export function parseBranches(raw: string): readonly BranchRecord[] {
 }
 
 export async function listBranches(repoPath: string): Promise<readonly BranchRecord[] | null> {
-  const result = await reapGit(repoPath, ["for-each-ref", `--format=${BRANCH_FORMAT}`, "refs/heads"]);
+  const result = await hardenedGit(repoPath, ["for-each-ref", `--format=${BRANCH_FORMAT}`, "refs/heads"]);
   return result.exitCode === 0 ? parseBranches(result.stdout) : null;
 }
 
@@ -192,7 +166,7 @@ function parsePatchIds(raw: string): ReadonlyMap<string, string> {
 }
 
 async function patchIds(repoPath: string, diff: string): Promise<ReadonlyMap<string, string> | null> {
-  const result = await reapGit(repoPath, ["patch-id", "--stable"], 60_000, diff);
+  const result = await hardenedGit(repoPath, ["patch-id", "--stable"], 60_000, diff);
   return result.exitCode === 0 ? parsePatchIds(result.stdout) : null;
 }
 
@@ -214,12 +188,12 @@ export function patchIndex(repoPath: string, base: string): PatchIndex {
   return {
     landedSince: async (since, patchId) => {
       if (broken) return false;
-      const revs = await reapGit(repoPath, ["rev-list", "--no-merges", `${since}..${base}`]);
+      const revs = await hardenedGit(repoPath, ["rev-list", "--no-merges", `${since}..${base}`]);
       if (revs.exitCode !== 0) return false;
       const range = revs.stdout.split("\n").filter((sha) => sha !== "");
       const missing = range.filter((sha) => !byCommit.has(sha));
       if (missing.length > 0) {
-        const diffs = await reapGit(repoPath, ["diff-tree", "--stdin", "-p"], 60_000, `${missing.join("\n")}\n`);
+        const diffs = await hardenedGit(repoPath, ["diff-tree", "--stdin", "-p"], 60_000, `${missing.join("\n")}\n`);
         const ids = diffs.exitCode === 0 ? await patchIds(repoPath, diffs.stdout) : null;
         if (ids === null) {
           broken = true;
@@ -238,7 +212,7 @@ export function patchIndex(repoPath: string, base: string): PatchIndex {
  * of it would carry. Null when the diff is empty or git failed.
  */
 async function squashPatchId(repoPath: string, mergeBase: string, tip: string): Promise<string | null> {
-  const diff = await reapGit(repoPath, ["diff-tree", "-p", mergeBase, tip], 60_000);
+  const diff = await hardenedGit(repoPath, ["diff-tree", "-p", mergeBase, tip], 60_000);
   if (diff.exitCode !== 0) return null;
   const ids = await patchIds(repoPath, diff.stdout);
   return ids?.values().next().value ?? null;
@@ -253,19 +227,19 @@ export async function classifyTip(
   upstreamGone: boolean,
   patches: PatchIndex,
 ): Promise<BranchVerdict> {
-  const ancestor = await reapGit(repoPath, ["merge-base", "--is-ancestor", tip, base]);
+  const ancestor = await hardenedGit(repoPath, ["merge-base", "--is-ancestor", tip, base]);
   if (ancestor.exitCode === 0) return "ancestor";
   // A conflict (exit 1) or a git without --write-tree (exit 129) reads as not
   // merged: the safe direction. Writes a few loose objects, which gc collects.
-  const merged = await reapGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
+  const merged = await hardenedGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
   if (merged.exitCode === 0 && merged.stdout.split("\n")[0]?.trim() === baseTree) return "squash";
   if (!upstreamGone) return "active";
-  const cherry = await reapGit(repoPath, ["cherry", base, tip]);
+  const cherry = await hardenedGit(repoPath, ["cherry", base, tip]);
   if (cherry.exitCode !== 0) return "unmerged-gone";
   if (!cherry.stdout.split("\n").some((line) => line.startsWith("+"))) return "gone";
   // Only commits after the fork count: a patch from before it that main since
   // reverted is not on main, and a branch re-applying it is new work.
-  const forkedAt = await reapGit(repoPath, ["merge-base", base, tip]);
+  const forkedAt = await hardenedGit(repoPath, ["merge-base", base, tip]);
   if (forkedAt.exitCode !== 0) return "unmerged-gone";
   const mergeBase = forkedAt.stdout.trim();
   const patchId = await squashPatchId(repoPath, mergeBase, tip);
@@ -275,7 +249,7 @@ export async function classifyTip(
 
 /** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. */
 export async function commitsAhead(repoPath: string, tip: string, base: string): Promise<number> {
-  const result = await reapGit(repoPath, ["rev-list", "--count", `${base}..${tip}`]);
+  const result = await hardenedGit(repoPath, ["rev-list", "--count", `${base}..${tip}`]);
   return result.exitCode === 0 ? Number(result.stdout.trim()) : 0;
 }
 
@@ -288,7 +262,7 @@ export async function commitsAhead(repoPath: string, tip: string, base: string):
  * it deletes untracked files unseen, and this is the only gate left.
  */
 export async function pendingChanges(worktree: string): Promise<number | null> {
-  const result = await reapGit(worktree, [
+  const result = await hardenedGit(worktree, [
     "status",
     "--porcelain",
     "--untracked-files=normal",
@@ -299,7 +273,7 @@ export async function pendingChanges(worktree: string): Promise<number | null> {
 }
 
 export async function gitDirOf(worktree: string): Promise<string | null> {
-  const result = await reapGit(worktree, ["rev-parse", "--absolute-git-dir"]);
+  const result = await hardenedGit(worktree, ["rev-parse", "--absolute-git-dir"]);
   return result.exitCode === 0 ? result.stdout.trim() : null;
 }
 
@@ -337,11 +311,11 @@ export async function lastTouched(worktree: string, gitDir: string, aliases: rea
 
 /** Never `--force`: git refuses a worktree with changes, untracked files or submodules, and that refusal is reported. */
 export async function removeWorktree(repoPath: string, worktree: string): Promise<ExecResult> {
-  return reapGit(repoPath, ["worktree", "remove", worktree]);
+  return hardenedGit(repoPath, ["worktree", "remove", worktree]);
 }
 
 export async function pruneWorktrees(repoPath: string): Promise<ExecResult> {
-  return reapGit(repoPath, ["worktree", "prune"]);
+  return hardenedGit(repoPath, ["worktree", "prune"]);
 }
 
 /**
@@ -350,7 +324,7 @@ export async function pruneWorktrees(repoPath: string): Promise<ExecResult> {
  * deleted unseen. Its config section goes too, as `git branch -D` would remove it.
  */
 export async function deleteBranch(repoPath: string, name: string, sha: string): Promise<ExecResult> {
-  const deleted = await reapGit(repoPath, ["update-ref", "-d", `refs/heads/${name}`, sha]);
-  if (deleted.exitCode === 0) await reapGit(repoPath, ["config", "--remove-section", `branch.${name}`]);
+  const deleted = await hardenedGit(repoPath, ["update-ref", "-d", `refs/heads/${name}`, sha]);
+  if (deleted.exitCode === 0) await hardenedGit(repoPath, ["config", "--remove-section", `branch.${name}`]);
   return deleted;
 }
