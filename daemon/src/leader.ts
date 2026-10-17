@@ -21,6 +21,7 @@ import {
   APP_ID,
   isSchedulerOp,
   MAX_ACTIVE_TASKS,
+  parseBranchState,
   parseSessionEvent,
   parseTaskRef,
   parseTaskRequest,
@@ -28,6 +29,7 @@ import {
   QUEUE_PROMPT_PREVIEW,
   quote,
   RequestFailure,
+  type BranchState,
   type Decision,
   type DespawnResponse,
   type Envelope,
@@ -144,6 +146,12 @@ export interface Leader {
    * a takeover in flight.
    */
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
+  /**
+   * A `branch-state` from this machine, in process (`run.ts`), as `onSession`
+   * is; other machines' arrive through the term's leg. `from` is the sealing
+   * daemon (one sealed `from: "app"` is dropped). A sink until the library takes branch state in (M3 item 3).
+   */
+  readonly onBranchState: (state: BranchState, from: string) => void;
   /** The term being run, or null while following. */
   readonly term: () => number | null;
   /** Resolves once the current term has taken over and is ticking, or has ended; tests await it. */
@@ -246,6 +254,7 @@ interface TermRun {
   readonly settled: Promise<void>;
   readonly deliver: (env: Envelope) => void;
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource) => Promise<void>;
+  readonly onBranchState: (state: BranchState, from: string) => void;
   readonly end: () => void;
 }
 
@@ -258,6 +267,9 @@ interface Demotion {
   readonly why: string;
   readonly resign: boolean;
 }
+
+// Deliberately a no-op: item 3 feeds it to the library (`Scheduler` has no branch-state entry until 4a adds one).
+function onBranchState(_state: BranchState, _from: string): void {}
 
 function schedulerError(code: SchedulerErrorCode, message: string): SchedulerError {
   return { ok: false, code, message };
@@ -484,9 +496,17 @@ function startTerm(
       onRequest(plain, plain.op, from).catch(report);
       return;
     }
+    // Only a daemon observes branches: an app's would let any holder of the PSK settle a task done.
+    if (plain.op === "branch-state" && from !== APP_ID) {
+      const branchState = parseBranchState(plain.payload);
+      if (branchState !== null) {
+        onBranchState(branchState, from);
+        return;
+      }
+    }
     const event = plain.op === "session-event" ? parseSessionEvent(plain.payload) : null;
     if (event === null) {
-      log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event`);
+      log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event or branch state`);
       return;
     }
     void onSession(event.taskId, event.state, { deviceId: from, pane: event.session });
@@ -580,6 +600,7 @@ function startTerm(
       if (live) relay.deliver(env).catch(report);
     },
     onSession,
+    onBranchState,
     end: () => {
       live = false;
       running = false;
@@ -637,6 +658,7 @@ export function createLeader(options: LeaderOpts): Leader {
       return true;
     },
     onSession: async (taskId, state, from) => current?.onSession(taskId, state, from),
+    onBranchState: (state, from) => current?.onBranchState(state, from),
     term: () => current?.term ?? null,
     settled: async () => current?.settled,
     stop: () => {

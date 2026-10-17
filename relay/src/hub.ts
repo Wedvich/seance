@@ -563,6 +563,12 @@ export class Hub implements DurableObject {
    *
    * No line for an accepted read or write — that would be the queue's activity
    * timeline — and never an `env`, a `ct` or its length.
+   *
+   * Two causes get no reply. A storage throw: a read's escapes
+   * `webSocketMessage`, as does `#holdsTerm`'s (outside the try); a put's or
+   * delete's is logged below, and a rejected write does not prove it never
+   * committed. And a reply the socket refused (`#storeReply` logs it). The
+   * client's `STORE_TIMEOUT_MS` reads either as indeterminate (DESIGN.md, "The store").
    */
   async #onStoreFrame(ws: WebSocket, leg: Role, frame: StoreRequestFrame): Promise<void> {
     if (frame.t === "store-list") {

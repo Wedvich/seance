@@ -10,6 +10,7 @@ import {
   importPsk,
   METRIC_NAMES,
   open,
+  parseBranchState,
   parseMachineStatus,
   parseMetricsReply,
   parseSessionEvent,
@@ -543,6 +544,50 @@ describe("daemon ↔ relay integration", () => {
       const plain = await open(appKey, env);
       expect(plain.op).toBe("session-event");
       expect(parseSessionEvent(plain.payload)).toEqual(event);
+    } finally {
+      client.stop();
+      relay.stop();
+    }
+  });
+
+  test("a branch state leaves sealed to the scheduler as `branch-state`, from this machine", async () => {
+    const relay = startTestRelay(TOKEN);
+    const identity = await identityFromSeed(generateIdentitySeed());
+    const routed: Envelope[] = [];
+    const client = new RelayClient({
+      url: relay.url,
+      bearerToken: TOKEN,
+      identity,
+      key: appKey,
+      buildInfo: () =>
+        seal(
+          appKey,
+          { to: APP_ID, from: identity.deviceId },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
+        ),
+      handle: () => Promise.resolve(null),
+      onScheduler: (env) => routed.push(env) > 0,
+    });
+    client.start();
+    try {
+      await relay.registers.next();
+      relay.lead(identity.deviceId, 1);
+      const state = {
+        taskId: "t1",
+        repo: "example.test/org/r",
+        branch: "worktree-x",
+        pushed: true,
+        merged: false,
+        at: 5,
+      };
+      expect(await client.sendBranchState(state)).toBe(true);
+      await pollUntil(() => routed.length === 1, "the state to come back routed to the leader");
+      const [env] = routed;
+      if (env === undefined) throw new Error("nothing routed");
+      expect({ to: env.to, from: env.from }).toEqual({ to: SCHEDULER_ID, from: identity.deviceId });
+      const plain = await open(appKey, env);
+      expect(plain.op).toBe("branch-state");
+      expect(parseBranchState(plain.payload)).toEqual(state);
     } finally {
       client.stop();
       relay.stop();

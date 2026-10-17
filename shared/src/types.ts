@@ -276,7 +276,7 @@ export type RegistryView = RegistryEntry & {
 /**
  * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
  * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
- * put. No relay accepts these frames before M3 item 1; the app sends
+ * put, ruled by `relay/src/store.ts` (item 1); the app sends
  * `store-list`, `store-get` and `store-put` (`RelayClient`, item 2), and nothing
  * sends `store-delete` yet. Plaintext Layer 1 frames, not ops — the
  * relay itself answers them — so a request carries its own `id` (a routing id,
@@ -359,8 +359,9 @@ export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
  * create. The leader prunes finished tasks to keep room; a record it cannot read
  * it reports and never deletes on its own — after a PSK rotation that would be
  * the whole queue — so clearing junk is a person's act. With
- * `STORE_MAX_CT_LENGTH`, a full prefix lists in 5 MiB: Cloudflare caps a
- * received WebSocket message at 32 MiB and states no cap on a sent one.
+ * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; whether Cloudflare
+ * sends a DO message that large is unverified (DESIGN.md, "The store", _Send
+ * size_, which holds the arithmetic), and paging is the fix if it does not.
  */
 export const MAX_TASKS = 128;
 
@@ -383,7 +384,12 @@ export const STORE_TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
 export const STORE_CREATE_WINDOW_MS = 60_000;
 export const MAX_STORE_CREATES_PER_WINDOW = 60;
 
-/** Client-side deadline for a store reply — a backstop, as `OP_TIMEOUT_MS` is: the relay answers every store frame it can parse. */
+/**
+ * Client-side deadline for a store reply. The relay answers every store frame it
+ * can parse, except on a storage throw or a reply the socket refused: then it
+ * sends nothing, and this timeout reads the outcome as indeterminate
+ * (DESIGN.md, "The store").
+ */
 export const STORE_TIMEOUT_MS = 10_000;
 
 export interface StoreListFrame {
@@ -1102,7 +1108,6 @@ export interface SessionsResponse {
    * cannot settle a task that ended with an open PR as `done`, or hold an
    * `after: "merged"` dependent past a merge it missed. At most
    * `SESSIONS_MAX_PROGRESS`; absent from older daemons and when there is none.
-   * Not sent yet (M3 item 4b).
    */
   readonly progress?: readonly TaskProgress[];
   /**
@@ -1128,11 +1133,14 @@ export interface TaskProgress {
   readonly prUrl?: string;
   /** Absent for a `here` session, which has no task branch of its own. */
   readonly branch?: string;
-  /** Its upstream held its tip. */
+  /**
+   * origin's ref for the branch (`refs/remotes/origin/<branch>`) held its tip at
+   * least once — never an upstream: `claude --worktree` branches `--no-track`.
+   */
   readonly pushed?: true;
   /** `BranchState.merged`'s verdict. */
   readonly merged?: true;
-  /** When the daemon last observed any of these, ms. */
+  /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
@@ -1169,9 +1177,19 @@ export const BRANCH_MAX_LENGTH = 255;
  * "Done detection"). Like `SessionEvent`, every field is the daemon's own: the
  * task id from its pane map or launch ledger, never from a session. `merged` is
  * reap's verdict (`Merged` in `daemon/src/reap-git.ts`: ancestor, squash or
- * gone) against the default branch; `pushed`, that the branch's upstream holds
- * its tip. A leader that missed one reads the same state back from
- * `SessionsResponse.progress`. Not sent yet (M3 item 4b).
+ * gone) against the default branch; `pushed`, that `refs/remotes/origin/<branch>`
+ * holds its work tip (live; exactly, where the repo has no `origin/HEAD`).
+ * `pushed` and `merged` are reported only once the branch was seen holding
+ * work of its own (a tip not reachable from the default branch whose tree
+ * differs from the one it forked at: an empty commit or a revert of its only
+ * change is none), and both are about that work tip, not whatever the branch
+ * points at now: a branch reset to the default after a push is not merged. The
+ * one exception: with no `origin/HEAD` nothing can be judged work, so `pushed`
+ * is the exact match alone, and never makes a `merged`, which needs a recorded
+ * work tip. `merged` also needs pushed evidence (seen pushed, or a recorded PR
+ * URL), since a fresh branch reads as merged. Only a
+ * daemon sends one; the leader drops an app's. A leader that missed one reads the
+ * same state back from `SessionsResponse.progress`.
  */
 export interface BranchState {
   readonly taskId: string;

@@ -104,6 +104,67 @@ describe("EndedTasks", () => {
     expect(ended.report(new Set(["c"]))).toEqual({ ended: ["a", "b"], ledgerSince: 5 });
   });
 
+  test("every landed launch starts the task's note afresh: a site notes it, `here` clears it", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    await ledger.note("t1", { branch: "worktree-x", ahead: true, pushed: true, prUrl: "https://x.test/1" });
+    // The same id relaunched to the same path: nothing of the first attempt carries over.
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    expect(ledger.notes()).toEqual([expect.objectContaining({ taskId: "t1", repo: "/r", path: site.worktree })]);
+    expect(ledger.notes()[0]).not.toHaveProperty("ahead");
+    expect(ledger.notes()[0]).not.toHaveProperty("prUrl");
+    await (
+      await ended.launch("t1")
+    )(true, {});
+    expect(ledger.notes()).toEqual([]);
+  });
+
+  test("a launch that did not land keeps the earlier launch's note: not launched, a refusal that ran, or a crash", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    await ledger.note("t1", { branch: "worktree-x", ahead: true, pushed: true, prUrl: "https://x.test/1" });
+    const before = ledger.notes();
+    await (
+      await ended.launch("t1")
+    )(false);
+    // `launched` without `landed`: task_running, or a crash.
+    await (
+      await ended.launch("t1")
+    )(true);
+    expect(ledger.notes()).toEqual(before);
+  });
+
+  test("a PR URL a session reports while its launch is in flight survives the fresh note", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", worktree: "/r/.claude/worktrees/x" };
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    await ledger.note("t1", { prUrl: "https://x.test/old" });
+    const settle = await ended.launch("t1");
+    await ended.notePr("t1", "https://x.test/new");
+    await settle(true, { site });
+    expect(ledger.notes()).toEqual([
+      expect.objectContaining({ taskId: "t1", path: site.worktree, prUrl: "https://x.test/new" }),
+    ]);
+    // Not carried to the next launch, which starts with none.
+    await (
+      await ended.launch("t1")
+    )(true, { site });
+    expect(ledger.notes()[0]).not.toHaveProperty("prUrl");
+  });
+
   test("ended events are bounded by age and by count", () => {
     const clock = { now: 0 };
     const ended = new EndedTasks(LaunchLedger.memory(), () => clock.now);
@@ -240,5 +301,56 @@ describe("coalescing", () => {
     events.stop();
     await Bun.sleep(200); // past the window: a non-event can't be polled
     expect(forwarded).toHaveLength(1);
+  });
+});
+
+describe("the PR URL is kept for the scheduler's progress", () => {
+  function setup(taskId: string) {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId, path: "/home" };
+    const events = createSessionEvents({
+      panes: () => Promise.resolve([pane]),
+      exclaves: () => [],
+      accountOf: () => null,
+      forward: () => {},
+      quota: SessionQuota.memory(),
+      ended,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    const send = (fields: object): Promise<unknown> => events.handle(frame({ pane: "%1", ...fields }), null);
+    return { ledger, ended, events, send };
+  }
+
+  test("an https URL for a launched task is recorded", async () => {
+    const { ledger, ended, events, send } = setup("t1");
+    try {
+      await ledger.record("t1");
+      await send({ state: "idle", prUrl: "https://github.com/a/b/pull/1" });
+      await pollUntil(() => ended.progress().length === 1, "the PR URL in progress");
+      expect(ended.progress()).toEqual([
+        { taskId: "t1", at: expect.any(Number), prUrl: "https://github.com/a/b/pull/1" },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("an http URL, a malformed one, and one for a task never launched here are not", async () => {
+    const { ledger, ended, events, send } = setup("t1");
+    const stranger = setup("ghost");
+    try {
+      await ledger.record("t1");
+      await send({ state: "idle", prUrl: "http://github.com/a/b/pull/1" });
+      await send({ state: "idle", prUrl: "not a url" });
+      await stranger.send({ state: "idle", prUrl: "https://github.com/a/b/pull/2" });
+      await Bun.sleep(30); // a non-event can't be polled
+      expect(ended.progress()).toEqual([]);
+      expect(stranger.ended.progress()).toEqual([]);
+    } finally {
+      events.stop();
+      stranger.events.stop();
+    }
   });
 });
