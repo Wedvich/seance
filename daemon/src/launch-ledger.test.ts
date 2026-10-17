@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS } from "./launch-ledger.ts";
@@ -7,9 +7,19 @@ import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS } from "./launch-ledger.ts"
 let dir: string;
 let path: string;
 
+/**
+ * A fresh ledger dates itself no earlier than its directory's mtime, which a
+ * real write moves to the real clock; the fake clocks here start near zero, so
+ * the directory is put back to the epoch before each fresh open.
+ */
+async function rewindDir(): Promise<void> {
+  await utimes(dir, 0, 0);
+}
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "seance-ledger-"));
   path = join(dir, "launched.json");
+  await rewindDir();
 });
 
 afterEach(async () => {
@@ -34,6 +44,7 @@ describe("LaunchLedger", () => {
     expect((await LaunchLedger.open(path, () => 7)).since()).toBe(7);
     for (const junk of ["{not json", '{"v":2,"since":1,"tasks":[]}', '{"v":1,"since":1,"tasks":[["bad id;", 1]]}']) {
       await writeFile(path, junk);
+      await rewindDir();
       const ledger = await LaunchLedger.open(path, () => 42);
       expect(ledger.ids()).toEqual([]);
       expect(ledger.since()).toBe(42);
@@ -79,6 +90,38 @@ describe("LaunchLedger", () => {
     await ledger.retract("t2");
     expect((await LaunchLedger.open(path, () => 5)).ids()).toEqual(["t1"]);
     expect(ledger.since()).toBe(5);
+  });
+
+  test("a fresh ledger never dates itself before its directory last changed: a clock behind at boot cannot", async () => {
+    await writeFile(path, "{lost");
+    // The lost ledger's last write, by a clock that was right then.
+    const lastWrite = 1_800_000_000;
+    await utimes(dir, lastWrite, lastWrite);
+    const ledger = await LaunchLedger.open(path, () => 5);
+    expect(ledger.since()).toBeGreaterThan(lastWrite * 1_000);
+    // Once the clock is past it, the clock decides as before.
+    await rewindDir();
+    expect((await LaunchLedger.open(join(dir, "missing.json"), () => 5)).since()).toBe(5);
+  });
+
+  // Writes are serialized, each the whole ledger as it stands when it starts:
+  // dropping the id when the first write fails would have the second, which
+  // starts right after, put the ledger on disk without it — and report success.
+  test("a failed record does not drop an id a concurrent record of it is about to write", async () => {
+    const ledger = await LaunchLedger.open(path, () => 1);
+    await ledger.record("before");
+    await chmod(dir, 0o500);
+    try {
+      const first = ledger.record("dup");
+      const second = ledger.record("dup");
+      await expect(first).rejects.toThrow();
+      expect(ledger.ids()).toContain("dup");
+      await expect(second).rejects.toThrow();
+      // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
+      expect(ledger.ids()).toContain("dup");
+    } finally {
+      await chmod(dir, 0o700);
+    }
   });
 
   test("concurrent records all land: writes are serialized, each the whole ledger", async () => {

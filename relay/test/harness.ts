@@ -22,6 +22,8 @@ export interface TestRelay {
   /** HTTP-level probe; the only way to observe upgrade rejections as status codes. */
   readonly probe: (path: string, init?: { readonly headers?: Record<string, string> }) => Promise<Response>;
   readonly dispose: () => Promise<void>;
+  /** The worker's console lines so far — only with `captureLogs`, which keeps them off the test output. */
+  readonly logs: () => readonly string[];
 }
 
 interface WranglerConfig {
@@ -74,10 +76,13 @@ export interface RelayOptions {
    * before calling this.
    */
   readonly leaders?: readonly string[];
+  /** Collect the worker's console lines for `logs()` instead of printing them: for asserting what the relay logs. */
+  readonly captureLogs?: boolean;
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
-  const { sweep, leaders } = opts;
+  const { sweep, leaders, captureLogs } = opts;
+  const logs: string[] = [];
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
   if (binding === undefined) throw new Error("wrangler.jsonc declares no Durable Object binding");
@@ -88,6 +93,9 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
   const mf = new Miniflare(
     convertV4MiniflareOptions({
       modules: [{ type: "ESModule", path: "index.mjs", contents: await workerBundle() }],
+      ...(captureLogs === true
+        ? { handleStructuredLogs: (log: { message: string }) => void logs.push(log.message) }
+        : {}),
       compatibilityDate: config.compatibility_date,
       compatibilityFlags: [...(config.compatibility_flags ?? [])],
       // Free-tier Durable Objects are SQLite-backed; match that here.
@@ -113,6 +121,7 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
     // Must dispose: `bun test` fires no process exit hooks, so an undisposed
     // Miniflare leaves its workerd running past the test process itself.
     dispose: () => mf.dispose(),
+    logs: () => logs,
   };
 }
 
@@ -236,6 +245,59 @@ export async function connectDaemon(relay: TestRelay): Promise<Client> {
   const url = new URL("/daemon", relay.url);
   url.protocol = "ws:";
   return open(new WebSocket(url.href, { headers: { authorization: `Bearer ${relay.token}` } }));
+}
+
+/** A daemon socket that sends and never reads: see `connectZombieDaemon`. */
+export interface Zombie {
+  send(frame: unknown): void;
+  /** Drops the TCP connection with no close frame, as a dying machine would. */
+  destroy(): void;
+}
+
+/**
+ * A daemon socket that, like a machine gone to sleep, never answers anything —
+ * not a ping, and not the close a supersede sends. Bun's WebSocket answers a
+ * close by itself, so this speaks the protocol over raw TCP: the upgrade, then
+ * masked text frames out, with everything that comes back ignored.
+ */
+export async function connectZombieDaemon(relay: TestRelay): Promise<Zombie> {
+  const upgraded = Promise.withResolvers<void>();
+  let head = "";
+  const socket = await Bun.connect<undefined>({
+    hostname: relay.url.hostname,
+    port: Number(relay.url.port),
+    socket: {
+      data: (_s, chunk) => {
+        if (head.includes("\r\n\r\n")) return;
+        head += chunk.toString("latin1");
+        if (!head.includes("\r\n\r\n")) return;
+        if (head.startsWith("HTTP/1.1 101")) upgraded.resolve();
+        else upgraded.reject(new Error(`zombie upgrade refused: ${head.split("\r\n")[0]}`));
+      },
+    },
+  });
+  const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  socket.write(
+    `GET /daemon HTTP/1.1\r\nHost: ${relay.url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+      `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer ${relay.token}\r\n\r\n`,
+  );
+  await upgraded.promise;
+  return {
+    send: (frame) => {
+      const payload = new TextEncoder().encode(JSON.stringify(frame));
+      const length =
+        payload.length < 126
+          ? [0x80 | payload.length]
+          : payload.length < 65_536
+            ? [0x80 | 126, payload.length >> 8, payload.length & 0xff]
+            : null;
+      if (length === null) throw new Error("zombie frames stay under 64 KiB");
+      const mask = crypto.getRandomValues(new Uint8Array(4));
+      const masked = payload.map((byte, i) => byte ^ (mask[i % 4] ?? 0));
+      socket.write(new Uint8Array([0x81, ...length, ...mask, ...masked]));
+    },
+    destroy: () => socket.terminate(),
+  };
 }
 
 /** `token` overrides the valid one so a rejected app handshake can be observed. */

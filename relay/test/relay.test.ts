@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   connectApp,
   connectDaemon,
+  connectZombieDaemon,
   envelope,
   identityOf,
   newDeviceId,
@@ -57,6 +58,16 @@ async function waitForEntry(
     const frame = await app.waitFor<RegistryFrame>("registry");
     const entry = frame.entries.find((candidate) => candidate.deviceId === deviceId);
     if (entry !== undefined && matches(entry)) return entry;
+  }
+}
+
+/** Polls a positive assertion's subject rather than sleeping: a relay suite has no business importing the daemon's fixtures. */
+async function pollUntil(ready: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    // oxlint-disable-next-line no-await-in-loop -- polling is sequential by nature
+    await Bun.sleep(20);
   }
 }
 
@@ -835,6 +846,7 @@ describe("silent-socket sweep", () => {
     await Bun.sleep(500);
     sweeping = await startRelay(TOKEN, {
       sweep: { sweepIntervalMs: SWEEP_INTERVAL_MS, sweepSilenceLimitMs: SILENCE_LIMIT_MS },
+      captureLogs: true,
     });
   });
 
@@ -868,6 +880,47 @@ describe("silent-socket sweep", () => {
     expect(entry.lastSeen).toBeLessThanOrEqual(registeredAt);
     app.close();
   });
+
+  // A zombie (a slept machine) never completes the close a supersede sends, so
+  // its close handler — here, the sweep — can run after its successor has come
+  // and gone. Writing its own older snapshot back then would replace the one
+  // the successor kept, and its listing would read the machine as connected.
+  test("a superseded zombie swept after its successor closed keeps nothing, and the successor's status stays", async () => {
+    const deviceId = await newDeviceId();
+    const app = await connectApp(sweeping);
+    const zombie = await connectZombieDaemon(sweeping);
+    try {
+      zombie.send(await register(deviceId));
+      await waitForEntry(app, deviceId, (entry) => entry.connected);
+      const old = envelope(APP_ID, deviceId);
+      zombie.send({ t: "status", env: old });
+      expect((await app.waitFor<StatusFrame>("status")).env).toEqual(old);
+
+      const successor = await connectDaemon(sweeping);
+      successor.send(await register(deviceId));
+      await waitForEntry(app, deviceId, (entry) => entry.connected && entry.status === undefined);
+      const latest = envelope(APP_ID, deviceId);
+      successor.send({ t: "status", env: latest });
+      expect((await app.waitFor<StatusFrame>("status")).env).toEqual(latest);
+      // A superseded socket's beat is not the machine's.
+      zombie.send({ t: "status", env: envelope(APP_ID, deviceId) });
+      await app.expectNo("status");
+
+      successor.close();
+      const gone = await waitForEntry(app, deviceId, (entry) => !entry.connected);
+      expect(gone.status).toEqual(latest);
+      // Past the silence limit the zombie is swept; the entry is unchanged by it.
+      await pollUntil(() => sweeping.logs().some((line) => line.startsWith(`swept ${deviceId}`)), "the sweep", 10_000);
+      const late = await connectApp(sweeping);
+      const after = await waitForEntry(late, deviceId, () => true);
+      expect(after.status).toEqual(latest);
+      expect(after.connected).toBe(false);
+      late.close();
+    } finally {
+      zombie.destroy();
+      app.close();
+    }
+  }, 20_000);
 
   test("a heartbeating daemon is never swept, then is once it falls silent", async () => {
     const deviceId = await newDeviceId();
@@ -913,6 +966,7 @@ describe("scheduler leadership", () => {
     hub = await startRelay(TOKEN, {
       sweep: { sweepIntervalMs: 250, sweepSilenceLimitMs: SILENCE_LIMIT_MS },
       leaders: [...junk, ` ${padded}\t`, ...listed],
+      captureLogs: true,
     });
   });
 
@@ -1026,7 +1080,8 @@ describe("scheduler leadership", () => {
     const leaderId = listedId();
     const other = await join(app, otherId);
     // Daemon-origin with no leader: dropped, and nobody is told.
-    other.daemon.send({ t: "msg", env: envelope(SCHEDULER_ID, otherId) });
+    const beforeLeader = envelope(SCHEDULER_ID, otherId);
+    other.daemon.send({ t: "msg", env: beforeLeader });
     const leader = await join(app, leaderId, { roles: SCHEDULER });
     await leader.daemon.waitFor<LeadFrame>("lead");
     await leader.daemon.expectNo("msg");
@@ -1038,6 +1093,19 @@ describe("scheduler leadership", () => {
     other.daemon.send({ t: "msg", env: fromDaemon });
     expect((await leader.daemon.waitFor<DaemonMsg>("msg")).env).toEqual(fromDaemon);
     await app.expectNo("undeliverable");
+
+    // Mostly busy/idle events: a line each would be a timeline of when every
+    // machine worked. An app's request is still logged — and, sent last, its
+    // line is what says the daemon's would have been written by now.
+    const marker = envelope(SCHEDULER_ID, APP_ID);
+    app.send({ t: "msg", env: marker });
+    await leader.daemon.waitFor<DaemonMsg>("msg");
+    const linesFor = (iv: string): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${iv}"`));
+    await pollUntil(() => linesFor(marker.iv).length > 0, "the app request's deliver line");
+    expect(linesFor(fromApp.iv)).toEqual([expect.stringContaining("wire deliver")]);
+    expect(linesFor(lone.iv).length).toBeGreaterThan(0);
+    expect(linesFor(fromDaemon.iv)).toEqual([]);
+    expect(linesFor(beforeLeader.iv)).toEqual([]);
 
     await leave(app, leader.daemon, leaderId);
     await leave(app, other.daemon, otherId);

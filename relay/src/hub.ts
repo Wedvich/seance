@@ -124,6 +124,12 @@ interface SocketAttachment {
    * `STATUS_MAX_CT_LENGTH` so it and the identity fit the attachment's 2 KiB together.
    */
   readonly status?: SocketStatus;
+  /**
+   * Set when a register on another socket took this one's route. The entry is
+   * the registering socket's from then on: this one's close or sweep writes
+   * nothing back into it, and it keeps no status (`#leftBy`).
+   */
+  readonly superseded?: true;
 }
 
 interface DaemonSocket {
@@ -250,7 +256,8 @@ export class Hub implements DurableObject {
     const key = ENTRY_PREFIX + deviceId;
     const entry = await this.#ctx.storage.get<RegistryEntry>(key);
     // Stamped with the last heartbeat, not sweep time: the machine has been gone since then.
-    if (entry !== undefined) await this.#put(key, this.#leftBy(ws, entry, lastAlive));
+    const left = entry === undefined ? null : this.#leftBy(ws, entry, lastAlive);
+    if (left !== null) await this.#put(key, left);
   }
 
   #roleOf(ws: WebSocket): Role {
@@ -310,6 +317,10 @@ export class Hub implements DurableObject {
     }
     const now = Date.now();
     const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
+    if (attachment.superseded === true) {
+      wireLog("dropped", env, " reason=status-superseded");
+      return;
+    }
     if (attachment.status !== undefined && now - attachment.status.at < STATUS_MIN_INTERVAL_MS) {
       wireLog("dropped", env, " reason=status-rate");
       return;
@@ -482,7 +493,13 @@ export class Hub implements DurableObject {
       identity: { deviceId, roles: knownRoles(frame.roles ?? []), ...rate },
     } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {
-      if (other !== ws && this.#deviceIdOf(other) === deviceId) other.close(1000, "superseded");
+      if (other === ws || this.#deviceIdOf(other) !== deviceId) continue;
+      // Marked before the close: a zombie (a slept machine) never completes the
+      // handshake, so its close handler, or the sweep, can run long after this
+      // register's successor has itself come and gone.
+      const { status: _dropped, ...loser } = other.deserializeAttachment() as SocketAttachment;
+      other.serializeAttachment({ ...loser, superseded: true } satisfies SocketAttachment);
+      other.close(1000, "superseded");
     }
     // Ahead of the put: the socket routes from here on, so it can lead from here on.
     await this.#renominate([]);
@@ -563,6 +580,13 @@ export class Hub implements DurableObject {
       addressee === null
         ? []
         : this.#daemonsNewestFirst([]).filter(({ attachment }) => attachment?.identity?.deviceId === addressee);
+    // A daemon's traffic to the scheduler is mostly its sessions' busy/idle
+    // events, so a line per delivery would be a timeline of when each machine
+    // was working — the activity record the blind relay keeps out of its logs
+    // (DESIGN.md, threat model item 3), as `#status` does for beats. Only a
+    // failed send is logged; with no leader the drop is the expected steady
+    // state, and logging it would be the same timeline.
+    const quiet = senderRole === "daemon" && env.to === SCHEDULER_ID;
     const text = JSON.stringify({ t: "msg", env } satisfies RelayToDaemonFrame);
     for (const { ws: target } of targets) {
       // A failure falls through to the next candidate and, past the last, to
@@ -571,7 +595,7 @@ export class Hub implements DurableObject {
       // reports `offline`, which the app promotes to *proven* offline.
       const err = trySend(target, text);
       if (err === null) {
-        wireLog("deliver", env, ` role=${senderRole}`);
+        if (!quiet) wireLog("deliver", env, ` role=${senderRole}`);
         return;
       }
       wireLog("dropped", env, ` reason=send-failed err=${err}`);
@@ -581,7 +605,7 @@ export class Hub implements DurableObject {
     // above — so reaching here means a daemon addressed a device that is neither
     // the app nor currently connected. Nobody is waiting for it either way.
     if (senderRole !== "app") {
-      wireLog("dropped", env, " reason=unroutable");
+      if (!quiet || targets.length > 0) wireLog("dropped", env, " reason=unroutable");
       return;
     }
     // No leader is `offline`, never `unknown`: the address is real, and one will be back.
@@ -602,9 +626,8 @@ export class Hub implements DurableObject {
     if (deviceId === null) return;
     const key = ENTRY_PREFIX + deviceId;
     const entry = await this.#ctx.storage.get<RegistryEntry>(key);
-    if (entry !== undefined) {
-      await this.#put(key, this.#leftBy(ws, entry, Date.now()));
-    }
+    const left = entry === undefined ? null : this.#leftBy(ws, entry, Date.now());
+    if (left !== null) await this.#put(key, left);
     await this.#renominate([ws]);
     await this.#pushRegistry(undefined, [ws]);
   }
@@ -613,18 +636,17 @@ export class Hub implements DurableObject {
    * The entry a departing socket leaves: its last `status` kept, or none — a
    * register cleared any older one, since it indexes the blob that register
    * replaced. Only the verified socket's own sealed env can get here, so it
-   * needs no signature. A superseded socket keeps nothing: its snapshot indexes
-   * the blob its successor's register replaced, and writing it back would undo
-   * that register's clear for as long as the successor's own close never runs
-   * (a relay restart drops sockets without one).
+   * needs no signature. Null for a superseded socket, which writes nothing: the
+   * entry is its successor's, and anything written back — its snapshot, or the
+   * absence of one — would undo the register's clear or the status the
+   * successor's own close kept. That holds whichever closes first, which
+   * newest-socket order cannot say once the successor has gone.
    */
-  #leftBy(ws: WebSocket, entry: RegistryEntry, lastSeen: number): RegistryEntry {
+  #leftBy(ws: WebSocket, entry: RegistryEntry, lastSeen: number): RegistryEntry | null {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (attachment?.superseded === true) return null;
     const { status: _kept, ...rest } = entry;
-    const newest = this.#daemonsNewestFirst([]).find(
-      ({ attachment }) => attachment?.identity?.deviceId === entry.deviceId,
-    );
-    if (newest !== undefined && newest.ws !== ws) return { ...rest, lastSeen };
-    const status = (ws.deserializeAttachment() as SocketAttachment | null)?.status?.env;
+    const status = attachment?.status?.env;
     return { ...rest, lastSeen, ...(status === undefined ? {} : { status }) };
   }
 
@@ -755,13 +777,16 @@ export class Hub implements DurableObject {
    * Daemon sockets by accept time, newest first — the order that breaks a tie
    * between two sockets on one deviceId across a reconnect. Each attachment is
    * deserialized once, up front: it carries the ~1 KiB `status`, and a sort
-   * comparator would decode it on every comparison.
+   * comparator would decode it on every comparison. A superseded socket is no
+   * route, presence or candidate, even once its successor has gone: it is
+   * listed only until a zombie's close or sweep runs.
    */
   #daemonsNewestFirst(exclude: readonly WebSocket[]): readonly DaemonSocket[] {
     return this.#ctx
       .getWebSockets("daemon")
       .filter((ws) => !exclude.includes(ws))
       .map((ws) => ({ ws, attachment: ws.deserializeAttachment() as SocketAttachment | null }))
+      .filter(({ attachment }) => attachment?.superseded !== true)
       .toSorted((a, b) => (b.attachment?.connectedAt ?? 0) - (a.attachment?.connectedAt ?? 0));
   }
 }

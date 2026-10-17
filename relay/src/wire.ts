@@ -75,7 +75,7 @@ export function isDeviceId(value: unknown): value is string {
  */
 function parseRoles(value: unknown): readonly string[] | null {
   if (!Array.isArray(value) || value.length > MAX_REGISTER_ROLES) return null;
-  return value.every(routableId) ? value : null;
+  return value.every(routableId) ? [...value] : null;
 }
 
 /** A term is a counter the relay minted, so anything but a non-negative integer is malformed. */
