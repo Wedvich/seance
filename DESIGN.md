@@ -3093,8 +3093,9 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   `$.process.run`. The command is silent, always exits 0, and waits for the daemon's
   one-line answer before exiting: the binding below needs the sender alive. It runs
   two or three times a turn in every session on the machine, so `main.ts` dispatches it
-  before loading anything else of the CLI (`cli.ts` pulls in the MCP SDK and zod):
-  13 ms a run on macOS where loading the whole CLI took 47 ms, against 5 ms for a bare
+  before loading anything else of the CLI (`cli.ts` pulls in the MCP SDK and zod), and the
+  command imports the frame constants from `session-event-frame.ts`, not the daemon side:
+  11 ms a run on macOS where loading the whole CLI took 47 ms, against 5 ms for a bare
   `bun -e 0`. Fire-and-forget from the mod's side, and skipped there when `TMUX_PANE`
   is unset: such a session is in no pane the daemon could bind it to, so every report
   would be `unbound` (below) at the cost of a Bun start and the daemon's tmux and

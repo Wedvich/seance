@@ -2,7 +2,7 @@
 // `session-event`'s is the one static import: it runs two or three times a turn
 // in every Claude session on the machine (the session-events mod, in every
 // exclave), and a static `cli.ts` would load the MCP SDK and zod into each of
-// those runs — 47 ms against 13. Every other command imports what it needs once picked.
+// those runs — 47 ms against 11. Every other command imports what it needs once picked.
 import { cmdSessionEvent } from "./session-event-cli.ts";
 
 const USAGE = `seanced — séance daemon
