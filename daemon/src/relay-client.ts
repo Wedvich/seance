@@ -8,9 +8,13 @@ import {
   isSchedulerOp,
   isTerm,
   MACHINES_ID,
+  parseStoreChanged,
+  parseStoreReply,
   ReplayError,
   ReplayGuard,
+  RequestFailure,
   SCHEDULER_ID,
+  STORE_TIMEOUT_MS,
   open,
   quote,
   seal,
@@ -27,6 +31,8 @@ import {
   type RelayToDaemonFrame,
   type SchedulerError,
   type SessionEvent,
+  type StoreReplyFrame,
+  type StoreRequestFrame,
 } from "@seance/shared";
 import { log } from "./log.ts";
 
@@ -62,6 +68,13 @@ export interface RelayClientOpts {
    * Absent, this leg's own guard.
    */
   readonly schedulerGuard?: ReplayGuard;
+  /**
+   * The relay's nudge after an app-leg write to the store (`store-changed`).
+   * Only the leader's socket receives it; `leader.ts` turns it into a refresh.
+   */
+  readonly onStoreChanged?: (key: string, version: number) => void;
+  /** Tests only; defaults to `STORE_TIMEOUT_MS`. */
+  readonly storeTimeoutMs?: number;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
@@ -76,10 +89,23 @@ export interface RelayClientOpts {
  */
 export class RelayClient {
   readonly #opts: Required<
-    Pick<RelayClientOpts, "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs">
+    Pick<RelayClientOpts, "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs" | "storeTimeoutMs">
   > &
     RelayClientOpts;
   readonly #guard = new ReplayGuard();
+  /** Store requests awaiting their reply, by id; each is bound to the socket it left on. */
+  readonly #storePending = new Map<
+    string,
+    {
+      readonly socket: WebSocket;
+      readonly timer: ReturnType<typeof setTimeout>;
+      readonly settle: (
+        result:
+          | { readonly ok: true; readonly reply: StoreReplyFrame | null }
+          | { readonly ok: false; readonly error: RequestFailure },
+      ) => void;
+    }
+  >();
   #ws: WebSocket | null = null;
   /** Whether a register frame has left the current socket: the relay drops any other frame before one. */
   #registered = false;
@@ -114,6 +140,7 @@ export class RelayClient {
       pongTimeoutMs: HEARTBEAT_PONG_TIMEOUT_MS,
       baseBackoffMs: 1_000,
       maxBackoffMs: 60_000,
+      storeTimeoutMs: STORE_TIMEOUT_MS,
       ...opts,
     };
   }
@@ -129,6 +156,9 @@ export class RelayClient {
     this.#teardownHeartbeat();
     this.#ws?.close();
     this.#ws = null;
+    for (const pending of [...this.#storePending.values()]) {
+      pending.settle({ ok: false, error: new RequestFailure("dropped", "the client stopped before the store reply") });
+    }
   }
 
   get connected(): boolean {
@@ -243,6 +273,73 @@ export class RelayClient {
     return true;
   }
 
+  /**
+   * One store frame to the relay, which answers it itself (no envelope). The
+   * leader's writes leave on this socket because the term fence is `holdsTerm(term,
+   * socket)`: the socket the term was issued to. Null is a reply this build
+   * cannot read. Rejects `RequestFailure`: `disconnected` when nothing was sent
+   * (no open socket), `timeout` or `dropped` when it was and no answer came —
+   * so the write may have landed. Logs only a timeout, and never a key, `env`
+   * or `ct`: no line per accepted op (DESIGN.md, "The store").
+   */
+  store(frame: StoreRequestFrame): Promise<StoreReplyFrame | null> {
+    const socket = this.#ws;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new RequestFailure("disconnected", "no socket to the relay"));
+    }
+    return new Promise<StoreReplyFrame | null>((resolve, reject) => {
+      const limit = this.#opts.storeTimeoutMs;
+      const timer = setTimeout(() => {
+        log.warn(`store timeout id=${quote(frame.id)} t=${frame.t} after=${limit}ms`);
+        this.#storePending.delete(frame.id);
+        reject(new RequestFailure("timeout", `${frame.t} timed out after ${limit}ms`));
+      }, limit);
+      this.#storePending.set(frame.id, {
+        socket,
+        timer,
+        settle: (result) => {
+          clearTimeout(timer);
+          this.#storePending.delete(frame.id);
+          if (result.ok) resolve(result.reply);
+          else reject(result.error);
+        },
+      });
+      socket.send(JSON.stringify(frame));
+    });
+  }
+
+  /** The relay answers a store frame only on the socket that sent it, so a close after the send may have committed. */
+  #failStorePending(socket: WebSocket, message: string): void {
+    for (const pending of [...this.#storePending.values()]) {
+      if (pending.socket === socket) pending.settle({ ok: false, error: new RequestFailure("dropped", message) });
+    }
+  }
+
+  /** Whether `frame` was a store frame, handled here: a reply settles its request, a nudge goes to the leader. */
+  #onStoreFrame(ws: WebSocket, frame: { readonly t?: unknown; readonly re?: unknown }): boolean {
+    if (typeof frame.t !== "string" || !frame.t.startsWith("store-")) return false;
+    if (frame.t === "store-changed") {
+      const changed = parseStoreChanged(frame);
+      if (changed === null) log.warn("dropped malformed store-changed");
+      else this.#opts.onStoreChanged?.(changed.key, changed.version);
+      return true;
+    }
+    const reply = parseStoreReply(frame);
+    const re = reply?.re ?? (typeof frame.re === "string" ? frame.re : null);
+    if (re === null) {
+      log.warn("dropped store frame without a reply id");
+      return true;
+    }
+    const pending = this.#storePending.get(re);
+    if (pending === undefined || pending.socket !== ws) {
+      log.warn(`dropped stale store reply re=${quote(re)}`);
+      return true;
+    }
+    // Unparseable settles at once with null: the request is answered, only unreadably.
+    pending.settle({ ok: true, reply });
+    return true;
+  }
+
   async #register(): Promise<void> {
     const { identity } = this.#opts;
     const info = await this.#opts.buildInfo();
@@ -292,7 +389,7 @@ export class RelayClient {
     });
 
     ws.addEventListener("message", (event) => {
-      void this.#onMessage(typeof event.data === "string" ? event.data : "");
+      void this.#onMessage(ws, typeof event.data === "string" ? event.data : "");
     });
 
     ws.addEventListener("close", (event) => this.#onDrop("closed", event.code, event.reason));
@@ -306,8 +403,10 @@ export class RelayClient {
   }
 
   #onDrop(why: string, code?: number, reason?: string): void {
-    if (this.#ws === null) return; // already handled (close after error)
+    const dropped = this.#ws;
+    if (dropped === null) return; // already handled (close after error)
     this.#ws = null;
+    this.#failStorePending(dropped, "socket closed before the store reply");
     this.#teardownHeartbeat();
     this.#opts.onDisconnect?.();
     if (this.#stopped) return;
@@ -347,7 +446,7 @@ export class RelayClient {
     this.#pongDeadline = null;
   }
 
-  async #onMessage(data: string): Promise<void> {
+  async #onMessage(ws: WebSocket, data: string): Promise<void> {
     if (data === "pong") {
       if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
       this.#pongDeadline = null;
@@ -365,6 +464,7 @@ export class RelayClient {
       log.warn("dropped non-object frame from relay");
       return;
     }
+    if (this.#onStoreFrame(ws, frame)) return;
     // Plaintext relay assertions, acted on by `leader.ts`; the term it runs
     // under is what the relay fences every scheduler send on.
     if (frame.t === "lead") {
