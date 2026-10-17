@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { DECISION_MAX_CANDIDATES, TASK_FAILURE_LIMITS, TARGET_LIMITS } from "@seance/shared";
+import { DECISION_MAX_CANDIDATES, TASK_FAILURE_LIMITS, TASK_REQUEST_LIMITS } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, StoreRevoked, type Task } from "../src/index.ts";
-import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
  * The store port (`QueueStore`): what a store can answer besides a clean write,
@@ -17,7 +17,12 @@ function setup(fleet = new FakeFleet([machine("a")])) {
   const clock = { now: NOW };
   const store = new MemoryQueueStore({ now: () => clock.now, tombstoneMs: 1_000 });
   const errors: unknown[] = [];
-  const scheduler = new Scheduler({ store, fleet, now: () => clock.now, onError: (err) => errors.push(err) });
+  const scheduler = new Scheduler({
+    store: readerChecked(store, () => clock.now),
+    fleet,
+    now: () => clock.now,
+    onError: (err) => errors.push(err),
+  });
   return { store, fleet, clock, scheduler, errors };
 }
 
@@ -174,7 +179,7 @@ describe("the scheduler over a store", () => {
     for (const m of fleet.fleet) {
       fleet.scripts.set(m.deviceId, () => ({ ok: false, code: "launch_error", message: "x".repeat(10_000) }));
     }
-    await store.put("t", 0, queued("t", { spec: spec({ title: "w".repeat(TARGET_LIMITS.window * 2) }) }));
+    await store.put("t", 0, queued("t", { spec: spec({ title: "w".repeat(TASK_REQUEST_LIMITS.title) }) }));
     await scheduler.load();
     await pass(scheduler);
     const body = (await store.get("t"))?.body;

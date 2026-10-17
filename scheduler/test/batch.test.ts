@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TASK_SPEC_LIMITS, type BatchStrategy } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task, type TaskSpec } from "../src/index.ts";
-import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /** Batches (M3 item 4a): a strategy's bound as `cap_reached` scope `batch`, and members routed in index order (`batch_order`). */
 
@@ -11,7 +11,7 @@ function setup() {
   const clock = { now: NOW };
   const fleet = new FakeFleet(FLEET);
   const store = new MemoryQueueStore({ now: () => clock.now });
-  const scheduler = new Scheduler({ store, fleet, now: () => clock.now });
+  const scheduler = new Scheduler({ store: readerChecked(store, () => clock.now), fleet, now: () => clock.now });
   async function member(
     id: string,
     index: number,

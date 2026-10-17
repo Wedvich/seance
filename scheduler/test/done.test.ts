@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { BranchState, TaskProgress } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
  * Done detection (M3 item 4a): a session's end read against its PR, a branch's
@@ -16,7 +16,13 @@ function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const clock = { now: NOW };
   const store = new MemoryQueueStore({ now: () => clock.now });
   let n = 0;
-  const scheduler = new Scheduler({ store, fleet, config, now: () => clock.now, newId: () => `t${++n}` });
+  const scheduler = new Scheduler({
+    store: readerChecked(store, () => clock.now),
+    fleet,
+    config,
+    now: () => clock.now,
+    newId: () => `t${++n}`,
+  });
   async function put(id: string, fields: Partial<Task> = {}): Promise<void> {
     const write = await store.put(id, 0, { id, spec: spec(), state: "running", createdAt: clock.now, ...fields });
     if (!write.ok) throw new Error(`put ${id}: ${write.code}`);

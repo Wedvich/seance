@@ -19,13 +19,19 @@ import {
   type TaskSpawnReply,
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
-import { FakeFleet, machine, NOW, spec, unreachable } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, readerChecked, spec, unreachable } from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const store = new MemoryQueueStore();
   const clock = { now: NOW };
   let n = 0;
-  const scheduler = new Scheduler({ store, fleet, config, now: () => clock.now, newId: () => `t${++n}` });
+  const scheduler = new Scheduler({
+    store: readerChecked(store, () => clock.now),
+    fleet,
+    config,
+    now: () => clock.now,
+    newId: () => `t${++n}`,
+  });
   return { store, fleet, clock, scheduler };
 }
 

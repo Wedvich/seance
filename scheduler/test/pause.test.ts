@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MAX_PAUSE_HOLDS } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, StoreRevoked } from "../src/index.ts";
-import { FakeFleet, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), store = new MemoryQueueStore()) {
   const clock = { now: NOW };
@@ -9,7 +9,7 @@ function setup(fleet = new FakeFleet([machine("a")]), store = new MemoryQueueSto
   let n = 0;
   const make = (): Scheduler =>
     new Scheduler({
-      store,
+      store: readerChecked(store, () => clock.now),
       fleet,
       config: DEFAULT_CONFIG,
       now: () => clock.now,

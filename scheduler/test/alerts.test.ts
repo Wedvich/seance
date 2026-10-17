@@ -10,7 +10,7 @@ import {
 } from "../src/index.ts";
 import { escalation, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import { exclave, FakeFleet, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
@@ -26,7 +26,7 @@ function setup(
   let n = 0;
   const make = (): Scheduler =>
     new Scheduler({
-      store,
+      store: readerChecked(store, () => clock.now),
       fleet,
       config,
       now: () => clock.now,
