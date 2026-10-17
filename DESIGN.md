@@ -1819,7 +1819,11 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - **What is tracked.** A spawn with a `taskId` in `mode: "worktree"` that lands notes two paths
   in the launch ledger (Session events, "`sessions` carries `ended`…"): the main clone
   (`RepoEntry.path`) and the worktree (`SpawnOutcome.path`). A `here` spawn has no branch of
-  its own and records neither; a refused spawn records nothing. Every ledger task with both
+  its own and records neither; a refused spawn records nothing. Every landed launch starts the
+  task's note afresh (`LaunchLedger.startNote`): a worktree launch with just those two paths, a
+  `here` one with none, whatever an earlier launch of the same id left. A relaunch to the same
+  path would otherwise inherit the first attempt's sticky `ahead`, `pushed` and PR URL and read
+  a workless branch as merged. Every ledger task with both
   paths and not yet merged is checked once a minute (`BRANCH_CHECK_INTERVAL_MS`); a merged one
   never again. Tasks launched before this landed have no site and are not watched. They are M2
   tasks with no `after:` dependents, so nothing waits on them.
@@ -1827,14 +1831,20 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   (`git -C <worktree> symbolic-ref`, run with the main clone as cwd because `Bun.spawn` throws
   on a cwd that is gone), so a `git branch -m` shows up on the next pass. The last-seen name
   is used only once the worktree no longer belongs to the repo (removed, or its directory
-  reused by another repo). When several tasks share a worktree path, the newest launch owns the
-  live read: `freeWorktreeName` can hand a freed name to a new spawn, and an older task must
-  keep being judged by its own recorded branch and tip, not by the newcomer's. A detached
-  head, or no branch at all, is skipped.
+  reused by another repo, or `HEAD` is not under `refs/heads/`: `symbolic-ref --short` would
+  print `heads/<b>` beside a tag of the same name). When several tasks share a worktree path, the
+  newest launch owns the live read, merged ones counted: `freeWorktreeName` frees a slug only when
+  the directory and the branch `worktree-<slug>` are both gone, so a reused path is a reused branch
+  name, and a newer launch's fresh local ref would otherwise be read as the older task's. A
+  non-owner never reads the local ref by name: it is judged by its recorded tip alone, and the
+  remote ref counts only if it holds that tip or descends from it. A detached head, or no branch
+  at all, is skipped.
 - **`pushed` is the remote ref, never an upstream.** `claude --worktree` branches `--no-track`,
   so `%(upstream:track)` says nothing for them. `pushed` is true when
-  `refs/remotes/origin/<branch>` exists and holds the tip (or the tip is its ancestor), which
-  `git push origin <b>` with no `-u` satisfies. In `BranchState` it is live (it reads false once
+  `refs/remotes/origin/<branch>` exists and holds the work tip (or the work tip is its ancestor),
+  which `git push origin <b>` with no `-u` satisfies. With no `origin/HEAD` nothing can be judged
+  ahead, so the ancestor test is off: `pushed` then needs the remote ref to equal the tip exactly,
+  and a stale ref from an earlier attempt that happens to be ahead of a fresh tip does not pass. In `BranchState` it is live (it reads false once
   a merge deletes the remote branch); in `progress` it is sticky, as `TaskProgress` says none of
   its flags goes back.
 - **`merged` is reap's verdict, with two gates.** `classifyTip` (`ancestor`, `squash` or `gone`,
@@ -1843,7 +1853,11 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   reap can afford that because it acts only on branches idle for days. A scheduler cannot: a
   workless branch reading merged settles a running task as `done`. So (1) **own work**: nothing
   is reported pushed or merged until the branch was seen holding a commit not reachable from the
-  default branch (`ahead`, sticky). That also stops a fresh branch reusing a stale
+  default branch (`ahead`, sticky), and the commit judged is the **work tip**: the current tip
+  while it is ahead now, otherwise the last tip recorded (the note keeps a tip only while ahead).
+  A session that pushes work and then `git reset --hard origin/main` is thus still judged on the
+  pushed commit, never on a main it merely points at; a fast-forward merge still reads merged, since
+  the unchanged tip is then an ancestor. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
   `refs/remotes/origin/<b>` from an earlier attempt from reading as pushed. And (2) **pushed
   evidence**: merged needs the branch seen pushed, or a recorded PR URL, which proves a push even
   when push, merge and prune all happened while the daemon was down. "Gone" is derived, since
@@ -1851,14 +1865,18 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   ref is now absent, which is what `git fetch --prune` does after the merge deletes it. A branch
   whose local ref was deleted (claude's worktree-exit "remove") before the PR merged is still
   judged, by its last-seen tip: the commit outlives the ref until gc. The verdict is memoized per
-  task on its inputs, so an idle branch costs no classification per pass.
+  task on its inputs, so an idle branch costs no classification per pass. It is computed against
+  the default branch's resolved sha, not the moving ref name, so the verdict and its memo key are
+  one snapshot.
 - **The fetch.** `git fetch --prune origin` runs only for a repo that holds a task branch with
   work seen pushed (or with a PR URL) and not yet merged, and only when the newest `FETCH_HEAD` is
   over five minutes old (`BRANCH_FETCH_STALE_MS`), through reap's guarded git (hooks and fsmonitor
   off, no prompt, 30 s timeout) with `GCM_INTERACTIVE=never` added unless the environment sets it,
   because Git Credential Manager ignores `GIT_TERMINAL_PROMPT` and can raise a GUI on WSL or
   Windows. A failed fetch is quiet: the pass judges by the refs on disk, which only makes fewer
-  things look merged, and one warning is logged when a repo goes from fetching to failing. Because
+  things look merged, and one warning is logged when a repo goes from fetching to failing: the repo
+  name and the exit code or "timed out", never git's stderr, which can carry a remote URL with
+  credentials (reap prints its own, to the operator's terminal). Because
   a failed fetch leaves `FETCH_HEAD` alone, the repo then backs off in memory (the window, doubling
   to an hour) instead of retrying every 60 s pass. Concurrent fetches from reap and the emitter can
   collide on a ref lock; that fails quietly and the next pass retries. The emitter takes no reap
@@ -1869,9 +1887,13 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   are recorded without a send. The last state is on disk, so a restart re-sends nothing that did not
   change. The first pass after a restart runs before the relay registers, so an undelivered state
   (`RelayClient.sendBranchState` resolves `false` when the socket is not up and registered) is kept in
-  memory and re-sent, with a fresh `at`, at the start of each pass until it is delivered. That
-  memory dies with the process: a state noted but never sent when the process exits is recovered
-  only through `progress`, which the leader reads on takeover and when the machine comes back.
+  memory and re-sent, with its original `at` (the observation time), at the start of each pass until
+  it is delivered. That memory is kept per ledger object at module scope, so an emitter that is
+  stopped and replaced on the same ledger (a config reload) hands its backlog on, and a send that
+  finds the emitter stopped after the note was written keeps its state there instead of losing it.
+  An entry whose task has left the ledger is dropped. The memory dies with the process: a state
+  noted but never sent when the process exits is recovered only through `progress`, which the
+  leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of
   PR URL, branch, pushed or merged, without paths or tips; an entry that would not pass
   `parseTaskProgressList` is left out, since one bad entry nulls the leader's whole list.
@@ -1887,7 +1909,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   `op: "branch-state"`. On the leader's own machine nothing crosses the relay: `run.ts` hands it in
   process to `leader.onBranchState`, as it does session events to `onSession`. The leader's relay
   event handler parses a relayed `branch-state` (`parseBranchState`) into the same sink, so there is
-  one place to wire. That sink does nothing until item 3 feeds it to the library, so until then the
+  one place to wire. Only a daemon observes a branch: one sealed `from: "app"` is dropped and
+  logged like a malformed one, since a PSK holder's app could otherwise settle a task `done`. That sink does nothing until item 3 feeds it to the library, so until then the
   library learns of a merge on the leader's own machine only through `progress`.
 - **Decided tails.**
   - A PR closed without merging keeps its repo fetched every five minutes until the ledger evicts the
