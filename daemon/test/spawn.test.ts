@@ -8,7 +8,7 @@ import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { listClaudeSessions } from "../src/sessions.ts";
 import { sessionName, spawnSession, type SpawnOptions } from "../src/spawn.ts";
-import { tmux, tmuxOk } from "../src/tmux.ts";
+import { FIELD_SEP, tmux, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
   makeClaudeStub,
@@ -441,13 +441,13 @@ async function headOf(path: string, rev = "HEAD"): Promise<string> {
 
 /** Kill by window id — a hostile window *name* is not a safe tmux target string. */
 async function killWindow(name: string): Promise<void> {
-  const listed = await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_id}\t#{window_name}"]);
-  const ids = listed
-    .split("\n")
-    .map((line) => line.split("\t"))
-    .filter((parts) => parts[1] === name)
-    .map((parts) => parts[0])
-    .filter((id): id is string => id !== undefined);
+  // FIELD_SEP, not a tab: tmux 3.4 prints a tab as `_` without a UTF-8 locale.
+  // Split at the first one only — an id never holds it, a name might.
+  const listed = await tmuxOk(["list-windows", "-t", "main", "-F", `#{window_id}${FIELD_SEP}#{window_name}`]);
+  const ids = listed.split("\n").flatMap((line) => {
+    const at = line.indexOf(FIELD_SEP);
+    return at !== -1 && line.slice(at + FIELD_SEP.length) === name ? [line.slice(0, at)] : [];
+  });
   await Promise.all(ids.map((id) => tmux(["kill-window", "-t", id])));
 }
 
