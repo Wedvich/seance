@@ -76,9 +76,23 @@ export type Verdict =
    * leader reported — refreshed from `queue` while the verdict is up — so the
    * screen follows it from waiting to placed, with its decision.
    */
-  | { readonly kind: "queued"; readonly task: Task }
+  | { readonly kind: "queued"; readonly task: Task; readonly follow?: FollowEnd }
   /** `submit` never landed, or the leader refused it; `message` says which. */
   | { readonly kind: "unqueued"; readonly message: string; readonly mayHaveLanded: boolean };
+
+/**
+ * Why a queued verdict stopped following its task before it settled. `gone`:
+ * the leader answered without it — M2's queue is the leader's memory, so a
+ * leader change drops it. `refused`: the leader answered the read with a
+ * refusal (`message`). `unanswered`: the polls ran out with the last one
+ * unanswered, so what shows may be stale. `stopped`: the polls ran out while
+ * the task still waited.
+ */
+export type FollowEnd =
+  | { readonly kind: "gone" }
+  | { readonly kind: "refused"; readonly message: string }
+  | { readonly kind: "unanswered" }
+  | { readonly kind: "stopped" };
 
 /** What survives a reload; transient fields are deliberately absent. */
 export interface PersistedForm {

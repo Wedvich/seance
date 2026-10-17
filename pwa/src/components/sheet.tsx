@@ -1,5 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useRef } from "preact/hooks";
+import type { Dot } from "../view.ts";
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -114,9 +115,6 @@ function TrashIcon(): JSX.Element {
     </svg>
   );
 }
-
-/** A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike. */
-export type Dot = "ok" | "off" | "auto";
 
 export function dotClass(dot: Dot): string {
   return dot === "ok" ? "dot dot-ok" : dot === "auto" ? "dot dot-auto" : "dot";

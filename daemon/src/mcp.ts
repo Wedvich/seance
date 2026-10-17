@@ -5,8 +5,12 @@ import { z } from "zod";
 import {
   failureReasonText,
   importPsk,
+  isTransportError,
+  reasonText,
   RequestFailure,
   QUEUE_MAX_TASKS,
+  schedulerErrorText,
+  TASK_PHASES,
   TASK_REQUEST_LIMITS,
   type Candidate,
   type Decision,
@@ -14,10 +18,8 @@ import {
   type DespawnResponse,
   type ErrorResponse,
   type Machine,
-  type Reason,
   type RepoEntry,
   type RequestOp,
-  type SchedulerErrorCode,
   type SessionsResponse,
   type SpawnClient,
   type SpawnRequest,
@@ -297,54 +299,6 @@ function taskRequestError(request: TaskRequest): string | null {
   );
 }
 
-/** Every code worded, so a new one fails the build here as it does in the PWA's table. */
-const SCHEDULER_ERRORS: Record<SchedulerErrorCode, string> = {
-  not_leader: "the scheduler moved to another machine while this was on its way; try again",
-  not_ready: "the scheduler is still taking over after a leader change; try again in a few seconds",
-  invalid_request:
-    "the scheduler refused the request as malformed — are this machine's and the leader's seanced the same version?",
-  queue_full:
-    "the scheduler already holds as many unfinished tasks as it will take; wait for some to start (get_queue), or name a machine",
-  task_not_found: "the scheduler holds no such task",
-  dispatching: "the task is starting on a machine right now; try again in a moment",
-  finished: "the task has already finished",
-  despawn_failed: "its machine refused to end the session; nothing changed",
-  conflict: "the task changed while this was on its way; try again",
-  reset_unknown: "no quota reading says when that account resets",
-  internal_error: "the scheduler hit an error",
-  too_large: "the scheduler's answer was too large to send back",
-};
-
-/** One clause per code, as the PWA's decision card words them, shortened for a line. */
-function reasonText(reason: Reason): string {
-  switch (reason.code) {
-    case "offline":
-      return "offline";
-    case "status_stale":
-      return "no fresh status";
-    case "task_id_unsupported":
-      return "its daemon predates task ids";
-    case "exclaves_unknown":
-      return "its daemon reports no exclaves";
-    case "disk_low":
-      return `disk nearly full (${reason.freeMib} MiB free)`;
-    case "pressure_unknown":
-      return "no CPU or memory load reported";
-    case "pin_mismatch":
-      return reason.field === "deviceId" ? "not the pinned machine" : "not the pinned exclave";
-    case "repo_absent":
-      return "no clone of this repo";
-    case "auth_missing":
-      return "not signed in";
-    case "quota_unknown":
-      return reason.why === "trimmed" ? "quota trimmed from its status" : "quota never observed";
-    case "quota_over_line":
-      return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
-    case "cap_reached":
-      return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
-  }
-}
-
 function candidateWhere(candidate: Candidate): string {
   return candidate.exclave === null ? candidate.machine : `${candidate.machine}/${candidate.exclave}`;
 }
@@ -419,7 +373,7 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
  * holding the tool call for that.
  */
 function stillPlacing(task: Task): boolean {
-  if (task.state === "reserved") return true;
+  if (TASK_PHASES[task.state] === "dispatching") return true;
   return task.state === "ready" && task.decision?.chosen !== null;
 }
 
@@ -541,8 +495,8 @@ async function spawnAuto(
   }
   if ("ok" in reply) {
     // `too_large` judges the reply, not the submit; a crashed handler may have got as far as queueing.
-    const landed = reply.code === "too_large" || reply.code === "internal_error" ? ` — ${MAY_HAVE_QUEUED}` : "";
-    return errorResult(`auto failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}${landed}`);
+    const landed = isTransportError(reply.code) ? ` — ${MAY_HAVE_QUEUED}` : "";
+    return errorResult(`auto failed (${reply.code}): ${schedulerErrorText(reply.code)}${landed}`);
   }
   let task = reply.task;
   const { id } = task;
@@ -698,7 +652,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
         }
         if (reply === null)
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
-        if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}`);
+        if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
         const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), tasks }, null, 2));
       }),
@@ -729,9 +683,8 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
         }
         if ("ok" in reply) {
           // As on submit: `too_large` judges the reply, and a crashed handler may have got as far as the despawn.
-          const landed =
-            reply.code === "too_large" || reply.code === "internal_error" ? ` — ${MAY_HAVE_CANCELLED}` : "";
-          return errorResult(`cancel_task failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}${landed}`);
+          const landed = isTransportError(reply.code) ? ` — ${MAY_HAVE_CANCELLED}` : "";
+          return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${landed}`);
         }
         return renderCancelled(reply.task, lease.machines);
       }),

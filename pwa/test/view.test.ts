@@ -480,16 +480,15 @@ describe("auto", () => {
   test("greyed with the reason whenever no verified leader would answer it", () => {
     const cases = [
       [{ kind: "none" }, "No scheduler is leading right now"],
-      [
-        { kind: "unverified", deviceId: "squat", term: 3 },
-        "Leader unverified — its registry entry doesn't open with this key",
-      ],
+      [{ kind: "unverified", deviceId: "squat", term: 3 }, "Leader unverified — it hasn't shown it holds this key"],
     ] as const;
     for (const [scheduler, reason] of cases) {
       const view = deriveView(state({ relay: relay({ machines: [withOrigins], scheduler }) }, { auto: true }), NOW);
       expect(view.autoAvailability).toEqual({ available: false, reason });
       expect(view.footerStatus).toBe(reason);
       expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
+      // Still "Auto" on the tile, but its dot no longer claims it would answer.
+      expect(view.machineTile).toMatchObject({ value: "Auto", dot: "off" });
     }
     const down = deriveView(state({ relay: relay({ status: "retrying", scheduler: ready }) }), NOW);
     expect(down.autoAvailability.available).toBe(false);

@@ -22,11 +22,20 @@ function Line(props: { line: DecisionLine; quota: boolean }): JSX.Element {
  * candidate was judged on — the placed task's record shows it; the form's
  * preview, read before anything is queued, leaves it out.
  */
-export function DecisionCard(props: { summary: DecisionSummary; title: string; quota: boolean }): JSX.Element {
-  const { summary, title, quota } = props;
+export function DecisionCard(props: {
+  summary: DecisionSummary;
+  title: string;
+  quota: boolean;
+  /** How long ago the decision was made, for a card that can outlive the fleet it read. */
+  age?: string;
+}): JSX.Element {
+  const { summary, title, quota, age } = props;
   return (
     <section className="decision card" aria-label={title}>
-      <span className="label">{title}</span>
+      <span className="label">
+        {title}
+        {age !== undefined && <span className="decision-age"> · decided {age}</span>}
+      </span>
       <p className="decision-headline">{summary.headline}</p>
       {summary.chosen !== null && (
         <ul className="decision-lines">
