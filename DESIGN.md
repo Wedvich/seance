@@ -1272,8 +1272,11 @@ is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's 
   and the readers say the losers were left out: the PWA's decision card counts them among its
   other candidates and closes the list with "N more not shown", MCP's decision line ends with
   "N more candidates not shown", and a record cut to no candidates at all never reads as an
-  empty fleet. Without it twenty finished tasks sealed past
-  the bound on a 3 × 2 fleet, and `queue` answered `too_large` for good. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
+  empty fleet. Where even the winner-only records overrun the budget (twenty tasks with every
+  bounded field near its cap), the oldest tasks are left out, finished ones before live ones, so
+  the reply holds fewer than `QUEUE_MAX_TASKS` rather than none. Without the budget twenty
+  finished tasks sealed past the bound on a 3 × 2 fleet, and `queue` answered `too_large` for
+  good. `route-preview` is `Scheduler.preview`: the same `route` over the same snapshot,
   reserving and writing nothing. `submit` (M2 only, Wire protocol Layer 2) queues the request and
   ticks at once, so the task is placed without waiting for the 30s timer; the scheduler mints the
   task id, never the app. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
@@ -1287,6 +1290,7 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
   the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
   the relay; the despawn a cancel sends audits on its target as any scheduler dispatch does.
+
 - **What never arrived is told from what may have.** The term's `Fleet` maps a request the
   relay provably did not deliver — `offline`, `unknown`, `refused`, or `disconnected`, which
   never left the leg — to the library's `undelivered`, so a spawn the relay could not route

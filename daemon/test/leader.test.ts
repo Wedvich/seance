@@ -593,6 +593,35 @@ describe("boundedQueue", () => {
     // Newest first, so the newest live record is the one kept whole.
     expect(queued[0]?.decision?.candidates).toHaveLength(50);
   });
+
+  test("tasks whose every field is near its cap still fit: the oldest finished ones are left out, never a live one", async () => {
+    const capped = { deviceId: "d".repeat(43), exclave: "e".repeat(64), clone: "c".repeat(512) };
+    const full = (i: number, state: Task["state"]): Task =>
+      task(`f${i}`, {
+        createdAt: i,
+        state,
+        // Four UTF-8 bytes per two UTF-16 units: the preview cut counts units, the budget bytes.
+        spec: { repo: "r".repeat(512), mode: "worktree", title: "t".repeat(200), prompt: "😀".repeat(200) },
+        assignment: { ...capped, window: "w".repeat(256) },
+        failure: { code: "launch_error", message: "m".repeat(512) },
+        decision: { ...fleetDecision(3, 3, i), chosen: capped },
+      });
+    // The two oldest are the live ones: age alone would drop them first.
+    const tasks = [
+      full(0, "ready"),
+      full(1, "reserved"),
+      ...Array.from({ length: QUEUE_MAX_TASKS - 2 }, (_, i) => full(i + 2, "failed")),
+    ];
+    const answered = boundedReply(tasks);
+    expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    const ids = queueReply(answered.payload).tasks.map((t) => t.id);
+    expect(ids.length).toBeLessThan(QUEUE_MAX_TASKS);
+    expect(ids).toContain("f0");
+    expect(ids).toContain("f1");
+    // Newest first still, the gap at the old end of the finished ones.
+    expect(ids.slice(0, 3)).toEqual([`f${QUEUE_MAX_TASKS - 1}`, `f${QUEUE_MAX_TASKS - 2}`, `f${QUEUE_MAX_TASKS - 3}`]);
+    expect(ids).not.toContain("f2");
+  });
 });
 
 describe("leader lifecycle", () => {
