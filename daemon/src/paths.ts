@@ -59,6 +59,11 @@ export function runtimePath(): string {
   return join(stateDir(), "runtime.json");
 }
 
+/** Reap's own record of when it last pruned each clone (`PruneLog` in `reap-git.ts`). */
+export function pruneLogPath(): string {
+  return join(stateDir(), "reap-fetch.json");
+}
+
 export function logPath(): string {
   return logPathIn(stateDir());
 }

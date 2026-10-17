@@ -1916,15 +1916,17 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   the default branch's resolved sha, not the moving ref name, so the verdict and its memo key are
   one snapshot.
 - **The fetch.** `git fetch --prune origin` runs only for a repo that holds a task branch with
-  work seen pushed (or with a PR URL) and not yet merged, and only when the newest `FETCH_HEAD` is
-  over five minutes old (`BRANCH_FETCH_STALE_MS`), through reap's guarded git (hooks and fsmonitor
+  work seen pushed (or with a PR URL) and not yet merged, and only when this emitter's own last
+  successful fetch of that clone, kept in memory, is over five minutes old (`BRANCH_FETCH_STALE_MS`;
+  not `FETCH_HEAD`'s mtime, which every worktree spawn refreshes without pruning, "Worktree spawns
+  fetch first"), through reap's guarded git (hooks and fsmonitor
   off, no prompt, 30 s timeout) with `GCM_INTERACTIVE=never` added unless the environment sets it,
   because Git Credential Manager ignores `GIT_TERMINAL_PROMPT` and can raise a GUI on WSL or
   Windows. A failed fetch is quiet: the pass judges by the refs on disk, which only makes fewer
   things look merged, and one warning is logged when a repo goes from fetching to failing: the repo
   name and the exit code or "timed out", never git's stderr, which can carry a remote URL with
   credentials (reap prints its own, to the operator's terminal). Because
-  a failed fetch leaves `FETCH_HEAD` alone, the repo then backs off in memory (the window, doubling
+  a failed fetch leaves that record alone, the repo then backs off in memory (the window, doubling
   to an hour) instead of retrying every 60 s pass. Concurrent fetches from reap and the emitter can
   collide on a ref lock; that fails quietly and the next pass retries. The emitter takes no reap
   lock: it never deletes, and the lock would make reap fail with `ReapBusy`. A repo with no
@@ -2829,16 +2831,24 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   moved since it was judged, then its config section, as `git branch -D` would.
   Every deletion's audit line carries the full tip sha — `git branch <name>
 <sha>` is the recovery.
-- **Network**: `git fetch --prune origin` only when the newest `FETCH_HEAD` (the
-  clone's, or a worktree's own) is over a day old — Claude Code's rule for its
-  own `--worktree` fetch. It must not hang on credentials: stdin ignored,
+- **Network**: `git fetch --prune origin` only when reap's own last prune of
+  that clone is over a day old. That time is kept in `reap-fetch.json` in the
+  state dir, keyed by canonical common dir, and written once per run for the
+  clones whose fetch succeeded. Missing or unparsable reads as never pruned.
+  This was the newest `FETCH_HEAD` until 2026-10-17. Worktree spawns now
+  refresh that file with a one-branch fetch that prunes nothing ("Worktree
+  spawns fetch first"), so on a machine that spawns daily it never aged. A
+  deleted remote branch then never read `[gone]` and was never reaped. A
+  separate file, not `state.json`, because a CLI reap and the daemon would both
+  rewrite the identity file. It must not hang on credentials: stdin ignored,
   `GIT_TERMINAL_PROMPT=0`, a 30s timeout; a failure is reported and the run
   judges by stale refs, which only ever makes fewer things look merged. A repo
   with no `origin/HEAD` on disk (about a third) gets `git remote set-head origin
 --auto`, bounded the same way, since "merged" needs something to measure
   against; still none, and the repo is skipped and named. The branch-state
   emitter (Scheduler, "Branch state") is the other fetcher, through the same guarded
-  `fetchIfStale` with a 5-minute window and `GCM_INTERACTIVE=never`.
+  `fetchIfStale` with a 5-minute window, its own in-memory record of its
+  last prune, and `GCM_INTERACTIVE=never`.
 - **Repo-local config executes.** Reap is the first thing to run git in every
   scanned repo, and git runs what a repo's config says. `core.fsmonitor` (a hook,
   or a daemon per worktree) and hooks (`reference-transaction` fires on the

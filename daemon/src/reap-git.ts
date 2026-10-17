@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFailure, type ExecResult } from "./exec.ts";
 import { hardenedGit } from "./git-hardened.ts";
 
-/** Claude Code's rule for its own `--worktree` fetch: only when the last one is over a day old. */
+/** At most one `fetch --prune` per clone per day. */
 export const FETCH_STALE_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
 
@@ -19,29 +19,41 @@ export type FetchOutcome =
     };
 
 /**
- * The newest `FETCH_HEAD` across the clone and its worktrees: a fetch run inside
- * a linked worktree may record it in that worktree's own git dir.
+ * When reap last ran a `fetch --prune` that succeeded, per canonical common
+ * dir. Reap's own record, not `FETCH_HEAD`'s mtime: every worktree spawn writes
+ * that file with a one-branch fetch that prunes nothing (`base-fetch.ts`), and
+ * so does any `git pull`. On a machine that spawns daily it would never age, and
+ * a deleted remote branch would never read `[gone]`.
  */
-export async function lastFetchedAt(commonDir: string): Promise<number> {
-  const worktrees = await readdir(join(commonDir, "worktrees")).catch(() => [] as string[]);
-  const candidates = [
-    join(commonDir, "FETCH_HEAD"),
-    ...worktrees.map((name) => join(commonDir, "worktrees", name, "FETCH_HEAD")),
-  ];
-  const times = await Promise.all(candidates.map(async (file) => (await stat(file).catch(() => null))?.mtimeMs ?? 0));
-  return Math.max(0, ...times);
+export type PruneLog = Readonly<Record<string, number>>;
+
+/** Missing or unreadable reads as empty — the cost is one extra fetch per clone. */
+export async function readPruneLog(path: string): Promise<PruneLog> {
+  const parsed: unknown = await Bun.file(path)
+    .json()
+    .catch(() => null);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  return Object.fromEntries(
+    Object.entries(parsed).filter((entry): entry is [string, number] => Number.isFinite(entry[1])),
+  );
 }
 
 /** `staleMs` and `env` are the emitter's: a shorter window, and `GCM_INTERACTIVE=never` against a credential GUI. */
 export async function fetchIfStale(
   repoPath: string,
-  commonDir: string,
+  lastPrunedAt: number,
   now: number,
   staleMs = FETCH_STALE_MS,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<FetchOutcome> {
-  if (now - (await lastFetchedAt(commonDir)) < staleMs) return { kind: "fresh" };
-  const result = await hardenedGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS, undefined, env);
+  if (now - lastPrunedAt < staleMs) return { kind: "fresh" };
+  const result = await hardenedGit(
+    repoPath,
+    ["fetch", "--prune", "--quiet", "origin"],
+    FETCH_TIMEOUT_MS,
+    undefined,
+    env,
+  );
   return result.exitCode === 0
     ? { kind: "fetched" }
     : {

@@ -32,6 +32,7 @@ import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import { peerPidSupported } from "./peer.ts";
+import { pruneLogPath } from "./paths.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { RelayClient } from "./relay-client.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -527,6 +528,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           minAgeMs: reapSettings.minAgeDays * DAY_MS,
           audit: reapAudit("schedule", daemonSink),
           signal: reapAbort.signal,
+          pruneLogPath: pruneLogPath(),
         }),
       );
       for (const line of formatReport(report)) log.info(`reap: ${line}`);

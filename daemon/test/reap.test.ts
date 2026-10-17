@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { reapAudit, type AuditSink } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
+import { resolveCommonDir } from "../src/gitdir.ts";
 import {
   DAY_MS,
   formatReport,
@@ -79,14 +80,28 @@ interface Repo {
   readonly fixture: GitFixture;
   readonly repos: readonly RepoEntry[];
   readonly path: string;
+  /** This repo's own prune log, so no test reads another's — or the developer's. */
+  readonly pruneLog: string;
 }
 
-/** A clone of its own origin, fetched once so `FETCH_HEAD` is fresh — the run fetches only where a test ages it. */
+/** A clone of its own origin, logged as just pruned — the run fetches only where a test ages that. */
 async function freshRepo(): Promise<Repo> {
   fixtures += 1;
   const fixture = await makeGitFixture(join(base, `f${fixtures}`));
   await git(fixture.repoPath, "fetch", "-q", "origin");
-  return { fixture, repos: await scanRepos([fixture.root]), path: fixture.repoPath };
+  const repo = {
+    fixture,
+    repos: await scanRepos([fixture.root]),
+    path: fixture.repoPath,
+    pruneLog: join(base, `prune-log-${fixtures}.json`),
+  };
+  await logPrune(repo, Date.now());
+  return repo;
+}
+
+async function logPrune(repo: Repo, at: number): Promise<void> {
+  const commonDir = await resolveCommonDir(repo.path);
+  await writeFile(repo.pruneLog, JSON.stringify({ [commonDir ?? ""]: at }));
 }
 
 async function commit(cwd: string, file: string): Promise<string> {
@@ -131,8 +146,7 @@ async function age(worktree: string): Promise<void> {
 }
 
 async function ageFetch(repo: Repo): Promise<void> {
-  const old = new Date(Date.now() - 2 * DAY_MS);
-  await utimes(join(repo.path, ".git", "FETCH_HEAD"), old, old);
+  await logPrune(repo, Date.now() - 2 * DAY_MS);
 }
 
 async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<ReapReport> {
@@ -142,6 +156,7 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     minAgeMs: WEEK,
     audit: reapAudit("cli", collect),
     deadPaneMinAgeMs: 0,
+    pruneLogPath: repo.pruneLog,
     ...overrides,
   });
 }
@@ -400,7 +415,7 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(printed).toContain("would delete branch");
   });
 
-  test("fetches only when FETCH_HEAD is a day old, and then prunes what origin deleted", async () => {
+  test("prunes only when its own last prune is a day old, and then drops what origin deleted", async () => {
     const repo = await freshRepo();
     await git(repo.path, "push", "-q", "origin", "main:elsewhere");
     await git(repo.path, "fetch", "-q", "origin");
@@ -411,8 +426,26 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(await gitOk(repo.path, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/elsewhere")).toBe(true);
 
     await ageFetch(repo);
+    // What every worktree spawn does: a one-branch fetch, a fresh FETCH_HEAD, nothing pruned.
+    // It must not pass for the prune it isn't.
+    await git(repo.path, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
     expect((await reap(repo)).repos[0]?.fetch).toEqual({ kind: "fetched" });
     expect(await gitOk(repo.path, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/elsewhere")).toBe(false);
+
+    // and the prune it ran is logged, so the next run within the day leaves the network alone
+    expect((await reap(repo)).repos[0]?.fetch).toEqual({ kind: "fresh" });
+  });
+
+  test("a missing or corrupt prune log reads as never pruned, and the run rewrites it", async () => {
+    const repo = await freshRepo();
+    await writeFile(repo.pruneLog, "{ not json");
+    expect((await reap(repo)).repos[0]?.fetch).toEqual({ kind: "fetched" });
+    expect((await reap(repo)).repos[0]?.fetch).toEqual({ kind: "fresh" });
+
+    // in a state dir that doesn't exist yet, too
+    const absent = { pruneLogPath: join(base, `absent-${fixtures}`, "reap-fetch.json") };
+    expect((await reap(repo, absent)).repos[0]?.fetch).toEqual({ kind: "fetched" });
+    expect((await reap(repo, absent)).repos[0]?.fetch).toEqual({ kind: "fresh" });
   });
 
   test("an origin that wants credentials fails the fetch fast instead of hanging on a prompt", async () => {

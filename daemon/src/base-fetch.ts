@@ -1,8 +1,9 @@
+import { readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { RepoEntry, SpawnMode } from "@seance/shared";
 import { execFailure } from "./exec.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { resolveCommonDir } from "./gitdir.ts";
-import { lastFetchedAt } from "./reap-git.ts";
 import { readDefaultBranch } from "./scan.ts";
 
 /** Claude's own `--worktree` fetch timeout: an unreachable origin costs a spawn this much, no more. */
@@ -36,6 +37,20 @@ function fetchDefault(repoPath: string, commonDir: string, branch: string): Prom
     .finally(() => inFlight.delete(commonDir));
   inFlight.set(commonDir, run);
   return run;
+}
+
+/**
+ * The newest `FETCH_HEAD` across the clone and its worktrees: a fetch run inside
+ * a linked worktree may record it in that worktree's own git dir.
+ */
+async function lastFetchedAt(commonDir: string): Promise<number> {
+  const worktrees = await readdir(join(commonDir, "worktrees")).catch(() => [] as string[]);
+  const candidates = [
+    join(commonDir, "FETCH_HEAD"),
+    ...worktrees.map((name) => join(commonDir, "worktrees", name, "FETCH_HEAD")),
+  ];
+  const times = await Promise.all(candidates.map(async (file) => (await stat(file).catch(() => null))?.mtimeMs ?? 0));
+  return Math.max(0, ...times);
 }
 
 function age(ms: number): string {

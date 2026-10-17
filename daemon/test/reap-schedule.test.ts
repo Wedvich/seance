@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64 } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config, ReapConfig } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
+import { resolveCommonDir } from "../src/gitdir.ts";
+import { pruneLogPath, stateDir } from "../src/paths.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
 import { readState } from "../src/state.ts";
 import { makeGitFixture, pollUntil, usePrivateTmux, type GitFixture, type PrivateTmux } from "./fixtures.ts";
@@ -37,8 +39,10 @@ beforeAll(async () => {
   process.env["GIT_CONFIG_NOSYSTEM"] = "1";
   privateTmux = usePrivateTmux(base, "reapsched");
   fixture = await makeGitFixture(base);
-  // A fresh FETCH_HEAD, so no run here reaches for the network.
+  // Logged as just pruned, so no run here reaches for the network.
   await git("fetch", "-q", "origin");
+  await mkdir(stateDir(), { recursive: true });
+  await writeFile(pruneLogPath(), JSON.stringify({ [(await resolveCommonDir(fixture.repoPath)) ?? ""]: Date.now() }));
   relay = startTestRelay(TOKEN);
   const capture = (...args: unknown[]): void => {
     lines.push(args.map(String).join(" "));
