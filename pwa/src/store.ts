@@ -680,9 +680,10 @@ export class Store {
         this.#follow(reply.task.id, QUEUE_POLLS);
       }
     } catch (err) {
-      const failure = err instanceof RequestFailure ? err : new RequestFailure("disconnected", String(err));
-      // A timeout or a dropped socket may have come after the leader queued it.
-      const mayHaveLanded = failure.reason === "timeout" || failure.reason === "disconnected";
+      // An error that is no `RequestFailure` says nothing about whether it went out, so it may have.
+      const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
+      // A timeout or a socket closing after the send may have come after the leader queued it.
+      const mayHaveLanded = failure.reason === "timeout" || failure.reason === "dropped";
       const text = failureReasonText(failure);
       this.#showVerdict({
         kind: "unqueued",
@@ -777,10 +778,11 @@ export class Store {
         this.#showVerdict({ kind: "failed", code: reply.code, message: reply.message, repo: repo.name });
       }
     } catch (err) {
-      const reason = err instanceof RequestFailure ? err.reason : "disconnected";
+      const reason = err instanceof RequestFailure ? err.reason : "dropped";
       // "refused" belongs with the undeliverables: the relay answered that the
-      // request did not land, so nothing can be running.
-      if (reason === "offline" || reason === "unknown" || reason === "refused") {
+      // request did not land, so nothing can be running — and "disconnected"
+      // never left the app at all.
+      if (reason === "offline" || reason === "unknown" || reason === "refused" || reason === "disconnected") {
         this.#pending = null;
         this.#showVerdict({ kind: "unknown", reason: "undelivered", machine: machine.name, sessionCount: null });
       } else {

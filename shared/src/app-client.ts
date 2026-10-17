@@ -26,6 +26,8 @@ import {
   type SchedulerLeader,
   type SchedulerOp,
   type SubmitReply,
+  type TaskRef,
+  type TaskReply,
   type TaskRequest,
   type UndeliverableCode,
 } from "./types.ts";
@@ -39,6 +41,7 @@ import {
   parseRescanResponse,
   parseRoutePreviewReply,
   parseSubmitReply,
+  parseTaskReply,
 } from "./parse.ts";
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
 import { sanitizeStatus } from "./status-reader.ts";
@@ -58,6 +61,9 @@ export type SchedulerEventHandler = (plain: Plain, from: string) => void;
  * code this build does not know: what it means is unknown, but that the relay
  * declined delivery is not — the request certainly did not land. "unsupported"
  * never left the app: the machine's register blob doesn't advertise the op.
+ * "disconnected" never left either — there was no socket to send it on — where
+ * "dropped" was sent and the socket closed before an answer came, so like
+ * "timeout" it may have landed.
  */
 export type FailureReason =
   | UndeliverableCode
@@ -65,6 +71,7 @@ export type FailureReason =
   | "unsupported"
   | "timeout"
   | "disconnected"
+  | "dropped"
   | "no_leader"
   | "leader_unverified";
 
@@ -93,6 +100,8 @@ export function failureReasonText(failure: RequestFailure): string {
       return "sent as the scheduler under a term that is no longer the leader's";
     case "disconnected":
       return "lost the relay connection before the request went out";
+    case "dropped":
+      return "lost the relay connection after the request went out — it may have landed anyway";
     case "no_leader":
       return "no scheduler is leading — no connected daemon can take auto right now";
     case "leader_unverified":
@@ -599,7 +608,7 @@ export class RelayClient {
     this.#patch({ settling: false, registrySettled: false });
     this.#socket?.close();
     this.#socket = null;
-    this.#failAllPending(new RequestFailure("disconnected", "client stopped"));
+    this.#failAllPending(new RequestFailure("dropped", "client stopped"));
   }
 
   /** Reconnects now, skipping any pending backoff. */
@@ -737,7 +746,7 @@ export class RelayClient {
       if (this.#socket !== socket) return;
       this.#socket = null;
       this.#teardownHeartbeat();
-      this.#failAllPending(new RequestFailure("disconnected", "the relay socket closed"));
+      this.#failAllPending(new RequestFailure("dropped", "the relay socket closed"));
       this.#onClose(event.code);
     });
   }
@@ -1171,6 +1180,12 @@ export class RelayClient {
 
   queue(): Promise<QueueReply | null> {
     return this.#schedule("queue", {}, parseQueueReply);
+  }
+
+  /** Ends the task's session if it has one, then marks it `cancelled`; the reply is the task as it now stands. */
+  cancel(taskId: string): Promise<TaskReply | null> {
+    const ref: TaskRef = { taskId };
+    return this.#schedule("cancel", ref, parseTaskReply);
   }
 
   /** Same object back when nothing moved: `useState` bails out on reference equality. */

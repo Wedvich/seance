@@ -217,14 +217,20 @@ function isAutoRef(ref: string): boolean {
 const AUTO_LIMITS =
   "The scheduler's queue lives only in the leading daemon's memory: a task still waiting for capacity is lost when leadership changes, and it changes on every relay deploy and every daemon self-update. A task already placed is an ordinary session and survives that. There are no dependencies or ordering between tasks. Do not use auto as a durable backlog — submit only work that should start now.";
 
+/** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
+type SchedulerTool = "auto" | "get_queue" | "cancel_task";
+
 /** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
-function keylessText(op: "auto" | "get_queue"): string {
+function keylessText(op: SchedulerTool): string {
   const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
   return `${op} needs this machine's own key; unavailable through the broker${instead}`;
 }
 
 /** A lost reply must never read as a failure: the task may be queued, and a blind retry would run it twice. */
 const MAY_HAVE_QUEUED = "the task may have queued anyway — check get_queue and get_sessions before retrying";
+
+/** Likewise for a cancel: its session may already be ended, and the queue says. */
+const MAY_HAVE_CANCELLED = "the cancel may have landed anyway — check get_queue";
 
 /**
  * `auto`'s `repo` as the scheduler keys it, `RepoEntry.origin`. Callers hold
@@ -462,23 +468,45 @@ function renderAutoTask(task: Task, machines: readonly Machine[], note: string |
   return settledBadly ? errorResult(text) : textResult(text);
 }
 
+/** What a lost answer to a call that changes the queue may have done anyway; null for a read. */
+function mayHaveLanded(op: SchedulerTool): string | null {
+  if (op === "auto") return MAY_HAVE_QUEUED;
+  return op === "cancel_task" ? MAY_HAVE_CANCELLED : null;
+}
+
 /**
  * Why a scheduler call threw. A reply lost on `submit` is "may have queued",
  * never "failed": the leader may have queued it before the answer went missing.
+ * A request that never left ("disconnected") is a plain failure.
  */
-function schedulerFailureText(op: "auto" | "get_queue", err: unknown): string {
+function schedulerFailureText(op: SchedulerTool, err: unknown): string {
+  const landed = mayHaveLanded(op);
   if (err instanceof RequestFailure) {
     if (err.reason === "no_leader" || err.reason === "leader_unverified") {
       const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
       return `${op} unavailable: ${failureReasonText(err)}${instead}`;
     }
-    if (op === "auto" && (err.reason === "timeout" || err.reason === "disconnected")) {
-      return `auto: no answer from the scheduler (${err.message}) — ${MAY_HAVE_QUEUED}`;
+    if (landed !== null && (err.reason === "timeout" || err.reason === "dropped")) {
+      return `${op}: no answer from the scheduler (${err.message}) — ${landed}`;
     }
     return `${op} failed: ${failureReasonText(err)}`;
   }
   const detail = err instanceof Error ? err.message : String(err);
-  return op === "auto" ? `auto: ${detail} — ${MAY_HAVE_QUEUED}` : `${op} failed: ${detail}`;
+  return landed === null ? `${op} failed: ${detail}` : `${op}: ${detail} — ${landed}`;
+}
+
+/** The answer to `cancel_task`: the task as it now stands, and what the cancel did or could not do. */
+function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
+  const placement = placementOf(task, machines);
+  const where = placement === null ? "" : ` on ${placement.machine}`;
+  const lines = [`task ${task.id}: ${task.state}${where}`];
+  if (task.state !== "cancelled") lines.push(`It had already finished (${task.state}) before the cancel landed.`);
+  else if (task.leftRunning === true) {
+    lines.push(
+      `Its machine was away, so nothing was stopped there — its session may still be running: check get_sessions${where} once it is back, and end it with despawn_session.`,
+    );
+  }
+  return textResult(lines.join("\n"));
 }
 
 export interface McpServerOpts {
@@ -557,8 +585,8 @@ async function spawnAuto(
 
 /**
  * The MCP face of Séance: tools mapping 1:1 onto the registry and the
- * `sessions`/`spawn`/`despawn` ops, plus the scheduler's `submit` and `queue`
- * behind `machine: "auto"` and `get_queue`. Anything this hands to the relay rides the same
+ * `sessions`/`spawn`/`despawn` ops, plus the scheduler's `submit`, `queue` and
+ * `cancel` behind `machine: "auto"`, `get_queue` and `cancel_task`. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface, whether
  * this process seals it or the daemon's broker does (`fleet.ts`).
  *
@@ -673,6 +701,39 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}`);
         const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), tasks }, null, 2));
+      }),
+  );
+
+  server.registerTool(
+    "cancel_task",
+    {
+      title: "Cancel a scheduler task",
+      description:
+        'Cancel a task that spawn_session with machine "auto" submitted, by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.',
+      inputSchema: z.object({ taskId: z.string().describe("The task's id from get_queue") }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ taskId }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(keylessText("cancel_task"));
+        let reply: Awaited<ReturnType<SchedulerLeg["cancel"]>>;
+        try {
+          reply = await lease.scheduler.cancel(taskId);
+        } catch (err) {
+          return errorResult(schedulerFailureText("cancel_task", err));
+        }
+        if (reply === null) {
+          return errorResult(
+            `cancel_task: the scheduler's answer was unreadable (a seanced version mismatch?) — ${MAY_HAVE_CANCELLED}`,
+          );
+        }
+        if ("ok" in reply) {
+          // As on submit: `too_large` judges the reply, and a crashed handler may have got as far as the despawn.
+          const landed =
+            reply.code === "too_large" || reply.code === "internal_error" ? ` — ${MAY_HAVE_CANCELLED}` : "";
+          return errorResult(`cancel_task failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}${landed}`);
+        }
+        return renderCancelled(reply.task, lease.machines);
       }),
   );
 

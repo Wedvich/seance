@@ -73,7 +73,8 @@ function describe(verdict: Verdict, machineName: string, machines: readonly Mach
       glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
       headline: verdict.mayHaveLanded ? "The scheduler's answer was lost." : "The scheduler didn't queue it.",
       body: verdict.mayHaveLanded
-        ? `${verdict.message} It may have been queued anyway — check your sessions before trying again.`
+        ? // No queue view until M3's (docs/scheduler.md, M3 item 6): sessions are what this app can show.
+          `${verdict.message} It may have queued anyway. Give it a moment and look for its session before trying again — one still waiting for a machine won't show yet.`
         : verdict.message,
       detail: null,
       primary: { label: "Back to the form", onClick: "back" },

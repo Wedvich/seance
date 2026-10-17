@@ -2,13 +2,17 @@ import {
   FINISHED,
   MemoryQueueStore,
   Scheduler,
+  UNDELIVERED,
+  type CancelResult,
   UNREACHABLE,
   type Fleet,
+  type NoAnswer,
   type QueueStore,
   type SchedulerConfig,
   type SessionSource,
   type StoreWrite,
   type TaskSessionsReply,
+  type Undelivered,
   type Unreachable,
 } from "@seance/scheduler";
 import {
@@ -16,6 +20,7 @@ import {
   isSchedulerOp,
   MAX_ACTIVE_TASKS,
   parseSessionEvent,
+  parseTaskRef,
   parseTaskRequest,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
@@ -24,6 +29,7 @@ import {
   type DespawnResponse,
   type Envelope,
   type ErrorResponse,
+  type FailureReason,
   type Plain,
   type QueueResponse,
   type RoutePreviewResponse,
@@ -36,8 +42,10 @@ import {
   type SpawnResponse,
   type SubmitResponse,
   type Task,
+  type TaskResponse,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
+import { daemonSink, queueAudit } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
 import { log } from "./log.ts";
 
@@ -47,9 +55,10 @@ import { log } from "./log.ts";
  * enforces it — so the library can move to a fixed box behind two new adapters.
  *
  * One term is one run: `lead { term }` builds an app-role leg of its own, the
- * `Fleet` over it, a `Scheduler`, and a tick timer; `follow`, the daemon's
- * relay socket dropping, or a `not_leader` answer ends it, and ending it stops
- * every one of those. Nothing of a term survives it — the broker's discipline.
+ * `Fleet` over it, a `Scheduler`, and a tick timer. `follow`, the daemon's
+ * relay socket dropping, a `not_leader` answer, the leg's token rejected
+ * (which also resigns the role, since the relay cannot know) or `stop` ends
+ * it, and ending it stops every one of those. Nothing of a term survives it — the broker's discipline.
  *
  * Why not `LazyRelay`: it hangs up after five idle minutes and redials on the
  * next call, which suits a Claude session calling hours apart and not a loop
@@ -59,6 +68,8 @@ import { log } from "./log.ts";
 
 // For the daemon's tests, which the layering rule keeps from importing `scheduler/` themselves.
 export { MemoryQueueStore, type QueueStore, type Task } from "@seance/scheduler";
+
+const audit = queueAudit(daemonSink);
 
 /** M2's in-memory queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
 const KEEP_FINISHED = 50;
@@ -149,6 +160,10 @@ function unreachable(message: string): Unreachable {
   return { ok: false, code: UNREACHABLE, message };
 }
 
+function undelivered(message: string): Undelivered {
+  return { ok: false, code: UNDELIVERED, message };
+}
+
 /**
  * The library writes after awaits — a spawn verdict lands seconds later — so a
  * scheduler whose term ended mid-pass would otherwise write into a store the
@@ -165,7 +180,7 @@ function fencedStore(inner: QueueStore, term: number, live: () => boolean): Queu
   };
 }
 
-function sessionsOf(reply: SessionsResponse | ErrorResponse | Unreachable): TaskSessionsReply {
+function sessionsOf(reply: SessionsResponse | ErrorResponse | NoAnswer): TaskSessionsReply {
   if ("ok" in reply) return reply;
   const { sessions, ended, ledgerSince } = reply;
   // A proof that does not parse proves nothing: the task then fails rather than risk a twin.
@@ -182,11 +197,20 @@ interface TermFleetOpts {
 }
 
 /**
+ * Failures that prove the request never reached its machine: the relay
+ * declined delivery, or there was no socket to send it on. `not_leader` is one
+ * too, but it ends the term, whose fenced store then refuses the verdict.
+ */
+const NEVER_DELIVERED: ReadonlySet<FailureReason> = new Set(["offline", "unknown", "refused", "disconnected"]);
+
+/**
  * The `Fleet` over one term's leg. Every call is refused once the term ends,
- * the local ones included, so a stale pass cannot dispatch here either. "No
- * answer" of any kind — no route, a timeout, the leg stopping — is the
- * library's `unreachable`, which never fails a task; `not_leader` additionally
- * ends the term, since the relay has said it is someone else's.
+ * the local ones included, so a stale pass cannot dispatch here either. A
+ * request provably never delivered is the library's `undelivered`, which sends
+ * a spawn straight back to `ready`; any other missing answer — a timeout, the
+ * socket closing after the send, the leg stopping — is `unreachable`, which
+ * never fails a task. `not_leader` additionally ends the term, since the relay
+ * has said it is someone else's.
  */
 function termFleet(o: TermFleetOpts): Fleet {
   const remote = async <T>(deviceId: string, op: "spawn" | "sessions" | "despawn", payload: unknown) => {
@@ -195,7 +219,7 @@ function termFleet(o: TermFleetOpts): Fleet {
     } catch (err) {
       if (!(err instanceof RequestFailure)) throw err;
       if (err.reason === "not_leader") o.demote(`the relay refused ${op} to ${quote(deviceId)} as not_leader`);
-      return unreachable(err.message);
+      return NEVER_DELIVERED.has(err.reason) ? undelivered(err.message) : unreachable(err.message);
     }
   };
   const ended = unreachable("the scheduler term has ended");
@@ -260,21 +284,38 @@ function queueView(scheduler: Scheduler, now: number): QueueResponse {
   return { tasks, at: now };
 }
 
+/** What answering one app request reads: the term's scheduler and the request it answers. */
+interface Asked {
+  readonly scheduler: Scheduler;
+  /** The request's own id, which the audit line carries so the app's side can find it. */
+  readonly id: string;
+  readonly now: number;
+  readonly tick: () => void;
+  /**
+   * Runs submits one at a time. The `MAX_ACTIVE_TASKS` count and the submit it
+   * admits sit either side of awaits, so two run together would both pass it.
+   */
+  readonly admit: <T>(step: () => Promise<T>) => Promise<T>;
+}
+
+const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
+  finished: schedulerError("finished", "the task has already finished"),
+  despawn_failed: schedulerError("despawn_failed", "its machine did not end the session; the task is unchanged"),
+  conflict: schedulerError("conflict", "the task changed while the cancel ran; ask again"),
+};
+
 /**
  * An app's request to a running term (DESIGN.md, Scheduler, "The leader").
  * The payload is untrusted input to a PSK holder that acts on it, so it is
  * parsed into a fresh value before anything reads it.
  */
-async function answer(
-  scheduler: Scheduler,
-  op: SchedulerOp,
-  payload: unknown,
-  now: number,
-  tick: () => void,
-): Promise<unknown> {
+async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<unknown> {
+  const { scheduler, id, tick } = asked;
   switch (op) {
     case "queue":
-      return queueView(scheduler, now);
+      return queueView(scheduler, asked.now);
     case "route-preview": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
@@ -286,19 +327,36 @@ async function answer(
     case "submit": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed submit request");
-      await scheduler.prune(KEEP_FINISHED);
-      const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
-      if (active >= MAX_ACTIVE_TASKS) {
-        return schedulerError("queue_full", `the leader already holds ${active} unfinished tasks`);
+      return asked.admit(async () => {
+        await scheduler.prune(KEEP_FINISHED);
+        const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
+        if (active >= MAX_ACTIVE_TASKS) {
+          await audit.refused("submit", id, "queue_full");
+          return schedulerError("queue_full", `the leader already holds ${active} unfinished tasks`);
+        }
+        const reply: SubmitResponse = { task: await scheduler.submit(request) };
+        await audit.submitted(id, reply.task.id);
+        // Placed now rather than on the next 30s tick; the reply is the task as queued.
+        tick();
+        return reply;
+      });
+    }
+    case "cancel": {
+      const ref = parseTaskRef(payload);
+      if (ref === null) return schedulerError("invalid_request", "malformed cancel request");
+      const result = await scheduler.cancel(ref.taskId);
+      if (!result.ok) {
+        await audit.refused("cancel", id, result.code, ref.taskId);
+        return CANCEL_REFUSALS[result.code];
       }
-      const reply: SubmitResponse = { task: await scheduler.submit(request) };
-      // Placed now rather than on the next 30s tick; the reply is the task as queued.
+      await audit.cancelled(id, result.task);
+      // A cancelled task frees its slot for whatever waits.
       tick();
+      const reply: TaskResponse = { task: result.task };
       return reply;
     }
     // M3's ops, in the schema ahead of their handlers (M3 items 5 and 6): a
     // refusal rather than silence, which an app would read as a dead leader.
-    case "cancel":
     case "mark-done":
     case "pause":
     case "resume":
@@ -321,6 +379,12 @@ function startTerm(
   let running = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   const now = opts.now ?? Date.now;
+  let admitting: Promise<unknown> = Promise.resolve();
+  const admit = <T>(step: () => Promise<T>): Promise<T> => {
+    const turn = admitting.then(step);
+    admitting = turn.catch(() => undefined);
+    return turn;
+  };
   // Declared before the leg that calls it; it reads `scheduler` only once a term is running.
   const onSession = async (taskId: string, state: SessionState, from?: SessionSource): Promise<void> => {
     if (live && running) await scheduler.onSession(taskId, state, from).catch(report);
@@ -337,7 +401,7 @@ function startTerm(
     let payload: unknown;
     try {
       payload = running
-        ? await answer(scheduler, op, plain.payload, now(), tick)
+        ? await answer({ scheduler, id: plain.id, now: now(), tick, admit }, op, plain.payload)
         : schedulerError("not_ready", `term ${term} is still taking over`);
     } catch (err) {
       log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);

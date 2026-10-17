@@ -8,6 +8,7 @@ import {
   type RequestOp,
   type SchedulerOp,
   type SubmitReply,
+  type TaskReply,
 } from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
 
@@ -80,10 +81,10 @@ export function fakeRelay(
     start: () => {
       fake.started += 1;
     },
-    // The real client fails every pending request as "disconnected" on stop.
+    // The real client fails every pending request as "dropped" on stop.
     stop: () => {
       fake.stopped = true;
-      for (const reject of pending) reject(new RequestFailure("disconnected", "client stopped"));
+      for (const reject of pending) reject(new RequestFailure("dropped", "client stopped"));
       pending.clear();
     },
     getState: () => state,
@@ -103,6 +104,7 @@ export function fakeRelay(
     },
     submit: (request) => schedule<SubmitReply | null>("submit", request),
     queue: () => schedule<QueueReply | null>("queue", {}),
+    cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
   };
   return fake;
 }

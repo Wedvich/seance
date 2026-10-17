@@ -1,4 +1,4 @@
-import type { ErrorResponse, Machine, QueueReply, SubmitReply, TaskRequest } from "@seance/shared";
+import type { ErrorResponse, Machine, QueueReply, SubmitReply, TaskReply, TaskRequest } from "@seance/shared";
 import type { LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
@@ -29,6 +29,7 @@ import type { Check } from "./check.ts";
 export interface SchedulerLeg {
   readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
   readonly queue: () => Promise<QueueReply | null>;
+  readonly cancel: (taskId: string) => Promise<TaskReply | null>;
 }
 
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
@@ -59,7 +60,11 @@ export function relayFleet(relay: LazyRelay): Fleet {
         machines: client.getState().machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
           client.request<T>(deviceId, op, payload),
-        scheduler: { submit: (request) => client.submit(request), queue: () => client.queue() },
+        scheduler: {
+          submit: (request) => client.submit(request),
+          queue: () => client.queue(),
+          cancel: (taskId) => client.cancel(taskId),
+        },
         release: (): void => relay.release(),
       };
     },

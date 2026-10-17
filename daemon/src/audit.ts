@@ -231,6 +231,34 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
   };
 }
 
+export interface QueueAudit {
+  readonly submitted: (id: string, taskId: string) => Promise<void>;
+  readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
+  readonly refused: (op: "submit" | "cancel", id: string, code: string, taskId?: string) => Promise<void>;
+}
+
+/**
+ * An app's request that changed, or tried to change, this leader's queue. Always
+ * `origin=relay`: apps reach the scheduler only through it. `id` is the
+ * request's, so the app's side can be found; `task` is what joins the line to
+ * the `task=` on the spawn it leads to, on whichever machine runs it. Never the
+ * prompt — that spawn line fingerprints it.
+ */
+export function queueAudit(sink: AuditSink): QueueAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit queue origin=relay ${rest}`);
+  };
+  return {
+    submitted: (id, taskId) => emit(`op=submit id=${quote(id)} task=${quote(taskId)} ok`),
+    cancelled: (id, task) =>
+      emit(
+        `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
+      ),
+    refused: (op, id, code, taskId) =>
+      emit(`op=${op} id=${quote(id)}${taskId === undefined ? "" : ` task=${quote(taskId)}`} refused code=${code}`),
+  };
+}
+
 /**
  * Something on this box asked the daemon to reach *another* machine for it over
  * the op socket — a keyless `seanced mcp`. Its own origin, never `local`: a
