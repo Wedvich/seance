@@ -855,6 +855,52 @@ describe("leader in the daemon", () => {
     }
   });
 
+  // The relay picks which term an envelope reaches. A guard per term let it
+  // redeliver an app's submit to the next one inside the replay window, and run
+  // the prompt once per term.
+  test("one replay guard outlives terms: an app's submit redelivered with no term, then to the next, runs once", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => void lines.push(args.map(String).join(" "));
+    const { daemon, deviceId } = await startLeaderDaemon(relay, store);
+    try {
+      const leading = async (term: number | null): Promise<void> => {
+        await pollUntil(() => daemon.leader.term() === term, `term ${term ?? "none"}`);
+        await daemon.leader.settled();
+      };
+      // A repo no machine holds, so the task stays queued rather than spawning here.
+      const submit = await appRequest("submit", { repo: "github.com/acme/nowhere", mode: "worktree", prompt: "once" });
+      const redeliver = (): void => relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: submit }));
+      const replays = (): number => lines.filter((l) => l.includes(submit.iv) && l.includes("reason=replay")).length;
+
+      relay.lead(deviceId, 1);
+      await leading(1);
+      redeliver();
+      expect((await open(key, await relay.messages.next(5_000))).payload).toHaveProperty("task");
+
+      relay.follow(deviceId);
+      await leading(null);
+      // Not answered not_leader: the term that took it already answered.
+      redeliver();
+      await pollUntil(() => replays() === 1, "the follower dropping it as a replay");
+
+      relay.lead(deviceId, 2);
+      await leading(2);
+      redeliver();
+      await pollUntil(() => replays() === 2, "the next term dropping it as a replay");
+
+      await Bun.sleep(100);
+      expect(relay.messages.size).toBe(0);
+      expect(await store.list()).toHaveLength(1);
+    } finally {
+      console.log = realLog;
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("the daemon's relay socket dropping ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore(), { pingIntervalMs: 100 });

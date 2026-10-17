@@ -51,6 +51,13 @@ export interface RelayClientOpts {
    * misaddressed.
    */
   readonly onScheduler?: (env: Envelope) => boolean;
+  /**
+   * The guard every term's leg checks scheduler envelopes against, which the
+   * `not_leader` answer must share: an envelope one term took must not be
+   * answered again after it, nor one answered here be taken by the next term.
+   * Absent, this leg's own guard.
+   */
+  readonly schedulerGuard?: ReplayGuard;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
@@ -440,17 +447,24 @@ export class RelayClient {
    * An envelope to the scheduler that no running term took. An app's request
    * is answered `not_leader` rather than left to time out — the relay routed
    * it here because its record still names this daemon (a term ended on its
-   * own, a relay restart), and silence would read as a dead machine. Opened
-   * under this leg's guard: no term's guard saw it. Anything else — a reply
-   * or event for a term that ended — opens nothing that acts.
+   * own, a relay restart), and silence would read as a dead machine. Checked
+   * against the scheduler guard every term's leg shares, so the relay cannot
+   * have one envelope both answered here and taken by a term. Anything else —
+   * a reply or event for a term that ended — opens nothing that acts.
    */
   async #refuseScheduler(env: Envelope): Promise<void> {
     let plain: Plain;
     try {
       plain = await open(this.#opts.key, env);
-      this.#guard.check(env.iv, plain.ts);
     } catch {
       log.warn(`wire dropped iv=${quote(env.iv)} from=${quote(env.from)} reason=not-leading`);
+      return;
+    }
+    try {
+      (this.#opts.schedulerGuard ?? this.#guard).check(env.iv, plain.ts);
+    } catch (err) {
+      const reason = err instanceof ReplayError ? err.reason : String(err);
+      log.warn(`wire dropped iv=${quote(env.iv)} from=${quote(env.from)} reason=replay detail=${quote(reason)}`);
       return;
     }
     if (plain.re !== undefined || env.from !== APP_ID || !isSchedulerOp(plain.op)) {
