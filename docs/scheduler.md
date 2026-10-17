@@ -643,6 +643,12 @@ same PR, with the reason.
     gathers the rest with tools; 8K characters is far more than that takes. A direct spawn is
     not bound by it. Measured: at the prompt limit in two-byte characters a record still holds a
     15-candidate decision; past what the record holds, the leader trims the stored decision.
+12. **Running tasks are checked against their machines every 2 min** (`sweepIntervalMs`, set
+    with the M2 review, 2026-10-17): the backstop for an `ended` event that never arrived,
+    whose task would otherwise hold its slot for good. One `sessions` per connected machine
+    holding running tasks, shared with the pass's other checks; a lost event costs at most
+    two minutes of a slot, where a sweep every pass would cost a call per busy machine per
+    status beat.
 
 ## Risks / unknowns
 
