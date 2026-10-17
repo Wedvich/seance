@@ -668,11 +668,11 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
     and served from the blob, never per request. Tightened to directories (or symlinks
     resolving to one) holding a `SKILL.md`, so a stray dir or a dangling dotfiles link stops
-    advertising a skill — landed with the autocomplete (PR #TBD).
+    advertising a skill — landed with the autocomplete (PR #167).
   - _Filter_ (open): only a name somewhere in the fleet's inventory restricts — to the exclaves
     that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
     anything the inventory skips; cost: a typo routes anywhere rather than failing.
-  - _Autocomplete_ — **DONE (PR #TBD)**: union of names across machines and exclaves, from data
+  - _Autocomplete_ — **DONE (PR #167)**: union of names across machines and exclaves, from data
     the PWA already holds — needs no leader, which is why it landed before the filter. Names
     only, no descriptions (blob size; revisit if wanted).
   - _Out of scope for now_: plugin skills (`plugin:name`, under `plugins/`) and legacy
