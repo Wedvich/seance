@@ -80,7 +80,10 @@ a production change.
   by design. The app's relay client is exercised against the shipped relay rather than
   a double. `SCHEDULER_LEADERS` is fixed at boot as a deploy fixes it, so a suite that
   needs a leader mints its ids (`newDeviceId`) before `startRelay({ leaders })`; left
-  out, the binding is unset and nobody leads.
+  out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
+  `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire. Any suite file that
+  boots workerd settles 500 ms before booting and after disposing, because the relay shard
+  runs every file in one process.
 - **e2e** — all three real components at once: the daemon from `daemon/src`, the
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,

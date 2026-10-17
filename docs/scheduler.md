@@ -494,7 +494,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   hold's `Reason` (`paused`) and raw scheduler error codes ride along, now that the PWA's and
   MCP's wording is one module (`shared/src/scheduler-text.ts`).
 - **Wave 1**, in parallel:
-  - **1. Relay store** — `relay/src/store.ts`, with `hub.ts` and `wire.ts`: the four frames, the
+  - **1. Relay store — done 2026-10-17** (DESIGN.md _Scheduler_, "The store"). `relay/src/store.ts`,
+    with `hub.ts` and `wire.ts`: the four frames, the
     per-prefix rules, term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS` /
     `MAX_RECORDS`, `STORE_MAX_CT_LENGTH` and the create cap, the create rate floor, tombstones and
     their expiry, `store-changed`. The only M3 PR that touches `hub.ts`. It starts by moving the
@@ -512,10 +513,12 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     PSK still gets it — it cannot seal a `lead-proof`, so readers call that leader unverified and
     send it nothing, but the relay cannot read the proof and still accepts its term-fenced writes. Such a thief cannot
     forge or read a record, so an overwrite fails `bindTaskRecord` and is skipped; a delete,
-    though, loses the task. Item 1 decides whether a delete's tombstone keeps the last `env`, so
-    a person can put a task deleted that way back within `STORE_TOMBSTONE_MS` — cheap (records
-    are small, deletes rare) — or records the loss as accepted, beside DESIGN.md _Threat model_
-    item 3. Version binding and tombstones stop a token holder, not the relay itself: a
+    though, loses the task. Decided in item 1: a delete's tombstone keeps no `env`, and the loss
+    is accepted — what is lost is a pointer to work, never the work or the repo — recorded in
+    DESIGN.md _Threat model_ item 3 (an overwrite destroys the env anyway, restoring one would
+    need shape changes, and uncapped tombstones holding 28–40 KiB envs would blow DO storage).
+    The relay also refuses every delete under `queue:`, since no client deletes the pause.
+    Version binding and tombstones stop a token holder, not the relay itself: a
     compromised relay can still roll a record back or resurrect one.
     **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
     task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
@@ -802,7 +805,8 @@ same PR, with the reason.
   read a prompt, forge a task, roll one back (version binding), or replay a deleted one
   (tombstones and the 30-day admit rule, M3 PR 0). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
-  exists (rotate). DESIGN.md's "destroys nothing that exists" paragraph gets this caveat.
+  exists (rotate). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
+  M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
   M4's account records add a smaller one: being app-writable, a token holder can delete an
   alias or overwrite it with junk that readers skip — but not read, forge or roll one back, and
   an alias is a label, retyped in a second. Holding the leader's term would be a larger act,
