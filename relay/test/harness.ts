@@ -78,10 +78,12 @@ export interface RelayOptions {
   readonly leaders?: readonly string[];
   /** Collect the worker's console lines for `logs()` instead of printing them: for asserting what the relay logs. */
   readonly captureLogs?: boolean;
+  /** `STORE_TOMBSTONE_MS`: how long a deleted task's key refuses a put, so a test can watch one expire. */
+  readonly tombstoneMs?: number;
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
-  const { sweep, leaders, captureLogs } = opts;
+  const { sweep, leaders, captureLogs, tombstoneMs } = opts;
   const logs: string[] = [];
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
@@ -103,6 +105,7 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
       bindings: {
         BEARER_TOKEN: token,
         ...(leaders === undefined ? {} : { SCHEDULER_LEADERS: leaders.join(",") }),
+        ...(tombstoneMs === undefined ? {} : { STORE_TOMBSTONE_MS: String(tombstoneMs) }),
         ...(sweep === undefined
           ? {}
           : {
@@ -162,6 +165,8 @@ export interface Client {
   sendRaw(text: string): void;
   /** Next frame of the given `t`, discarding others (registry pushes interleave). */
   waitFor<T extends { t: string }>(t: T["t"], timeoutMs?: number): Promise<T>;
+  /** Next frame whose `re` is this, discarding others — store replies are correlated on `re`, not typed like `msg`. */
+  waitForRe<T extends { re: string }>(re: string, timeoutMs?: number): Promise<T>;
   /** Next frame verbatim — heartbeats are bare strings, not JSON. */
   nextRaw(timeoutMs?: number): Promise<string>;
   /** Asserts no frame of this type arrives — used where one must have been dropped. */
@@ -196,6 +201,17 @@ function wrap(ws: WebSocket): Client {
         if (text === "pong") continue;
         const frame = JSON.parse(text) as { t: string };
         if (frame.t === t) return frame as T;
+      }
+    },
+    waitForRe: async <T extends { re: string }>(re: string, timeoutMs = 2_000): Promise<T> => {
+      const deadline = Bun.nanoseconds() + timeoutMs * 1e6;
+      for (;;) {
+        const remaining = Math.ceil((deadline - Bun.nanoseconds()) / 1e6);
+        if (remaining <= 0) throw new Error(`no frame with re "${re}" within ${timeoutMs}ms`);
+        const text = await frames.next(remaining);
+        if (text === "pong") continue;
+        const frame = JSON.parse(text) as { re?: unknown };
+        if (frame.re === re) return frame as T;
       }
     },
     nextRaw: (timeoutMs = 2_000) => frames.next(timeoutMs),

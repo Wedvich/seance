@@ -13,12 +13,24 @@ import {
   ROUTING_ID_MAX_LENGTH,
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
+  STORE_CREATE_MAX_CT_LENGTH,
+  STORE_KEY_PATTERN,
+  STORE_MAX_CT_LENGTH,
+  STORE_PREFIXES,
   type AppFrame,
-  type AppStoreRequestFrame,
   type DaemonFrame,
   type Envelope,
+  type StoreErrorCode,
+  type StorePrefix,
   type StoreRequestFrame,
 } from "@seance/shared";
+
+/**
+ * Which socket a frame arrived on, fixed by the upgrade path (`auth.ts`
+ * re-exports it). Defined here because the pure modules and their tests reach
+ * it, and `auth.ts` uses a workerd-only API the test project's types lack.
+ */
+export type Role = "daemon" | "app";
 
 /**
  * Bounds, not shapes. `deviceId` is an identifier rather than a credential, so
@@ -104,10 +116,78 @@ export function parseEnvelope(value: unknown, maxCtLength = ENVELOPE_MAX_CT_LENG
   return env;
 }
 
-/** Store frames are not parsed yet (scheduler M3 item 1), so neither parser returns one. */
-export function parseDaemonFrame(text: string): Exclude<DaemonFrame, StoreRequestFrame> | null {
+/**
+ * A store request the relay can correlate but not accept. Never on the wire: the
+ * hub answers it `store-refused`. A frame without a usable `id` has nothing to
+ * answer to and parses to null instead.
+ */
+export interface StoreRejected {
+  readonly t: "store-rejected";
+  readonly id: string;
+  readonly code: Extract<StoreErrorCode, "invalid_request" | "too_large">;
+}
+
+const STORE_REQUEST_TYPES: ReadonlySet<unknown> = new Set(["store-list", "store-get", "store-put", "store-delete"]);
+
+/** Narrows to the store requests of whichever leg's union it is handed, term-less app variants included. */
+export function isStoreRequest<T extends { readonly t: string }>(
+  frame: T,
+): frame is Extract<T, { readonly t: StoreRequestFrame["t"] }> {
+  return STORE_REQUEST_TYPES.has(frame.t);
+}
+
+const LIST_PREFIXES: ReadonlySet<string> = new Set(Object.values(STORE_PREFIXES).map((rule) => rule.prefix));
+
+function isStorePrefix(value: unknown): value is StorePrefix {
+  return typeof value === "string" && LIST_PREFIXES.has(value);
+}
+
+function isStoreKeyShape(value: unknown): value is string {
+  return typeof value === "string" && STORE_KEY_PATTERN.test(value);
+}
+
+/**
+ * Bounds and shapes of the four store frames. The ciphertext is parsed
+ * unbounded and measured after, so an oversized one is `too_large` rather than
+ * indistinguishable from a malformed frame; the WebSocket message cap bounds it
+ * at the transport. A `term` is a daemon-leg field only: on the app leg it is
+ * dropped here, so nothing downstream can read it as authority.
+ */
+function parseStoreFrame(value: Record<string, unknown>, leg: Role): StoreRequestFrame | StoreRejected | null {
+  const t = value["t"];
+  if (!STORE_REQUEST_TYPES.has(t)) return null;
+  // Nothing to correlate a reply with, so nothing to answer.
+  const id = value["id"];
+  if (!routableId(id)) return null;
+  const reject = (code: StoreRejected["code"]): StoreRejected => ({ t: "store-rejected", id, code });
+
+  if (t === "store-list") {
+    // Other fields (`after`) are ignored: a relay without paging answers the whole prefix.
+    const prefix = value["prefix"];
+    return isStorePrefix(prefix) ? { t: "store-list", id, prefix } : reject("invalid_request");
+  }
+  const key = value["key"];
+  if (!isStoreKeyShape(key)) return reject("invalid_request");
+  if (t === "store-get") return { t: "store-get", id, key };
+
+  const expect = value["expect"];
+  if (!isTerm(expect)) return reject("invalid_request");
+  const termValue = value["term"];
+  if (leg === "daemon" && termValue !== undefined && !isTerm(termValue)) return reject("invalid_request");
+  const term = leg === "daemon" && isTerm(termValue) ? { term: termValue } : {};
+
+  if (t === "store-delete") return { t: "store-delete", id, key, expect, ...term };
+
+  const env = parseEnvelope(value["env"], Number.POSITIVE_INFINITY);
+  if (env === null) return reject("invalid_request");
+  if (env.ct.length > (expect === 0 ? STORE_CREATE_MAX_CT_LENGTH : STORE_MAX_CT_LENGTH)) return reject("too_large");
+  return { t: "store-put", id, key, expect, env, ...term };
+}
+
+export function parseDaemonFrame(text: string): DaemonFrame | StoreRejected | null {
   const value = parseJson(text);
   if (!isRecord(value)) return null;
+  if (STORE_REQUEST_TYPES.has(value["t"])) return parseStoreFrame(value, "daemon");
   if (value["t"] === "register") {
     const info = parseEnvelope(value["info"]);
     const id = value["deviceId"];
@@ -144,9 +224,10 @@ export function parseDaemonFrame(text: string): Exclude<DaemonFrame, StoreReques
   return null;
 }
 
-export function parseAppFrame(text: string): Exclude<AppFrame, AppStoreRequestFrame> | null {
+export function parseAppFrame(text: string): AppFrame | StoreRejected | null {
   const value = parseJson(text);
   if (!isRecord(value)) return null;
+  if (STORE_REQUEST_TYPES.has(value["t"])) return parseStoreFrame(value, "app");
   if (value["t"] === "forget") {
     // Same bounds as a register's deviceId: it reaches a storage key and a log line.
     return routableId(value["deviceId"]) ? { t: "forget", deviceId: value["deviceId"] } : null;

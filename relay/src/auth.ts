@@ -1,7 +1,8 @@
 import { APP_PATH, DAEMON_PATH, TOKEN_PARAM } from "@seance/shared";
+import type { Role } from "./wire.ts";
 
 /** Fixed by upgrade path, so the DO knows what a socket is before any frame arrives. */
-export type Role = "daemon" | "app";
+export type { Role };
 
 export function roleForPath(pathname: string): Role | null {
   if (pathname === DAEMON_PATH) return "daemon";

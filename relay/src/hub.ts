@@ -6,6 +6,7 @@ import {
   MACHINES_ID,
   SCHEDULER_ID,
   STATUS_MIN_INTERVAL_MS,
+  STORE_TOMBSTONE_MS,
   quote,
   verifyRegister,
   type DaemonFrame,
@@ -16,32 +17,28 @@ import {
   type RelayToAppFrame,
   type RelayToDaemonFrame,
   type SchedulerLeader,
+  type StoreReplyFrame,
+  type StoreRequestFrame,
   type UndeliverableCode,
 } from "@seance/shared";
 import { roleForPath, type Role } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { knownRoles, nominate, parseLeaders } from "./leadership.ts";
-import { parseAppFrame, parseDaemonFrame } from "./wire.ts";
+import {
+  holdsTerm,
+  isCurrentTerm,
+  knownRoles,
+  LEADER_KEY,
+  nextLeaderRecord,
+  NO_LEADER,
+  nominate,
+  parseLeaders,
+  type LeaderRecord,
+  type LeaderSocket,
+} from "./leadership.ts";
+import { actOf, admitCreate, authorize, RelayStore, ruleFor, type CreateWindow, type WriteResult } from "./store.ts";
+import { isStoreRequest, parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
-
-/**
- * The scheduler leader record. In storage rather than on an attachment because
- * `term` must outlive every socket — it is monotonic for the life of the DO, so
- * a term a demoted leader holds can never come round again.
- */
-const LEADER_KEY = "scheduler:term";
-
-interface LeaderRecord {
-  readonly term: number;
-  readonly deviceId: string | null;
-  /** The leader socket's accept time: a new socket under the same id is a new term. */
-  readonly connectedAt: number | null;
-  /** The first `lead-proof` that socket sent under this term; a new term starts without one. */
-  readonly proof?: Envelope;
-}
-
-const NO_LEADER: LeaderRecord = { term: 0, deviceId: null, connectedAt: null };
 
 /**
  * One shape for every routing line. `iv` is the only per-message identifier a
@@ -132,6 +129,14 @@ interface SocketAttachment {
   readonly superseded?: true;
 }
 
+/**
+ * What an app socket carries: only the create floor's window, written on its
+ * first create. On the attachment rather than a field so it survives hibernation.
+ */
+interface AppAttachment {
+  readonly createWindow?: CreateWindow;
+}
+
 interface DaemonSocket {
   readonly ws: WebSocket;
   readonly attachment: SocketAttachment | null;
@@ -163,6 +168,7 @@ export class Hub implements DurableObject {
   readonly #silenceLimitMs: number;
   /** Who may be nominated. Parsed per wake: a secret change rolls a new version, so it cannot change under one. */
   readonly #leaders: ReadonlySet<string>;
+  readonly #store: RelayStore;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
@@ -170,6 +176,7 @@ export class Hub implements DurableObject {
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
     const leaders = parseLeaders(env.SCHEDULER_LEADERS);
     this.#leaders = leaders.ids;
+    this.#store = new RelayStore(ctx.storage, msOverride(env.STORE_TOMBSTONE_MS) ?? STORE_TOMBSTONE_MS);
     for (const entry of leaders.invalid) console.log(`SCHEDULER_LEADERS: ignored ${quote(entry)}, not a deviceId`);
     // Re-applied on every wake. Heartbeats are answered without waking the object;
     // only the sweep alarm reads their timestamps.
@@ -265,6 +272,8 @@ export class Hub implements DurableObject {
   }
 
   #deviceIdOf(ws: WebSocket): string | null {
+    // An app socket's attachment is an `AppAttachment`, never read as a `SocketAttachment`.
+    if (this.#roleOf(ws) !== "daemon") return null;
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     return attachment?.identity?.deviceId ?? null;
   }
@@ -273,6 +282,19 @@ export class Hub implements DurableObject {
     const frame = parseDaemonFrame(text);
     if (frame === null) {
       console.log("wire dropped reason=malformed-daemon-frame");
+      return;
+    }
+    // Before the register and registration checks: reads are anyone's, and an
+    // unregistered socket's write fails `holdsTerm` (no identity) and is
+    // answered `not_leader` rather than dropped. A put's `env.from` is not
+    // compared with the socket's id: the relay is blind, and the seal's
+    // addressing is the clients' to decide.
+    if (frame.t === "store-rejected") {
+      this.#refuseStore(ws, "daemon", frame.id, frame.t, undefined, frame.code);
+      return;
+    }
+    if (isStoreRequest(frame)) {
+      await this.#onStoreFrame(ws, "daemon", frame);
       return;
     }
     if (frame.t === "register") {
@@ -296,7 +318,7 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.t === "lead-proof") {
-      await this.#leadProof(ws, deviceId, frame.term, frame.env);
+      await this.#leadProof(ws, frame.term, frame.env);
       return;
     }
     await this.#route(frame.env, ws, "daemon");
@@ -348,14 +370,13 @@ export class Hub implements DurableObject {
    * and one push per term, however often a socket sends — and a later term
    * starts without one, since `#renominate` writes a fresh record.
    */
-  async #leadProof(ws: WebSocket, deviceId: string, term: number, env: Envelope): Promise<void> {
+  async #leadProof(ws: WebSocket, term: number, env: Envelope): Promise<void> {
     if (env.to !== APP_ID) {
       wireLog("dropped", env, " reason=lead-proof-not-app");
       return;
     }
     const record = await this.#leaderRecord();
-    const socketAt = (ws.deserializeAttachment() as SocketAttachment | null)?.connectedAt;
-    if (record.deviceId !== deviceId || record.connectedAt !== socketAt || record.term !== term) {
+    if (!holdsTerm(record, term, this.#leaderSocketOf(ws))) {
       wireLog("dropped", env, ` reason=lead-proof-not-leader term=${term}`);
       return;
     }
@@ -378,12 +399,20 @@ export class Hub implements DurableObject {
       console.log("wire dropped reason=malformed-app-frame");
       return;
     }
+    if (frame.t === "store-rejected") {
+      this.#refuseStore(ws, "app", frame.id, frame.t, undefined, frame.code);
+      return;
+    }
+    if (isStoreRequest(frame)) {
+      await this.#onStoreFrame(ws, "app", frame);
+      return;
+    }
     if (frame.t === "forget") {
       await this.#forget(ws, frame.deviceId);
       return;
     }
     if (frame.env.from === SCHEDULER_ID) {
-      if (!(await this.#holdsTerm(frame.term))) {
+      if (!(await this.#isCurrentTerm(frame.term))) {
         const notice: RelayToAppFrame = { t: "undeliverable", to: frame.env.to, iv: frame.env.iv, code: "not_leader" };
         const err = trySend(ws, JSON.stringify(notice));
         wireLog(err === null ? "undeliverable" : "dropped", frame.env, ` code=not_leader term=${frame.term ?? "none"}`);
@@ -523,6 +552,99 @@ export class Hub implements DurableObject {
       console.log(`failed to persist ${key}: ${String(err)}`);
       return false;
     }
+  }
+
+  /**
+   * Answers one store frame. The order of checks is the contract: rule
+   * (`forbidden` / `not_leader`), then tombstone and version, then the app
+   * create floor, then the caps, then the write. The floor sits behind the
+   * version check so an enqueue retried after it landed reads `version_conflict`,
+   * not `rate_limited`, and only creates that land count toward it.
+   *
+   * No line for an accepted read or write — that would be the queue's activity
+   * timeline — and never an `env`, a `ct` or its length.
+   */
+  async #onStoreFrame(ws: WebSocket, leg: Role, frame: StoreRequestFrame): Promise<void> {
+    if (frame.t === "store-list") {
+      this.#storeReply(ws, { t: "store-listed", re: frame.id, records: await this.#store.list(frame.prefix) });
+      return;
+    }
+    if (frame.t === "store-get") {
+      this.#storeReply(ws, { t: "store-record", re: frame.id, record: await this.#store.get(frame.key) });
+      return;
+    }
+
+    const rule = ruleFor(frame.key);
+    if (rule === null) {
+      this.#refuseStore(ws, leg, frame.id, frame.t, frame.key, "invalid_request");
+      return;
+    }
+    const act = actOf(frame);
+    const now = Date.now();
+    const leader = leg === "daemon" ? await this.#holdsTerm(frame.term, ws) : false;
+    const refusal = authorize(rule, act, leg, leader);
+    if (refusal !== null) {
+      this.#refuseStore(ws, leg, frame.id, frame.t, frame.key, refusal);
+      return;
+    }
+
+    // Tentative: only a create that lands is written back to the attachment, so
+    // a refusal of any kind leaves the window as it was. No floor on the daemon
+    // leg: every write there is term-fenced, so only the leader writes, bounded
+    // by `MAX_TASKS`. The attachment is an `AppAttachment` only on an app
+    // socket, so it is read only when the floor applies.
+    const floored = leg === "app" && act === "create";
+    const attachment = floored ? (ws.deserializeAttachment() as AppAttachment | null) : null;
+    const window = floored ? admitCreate(attachment?.createWindow, now) : null;
+    let result: WriteResult;
+    try {
+      result =
+        frame.t === "store-put"
+          ? await this.#store.put(frame.key, frame.expect, frame.env, now, !floored || window !== null)
+          : await this.#store.delete(frame.key, frame.expect, now);
+    } catch (err) {
+      // No reply: the client's `STORE_TIMEOUT_MS` reads it as indeterminate.
+      console.log(`store ${frame.t} failed key=${quote(frame.key)} err=${String(err)}`);
+      return;
+    }
+    if (!result.ok) {
+      this.#refuseStore(ws, leg, frame.id, frame.t, frame.key, result.code);
+      return;
+    }
+    if (window !== null) ws.serializeAttachment({ ...attachment, createWindow: window } satisfies AppAttachment);
+    this.#storeReply(ws, { t: "store-written", re: frame.id, version: result.version });
+    if (leg === "app") await this.#nudgeLeader(frame.key, frame.t === "store-put" ? result.version : 0);
+  }
+
+  #refuseStore(ws: WebSocket, leg: Role, re: string, t: string, key: string | undefined, code: string): void {
+    // No key on a conflict: it is the normal answer to a retried enqueue and to
+    // leader races, and a key with a time would link task ids to retries.
+    const keyField = key === undefined || code === "version_conflict" ? "" : ` key=${quote(key)}`;
+    console.log(`store refused t=${t}${keyField} leg=${leg} code=${code}`);
+    this.#storeReply(ws, { t: "store-refused", re, code });
+  }
+
+  #storeReply(ws: WebSocket, frame: StoreReplyFrame): void {
+    const err = trySend(ws, JSON.stringify(frame));
+    if (err !== null) console.log(`store reply not sent t=${frame.t} err=${err}`);
+  }
+
+  /**
+   * Tells the leader's daemon socket — the one its term was issued to — that an
+   * app wrote a key. Daemon-leg writes are the leader's own, so any app-leg write
+   * is one the leader did not make. With no such socket nothing is sent: the next
+   * leader reconciles from `store-list` at takeover.
+   */
+  async #nudgeLeader(key: string, version: number): Promise<void> {
+    const record = await this.#leaderRecord();
+    if (record.deviceId === null) return;
+    const leader = this.#daemonsNewestFirst([]).find(
+      ({ attachment }) =>
+        attachment?.identity?.deviceId === record.deviceId && attachment.connectedAt === record.connectedAt,
+    );
+    if (leader === undefined) return;
+    const err = trySend(leader.ws, JSON.stringify({ t: "store-changed", key, version } satisfies RelayToDaemonFrame));
+    if (err !== null) console.log(`store-changed not sent: ${err}`);
   }
 
   async #route(env: Envelope, sender: WebSocket, senderRole: Role): Promise<void> {
@@ -731,8 +853,8 @@ export class Hub implements DurableObject {
     }));
     const next = nominate(candidates, record.deviceId, this.#leaders);
     const connectedAt = next === null ? null : (live.get(next)?.connectedAt ?? null);
-    if (next === record.deviceId && connectedAt === record.connectedAt) return;
-    const updated: LeaderRecord = { term: record.term + 1, deviceId: next, connectedAt };
+    const updated = nextLeaderRecord(record, next, connectedAt);
+    if (updated === null) return;
     try {
       await this.#ctx.storage.put(LEADER_KEY, updated);
     } catch (err) {
@@ -763,14 +885,26 @@ export class Hub implements DurableObject {
   }
 
   /**
-   * The fence on an envelope sent as the scheduler. The term is no credential —
-   * every registry push carries it — so this stops a leader that was demoted
-   * without noticing, not a stranger; who may lead at all is nomination's
-   * allowlist, not this.
+   * The fence on an envelope sent as the scheduler on the leader's app-role leg.
+   * Term only (`isCurrentTerm`): an app socket has no identity to check.
    */
-  async #holdsTerm(term: number | undefined): Promise<boolean> {
-    if (term === undefined) return false;
-    return (await this.#schedulerView(this.#liveSockets([])))?.term === term;
+  async #isCurrentTerm(term: number | undefined): Promise<boolean> {
+    const record = await this.#leaderRecord();
+    return isCurrentTerm(record, term, record.deviceId !== null && this.#liveSockets([]).has(record.deviceId));
+  }
+
+  /** The daemon-leg fence: the term and the socket it was issued to (`holdsTerm`). */
+  async #holdsTerm(term: number | undefined, ws: WebSocket): Promise<boolean> {
+    return holdsTerm(await this.#leaderRecord(), term, this.#leaderSocketOf(ws));
+  }
+
+  /** Null for anything that cannot hold a term: an app socket, a superseded or unregistered daemon. */
+  #leaderSocketOf(ws: WebSocket): LeaderSocket | null {
+    if (this.#roleOf(ws) !== "daemon") return null;
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (attachment === null || attachment.superseded === true) return null;
+    const deviceId = attachment.identity?.deviceId;
+    return deviceId === undefined ? null : { deviceId, connectedAt: attachment.connectedAt };
   }
 
   /**

@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { nominate, parseLeaders, type Candidate } from "../src/leadership.ts";
+import {
+  holdsTerm,
+  isCurrentTerm,
+  NO_LEADER,
+  nextLeaderRecord,
+  nominate,
+  parseLeaders,
+  type Candidate,
+  type LeaderRecord,
+} from "../src/leadership.ts";
 
 const SCHEDULER = ["scheduler"];
 
@@ -70,5 +79,63 @@ describe("parseLeaders", () => {
     const { ids, invalid } = parseLeaders(` ${id}\t, ,other-id,not an id!,${"x".repeat(65)},scheduler,app,machines`);
     expect([...ids]).toEqual([id, "other-id"]);
     expect(invalid).toEqual(["not an id!", "x".repeat(65), "scheduler", "app", "machines"]);
+  });
+});
+
+const LEADER: LeaderRecord = { term: 4, deviceId: "lead", connectedAt: 100 };
+const LEADER_SOCKET = { deviceId: "lead", connectedAt: 100 };
+
+describe("holdsTerm", () => {
+  test("true only when the term, deviceId and connectedAt all match", () => {
+    expect(holdsTerm(LEADER, 4, LEADER_SOCKET)).toBe(true);
+  });
+
+  test("false for an undefined term, a null socket and a stale term", () => {
+    expect(holdsTerm(LEADER, undefined, LEADER_SOCKET)).toBe(false);
+    expect(holdsTerm(LEADER, 4, null)).toBe(false);
+    expect(holdsTerm(LEADER, 3, LEADER_SOCKET)).toBe(false);
+  });
+
+  // The term is public: a thief who copied it, or the leader's own newer socket, is not the socket it was issued to.
+  test("false for the same deviceId on another socket, and for another deviceId with the current term", () => {
+    expect(holdsTerm(LEADER, 4, { deviceId: "lead", connectedAt: 101 })).toBe(false);
+    expect(holdsTerm(LEADER, 4, { deviceId: "other", connectedAt: 100 })).toBe(false);
+  });
+
+  test("nobody holds term 0 under NO_LEADER", () => {
+    expect(holdsTerm(NO_LEADER, 0, LEADER_SOCKET)).toBe(false);
+  });
+});
+
+describe("isCurrentTerm", () => {
+  test("true for the current term with the leader connected", () => {
+    expect(isCurrentTerm(LEADER, 4, true)).toBe(true);
+  });
+
+  test("false when the leader is not connected, there is no leader, or the term is missing or stale", () => {
+    expect(isCurrentTerm(LEADER, 4, false)).toBe(false);
+    expect(isCurrentTerm(NO_LEADER, 0, true)).toBe(false);
+    expect(isCurrentTerm(LEADER, undefined, true)).toBe(false);
+    expect(isCurrentTerm(LEADER, 3, true)).toBe(false);
+  });
+});
+
+describe("nextLeaderRecord", () => {
+  test("null when nothing moved", () => {
+    expect(nextLeaderRecord(LEADER, "lead", 100)).toBeNull();
+    expect(nextLeaderRecord(NO_LEADER, null, null)).toBeNull();
+  });
+
+  test("a new leader, none, or the same id on a new socket bumps the term", () => {
+    expect(nextLeaderRecord(LEADER, "new", 200)).toEqual({ term: 5, deviceId: "new", connectedAt: 200 });
+    expect(nextLeaderRecord(LEADER, null, null)).toEqual({ term: 5, deviceId: null, connectedAt: null });
+    expect(nextLeaderRecord(LEADER, "lead", 300)).toEqual({ term: 5, deviceId: "lead", connectedAt: 300 });
+  });
+
+  test("a proof does not survive the change", () => {
+    const proof = { v: 1, to: "app", from: "lead", iv: "iv", ct: "ct" };
+    const next = nextLeaderRecord({ ...LEADER, proof }, "new", 200);
+    expect(next).not.toBeNull();
+    expect(next).not.toHaveProperty("proof");
   });
 });
