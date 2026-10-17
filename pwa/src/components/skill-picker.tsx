@@ -1,6 +1,5 @@
 import type { JSX } from "preact";
 import { useEffect, useRef } from "preact/hooks";
-import type { SkillEntry } from "../skills.ts";
 
 export function skillOptionId(listId: string, index: number): string {
   // By index, not name: an id has to stay valid whatever a skill dir is called.
@@ -15,12 +14,11 @@ export function skillOptionId(listId: string, index: number): string {
 export function SkillPicker(props: {
   id: string;
   query: string;
-  items: readonly SkillEntry[];
+  items: readonly string[];
   active: number;
-  describe: (entry: SkillEntry) => string;
   onPick: (name: string) => void;
 }): JSX.Element {
-  const { id, query, items, active, describe, onPick } = props;
+  const { id, query, items, active, onPick } = props;
 
   const list = useRef<HTMLDivElement>(null);
 
@@ -49,9 +47,9 @@ export function SkillPicker(props: {
 
   return (
     <div ref={list} id={id} className="skill-list" role="listbox" aria-label="Skills">
-      {items.map((entry, i) => (
+      {items.map((name, i) => (
         <button
-          key={entry.name}
+          key={name}
           type="button"
           id={skillOptionId(id, i)}
           role="option"
@@ -61,10 +59,9 @@ export function SkillPicker(props: {
           // A tap would otherwise move focus here, blurring the textarea and
           // dropping the keyboard (Firefox Android); click still activates.
           onPointerDown={(event) => event.preventDefault()}
-          onClick={() => onPick(entry.name)}
+          onClick={() => onPick(name)}
         >
-          <span className="skill-name">/{entry.name}</span>
-          <span className="skill-sub">{describe(entry)}</span>
+          <span className="skill-name">/{name}</span>
         </button>
       ))}
     </div>

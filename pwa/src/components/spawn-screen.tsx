@@ -14,7 +14,7 @@ import {
   type RescanState,
   type SheetKind,
 } from "../state.ts";
-import { completeSkill, describeSources, matchSkills, skillIndex, skillQuery } from "../skills.ts";
+import { completeSkill, matchSkills, skillIndex, skillQuery } from "../skills.ts";
 import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { RelayDot } from "./relay-dot.tsx";
@@ -389,9 +389,9 @@ export function SpawnScreen(props: {
   // Escape hides only until the next edit: once the prompt differs, forget it,
   // or typing back to the same text would stay hidden.
   if (dismissed !== null && dismissed !== form.prompt) setDismissed(null);
-  const pickerOpen = query !== null && skills.skills.length > 0 && dismissed !== form.prompt;
+  const pickerOpen = query !== null && skills.length > 0 && dismissed !== form.prompt;
   const matches = useMemo(
-    () => (pickerOpen && query !== null ? matchSkills(skills.skills, query) : []),
+    () => (pickerOpen && query !== null ? matchSkills(skills, query) : []),
     [pickerOpen, query, skills],
   );
   // Reset to the top on every query change (render-time, no effect), so editing
@@ -423,8 +423,8 @@ export function SpawnScreen(props: {
       (event.key === "Enter" && !(event.metaKey || event.ctrlKey || event.shiftKey)) ||
       (event.key === "Tab" && !event.shiftKey);
     if (pick) {
-      const entry = matches[active];
-      if (entry !== undefined) pickSkill(entry.name);
+      const name = matches[active];
+      if (name !== undefined) pickSkill(name);
       return true;
     }
     return false;
@@ -485,14 +485,7 @@ export function SpawnScreen(props: {
             }}
           />
           {pickerOpen && query !== null && (
-            <SkillPicker
-              id={SKILL_LIST_ID}
-              query={query}
-              items={matches}
-              active={active}
-              describe={(entry) => describeSources(entry, skills.machines)}
-              onPick={pickSkill}
-            />
+            <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
         </div>
 

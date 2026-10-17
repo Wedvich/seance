@@ -3149,8 +3149,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **A `/` first in the prompt opens a skill picker** (scheduler M4, _Skills_, 2026-10-17). It
   lists the union of skill names across every machine and exclave — `MachineInfo.exclaves[].skills`
   from the register blobs the app already holds, offline machines included — so it needs no
-  leader and works on a direct pick as on `auto`. Names only, no descriptions: the blob carries
-  every name to every app, and descriptions would grow it per skill. Like Claude Code's picker it
+  leader and works on a direct pick as on `auto`. Names only, no descriptions and no
+  machine list: the blob carries every name to every app, and descriptions would grow it per
+  skill; placement is the M4 routing filter's job, so the list stays a plain union. Like Claude Code's picker it
   completes the first token only (open while the prompt is `/` plus no whitespace), matching
   prefix first then substring, and picking writes `/name ` with the space. It sits inline under
   the textarea, which collapses to one line meanwhile, rather than in an overlay the on-screen
