@@ -298,8 +298,8 @@ whether or not anything is ready; reservation TTLs and `lost` are checked only i
 task's decision is written with its reservation (one store write) — never after the spawn —
 and an unplaced task's stays in memory. M3 and M4 add:
 
-- Filters: the per-account cap (`cap_reached` with `scope: "account"`, M3 item 5; the per-batch
-  bound landed with item 4a, DESIGN.md "Batches"); `skill absent` (M4,
+- Filters (the per-account cap and the per-batch bound landed with M3 items 5 and 4a, DESIGN.md
+  "Caps" and "Batches"): `skill absent` (M4,
   _Skills_: a hard filter when declared or the prompt starts with `/name`, and only for a name the
   fleet's inventory knows); stacked base
   unpushed and not on this exclave (M4, _Stacking_).
@@ -309,10 +309,10 @@ and an unplaced task's stays in memory. M3 and M4 add:
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
   deltas per task.
 
-**Credits spill:** dispatching to an account past the hard threshold with extra usage on — a
-candidate the record already marks `spill` — is detected and shown in the PWA from M3 item 5,
-and from M4 fires a Web Push ("Spending credits on <account> for <task>" + Pause actions).
-Re-alerts once per account per window, not per task.
+**Credits spill:** detected, logged and shown in the PWA since M3 item 5 (DESIGN.md "Credits
+spill"). From M4 the same `onAlert` fires a Web Push ("Spending credits on <account> for
+<task>" + Pause actions), once per account per window, not per task; whether that de-dupe must
+outlive a leader change (today it is in memory) is M4's call.
 
 **Done detection, ahead.** `branch-state merged` → `done`, a session ending with a PR open →
 `awaiting-merge`, and the read-back from `progress` landed with M3 item 4a (DESIGN.md "Done
@@ -598,13 +598,15 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     is a client timeout plus a `store reply not sent` relay log line, or a closed socket. If it
     does not arrive, page with the reserved `after`/`next`.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
-    credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
-    handlers after the split. What it adds surfaces as data its own requests return — `queue`
-    fields, a `Decision`'s reasons — wherever that serves, so it stays in `leader-requests.ts`
-    and the library; where it needs a hook the library pushes (a spill to log, an escalation
-    timer) or config caps, the one accepted touchpoint is the `new Scheduler({…})` options in
-    `startTerm` (`leader.ts`), plus the `config` `run.ts` passes — a line each, rebased over
-    item 3 (owner, 2026-10-17).
+    credits-spill detection (logged and shown in the PWA; the push alert is M4). **Landed
+    2026-10-17** (DESIGN.md _Scheduler_, "The library": "Caps", "Pause", "Needs input", "Credits
+    spill"; "The leader" for the ops and the alert log line). What it adds surfaces as data its
+    own requests return (`queue`'s `holds`, `paused` and `cap_reached` scope `account` reasons)
+    and as one hook, `onAlert`, in `startTerm`'s `Scheduler` options; `run.ts` untouched, the
+    caps being `DEFAULT_CONFIG`'s. Decided here: `accountMax` 4 (Settled defaults 8); an
+    unreadable `queue:pause` fails closed; a reset hold lifts at the latest reset among the
+    windows over the line, else the earliest ahead; spill alerts de-dupe per account per window
+    in memory.
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
   Batch creation must refuse a spec whose `batch.index` is past `TASK_SPEC_LIMITS.batchIndex`
   (= `MAX_TASKS`) at submit time: `parseBatch` bounds it, and a spec past it makes the whole record
@@ -794,7 +796,9 @@ same PR, with the reason.
    usage (current + this task's estimate + reservations), so with a 5% v1 estimate a new task
    is refused from ~85% current; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
-5. **`needs-input` escalation** after 30 min: re-alert once, keep the slot, never kill.
+5. **`needs-input` escalation** after 30 min (`needsInputEscalateMs`, built with M3 item 5):
+   re-alert once, keep the slot, never kill. Until M4's Web Push the re-alert is the record's
+   `escalated` and a leader log line.
 6. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
@@ -813,7 +817,11 @@ same PR, with the reason.
    tasks. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
    the scale of an account near 70%. First guesses, to tune from decision records; nothing
-   observed yet argues for them.
+   observed yet argues for them. **Per-account max 4** in-flight tasks (`accountMax`, added
+   with M3 item 5, 2026-10-17): half the global max, so one account cannot take every slot,
+   and an account's parallel sessions draw on its 5h window together — at the 5% estimate, four
+   already project +20%. A fleet on one account therefore runs at most four `auto` tasks at
+   once; raise it here if that bites.
 9. **An unreported `free` is not under the disk floor.** The floor guards a disk known to
    be full; read as unknown-therefore-filtered, a host with no statfs answer would never
    get work. Unlike quota, nothing about a missing disk reading makes it the risky choice.
