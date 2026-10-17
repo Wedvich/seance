@@ -124,8 +124,11 @@ green:
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
   so only the AAD-bound `from` says which machine an entry describes), every blob opened outside
-  the replay guard (`machine-info`, `status`) goes through `openAtRest` in `shared/src/crypto.ts`,
-  which refuses one whose `op` isn't the slot's — shape alone does not say which blob it is —
+  the replay guard (`machine-info`, `status`, `lead-proof`) goes through `openAtRest` in
+  `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say
+  which blob it is — and an app believes a scheduler nominee only with a `lead-proof` sealed `from`
+  the nominee for the pushed term, never because its registry entry opens (its `info` blob is
+  readable off any push and re-registrable under a stolen seed),
   and a `register` moves a route only when it is signed by the key its `deviceId` hashes (verified in `relay/src/hub.ts`
   through `shared/src/identity.ts`; the seed never leaves `state.json`), and any register field the
   relay acts on — today `roles`, which decides nomination — is covered by that signature (the v2
