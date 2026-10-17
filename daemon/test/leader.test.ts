@@ -968,6 +968,43 @@ describe("leader in the daemon", () => {
     }
   });
 
+  test("a valid branch-state reaches the leader quietly; a malformed one is dropped and logged", async () => {
+    const relay = startTestRelay(TOKEN);
+    // `captureLog` hands its lines back only at the end; this one is readable while the test waits on a line.
+    const seen: string[] = [];
+    const lines = await captureLog(async () => {
+      const capture = console.log;
+      console.log = (...args: unknown[]): void => {
+        seen.push(args.map(String).join(" "));
+        capture(...args);
+      };
+      const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore());
+      try {
+        relay.lead(deviceId, 1);
+        await daemon.leader.settled();
+        const send = async (payload: unknown): Promise<void> => {
+          const env = await seal(
+            key,
+            { to: SCHEDULER_ID, from: "b" },
+            { id: crypto.randomUUID(), ts: Date.now(), op: "branch-state", payload },
+          );
+          relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
+        };
+        const valid = { taskId: "t-1", repo: "example.test/org/r", branch: "worktree-x", pushed: true, merged: false };
+        await send({ ...valid, at: Date.now() });
+        await send({ ...valid, pushed: "yes", at: Date.now() });
+        await pollUntil(() => seen.some((line) => line.includes("dropped op=")), "the malformed branch-state to drop");
+      } finally {
+        console.log = capture;
+        daemon.stop();
+        relay.stop();
+      }
+    });
+    const dropped = lines.filter((line) => line.includes('dropped op="branch-state"'));
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toContain("not a session event or branch state");
+  });
+
   test("with no term running, an app's scheduler request is answered not_leader from this machine", async () => {
     const relay = startTestRelay(TOKEN);
     const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore());
