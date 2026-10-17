@@ -13,7 +13,7 @@ import type {
   SpawnResponse,
   UpdateAvailable,
 } from "@seance/shared";
-import { isMetricsRequest, isRecord, isTaskId, quote } from "@seance/shared";
+import { isMetricsRequest, isRecord, isTaskId, quote, SCHEDULER_ID } from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -229,12 +229,18 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
  * `ended` is reckoned from this reply's own `sessions`, not a second tmux read:
  * a session ending between two reads would otherwise be in neither, which is
  * what proves a spawn never landed.
+ *
+ * Only the scheduler waits out a launch in flight, which is what makes the two
+ * fields a proof (DESIGN.md, "Session events"), and only it gets them. A spawn
+ * can run for a minute; a PWA refresh or an MCP `get_sessions` behind it would
+ * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. M3's
+ * `progress` is the leader's to read too, and belongs on the same side.
  */
-async function listSessions(ctx: HandlerContext): Promise<SessionsResponse> {
-  await ctx.tasks?.settled();
+async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<SessionsResponse> {
+  if (scheduler) await ctx.tasks?.settled();
   const sessions = await ctx.backend.sessions(ctx.getRepos());
   const at = Date.now();
-  if (ctx.tasks === undefined) return { sessions, at };
+  if (ctx.tasks === undefined || !scheduler) return { sessions, at };
   const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
   return { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
 }
@@ -261,7 +267,8 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
     return guarded(op, body);
   };
   return {
-    sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx)),
+    // Every caller of these is the scheduler: `leader.ts` is the only one.
+    sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx, true)),
     spawn: (payload) => {
       const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();
       return run("spawn", taskId, () => handleSpawn(ctx, audit, payload));
@@ -284,15 +291,17 @@ async function guarded<T>(op: string, body: () => Promise<T>): Promise<T | Error
  * Routes decrypted request ops to their implementations and wraps the reply.
  * `origin` tags everything this handler audits; the daemon builds one per
  * inbound surface over a single shared context, so the relay and the local op
- * socket run the same code and stay distinguishable in the log.
+ * socket run the same code and stay distinguishable in the log. `from` is the
+ * envelope's sealer, AAD-bound: the relay leg passes it, and the local socket,
+ * which no scheduler reaches, has none.
  */
 export function createHandler(
   ctx: HandlerContext,
   origin: SpawnOrigin = "relay",
-): (plain: Plain) => Promise<Plain | null> {
+): (plain: Plain, from?: string) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
-  return async (plain: Plain): Promise<Plain | null> => {
+  return async (plain: Plain, from?: string): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
     const reply = (payload: unknown): Plain => ({
@@ -307,7 +316,7 @@ export function createHandler(
     const answer = async (): Promise<{ readonly payload: unknown } | null> => {
       switch (plain.op) {
         case "sessions":
-          return { payload: await listSessions(ctx) };
+          return { payload: await listSessions(ctx, from === SCHEDULER_ID) };
         case "spawn":
           return { payload: await handleSpawn(ctx, audit, plain.payload) };
         case "despawn":
