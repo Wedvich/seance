@@ -372,6 +372,8 @@ describe("a task's launch is recorded before it runs", () => {
   });
 });
 
+const bytesOf = (reply: SessionsResponse): number => Buffer.byteLength(JSON.stringify(reply), "utf8");
+
 const noted = (taskId: string, at: number, merged = false): TaskProgress => ({
   taskId,
   at,
@@ -460,6 +462,40 @@ describe("a worktree launch's site and the scheduler's progress", () => {
       const none = fitProgress(base, all, 10);
       expect(none.progress).toBeUndefined();
       expect(none.progressTrimmed).toBe(3);
+    });
+
+    test("a reply exactly at the budget keeps everything; one byte under drops the oldest", () => {
+      const all = [noted("a", 1), noted("b", 2), noted("c", 3)];
+      const whole = fitProgress(base, all, 1_000_000);
+      expect(whole.progressTrimmed).toBeUndefined();
+      const exact = bytesOf(whole);
+      expect(fitProgress(base, all, exact)).toEqual(whole);
+      const under = fitProgress(base, all, exact - 1);
+      expect(under.progressTrimmed).toBe(1);
+      expect(under.progress?.map((e) => e.taskId)).toEqual(["b", "c"]);
+      expect(bytesOf(under)).toBeLessThanOrEqual(exact - 1);
+    });
+
+    test("the trimmed count's own digits are budgeted, across 9 to 10 entries dropped", () => {
+      const all = Array.from({ length: 14 }, (_, i) => noted(`t${String(i).padStart(2, "0")}`, i));
+      const seen = new Set<number>();
+      // Below the floor — base plus the count of everything dropped — no trimming can fit.
+      const floor = bytesOf(fitProgress(base, all, 0));
+      for (let budget = bytesOf(fitProgress(base, all, 1_000_000)); budget >= floor; budget -= 1) {
+        const fitted = fitProgress(base, all, budget);
+        seen.add(fitted.progressTrimmed ?? 0);
+        // Whatever the count's width, the reply never outgrows the budget.
+        expect(bytesOf(fitted)).toBeLessThanOrEqual(budget);
+      }
+      expect(seen.has(9) && seen.has(10)).toBe(true);
+    });
+
+    test("a base already over budget drops every entry and still reports the count: the budget cannot be met", () => {
+      const all = [noted("a", 1), noted("b", 2)];
+      const fitted = fitProgress(base, all, 5);
+      expect(fitted.progress).toBeUndefined();
+      expect(fitted.progressTrimmed).toBe(2);
+      expect(bytesOf(fitted)).toBeGreaterThan(5);
     });
   });
 });
