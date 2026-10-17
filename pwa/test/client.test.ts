@@ -830,16 +830,26 @@ describe("requests", () => {
     }
   });
 
-  test("fails in-flight requests when the socket drops", async () => {
+  test("fails in-flight requests when the socket drops: unsent never left, sent may have landed", async () => {
     const deviceId = await newDeviceId();
-    const { client, waitFor } = startClient();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ log: (line) => lines.push(line) });
+    // No `spawn` handler: a request that reaches it is never answered.
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Dropper"));
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
-      const inFlight = client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" });
+      // Stopped while still sealing: it never reached the socket.
+      const unsent = client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" });
       client.stop();
-      await expect(inFlight).rejects.toBeInstanceOf(RequestFailure);
-      await expect(inFlight).rejects.toMatchObject({ reason: "disconnected" });
+      await expect(unsent).rejects.toBeInstanceOf(RequestFailure);
+      await expect(unsent).rejects.toMatchObject({ reason: "disconnected" });
+
+      client.reconnect();
+      await waitFor((s) => s.status === "open", "reconnected");
+      const sent = client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" });
+      await pollUntil(() => lines.some((line) => line.startsWith("wire send ")), "the request to go out");
+      client.stop();
+      await expect(sent).rejects.toMatchObject({ reason: "dropped" });
     } finally {
       daemon.close();
     }

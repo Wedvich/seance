@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   APP_ID,
+  CAPABILITIES,
   appRelayUrl,
   importPsk,
   MAX_ACTIVE_TASKS,
@@ -18,9 +19,12 @@ import {
   seal,
   toBase64,
   type Envelope,
+  type MachineInfo,
+  type MachineStatus,
   type OpName,
   type Plain,
   type QueueResponse,
+  type RegistryView,
   type SessionsResponse,
   type SubmitResponse,
 } from "@seance/shared";
@@ -127,6 +131,48 @@ function submitReply(payload: unknown): SubmitResponse {
   return reply;
 }
 
+/**
+ * A registry entry the scheduler can route to: connected, signed in, a clone of
+ * `github.com/acme/app`, a fresh status with headroom — each blob sealed by
+ * the machine it describes, as the leg's client requires.
+ */
+async function routableEntry(deviceId: string): Promise<RegistryView> {
+  const info: MachineInfo = {
+    name: deviceId,
+    platform: "linux",
+    repos: [
+      {
+        name: "app",
+        path: `/r/${deviceId}/app`,
+        defaultBranch: "main",
+        exclave: "default",
+        origin: "github.com/acme/app",
+      },
+    ],
+    scannedAt: 1,
+    exclaves: [{ id: "default", accountId: `org:${deviceId}`, extraUsageEnabled: false, authOk: true, skills: [] }],
+    capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId],
+  };
+  const nowS = Math.floor(Date.now() / 1000);
+  const status: MachineStatus = {
+    at: nowS,
+    scan: 1,
+    cpu: 10,
+    mem: 10,
+    free: 50_000,
+    quota: [{ x: 0, h: 10, d: 10, s: "session", at: nowS - 60 }],
+  };
+  const sealed = (op: OpName, payload: unknown): Promise<Envelope> =>
+    seal(key, { to: APP_ID, from: deviceId }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
+  return {
+    deviceId,
+    info: await sealed("machine-info", info),
+    lastSeen: Date.now(),
+    connected: true,
+    status: await sealed("status", status),
+  };
+}
+
 /** An app's request to the scheduler, sealed as the PWA's client seals one. */
 function appRequest(op: OpName, payload: unknown = {}, from = APP_ID): Promise<Envelope> {
   return seal(key, { to: SCHEDULER_ID, from }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
@@ -204,6 +250,143 @@ describe("leader requests", () => {
 
       leader.deliver(await appRequest("submit", { repo: "r" }));
       expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "invalid_request" });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("submits landing together are admitted one at a time, so MAX_ACTIVE_TASKS holds", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    for (let i = 0; i < MAX_ACTIVE_TASKS - 1; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
+      await store.put(`t${i}`, 0, task(`t${i}`, {}));
+    }
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      // One slot left, two submits at once: before, both counted the same 63 across their awaits.
+      const both = await Promise.all([
+        appRequest("submit", { repo: "r", mode: "here" }),
+        appRequest("submit", { repo: "r", mode: "here" }),
+      ]);
+      for (const env of both) leader.deliver(env);
+      const answers = [(await replies.next()).response.payload, (await replies.next()).response.payload];
+      expect(answers.filter((a) => typeof a === "object" && a !== null && "task" in a)).toHaveLength(1);
+      expect(answers).toContainEqual(expect.objectContaining({ ok: false, code: "queue_full" }));
+      expect(await store.list()).toHaveLength(MAX_ACTIVE_TASKS);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("submit and cancel audit the request id with the task id, so an app's request joins the task's spawn", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { leader, replies } = leaderOver(relay);
+    let submitId = "";
+    let taskId = "";
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        const submit = await appRequest("submit", { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" });
+        submitId = (await open(key, submit)).id;
+        leader.deliver(submit);
+        taskId = submitReply((await replies.next()).response.payload).task.id;
+        leader.deliver(await appRequest("cancel", { taskId }));
+        expect((await replies.next()).response.payload).toMatchObject({ task: { id: taskId, state: "cancelled" } });
+        leader.deliver(await appRequest("cancel", { taskId }));
+        expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "finished" });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits[0]).toContain(`audit queue origin=relay op=submit id="${submitId}" task="${taskId}" ok`);
+    expect(audits[1]).toContain(`op=cancel id=`);
+    expect(audits[1]).toContain(`task="${taskId}" ok`);
+    expect(audits[2]).toContain(`task="${taskId}" refused code=finished`);
+    // The prompt is the spawn line's to fingerprint, never this one's to carry.
+    expect(lines.some((line) => line.includes("secret"))).toBe(false);
+  });
+
+  test("an app cancels a running task on another machine: despawned there as the scheduler, then cancelled in the queue", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const assignment = { deviceId: "b", ...target, window: "w9", pane: "%9" };
+    await store.put("run-b", 0, task("run-b", { state: "running", assignment }));
+    const { leader, replies } = leaderOver(relay, store);
+    /** Answers the leg's next request as `b` would, after checking what it asked. */
+    const answerAsB = async (op: OpName, payload: unknown): Promise<Plain> => {
+      const asked = await relay.appFrames.next(5_000);
+      expect(asked.env).toMatchObject({ to: "b", from: SCHEDULER_ID });
+      const request = await open(key, asked.env);
+      expect(request.op).toBe(op);
+      const env = await seal(
+        key,
+        { to: SCHEDULER_ID, from: "b" },
+        { id: crypto.randomUUID(), ts: Date.now(), op, re: request.id, payload },
+      );
+      relay.sendToApps({ t: "msg", env });
+      return request;
+    };
+    try {
+      leader.lead(1);
+      const session = { id: "%9", window: "w9", repo: "app", path: "/wt/run-b", taskId: "run-b" };
+      await answerAsB("sessions", { sessions: [session], at: Date.now() } satisfies SessionsResponse);
+      await leader.settled();
+      expect((await store.get("run-b"))?.body.state).toBe("running");
+
+      leader.deliver(await appRequest("cancel", { taskId: "run-b" }));
+      // `client: scheduler` from `SCHEDULER_ID` is what `b` audits as `origin=relay client=scheduler`.
+      const despawn = await answerAsB("despawn", { ok: true, window: "w9", outcome: "exited", sessions: [] });
+      expect(despawn.payload).toEqual({ id: "%9", client: "scheduler" });
+      expect((await replies.next()).response.payload).toMatchObject({ task: { id: "run-b", state: "cancelled" } });
+
+      leader.deliver(await appRequest("queue"));
+      expect(queueReply((await replies.next()).response.payload).tasks).toMatchObject([
+        { id: "run-b", state: "cancelled" },
+      ]);
+
+      for (const [payload, code] of [
+        [{ taskId: "nobody" }, "task_not_found"],
+        [{ id: "run-b" }, "invalid_request"],
+      ] as const) {
+        leader.deliver(await appRequest("cancel", payload));
+        // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+        expect((await replies.next()).response.payload).toMatchObject({ ok: false, code });
+      }
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a spawn the relay could not deliver is routed afresh at once, never held as lost", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), 50);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      relay.setRegistry([await routableEntry("b"), await routableEntry("c")]);
+      leader.deliver(await appRequest("submit", { repo: "github.com/acme/app", mode: "worktree" }));
+      const { task: submitted } = submitReply((await replies.next()).response.payload);
+
+      const first = await relay.appFrames.next(5_000);
+      expect((await open(key, first.env)).op).toBe("spawn");
+      // The machine's socket went away before the spawn reached it.
+      relay.sendToApps({ t: "undeliverable", to: first.env.to, iv: first.env.iv, code: "offline" });
+      const second = await relay.appFrames.next(5_000);
+      const request = await open(key, second.env);
+      expect(request.op).toBe("spawn");
+      expect(request.payload).toMatchObject({ taskId: submitted.id });
+      expect(second.env.to).not.toBe(first.env.to);
     } finally {
       leader.stop();
       relay.stop();
