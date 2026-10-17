@@ -262,15 +262,15 @@ function parseScopedWindow(value: unknown): ScopedWindow | null {
   return { m: value["m"], p: value["p"], ...(r === undefined ? {} : { r }) };
 }
 
-function parseQuotaObservation(value: unknown): QuotaObservation | null {
+/** A quota observation without its exclave index — the shape a daemon keeps per exclave id. */
+export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> | null {
   if (!isRecord(value)) return null;
-  if (!isUint(value["x"]) || !isUint(value["at"]) || !isQuotaSource(value["s"])) return null;
+  if (!isUint(value["at"]) || !isQuotaSource(value["s"])) return null;
   const { h, d, hr, dr } = value;
   if (!isOptionalUint(h) || !isOptionalUint(d) || !isOptionalUint(hr) || !isOptionalUint(dr)) return null;
   const w = value["w"] === undefined ? undefined : parseList(value["w"], parseScopedWindow);
   if (w === null) return null;
   return {
-    x: value["x"],
     s: value["s"],
     at: value["at"],
     ...(h === undefined ? {} : { h }),
@@ -279,6 +279,12 @@ function parseQuotaObservation(value: unknown): QuotaObservation | null {
     ...(dr === undefined ? {} : { dr }),
     ...(w === undefined ? {} : { w }),
   };
+}
+
+function parseQuotaObservation(value: unknown): QuotaObservation | null {
+  if (!isRecord(value) || !isUint(value["x"])) return null;
+  const reading = parseQuotaReading(value);
+  return reading === null ? null : { x: value["x"], ...reading };
 }
 
 /**

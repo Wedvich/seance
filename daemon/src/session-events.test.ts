@@ -15,9 +15,9 @@ import {
   peerBindingProblem,
   parseSessionEventFrame,
   quotaFromRateLimits,
-  SessionQuota,
   type BoundPane,
 } from "./session-events.ts";
+import { SessionQuota } from "./session-quota.ts";
 import { newestQuota } from "./telemetry.ts";
 
 const frame = (fields: object): object => ({ v: 1, kind: "session-event", ...fields });
@@ -75,13 +75,6 @@ describe("quotaFromRateLimits", () => {
     ).toEqual({ s: "session", at: 1000, h: 24, d: 100, hr: Date.parse("2026-10-16T18:00:00Z") / 1000 });
     expect(quotaFromRateLimits([{ kind: "spend_limit", percentUsed: 50 }], 0)).toBeNull();
   });
-});
-
-test("SessionQuota keeps the newest per exclave", () => {
-  const quota = new SessionQuota();
-  quota.record("work", { s: "session", at: 10, h: 5 });
-  quota.record("work", { s: "session", at: 9, h: 99 });
-  expect(quota.get("work")?.h).toBe(5);
 });
 
 describe("newestQuota", () => {
@@ -209,8 +202,9 @@ describe("coalescing", () => {
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
       exclaves: () => [],
+      accountOf: () => null,
       forward: (event) => void forwarded.push(event),
-      quota: new SessionQuota(),
+      quota: SessionQuota.memory(),
       ended: new EndedTasks(),
       coalesceMs,
       // A host that names no peer: the fallback binding, by the frame's own pane.

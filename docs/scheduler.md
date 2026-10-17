@@ -646,15 +646,20 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   account id — clearing an alias falls back to the email. Exit: an alias set in one client shows in another; a record whose
   `accountId` does not hash to its key is ignored (shared + e2e). Record: DESIGN.md _Threat
   model_ (the HKDF label, what the key reveals, a token holder can delete an alias).
-- **Fleet quota record** (follow-up, after account records) — a single `quota` key,
-  `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) whether
-  or not anything changed, by read-open-compare-`expect`: a daemon writes only an observation
-  newer than the one stored, so the record keeps the newest observation, not the last write.
-  One key, not one per account — per-account writes would tell the relay when each account is
-  in use. Its payoff is `status` shrinking to pressure, which frees most of the 2 KiB socket
+- **Fleet quota record** (after account records; decided 2026-10-17, no longer conditional) —
+  a single `quota` key, `{ accountId → newest observation }`, written by daemons on a fixed
+  cadence (~5 min) whether or not anything changed, by read-open-compare-`expect`: a daemon
+  writes only an observation newer than the one stored, so the record keeps the newest
+  observation, not the last write. One key, not one per account — per-account writes would
+  tell the relay when each account is in use. Why it is needed, not just nice: the kept-status
+  fold (M2) holds an account's quota only as long as some machine's own snapshot does. Each
+  daemon writes over its own, so the fleet's newest reading lives only on the machine that saw
+  it, and a `forget`, a reinstall or a machine retired takes that reading with it. Persisting
+  `SessionQuota` (DESIGN.md, "Session events") stops a restart regressing it, and does nothing
+  for those. The record makes the newest observation a fleet fact rather than a machine's.
+  Its other payoff is `status` shrinking to pressure, which frees most of the 2 KiB socket
   attachment; its cost is a daemon write path into the store and a 5-min floor on freshness,
-  where `status` is faster. Taken up only if the attachment budget or the kept-status fold
-  (M2) proves too tight.
+  where `status` is faster — so readers fold both, newest wins, as they fold statuses today.
 - **Auth health** — `authOk` says only that `.claude.json` names an `oauthAccount`: a revoked
   or lapsed login still reads as signed in, and the `auth missing` filter routes to an exclave
   that cannot start a session. Per exclave `auth: ok | expired | unknown` with its observed-at,

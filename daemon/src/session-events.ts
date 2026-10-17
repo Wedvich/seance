@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { log } from "./log.ts";
+import type { SessionQuota } from "./session-quota.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -147,24 +148,6 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
 export async function listPanePids(): Promise<readonly BoundPane[]> {
   const result = await tmux(["list-panes", "-a", "-F", PANE_PID_FORMAT]);
   return result.exitCode === 0 ? parsePanePids(result.stdout) : [];
-}
-
-/**
- * Newest session-reported quota per exclave id, kept in memory: the telemetry
- * tick folds it beside the config dir's cache (`telemetry.ts`). Lost on a
- * restart, which costs only freshness — the cache and the metrics history stay.
- */
-export class SessionQuota {
-  readonly #byExclave = new Map<string, Omit<QuotaObservation, "x">>();
-
-  record(exclave: string, observation: Omit<QuotaObservation, "x">): void {
-    const current = this.#byExclave.get(exclave);
-    if (current === undefined || observation.at >= current.at) this.#byExclave.set(exclave, observation);
-  }
-
-  get(exclave: string): Omit<QuotaObservation, "x"> | undefined {
-    return this.#byExclave.get(exclave);
-  }
 }
 
 /**
@@ -370,6 +353,8 @@ export const COALESCE_MS = 5_000;
 export interface SessionEventDeps {
   readonly panes: () => Promise<readonly BoundPane[]>;
   readonly exclaves: () => readonly Exclave[];
+  /** The account an exclave is signed into, as the last scan read it; a quota reading is kept under it. */
+  readonly accountOf: (exclave: string) => string | null;
   /** Sealed to the scheduler and sent; fire-and-forget, so nothing comes back. */
   readonly forward: (event: SessionEvent) => void;
   readonly quota: SessionQuota;
@@ -456,7 +441,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (frame.rateLimits !== undefined) {
         const observation = quotaFromRateLimits(frame.rateLimits, at);
-        if (observation !== null) deps.quota.record(exclave, observation);
+        if (observation !== null) deps.quota.record(exclave, deps.accountOf(exclave), observation);
       }
       if (frame.state === undefined || pane.taskId === null || stopped) return { ok: true };
       if (frame.state === "ended") deps.ended.ended(pane.taskId);
