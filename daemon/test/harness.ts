@@ -79,6 +79,8 @@ export interface TestRelay {
   readonly messages: AsyncQueue<Envelope>;
   /** `status` envelopes, apart from `messages` so a reply assertion never meets a snapshot first. */
   readonly statuses: AsyncQueue<Envelope>;
+  /** Envelopes `to: "scheduler"` while no leader is named, which the real DO would refuse instead. */
+  readonly toScheduler: AsyncQueue<Envelope>;
   autoPong: boolean;
   /** Close every register the way the real DO refuses an id another live socket holds. */
   refuseRegisters: boolean;
@@ -115,6 +117,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const registers = new AsyncQueue<RegisterFrame>("registers");
   const messages = new AsyncQueue<Envelope>("messages");
   const statuses = new AsyncQueue<Envelope>("statuses");
+  const toScheduler = new AsyncQueue<Envelope>("toScheduler");
   const appFrames = new AsyncQueue<AppMsg>("appFrames");
   const appEvents = new AsyncQueue<"open" | "close">("appEvents");
   const daemons = new Map<string, Bun.ServerWebSocket<Role>>();
@@ -182,7 +185,8 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     } else if (frame.t !== "msg") {
       // A store frame (scheduler M3): this double has no store until item 3 gives it one.
     } else if (frame.env.to === SCHEDULER_ID) {
-      if (leader !== null) daemons.get(leader)?.send(JSON.stringify({ t: "msg", env: frame.env }));
+      if (leader === null) toScheduler.push(frame.env);
+      else daemons.get(leader)?.send(JSON.stringify({ t: "msg", env: frame.env }));
     } else {
       messages.push(frame.env);
     }
@@ -254,6 +258,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     registerConnections,
     messages,
     statuses,
+    toScheduler,
     appFrames,
     appEvents,
     get autoPong() {

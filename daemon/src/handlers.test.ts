@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
+  APP_ID,
   METRIC_NAMES,
   parseMetricsReply,
+  SCHEDULER_ID,
   type DespawnResponse,
   type MetricsReply,
   type OpName,
@@ -16,7 +18,7 @@ import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
-import { createHandler, type HandlerContext, type TaskLaunches } from "./handlers.ts";
+import { createHandler, createLocalOps, type HandlerContext, type TaskLaunches } from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks } from "./session-events.ts";
@@ -250,8 +252,12 @@ function failing(failure: Error): SessionBackend {
 
 const spawnTask = (taskId: string): Plain => request("spawn", { repo: "myrepo", mode: "here", taskId });
 
-async function sessionsOf(handle: (plain: Plain) => Promise<Plain | null>): Promise<SessionsResponse> {
-  const reply = await handle(request("sessions", {}));
+/** As the scheduler asks, unless `from` says otherwise (null: no sealer): it alone gets `ended` and `ledgerSince`. */
+async function sessionsOf(
+  handle: (plain: Plain, from?: string) => Promise<Plain | null>,
+  from: string | null = SCHEDULER_ID,
+): Promise<SessionsResponse> {
+  const reply = await handle(request("sessions", {}), from ?? undefined);
   return reply?.payload as SessionsResponse;
 }
 
@@ -288,21 +294,48 @@ describe("a task's launch is recorded before it runs", () => {
     expect((await sessionsOf(createHandler({ ...ctx, tasks }))).ended).toEqual(["dup", "crashed"]);
   });
 
-  test("a sessions reply waits for a spawn in flight, so the task is never in neither list", async () => {
+  test("the scheduler's sessions reply waits for a spawn in flight, so the task is never in neither list", async () => {
     const gate = Promise.withResolvers<void>();
     const { backend } = taskBackend(() => gate.promise);
-    const handle = createHandler({ ...ctx, backend, tasks: new EndedTasks(LaunchLedger.memory()) });
+    const taskCtx = { ...ctx, backend, tasks: new EndedTasks(LaunchLedger.memory()) };
+    const handle = createHandler(taskCtx);
     const spawning = handle(spawnTask("t-1"));
     await Bun.sleep(0);
-    let answered: SessionsResponse | null = null;
-    const listing = (async () => {
-      answered = await sessionsOf(handle);
-    })();
+    const answered: unknown[] = [];
+    const overRelay = sessionsOf(handle).then((reply) => answered.push(reply));
+    // The leader reaching its own machine, in process: the same wait.
+    const inProcess = createLocalOps(taskCtx, "leader")
+      .sessions()
+      .then((reply) => answered.push(reply));
     await Bun.sleep(10);
-    expect(answered).toBeNull();
+    expect(answered).toEqual([]);
     gate.resolve();
-    await Promise.all([spawning, listing]);
-    expect(answered).toMatchObject({ sessions: [{ taskId: "t-1" }] });
+    await Promise.all([spawning, overRelay, inProcess]);
+    expect(answered).toMatchObject([{ sessions: [{ taskId: "t-1" }] }, { sessions: [{ taskId: "t-1" }] }]);
+  });
+
+  test("any other caller is answered while a spawn is in flight, with neither field", async () => {
+    const gate = Promise.withResolvers<void>();
+    const { backend } = taskBackend(() => gate.promise);
+    const tasks = new EndedTasks(LaunchLedger.memory());
+    const relay = createHandler({ ...ctx, backend, tasks });
+    const spawning = relay(spawnTask("t-1"));
+    await Bun.sleep(0);
+    try {
+      // An app over the relay, and the local socket (MCP, the CLI), which passes no sealer.
+      const replies = [
+        await sessionsOf(relay, APP_ID),
+        await sessionsOf(createHandler({ ...ctx, backend, tasks }, "local"), null),
+      ];
+      for (const reply of replies) {
+        expect(reply.sessions).toEqual(expect.any(Array));
+        expect(reply.ended).toBeUndefined();
+        expect(reply.ledgerSince).toBeUndefined();
+      }
+    } finally {
+      gate.resolve();
+      await spawning;
+    }
   });
 
   test("a launch the ledger cannot record is refused before the backend runs", async () => {

@@ -124,11 +124,12 @@ async function appRequest(
   op: Plain["op"],
   payload: unknown,
   tsOffset = 0,
+  from = APP_ID,
 ): Promise<{ id: string }> {
   const id = crypto.randomUUID();
   const env = await seal(
     appKey,
-    { to: deviceId, from: APP_ID },
+    { to: deviceId, from },
     {
       id,
       ts: Date.now() + tsOffset,
@@ -185,6 +186,26 @@ describe("daemon ↔ relay integration", () => {
       expect(response.op).toBe("sessions");
       expect(response.re).toBe(id);
       expect(Array.isArray((response.payload as SessionsResponse).sessions)).toBe(true);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("only a sessions request sealed by the scheduler gets the launch ledger's fields", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { deviceId } = await registerWithRepo(relay, "myrepo");
+      await appRequest(relay, deviceId, "sessions", {});
+      const app = (await appReceive(relay)).payload as SessionsResponse;
+      expect(app.sessions).toEqual(expect.any(Array));
+      expect(app).not.toHaveProperty("ledgerSince");
+
+      await appRequest(relay, deviceId, "sessions", {}, 0, SCHEDULER_ID);
+      const sealed = await relay.toScheduler.next();
+      const scheduler = (await open(appKey, sealed)).payload as SessionsResponse;
+      expect(scheduler.ledgerSince).toEqual(expect.any(Number));
     } finally {
       daemon.stop();
       relay.stop();

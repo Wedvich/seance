@@ -1006,7 +1006,8 @@ send error that caused it.
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows, each `{ id?, window, repo, path,
-taskId? }`, plus `ended?` and `ledgerSince?` for the scheduler (Local op socket,
+taskId? }`, plus `ended?` and `ledgerSince?` for the scheduler alone: a request
+  sealed `from: "scheduler"`, or the leader's in-process call (Local op socket,
   "Session events"). The one live pull — session state is inherently fresh-only.
 - `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
@@ -3208,10 +3209,17 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   Three rules keep that true. `ended` is reckoned against the reply's own `sessions`, not
   a second tmux read a session could end between — which also lists a tagged pane still
   on a startup dialog, which `sessions` does not, as ended: `done` is a wrong label, a
-  re-dispatch would be a twin. A `sessions` reply waits for any launch in flight; two
-  launches of one id in flight together (a duplicate dispatch) are counted per id, so the
-  one that failed never retracts the one that ran, and a failed write never drops an id
-  a concurrent record of it is about to write. And the
+  re-dispatch would be a twin. A `sessions` reply to the scheduler waits for any launch
+  in flight; two launches of one id in flight together (a duplicate dispatch) are counted
+  per id, so the one that failed never retracts the one that ran, and a failed write
+  never drops an id a concurrent record of it is about to write. Only the scheduler's
+  reply waits: a spawn can run for a minute, and a PWA refresh or an MCP `get_sessions`
+  queued behind one timed out at `OP_TIMEOUT_MS.sessions` (10 s) for fields it never
+  reads. So the two fields and the wait go only to a request whose AAD-bound sealer is
+  `scheduler` (`RelayClient` hands the handler `env.from`) or to the leader's in-process
+  `createLocalOps`; every other caller, the local socket included, gets the list at once
+  and neither field. Any PSK holder can seal `from: "scheduler"`, and all it buys is the
+  wait and a list of task ids it could already read. And the
   ledger is bounded with `since` moving past each entry it drops: at most 128 entries
   (eviction comes only from this machine's own launches, while the task awaiting proof
   is one whose machine was away, so the count outlasts any absence and the reply stays a

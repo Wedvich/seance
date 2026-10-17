@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { SessionEvent, SessionsResponse } from "@seance/shared";
 import type { SessionBackend } from "../src/backend.ts";
 import type { ExclaveScan } from "../src/exclaves.ts";
-import { createHandler } from "../src/handlers.ts";
+import { createHandler, createLocalOps, type HandlerContext } from "../src/handlers.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { MetricsStore } from "../src/metrics-store.ts";
@@ -50,6 +50,14 @@ const backend: SessionBackend = {
   doctor: () => Promise.resolve([]),
 };
 
+const handlerCtx: HandlerContext = {
+  backend,
+  getRepos: () => [],
+  rescan: () => Promise.resolve([]),
+  auditSink: () => {},
+  tasks: ended,
+};
+
 function shq(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -87,16 +95,7 @@ beforeAll(async () => {
     // Coalescing has its own unit test; here every event goes out at once.
     coalesceMs: 0,
   });
-  const handle = createHandler(
-    {
-      backend,
-      getRepos: () => [],
-      rescan: () => Promise.resolve([]),
-      auditSink: () => {},
-      tasks: ended,
-    },
-    "local",
-  );
+  const handle = createHandler(handlerCtx, "local");
   socket = await startLocalSocket({
     handle,
     sessionEvents: async (raw, peer) => {
@@ -216,11 +215,15 @@ describe("binding", () => {
     ]);
     expect(forwardedFor("task-b")).toEqual([]);
 
-    // The session exits after its SessionEnd: the backstop reports its task, and only it.
+    // The session exits after its SessionEnd: the backstop reports its task, and only it —
+    // to the scheduler (here the leader's in-process path), never to a local-socket caller.
     await tmuxOk(["kill-pane", "-t", forger.pane]);
-    const reply = await localRequest<SessionsResponse>("sessions", {}, { path: sockPath });
+    const reply = await createLocalOps(handlerCtx, "leader").sessions();
     expect("sessions" in reply ? reply.ended : undefined).toEqual(["task-a"]);
     expect("sessions" in reply ? reply.ledgerSince : undefined).toEqual(expect.any(Number));
+    const local = await localRequest<SessionsResponse>("sessions", {}, { path: sockPath });
+    expect(local).not.toHaveProperty("ended");
+    expect(local).not.toHaveProperty("ledgerSince");
   });
 
   test("a sender in no pane is refused, whatever pane it names", async () => {

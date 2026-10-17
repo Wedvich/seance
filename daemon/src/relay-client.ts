@@ -36,8 +36,8 @@ export interface RelayClientOpts {
   readonly key: CryptoKey;
   /** Fresh encrypted machine-info blob — called on every register. */
   readonly buildInfo: () => Promise<Envelope>;
-  /** Op dispatch; a returned Plain is sealed and sent back to the requester. */
-  readonly handle: (plain: Plain) => Promise<Plain | null>;
+  /** Op dispatch, with the envelope's AAD-bound sealer; a returned Plain is sealed and sent back to it. */
+  readonly handle: (plain: Plain, from: string) => Promise<Plain | null>;
   readonly onConnect?: () => void;
   /** After every register frame leaves — connect and re-register alike — with the blob it carried. */
   readonly onRegister?: (info: Envelope) => void;
@@ -444,7 +444,7 @@ export class RelayClient {
     // scope. Logging the pair here is what lets a relay line — which can only
     // ever name the `iv` — be joined to an op end to end. Never the payload.
     log.info(`wire recv iv=${quote(env.iv)} id=${quote(plain.id)} op=${quote(plain.op)}`);
-    const response = await this.#opts.handle(plain);
+    const response = await this.#opts.handle(plain, env.from);
     // A broadcast is never answered: the sender is not waiting, and the reply
     // would be daemon→daemon traffic no route is meant to carry.
     if (broadcast || response === null) return;

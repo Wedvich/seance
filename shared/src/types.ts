@@ -1076,8 +1076,9 @@ export interface SessionsResponse {
   /**
    * Task ids this daemon launched, or saw end, that no live pane carries now:
    * what tells a scheduler whose spawn reply and `ended` event were both lost
-   * that the task ran, rather than that it never started. Absent from older
-   * daemons, and when there are none; a reader that predates it ignores it.
+   * that the task ran, rather than that it never started. Sent only to the
+   * scheduler (DESIGN.md, "Session events"); absent from older daemons, and
+   * when there are none; a reader that predates it ignores it.
    */
   readonly ended?: readonly string[];
   /**
@@ -1086,8 +1087,9 @@ export interface SessionsResponse {
    * launches are recorded write-ahead in a file that survives restarts, so a
    * reservation made after it and found in neither list is proof its spawn
    * never landed. The ledger's creation time on a fresh install; it moves
-   * forward as old launches are evicted. Absent from older daemons, which can
-   * prove nothing (DESIGN.md, "Session events").
+   * forward as old launches are evicted. Sent only to the scheduler, whose
+   * request the reply waits on every launch in flight for; absent from older
+   * daemons, which can prove nothing (DESIGN.md, "Session events").
    */
   readonly ledgerSince?: number;
   /**
