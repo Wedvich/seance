@@ -136,7 +136,8 @@ export interface Stack {
    * Restart with identical opts — same state dir, so the same deviceId. `spawnWaitMs`
    * overrides the default budget for the new daemon; pass nothing to get it back.
    * `quiet` pushes out the leader's tick and the daemon's status beat, so the only
-   * thing that can wake the leader after boot is a `store-changed`; the next
+   * thing that can wake the leader after boot is a `store-changed` (a failed takeover
+   * still retries at once, which is not a wake-up); the next
    * restart without it puts the stack's cadence back.
    */
   readonly restartDaemon: (opts?: { readonly spawnWaitMs?: number; readonly quiet?: boolean }) => Promise<void>;
@@ -231,7 +232,8 @@ export async function startStack(
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
-      ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS } } : {}),
+      // A failed takeover still retries promptly: only the regular tick waits the hour.
+      ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
     });
 
   let daemon = await startTestDaemon();

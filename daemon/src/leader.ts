@@ -93,6 +93,8 @@ export interface LeaderBaseOpts {
   readonly resign: () => void;
   readonly config?: SchedulerConfig;
   readonly tickIntervalMs?: number;
+  /** The wait before a failed takeover is tried again; defaults to the tick interval. */
+  readonly takeoverRetryMs?: number;
   readonly now?: () => number;
 }
 
@@ -312,6 +314,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   relay.start();
 
   const intervalMs = opts.tickIntervalMs ?? TICK_INTERVAL_MS;
+  const retryMs = opts.takeoverRetryMs ?? intervalMs;
   // Woken early by `end`, so a retry wait never outlives the term.
   let retry: { readonly timer: ReturnType<typeof setTimeout>; readonly wake: () => void } | null = null;
   const pause = (): Promise<void> =>
@@ -321,7 +324,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         retry = null;
         resolve();
       };
-      retry = { timer: setTimeout(wake, intervalMs), wake };
+      retry = { timer: setTimeout(wake, retryMs), wake };
     });
 
   const settled = (async (): Promise<void> => {
@@ -339,7 +342,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           fail(err);
           return;
         }
-        log.warn(`scheduler: term ${term} takeover failed, retrying in ${intervalMs}ms: ${String(err)}`);
+        log.warn(`scheduler: term ${term} takeover failed, retrying in ${retryMs}ms: ${String(err)}`);
       }
       // oxlint-disable-next-line no-await-in-loop -- the wait between attempts
       await pause();

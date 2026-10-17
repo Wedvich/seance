@@ -97,7 +97,11 @@ export interface RunOpts {
    * Tests seed one store across terms and shorten the tick; absent, the leader
    * runs on the relay store.
    */
-  readonly leader?: { readonly store?: QueueStore; readonly tickIntervalMs?: number };
+  readonly leader?: {
+    readonly store?: QueueStore;
+    readonly tickIntervalMs?: number;
+    readonly takeoverRetryMs?: number;
+  };
   /** Tests only: the branch-state emitter's intervals, which are constants in production. */
   readonly branchState?: Pick<BranchStateDeps, "intervalMs" | "fetchStaleMs">;
 }
@@ -372,6 +376,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ? { store: opts.leader.store }
       : { storeLeg: { store: (frame) => client.store(frame) }, key }),
     ...(opts.leader?.tickIntervalMs === undefined ? {} : { tickIntervalMs: opts.leader.tickIntervalMs }),
+    ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
   });
 
   const client = new RelayClient({
