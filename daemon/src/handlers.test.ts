@@ -13,12 +13,21 @@ import {
   type SessionsResponse,
   type SpawnRequest,
   type SpawnResponse,
+  type TaskProgress,
+  parseTaskProgressList,
 } from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
-import { createHandler, createLocalOps, type HandlerContext, type TaskLaunches } from "./handlers.ts";
+import {
+  createHandler,
+  createLocalOps,
+  fitProgress,
+  SESSIONS_REPLY_BUDGET,
+  type HandlerContext,
+  type TaskLaunches,
+} from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks } from "./session-events.ts";
@@ -348,6 +357,7 @@ describe("a task's launch is recorded before it runs", () => {
       launch: () => Promise.reject(new Error("disk full")),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
     };
     const reply = await createHandler({ ...ctx, backend, tasks })(spawnTask("t-1"));
     expect(reply?.payload).toMatchObject({ ok: false, code: "launch_error" });
@@ -359,6 +369,98 @@ describe("a task's launch is recorded before it runs", () => {
     const reply = await sessionsOf(createHandler(ctx));
     expect(reply.ended).toBeUndefined();
     expect(reply.ledgerSince).toBeUndefined();
+  });
+});
+
+const noted = (taskId: string, at: number, merged = false): TaskProgress => ({
+  taskId,
+  at,
+  branch: "worktree-x",
+  ...(merged ? { merged: true as const } : {}),
+});
+
+describe("a worktree launch's site and the scheduler's progress", () => {
+  const spawnIn = (mode: "worktree" | "here", taskId: string): Plain =>
+    request("spawn", { repo: "myrepo", mode, taskId });
+
+  test("a worktree spawn that lands records its repo and worktree; a here spawn and a refusal record neither", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    const { backend } = taskBackend(() => Promise.resolve());
+    await createHandler({ ...ctx, backend, tasks })(spawnIn("worktree", "wt"));
+    await createHandler({ ...ctx, backend, tasks })(spawnIn("here", "here"));
+    await createHandler({ ...ctx, backend: failing(new SpawnFailure("repo_not_found", "gone")), tasks })(
+      spawnIn("worktree", "refused"),
+    );
+    expect(ledger.notes()).toEqual([expect.objectContaining({ taskId: "wt", repo: "/repos/myrepo", path: "/p" })]);
+  });
+
+  test("only the scheduler's sessions carries progress", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    const { backend } = taskBackend(() => Promise.resolve());
+    const handle = createHandler({ ...ctx, backend, tasks });
+    await handle(spawnIn("worktree", "t-1"));
+    await ledger.note("t-1", { branch: "worktree-x", pushed: true });
+    const scheduler = await sessionsOf(handle);
+    expect(scheduler.progress).toEqual([{ taskId: "t-1", at: expect.any(Number), branch: "worktree-x", pushed: true }]);
+    expect(scheduler.progressTrimmed).toBeUndefined();
+    expect(parseTaskProgressList(scheduler.progress)).not.toBeNull();
+    const inProcess = await createLocalOps({ ...ctx, backend, tasks }, "leader").sessions();
+    expect(inProcess).toMatchObject({ progress: [{ taskId: "t-1" }] });
+    for (const from of [APP_ID, null]) {
+      // oxlint-disable-next-line no-await-in-loop -- two callers, one handler
+      const reply = await sessionsOf(handle, from);
+      expect(reply.progress).toBeUndefined();
+      expect(reply.progressTrimmed).toBeUndefined();
+    }
+  });
+
+  test("a full ledger of large notes is trimmed to fit one envelope, oldest first, still parseable", async () => {
+    const clock = { now: 1_000 };
+    const ledger = LaunchLedger.memory(() => clock.now);
+    const tasks = new EndedTasks(ledger);
+    const ids = Array.from({ length: 128 }, (_, i) => `t-${i}`);
+    for (const [i, id] of ids.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- the ledger's clock moves between notes
+      await ledger.record(id);
+      clock.now += 1;
+      // oxlint-disable-next-line no-await-in-loop
+      await ledger.note(id, {
+        branch: `b${i}-`.padEnd(255, "x"),
+        prUrl: `https://example.test/pr/${i}/`.padEnd(2_000, "a"),
+        pushed: true,
+      });
+    }
+    const handle = createHandler({ ...ctx, tasks });
+    const reply = await sessionsOf(handle);
+    const progress = reply.progress ?? [];
+    expect(reply.progressTrimmed).toBeGreaterThan(0);
+    expect(progress.length + (reply.progressTrimmed ?? 0)).toBe(128);
+    expect(Buffer.byteLength(JSON.stringify(reply), "utf8")).toBeLessThanOrEqual(SESSIONS_REPLY_BUDGET);
+    expect(parseTaskProgressList(progress)).not.toBeNull();
+    // The newest survive, in their original order.
+    expect(progress.map((entry) => entry.taskId)).toEqual(ids.slice(-progress.length));
+  });
+
+  describe("fitProgress", () => {
+    const base: SessionsResponse = { sessions: [], at: 1 };
+
+    test("nothing to fit leaves the reply as it was", () => {
+      expect(fitProgress(base, [])).toBe(base);
+      expect(fitProgress(base, [noted("a", 1)])).toEqual({ ...base, progress: [noted("a", 1)] });
+    });
+
+    test("merged entries go before older open ones, and an empty survivor list omits progress", () => {
+      const all = [noted("open-old", 1), noted("done-new", 9, true), noted("open-new", 5)];
+      const one = Buffer.byteLength(JSON.stringify(fitProgress(base, [noted("open-new", 5)], 1_000)), "utf8");
+      const fitted = fitProgress(base, all, one + 30);
+      expect(fitted.progressTrimmed).toBe(2);
+      expect(fitted.progress?.map((e) => e.taskId)).toEqual(["open-new"]);
+      const none = fitProgress(base, all, 10);
+      expect(none.progress).toBeUndefined();
+      expect(none.progressTrimmed).toBe(3);
+    });
   });
 });
 

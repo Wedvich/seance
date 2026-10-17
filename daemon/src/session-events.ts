@@ -7,12 +7,13 @@ import {
   type QuotaObservation,
   type SessionEvent,
   type SessionState,
+  type TaskProgress,
 } from "@seance/shared";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
-import { LaunchLedger } from "./launch-ledger.ts";
+import { LaunchLedger, type LaunchSite } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import type { SessionQuota } from "./session-quota.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
@@ -190,8 +191,13 @@ export function quotaFromRateLimits(
 export const ENDED_TTL_MS = 30 * 60_000;
 export const ENDED_MAX = 128;
 
-/** What `EndedTasks.launch` hands back: told whether the spawn launched, and only then is the launch over. */
-export type SettleLaunch = (launched: boolean) => Promise<void>;
+/**
+ * What `EndedTasks.launch` hands back: told whether the spawn launched, and
+ * only then is the launch over. `site` is where a worktree-mode launch landed,
+ * noted before the launch counts as over so a `sessions` waiting on `settled`
+ * sees it.
+ */
+export type SettleLaunch = (launched: boolean, site?: LaunchSite) => Promise<void>;
 
 /**
  * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
@@ -261,10 +267,29 @@ export class EndedTasks {
       await finish();
       throw err;
     }
-    return async (launched) => {
+    return async (launched, site) => {
       if (launched) launches.landed = true;
-      await finish();
+      try {
+        if (launched && site !== undefined) await this.#ledger.note(taskId, { repo: site.repo, path: site.worktree });
+      } finally {
+        await finish();
+      }
     };
+  }
+
+  /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
+  notePr(taskId: string, prUrl: string): Promise<void> {
+    return this.#ledger.note(taskId, { prUrl });
+  }
+
+  /** `SessionsResponse.progress`: what the ledger holds of each launched task's PR and branch. */
+  progress(): readonly TaskProgress[] {
+    return this.#ledger.progress();
+  }
+
+  /** The one ledger of this file in this process, for the branch-state emitter. */
+  get ledger(): LaunchLedger {
+    return this.#ledger;
   }
 
   ended(taskId: string): void {
@@ -449,6 +474,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (frame.prUrl !== undefined && prUrl === null) {
         log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
       }
+      if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
       enqueue({
         session: pane.id,
         taskId: pane.taskId,
