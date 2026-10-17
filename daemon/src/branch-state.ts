@@ -67,6 +67,22 @@ async function isAncestor(cwd: string, ancestor: string, of: string): Promise<bo
   return result.exitCode === 1 ? false : null;
 }
 
+/**
+ * Own work: a tip the default branch does not already contain, whose tree differs from the one it forked at.
+ * An empty commit or a revert of the branch's only change has no net change, and `classifyTip` reads it as
+ * an empty "squash" of the default. A git failure reads as no work, the safe direction.
+ */
+async function holdsOwnWork(repoPath: string, tip: string, base: string): Promise<boolean> {
+  if ((await isAncestor(repoPath, tip, base)) !== false) return false;
+  const fork = await reapGit(repoPath, ["merge-base", tip, base]);
+  const forkSha = fork.stdout.trim();
+  if (fork.exitCode !== 0 || forkSha === "") return false;
+  const trees = await reapGit(repoPath, ["rev-parse", `${tip}^{tree}`, `${forkSha}^{tree}`]);
+  if (trees.exitCode !== 0) return false;
+  const [tipTree, forkTree] = trees.stdout.split("\n");
+  return tipTree !== undefined && tipTree !== "" && tipTree !== forkTree;
+}
+
 const HEADS = "refs/heads/";
 
 /** `for-each-ref` matches prefixes, so a sibling branch (`b-2` for `b`) is filtered out by exact refname. */
@@ -120,14 +136,21 @@ async function repoBase(repo: RepoEntry): Promise<RepoContext["base"]> {
 /**
  * Undelivered states, newest per task, per ledger: `endedTasksFor` keeps one
  * ledger per file per process, so a stopped emitter's backlog reaches the one
- * that replaces it. Lost with the process; `progress` recovers it.
+ * that replaces it. Lost with the process; `progress` recovers it. Dropped once
+ * its task is gone or relaunched (the note's `siteAt` moved).
  */
-const pendingByLedger = new WeakMap<object, Map<string, BranchState>>();
+/** `siteAt`: the launch it was computed under; a relaunch of the id makes it stale. */
+interface Pending {
+  readonly state: BranchState;
+  readonly siteAt: number | undefined;
+}
 
-function pendingFor(ledger: object): Map<string, BranchState> {
+const pendingByLedger = new WeakMap<object, Map<string, Pending>>();
+
+function pendingFor(ledger: object): Map<string, Pending> {
   const known = pendingByLedger.get(ledger);
   if (known !== undefined) return known;
-  const made = new Map<string, BranchState>();
+  const made = new Map<string, Pending>();
   pendingByLedger.set(ledger, made);
   return made;
 }
@@ -145,11 +168,13 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
   const failing = new Set<string>();
   /** Latest verdict per task, keyed by every input: an idle branch costs no `classifyTip` per pass. */
   const verdicts = new Map<string, { key: string; merged: boolean }>();
+  /** Whether a tip holds own work, per task and tip + default sha: it is up to three git runs. */
+  const ownWork = new Map<string, { key: string; own: boolean }>();
 
-  const send = async (state: BranchState): Promise<void> => {
+  const send = async (state: BranchState, siteAt: number | undefined): Promise<void> => {
     // Noted already, so the state is kept for whichever emitter replaces this one.
     if (stopped) {
-      pending.set(state.taskId, state);
+      pending.set(state.taskId, { state, siteAt });
       return;
     }
     let delivered = false;
@@ -159,7 +184,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       // Kept for the next pass, like a false.
     }
     if (delivered) pending.delete(state.taskId);
-    else pending.set(state.taskId, state);
+    else pending.set(state.taskId, { state, siteAt });
   };
 
   const fetchFor = async (repo: RepoEntry, commonDir: string): Promise<void> => {
@@ -181,6 +206,15 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     if (failures === 1) log.warn(`branch state: fetch failed in ${repo.name} (${outcome.brief})`);
   };
 
+  const ownsWork = async (repoPath: string, taskId: string, tip: string, baseSha: string): Promise<boolean> => {
+    const key = `${tip} ${baseSha}`;
+    const known = ownWork.get(taskId);
+    if (known?.key === key) return known.own;
+    const own = await holdsOwnWork(repoPath, tip, baseSha);
+    ownWork.set(taskId, { key, own });
+    return own;
+  };
+
   const checkTask = async (ctx: RepoContext, note: NotedTask, owner: boolean): Promise<void> => {
     const branch = await liveBranch(ctx, note, owner);
     if (branch === undefined || branch === "" || branch.length > BRANCH_MAX_LENGTH) return;
@@ -190,20 +224,33 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     // The branch can be deleted (claude's worktree-exit) before its PR merges; the commit outlives the ref until gc.
     // A non-owner's name now belongs to a newer launch (a freed worktree name frees its branch too): that local ref is
     // not this task's, so it is judged by its recorded tip alone.
-    let tip = owner ? refs.local : undefined;
+    // Even the owner's local ref must be the recorded work or grow from it: a branch of the same name made by
+    // something else once the task's own was removed (a spawn with no task id) is a stranger's, and would
+    // overwrite the recorded tip and read the stranger's merge as this task's.
+    let tip: string | undefined;
+    if (owner && refs.local !== undefined) {
+      const grown =
+        note.tip === undefined ||
+        refs.local === note.tip ||
+        (await isAncestor(ctx.repo.path, note.tip, refs.local)) === true;
+      if (grown) tip = refs.local;
+    }
     if (tip === undefined && note.tip !== undefined && branch === note.branch) {
       const kept = await reapGit(ctx.repo.path, ["cat-file", "-e", `${note.tip}^{commit}`]);
       if (kept.exitCode === 0) tip = note.tip;
     }
     if (tip === undefined) return;
 
-    // Own work gates both pushed and merged: a fresh branch is an ancestor of the default and an empty "squash",
-    // and may reuse the name of a stale remote ref from an earlier attempt. `ahead` is sticky once seen.
-    const liveAhead = ctx.base !== null && (await isAncestor(ctx.repo.path, tip, ctx.base.sha)) === false;
+    // Own work (`holdsOwnWork`) gates both pushed and merged: a fresh branch is an ancestor of the default and an
+    // empty "squash", as is a pushed empty commit, and it may reuse the name of a stale remote ref from an earlier
+    // attempt. `ahead` is sticky once seen.
+    const liveAhead = ctx.base !== null && (await ownsWork(ctx.repo.path, note.taskId, tip, ctx.base.sha));
     const ahead = note.ahead === true || liveAhead;
     // What the verdicts are about: the tip while it holds own work, else the last tip that did (recorded only while
-    // ahead) — a branch reset to main has no work left to call merged. Without an origin/HEAD nothing can be judged
-    // ahead, so the tip stands in and only pushed is reported, on an exact match.
+    // ahead) — a branch reset to main, or whose work was reverted, has none left to call merged. Without an
+    // origin/HEAD nothing can be judged ahead, so the tip stands in and only pushed is reported, on an exact match.
+    // That pushed cannot make a merged by itself: merged needs a recorded own-work tip, which only a pass with a
+    // default branch writes (`liveAhead`), and the verdict needs `ctx.base`.
     const workTip = ctx.base === null || liveAhead ? tip : note.tip;
     const livePushed =
       workTip !== undefined &&
@@ -245,7 +292,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     const origin = ctx.repo.origin;
     if (!reportable || origin === undefined || origin === "" || origin.length > 512) return;
     // Past a stop `send` keeps it: the note is written, so no later pass would report it again.
-    await send({ taskId: note.taskId, repo: origin, branch, pushed: livePushed, merged, at: now() });
+    await send({ taskId: note.taskId, repo: origin, branch, pushed: livePushed, merged, at: now() }, note.siteAt);
   };
 
   const checkRepo = async (
@@ -271,20 +318,30 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
   const pass = async (): Promise<void> => {
     if (stopped) return;
     const noted = deps.ledger.notes();
-    // A retracted or evicted task has nothing left to report.
-    for (const id of pending.keys()) if (!noted.some((note) => note.taskId === id)) pending.delete(id);
+    // A retracted or evicted task has nothing left to report, nor has a relaunched one for its earlier launch.
+    for (const [id, entry] of pending) {
+      const current = noted.find((note) => note.taskId === id);
+      if (current === undefined || current.siteAt !== entry.siteAt) pending.delete(id);
+    }
     // Each with the time it was observed, not the retry's.
-    for (const state of [...pending.values()]) {
+    for (const entry of [...pending.values()]) {
       if (stopped) return;
       // oxlint-disable-next-line no-await-in-loop -- in order, each one's delivery decides its own retry
-      await send(state);
+      await send(entry.state, entry.siteAt);
     }
     const tracked = noted.filter((note) => note.path !== undefined && note.repo !== undefined && note.merged !== true);
     for (const id of verdicts.keys()) if (!tracked.some((note) => note.taskId === id)) verdicts.delete(id);
-    // A freed worktree name can be reused by a newer spawn: the newest launch owns the live read of a path, a merged
-    // one included, or its older namesake would read the newer one's branch.
-    const owners = new Map<string, string>();
-    for (const note of noted) if (note.path !== undefined) owners.set(note.path, note.taskId);
+    for (const id of ownWork.keys()) if (!tracked.some((note) => note.taskId === id)) ownWork.delete(id);
+    // A freed worktree name can be reused by a newer spawn: the newest site owns the live read of a path, a merged
+    // one included, or its older namesake would read the newer one's branch. By when the site was set, not ledger
+    // order: a failed re-dispatch of an old id re-records it at the end. A tie goes to the later in the ledger.
+    const newest = new Map<string, NotedTask>();
+    for (const note of noted) {
+      if (note.path === undefined) continue;
+      const held = newest.get(note.path);
+      if (held === undefined || (note.siteAt ?? 0) >= (held.siteAt ?? 0)) newest.set(note.path, note);
+    }
+    const owners = new Map([...newest].map(([path, note]) => [path, note.taskId]));
     const groups = new Map<string, NotedTask[]>();
     for (const note of tracked) {
       if (note.repo === undefined) continue;

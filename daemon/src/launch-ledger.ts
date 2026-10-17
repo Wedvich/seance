@@ -60,9 +60,9 @@ export interface TaskNote {
   /** Absolute worktree path. */
   readonly path?: string;
   readonly branch?: string;
-  /** The last tip that held own work (ahead of the default), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
+  /** The last tip that held own work (not in the default, and a net change from its fork), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
   readonly tip?: string;
-  /** The tip once held a commit not reachable from `origin/<default>`: sticky, gates pushed and merged. */
+  /** The tip once held own work, as `tip` says: sticky, gates pushed and merged. */
   readonly ahead?: true;
   readonly pushed?: true;
   readonly merged?: true;

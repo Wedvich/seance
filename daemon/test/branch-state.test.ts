@@ -531,6 +531,131 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
+  test("an empty commit pushed under a draft PR is no work: neither pushed nor merged", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await git(path, "commit", "-q", "--allow-empty", "-m", "draft");
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await w.ledger.note("t1", { prUrl: "https://github.com/org/myrepo/pull/1" });
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.every((s) => !s.pushed && !s.merged)).toBe(true);
+    expect(w.ledger.notes()[0]).not.toHaveProperty("tip");
+    expect(w.ledger.notes()[0]).not.toHaveProperty("ahead");
+    expect(w.ledger.notes()[0]).not.toHaveProperty("merged");
+    stopAll(w);
+  });
+
+  test("a revert of the only change is no work: the pre-revert commit stays the one judged, and is not merged", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    const worked = await git(path, "rev-parse", "HEAD");
+    expect(w.ledger.notes()[0]).toMatchObject({ tip: worked, ahead: true, pushed: true });
+    await git(path, "revert", "--no-edit", "HEAD");
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    expect(w.ledger.notes()[0]).toMatchObject({ tip: worked });
+    expect(w.ledger.notes()[0]?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a branch someone else made under a removed task branch's name is not read as the task's", async () => {
+    const w = await world();
+    const path = await launch(w, "old", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.ledger.note("old", { prUrl: "https://github.com/org/myrepo/pull/1" });
+    await emitter.check();
+    const oldTip = w.ledger.notes()[0]?.tip;
+    expect(oldTip).toBe(await git(path, "rev-parse", "HEAD"));
+
+    // The task's worktree and branch are freed; a spawn with no task id takes the name and path and merges its own work.
+    await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
+    await git(w.fixture.repoPath, "branch", "-D", "worktree-x");
+    await git(w.fixture.repoPath, "worktree", "add", "-q", "--no-track", "-b", "worktree-x", path, "origin/main");
+    await commitAndPush(path, "b.txt", "+worktree-x");
+    await squashMergeOnOrigin(w, "worktree-x");
+    const sent = w.states.length;
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.slice(sent).every((s) => !s.merged)).toBe(true);
+    const old = w.ledger.notes().find((n) => n.taskId === "old");
+    expect(old?.tip).toBe(oldTip);
+    expect(old?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a failed re-dispatch of an old id does not take its path from the launch that holds it", async () => {
+    const w = await world();
+    let tick = 0;
+    w.ledger = await LaunchLedger.open(w.ledgerPath, () => ++tick);
+    const path = await launch(w, "old", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    await reuseName(w, path, "x", "new");
+    // The scheduler re-dispatches "old"; its spawn is refused, so nothing but `record` ran: it is now last in the ledger.
+    await w.ledger.record("old");
+    expect(w.ledger.notes().map((n) => n.taskId)).toEqual(["new", "old"]);
+    await commitAndPush(path, "b.txt", "+worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ taskId: "new", branch: "worktree-x", pushed: true, merged: false });
+    stopAll(w);
+  });
+
+  test("an undelivered state is not re-sent once its task was relaunched", async () => {
+    const w = await world();
+    let tick = 0;
+    w.ledger = await LaunchLedger.open(w.ledgerPath, () => ++tick);
+    const path = await launch(w, "t1", "x");
+    const delivered: BranchState[] = [];
+    let deliver = false;
+    const emitter = start(w, {
+      emit: (state) => {
+        if (deliver) delivered.push(state);
+        return Promise.resolve(deliver);
+      },
+    });
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    // The first launch's pushed state is still undelivered when the id is relaunched to the same path.
+    await git(path, "reset", "-q", "--hard", "origin/main");
+    await w.ledger.startNote("t1", { repo: w.repo.path, path });
+    deliver = true;
+    await emitter.check();
+    await emitter.check();
+    expect(delivered.map((s) => s.pushed)).toEqual([false]);
+    stopAll(w);
+  });
+
+  test("with no origin/HEAD a pushed fresh branch stays unmerged once the default branch appears", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    let defaultBranch: string | null = null;
+    const emitter = start(w, { repos: () => [{ ...w.repo, defaultBranch }] });
+    // Pushed with no commit of its own: pushed on an exact match, though nothing was judged ahead.
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    defaultBranch = "main";
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.every((s) => !s.merged)).toBe(true);
+    expect(w.ledger.notes()[0]?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
   test("a tag named like the branch does not break branch detection", async () => {
     const w = await world();
     await launch(w, "t1", "x");
