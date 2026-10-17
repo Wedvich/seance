@@ -88,7 +88,7 @@ const PATH_MAX_LENGTH = 4096;
 const TIP_PATTERN = /^[0-9a-f]{40}([0-9a-f]{24})?$/u;
 
 function boundedText(value: unknown, max: number): string | undefined {
-  return typeof value === "string" && value.length >= 1 && value.length <= max ? value : undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 }
 
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
