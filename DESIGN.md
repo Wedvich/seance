@@ -1292,9 +1292,10 @@ enforces is what it can see: who is asking, the key, a version and a size.
   up to `PURGE_BATCH` (32) expired ones, oldest first, through the age index, so storage stays
   bounded by a window of deletes with no alarm: the one alarm is the sweep's, armed only while
   daemons are connected. 32 because Cloudflare's KV-style storage API caps a `get`/`put`/`delete`
-  at 128 keys per call (local workerd does not enforce it on `delete`): a delete sends 1 + 2 × 32
-  keys. The relay logs `store purged expired tombstones=<n>` only when `n > 0`. The tombstone
-  keeps no env on purpose; the cost is on Threat model item 3.
+  at 128 keys per call (local workerd does not enforce it on `delete`): the delete call
+  carries 1 + 2 × 32 keys (the counts row goes in the `put`). The relay logs nothing for a purge:
+  after the expiry nearly every leader delete purges, so a line would be a timeline of the
+  leader's deletes. The tombstone keeps no env on purpose; the cost is on Threat model item 3.
 - **The create floor is the app leg's alone**: 60 creates per socket per 60 s
   (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the app socket's
   attachment (written on its first create, so it survives hibernation) and a fresh socket starting
@@ -1303,6 +1304,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
   `version_conflict`, `store_full` or `rate_limited` leaves it untouched and a refusal cannot reset
   it. No floor on the daemon leg: every write there is term-fenced, so only the leader writes, and
   `MAX_TASKS` bounds it. Enqueue needs no leader: an app create lands with no daemon connected.
+  **Constraint on M4:** the floor applies on the app leg only because every prefix is term-fenced
+  today. A prefix with `termFenced: false` (M4's `account:`) must extend the floor to daemon-leg
+  creates, since `/daemon` accepts any bearer token.
 - **Caps**: a create past `MAX_TASKS` under `task:`, or past `MAX_RECORDS` in all, is `store_full`
   on either leg. `queue:` is bounded only by the total. Reads are unrated, as `forget` is: a
   token holder can loop `store-list`, which costs DO CPU and egress — an availability concern only.
@@ -1312,8 +1316,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
   write the leader did not make is an app-leg write. Nothing goes to followers, nothing for the
   leader's own writes, and nothing with no leader connected: the next leader reconciles from
   `store-list` at takeover. `#nudgeLeader` in `hub.ts` sends it.
-- **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…` — and none for an
-  accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
+- **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…`, with no `key=` on
+  `version_conflict` (the normal answer to an enqueue retry and to leader races, so a key with a
+  time would link task ids to retries) — and none for an accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
   item 3). Never an `env`, a `ct` or its length. A storage failure logs and sends **no reply**;
   the client's `STORE_TIMEOUT_MS` reads it as indeterminate. A shared-shape follow-up could give
   it a code (`shared/src/types.ts` is not touched by item 1).

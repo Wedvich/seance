@@ -116,11 +116,11 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   store, not the queue, because tasks are not its only records — who may write is a rule per
   key prefix, applied by the relay:
 
-  | Prefix           | Create          | Overwrite / delete         | Term-fenced | Lands |
-  | ---------------- | --------------- | -------------------------- | ----------- | ----- |
-  | `task:<id>`      | any app, leader | leader only                | yes         | M3    |
-  | `queue:pause`    | leader only     | leader only                | yes         | M3    |
-  | `account:<hmac>` | any app         | any app, by `expect` (CAS) | no          | M4    |
+  | Prefix           | Create          | Overwrite / delete               | Term-fenced | Lands |
+  | ---------------- | --------------- | -------------------------------- | ----------- | ----- |
+  | `task:<id>`      | any app, leader | leader only                      | yes         | M3    |
+  | `queue:pause`    | leader only     | leader overwrites; never deleted | yes         | M3    |
+  | `account:<hmac>` | any app         | any app, by `expect` (CAS)       | no          | M4    |
 
   Tasks: apps may list and create (`expect: 0`) so enqueue works with no leader; every
   overwrite and delete is the leader's. `queue:pause` holds the pause (`PauseRecord`, op

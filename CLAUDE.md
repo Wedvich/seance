@@ -147,8 +147,12 @@ green:
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `submit` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
-  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed. Don't
-  let changes drift from them.
+  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed, and the
+  relay's store: a `term` on an app-leg store frame authorizes nothing, a daemon-leg write is
+  fenced on the term and the socket it was issued to (`holdsTerm` in `relay/src/leadership.ts`),
+  store records live under their own storage namespaces so no key aliases `device:` or
+  `scheduler:term`, `queue:` deletes are refused, and the relay logs no store `env`/`ct` and no
+  line per accepted store read or write. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
