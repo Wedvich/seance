@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, seal, toBase64 } from "./crypto.ts";
 import {
+  bindTaskRecord,
   isMetricsRequest,
   isStoreKey,
+  isTaskId,
+  isTerm,
   parseBranchState,
   parseDecision,
   parseExclaveList,
@@ -15,28 +18,38 @@ import {
   parsePauseRequest,
   parseQueueChanged,
   parseQueueReply,
+  parseQueueRequest,
   parseRepoEntry,
   parseResumeRequest,
   parseStoreChanged,
   parseStoreReply,
   parseTask,
   parseTaskRecord,
+  parseTaskProgressList,
   parseTaskRef,
   parseTaskReply,
   parseTaskRequest,
   parseTaskSpec,
 } from "./parse.ts";
+import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
   BRANCH_MAX_LENGTH,
+  CANDIDATE_MAX_REASONS,
+  DECISION_MAX_CANDIDATES,
   MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
   METRICS_MAX_POINTS,
   MAX_TASKS,
   OP_TIMEOUT_MS,
-  STORE_KEY_ID_MAX_LENGTH,
+  QUEUE_MAX_TASKS,
+  ROUTING_ID_MAX_LENGTH,
+  SESSIONS_MAX_PROGRESS,
+  STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
+  TARGET_LIMITS,
+  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   type BranchState,
@@ -49,8 +62,10 @@ import {
   type SchedulerError,
   type StoreRecord,
   type StoreReplyFrame,
+  type Target,
   type Task,
   type TaskDep,
+  type TaskRecord,
   type TaskRequest,
   type TaskSpec,
 } from "./types.ts";
@@ -58,6 +73,12 @@ import {
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
 const info = { name: "mac", platform: "darwin", repos: [repo], scannedAt: 1_700_000_000_000 };
 const exclave = { id: "default", accountId: "org:acct", extraUsageEnabled: true, authOk: true, skills: ["dataviz"] };
+
+async function sealedLength(task: Task): Promise<number> {
+  const key = await importPsk(toBase64(new Uint8Array(32)));
+  const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+  return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
+}
 
 describe("parseRepoEntry", () => {
   test("passes exclave and origin through, and leaves them absent when absent", () => {
@@ -425,7 +446,9 @@ describe("tasks and their records", () => {
     const reason: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
     const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
     expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
-    expect(parseDecision(decision({ ...reason, scope: "batch" }))?.candidates[0]?.rejected).toEqual([]);
+    const batch: Reason = { ...reason, scope: "batch" };
+    expect(parseDecision(decision(batch))?.candidates[0]?.rejected).toEqual([batch]);
+    expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
@@ -504,9 +527,28 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
   });
 
-  test("queue-changed is a stamp and nothing else", () => {
-    expect(parseQueueChanged({ at: 9, tasks: ["t-1"] })).toEqual({ at: 9 });
+  test("queue-changed is a stamp and which tasks changed; an unreadable list costs the list, not the nudge", () => {
+    expect(parseQueueChanged({ at: 9, tasks: ["t-1"], extra: 1 })).toEqual({ at: 9, tasks: ["t-1"] });
+    expect(parseQueueChanged({ at: 9 })).toEqual({ at: 9 });
+    expect(parseQueueChanged({ at: 9, tasks: ["t 1"] })).toEqual({ at: 9 });
+    expect(parseQueueChanged({ at: 9, tasks: Array.from({ length: QUEUE_MAX_TASKS + 1 }, () => "t") })).toEqual({
+      at: 9,
+    });
     expect(parseQueueChanged({})).toBeNull();
+  });
+
+  test("queue may ask for some tasks only; an unreadable filter is malformed, never everything", () => {
+    expect(parseQueueRequest({})).toEqual({});
+    expect(parseQueueRequest({ tasks: ["t-1", "t-2"] })).toEqual({ tasks: ["t-1", "t-2"] });
+    expect(parseQueueRequest({ tasks: ["t:1"] })).toBeNull();
+    expect(parseQueueRequest({ tasks: Array.from({ length: QUEUE_MAX_TASKS + 1 }, () => "t") })).toBeNull();
+    expect(parseQueueRequest([])).toBeNull();
+  });
+
+  test("a queue reply holds at most QUEUE_MAX_TASKS", () => {
+    const many = (n: number) => ({ tasks: Array.from({ length: n }, () => task), at: 5 });
+    expect(parseQueueReply(many(QUEUE_MAX_TASKS))).not.toBeNull();
+    expect(parseQueueReply(many(QUEUE_MAX_TASKS + 1))).toBeNull();
   });
 
   test("cancel's deadline clears the despawn it may wait on", () => {
@@ -547,47 +589,86 @@ describe("store", () => {
   const env = { v: 1, to: "scheduler", from: "app", iv: "aXY=", ct: "Y3Q=" };
   const record: StoreRecord = { key: "task:t-1", version: 2, env };
 
-  test("a task at the prompt limit, two bytes a character, with a 15-candidate decision, seals into one record", async () => {
-    const id = "A".repeat(43);
-    const candidate: Candidate = {
-      deviceId: id,
-      machine: "macbook-pro",
-      exclave: "default",
-      clone: "seance",
-      rejected: [],
-      score: {
-        components: { accountPressure: 0.123456789, machinePressure: 0.25, dependencyDistance: 0.5, queuePressure: 3 },
-        sticky: 0,
-        total: 1.987654321,
+  // Every field at its bound, two UTF-8 bytes a character wherever a field is free text.
+  const device = "A".repeat(43);
+  const placement = { deviceId: device, exclave: "x".repeat(TASK_SPEC_LIMITS.placement) };
+  const created: Task = {
+    id: crypto.randomUUID(),
+    state: "queued",
+    createdAt: 1_760_000_000_000,
+    spec: {
+      repo: "r".repeat(TASK_REQUEST_LIMITS.repo),
+      mode: "worktree",
+      prompt: "ø".repeat(TASK_REQUEST_LIMITS.prompt),
+      title: "ø".repeat(TASK_REQUEST_LIMITS.title),
+      model: "m".repeat(TASK_REQUEST_LIMITS.model),
+      effort: "e".repeat(TASK_REQUEST_LIMITS.effort),
+      plan: true,
+      pin: placement,
+      lineage: placement,
+      base: placement,
+      batch: { id: crypto.randomUUID(), index: 15, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel } },
+      deps: Array.from({ length: TASK_SPEC_LIMITS.deps }, () => ({
+        task: crypto.randomUUID(),
+        after: "merged" as const,
+      })),
+      linear: {
+        issue: "E".repeat(TASK_SPEC_LIMITS.linearIssue),
+        url: `https://linear.app/acme/issue/${"s".repeat(80)}`,
       },
-      quota: { observedAt: 1_760_000_000, observer: id, source: "session" },
+    },
+  };
+  const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };
+  const written: Task = {
+    ...created,
+    state: "failed",
+    reservation: { ...target, expiresAt: 1_760_000_120_000 },
+    assignment: { ...target, window: "ø".repeat(TARGET_LIMITS.window), pane: "%".repeat(ROUTING_ID_MAX_LENGTH) },
+    failure: { code: "c".repeat(TASK_FAILURE_LIMITS.code), message: "ø".repeat(TASK_FAILURE_LIMITS.message) },
+    prUrl: `https://${"p".repeat(2000)}.example/`,
+    branch: "ø".repeat(BRANCH_MAX_LENGTH),
+    pushed: true,
+    absentSince: 1_760_000_000_000,
+    reservedAt: 1_760_000_000_000,
+    needsInputSince: 1_760_000_000_000,
+    escalated: true,
+    leftRunning: true,
+  };
+  const candidate: Candidate = {
+    deviceId: device,
+    machine: "macbook-pro",
+    exclave: "default",
+    clone: "seance",
+    rejected: [],
+    score: {
+      components: { accountPressure: 0.123456789, machinePressure: 0.25, dependencyDistance: 0.5, queuePressure: 3 },
+      sticky: 0,
+      total: 1.987654321,
+    },
+    quota: { observedAt: 1_760_000_000, observer: device, source: "session" },
+  };
+
+  test("a create with every field at its bound, the prompt two bytes a character, fits the create cap", async () => {
+    expect(parseTask(created)).toEqual(created);
+    expect(await sealedLength(created)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
+  });
+
+  test("on top of that, all the leader adds at every bound fits a record with ten candidates beside it", async () => {
+    const decided: Task = {
+      ...written,
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 10 }, () => candidate) },
     };
-    const task: Task = {
-      id: crypto.randomUUID(),
-      spec: {
-        repo: "github.com/acme/app",
-        mode: "worktree",
-        prompt: "ø".repeat(TASK_REQUEST_LIMITS.prompt),
-        title: "t".repeat(TASK_REQUEST_LIMITS.title),
-      },
-      state: "reserved",
-      createdAt: 1_760_000_000_000,
-      reservation: { deviceId: id, exclave: "default", clone: "seance", expiresAt: 1_760_000_120_000 },
-      decision: { at: 1_760_000_000_000, chosen: null, candidates: Array.from({ length: 15 }, () => candidate) },
-    };
-    const key = await importPsk(toBase64(new Uint8Array(32)));
-    const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
-    const sealed = await seal(key, { to: "scheduler", from: "app" }, plain);
-    expect(sealed.ct.length).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+    expect(parseTask(decided)).toEqual(decided);
+    expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
   });
 
   test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {
     for (const { prefix } of Object.values(STORE_PREFIXES)) expect(isStoreKey(`${prefix}x`)).toBe(true);
-    expect(isStoreKey(`task:${"a".repeat(STORE_KEY_ID_MAX_LENGTH)}`)).toBe(true);
+    expect(isStoreKey(`task:${"a".repeat(ROUTING_ID_MAX_LENGTH)}`)).toBe(true);
     for (const bad of [
-      `task:${"a".repeat(STORE_KEY_ID_MAX_LENGTH + 1)}`,
+      `task:${"a".repeat(ROUTING_ID_MAX_LENGTH + 1)}`,
       "task:",
       "task:a:b",
       "task:a/b",
@@ -648,5 +729,142 @@ describe("store", () => {
     });
     expect(parseStoreChanged({ t: "store-changed", key: "task:t-1", version: -1 })).toBeNull();
     expect(parseStoreChanged({ t: "store-changed", key: "nope", version: 1 })).toBeNull();
+  });
+});
+
+describe("routing ids and terms", () => {
+  test("a task id is a routing id, so every one is a store key's id part as it stands", () => {
+    for (const id of [crypto.randomUUID(), "t-1", "a".repeat(ROUTING_ID_MAX_LENGTH)]) {
+      expect(isTaskId(id)).toBe(true);
+      expect(isStoreKey(`${STORE_PREFIXES.task.prefix}${id}`)).toBe(true);
+    }
+    for (const bad of ["t:1", "", "a".repeat(ROUTING_ID_MAX_LENGTH + 1), "t 1", "t/1"])
+      expect(isTaskId(bad)).toBe(false);
+  });
+
+  test("a term is a safe non-negative integer", () => {
+    expect(isTerm(0)).toBe(true);
+    expect(isTerm(31)).toBe(true);
+    for (const bad of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "3", null]) expect(isTerm(bad)).toBe(false);
+  });
+});
+
+describe("what a leader writes into a task is bounded", () => {
+  const target: Target = { deviceId: "d-1", exclave: "default", clone: "seance" };
+  const task: Task = {
+    id: "t-1",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "running",
+    createdAt: 1,
+  };
+
+  test("a target's names: a routing id, an exclave name, a clone name, a window and a pane", () => {
+    expect(parseTask({ ...task, assignment: { ...target, window: "", pane: "%3" } })?.assignment?.window).toBe("");
+    for (const bad of [
+      { ...target, deviceId: "d:1" },
+      { ...target, exclave: "x".repeat(TASK_SPEC_LIMITS.placement + 1) },
+      { ...target, clone: "" },
+      { ...target, clone: "c".repeat(TARGET_LIMITS.clone + 1) },
+      { ...target, window: "w".repeat(TARGET_LIMITS.window + 1) },
+      { ...target, pane: "%".repeat(ROUTING_ID_MAX_LENGTH + 1) },
+    ]) {
+      expect(parseTask({ ...task, assignment: bad })).toBeNull();
+    }
+  });
+
+  test("a failure's code is bounded; its message is cut, so an older leader's long one costs its tail only", () => {
+    const long = { code: "launch_error", message: "x".repeat(TASK_FAILURE_LIMITS.message + 10) };
+    expect(parseTask({ ...task, state: "failed", failure: long })?.failure?.message).toHaveLength(
+      TASK_FAILURE_LIMITS.message,
+    );
+    const failure = { code: "c".repeat(TASK_FAILURE_LIMITS.code + 1), message: "m" };
+    expect(parseTask({ ...task, state: "failed", failure })).toBeNull();
+    expect(parseTask({ ...task, state: "failed", failure: { code: "", message: "m" } })).toBeNull();
+  });
+
+  test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {
+    const candidate = { deviceId: "d-1", machine: "mac", exclave: "default", rejected: [{ code: "offline" }] };
+    const decision = (n: number, extra: object = {}) => ({
+      at: 1,
+      chosen: null,
+      candidates: Array.from({ length: n }, () => candidate),
+      ...extra,
+    });
+    expect(parseDecision(decision(DECISION_MAX_CANDIDATES))).not.toBeNull();
+    expect(parseDecision(decision(DECISION_MAX_CANDIDATES + 1))).toBeNull();
+    expect(parseDecision(decision(1, { trimmed: 7 }))?.trimmed).toBe(7);
+    expect(parseDecision(decision(1, { trimmed: -1 }))).toBeNull();
+    const rejected = Array.from({ length: CANDIDATE_MAX_REASONS + 1 }, () => ({ code: "offline" }));
+    expect(parseDecision({ at: 1, chosen: null, candidates: [{ ...candidate, rejected }] })).toBeNull();
+    expect(parseDecision({ at: 1, chosen: null, candidates: [{ ...candidate, deviceId: "d 1" }] })).toBeNull();
+    const named = { ...candidate, machine: "m".repeat(TARGET_LIMITS.machine + 1) };
+    expect(parseDecision({ at: 1, chosen: null, candidates: [named] })).toBeNull();
+  });
+});
+
+describe("bindTaskRecord", () => {
+  const now = 1_760_000_000_000;
+  const task: Task = {
+    id: "t-1",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "queued",
+    createdAt: now,
+  };
+  const key = "task:t-1";
+
+  test("keeps a record bound to its key and version", () => {
+    expect(bindTaskRecord({ version: 1, task }, { key, version: 1 }, now)).toEqual({ version: 1, task });
+    const ready: TaskRecord = { version: 2, task: { ...task, state: "ready" } };
+    expect(bindTaskRecord(ready, { key, version: 2 }, now)).toEqual(ready);
+    const edge = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS } };
+    expect(bindTaskRecord(edge, { key, version: 1 }, now)).toEqual(edge);
+  });
+
+  test("names why it refuses one, so a reader can skip and report it", () => {
+    const paused = { version: 1, task: { ...task, state: "paused" } };
+    expect(bindTaskRecord(paused, { key, version: 1 }, now)).toBe("malformed");
+    // An authentic old blob put back at the current version: version binding.
+    expect(bindTaskRecord({ version: 1, task }, { key, version: 3 }, now)).toBe("version_mismatch");
+    // Another task's blob re-filed under a fresh key.
+    expect(bindTaskRecord({ version: 1, task }, { key: "task:t-2", version: 1 }, now)).toBe("key_mismatch");
+    // Only the leader moves a task past `queued`; no create may start it further on.
+    const running = { version: 1, task: { ...task, state: "running" } };
+    expect(bindTaskRecord(running, { key, version: 1 }, now)).toBe("created_unqueued");
+    const ahead = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS + 1 } };
+    expect(bindTaskRecord(ahead, { key, version: 1 }, now)).toBe("created_ahead");
+  });
+});
+
+describe("parseTaskProgressList", () => {
+  const entry = {
+    taskId: "t-1",
+    prUrl: "https://github.com/acme/app/pull/7",
+    branch: "worktree-fix-it",
+    pushed: true,
+    merged: true,
+    at: 1,
+  } as const;
+
+  test("round-trips, a `here` task's entry with no branch included", () => {
+    const here = { taskId: "t-2", prUrl: entry.prUrl, at: 2 };
+    expect(parseTaskProgressList([entry, here, { taskId: "t-3", at: 3, extra: 1 }])).toEqual([
+      entry,
+      here,
+      { taskId: "t-3", at: 3 },
+    ]);
+  });
+
+  test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {
+    for (const bad of [
+      { ...entry, prUrl: "http://github.com/acme/app/pull/7" },
+      { ...entry, merged: false },
+      { ...entry, pushed: "yes" },
+      { ...entry, branch: "" },
+      { ...entry, taskId: "t:1" },
+      { ...entry, at: "now" },
+    ]) {
+      expect(parseTaskProgressList([entry, bad])).toBeNull();
+    }
+    expect(parseTaskProgressList(Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, () => entry))).toBeNull();
   });
 });

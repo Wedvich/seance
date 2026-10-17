@@ -103,8 +103,10 @@ reasoning, `types.ts` is the record, and where they differ `types.ts` wins.
 **Relay (`hub.ts`, `wire.ts`, `index.ts`)**
 
 - **Leadership** (M2; DESIGN.md _Scheduler_, "Leadership", is the record): signed `roles`,
-  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow` and the term fence.
-  Every leader write in M3 carries its term through the same check.
+  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow`, the term fence and
+  (M2 review) the `lead-proof` apps believe a nominee by. Every leader write in M3 carries its
+  term through the same fence — which checks the term, not the proof the relay cannot read (M3
+  item 1).
 - **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
 version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (what a
   `version_conflict` refreshes from, so a lost race costs one read, not the whole queue
@@ -117,24 +119,36 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   | Prefix           | Create          | Overwrite / delete         | Term-fenced | Lands |
   | ---------------- | --------------- | -------------------------- | ----------- | ----- |
   | `task:<id>`      | any app, leader | leader only                | yes         | M3    |
+  | `queue:pause`    | leader only     | leader only                | yes         | M3    |
   | `account:<hmac>` | any app         | any app, by `expect` (CAS) | no          | M4    |
 
   Tasks: apps may list and create (`expect: 0`) so enqueue works with no leader; every
-  overwrite and delete is the leader's. App-writable records exist for state a person edits from
-  any client with no leader up — an account's alias first; whether M4's `settings` is one is
-  M4's call. Bounds in `wire.ts`: keys as for `deviceId` plus their prefix, `env.ct` under the
-  existing 64 KiB cap (a DO value caps at 128 KiB), `MAX_TASKS` and `MAX_RECORDS` like
-  `MAX_DEVICES`, and a create rate floor per socket.
+  overwrite and delete is the leader's. `queue:pause` holds the pause (`PauseRecord`, op
+  `pause-state`), so it outlives the leader that took it. App-writable records exist for state a
+  person edits from any client with no leader up — an account's alias first; whether M4's
+  `settings` is one is M4's call. Bounds in `wire.ts`: keys a known prefix plus a routing id
+  (`ROUTING_ID_PATTERN`, the one bound task ids and `deviceId`s share), `env.ct` under
+  `STORE_MAX_CT_LENGTH` (40 KiB) and a create's under `STORE_CREATE_MAX_CT_LENGTH` (28 KiB), so
+  a record has room for what the leader adds to it; `MAX_TASKS` and `MAX_RECORDS` like
+  `MAX_DEVICES`, and a create rate floor per socket. The DO is SQLite-backed, so a value may
+  reach 2 MB; what keeps records small is the one-frame listing, not storage.
 
 - **Version binding closes rollback.** Anything with the bearer token can list the queue, keep a
   task's old sealed blob and put it back — authentic bytes, stale state (a cancelled task back to
   `ready`). So the sealed body carries the `version` its put will produce, and every reader
   rejects a blob whose inner version disagrees with the relay's. A replayed blob then fails like
-  a forged one. `version_conflict` is the only other way a put fails.
+  a forged one. The reader's rules are one function, `bindTaskRecord` in `shared/src/parse.ts`:
+  version and key binding, a version-1 record must be `queued`, and a `createdAt` more than the
+  replay window ahead is refused, so a far-future stamp cannot outlive the 30-day admit rule. A
+  refused record is skipped and reported with its reason, never deleted unasked — after a PSK
+  rotation every record is unreadable. A put fails as `version_conflict` (a lost race),
+  `not_leader`, `forbidden`, `too_large`, `rate_limited`, `store_full` or `invalid_request`
+  (`STORE_ERROR_CODES`), or its reply is lost after it committed — which a create's retry reads
+  as `version_conflict` and a leader's next read settles.
 - **Stored blobs are an at-rest format, not live frames.** Their `op` is the record's kind —
-  `task` sealed to `"scheduler"`, `account` to `"app"` — opened _without_ the `ReplayGuard`
-  through `openAtRest` — exactly as the register blob and `status` already are — and never
-  accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
+  `task` and `pause-state` sealed to `"scheduler"`, `account` to `"app"` — opened _without_ the
+  `ReplayGuard` through `openAtRest` — exactly as the register blob and `status` already are —
+  and never accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
   record being replayed as a request, or as a record of another kind.
 - **Last `status` kept**, `to: "scheduler"` envelopes and the registry push's `scheduler` (M2;
   DESIGN.md _Presence & identity_ and _Scheduler_).
@@ -154,14 +168,19 @@ that must arrive when they happen rather than when someone asks:
 | Op              | Cadence                      | Payload (sketch)                                                                               |
 | --------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
 | `session-event` | on event, coalesced ≤1/5s    | `SessionEvent`: session (pane), task id, exclave, state, `https:` PR URL, `at` — landed (M2 5) |
-| `branch-state`  | on change, for task branches | repo, branch, `pushed`, `merged` (reap-git's rules)                                            |
+| `branch-state`  | on change, for task branches | task id, repo, branch, `pushed`, `merged` (reap-git's rules), `at`                             |
 
-A leader change loses nothing here: every event is also reflected in the daemon's `sessions`
-reply — a running session as itself, an ended task in its `ended` list — which the new leader
-reconciles against on takeover (below). The session and task ids in a `session-event` are the
-daemon's own, from its pane map, never copied from what the mod sent (DESIGN.md, Local op
-socket, "Session events"). The plan's `skill` field was left out: nothing reads it before M4's
-skill filter.
+Both are lost while no leader listens, so neither is the record. What they carry is also in the
+daemon's `sessions` reply — a running session as itself, an ended task in `ended`, and each
+task's PR URL, branch, `pushed` and `merged` in `progress` (`TaskProgress`, M3; decided
+2026-10-17 over re-emitting `branch-state` on a cadence: one read the takeover already makes,
+and no standing traffic). A new leader reads it on takeover, and again when a machine holding
+a task it waits on comes back, so a gap can neither settle a task that ended with an open PR
+as `done` nor hold an `after: merged` dependent past a merge. In a reply the daemon trimmed to
+fit (`progressTrimmed`) a task with no entry is unknown and waits for a later read. The
+session and task ids in a `session-event` are the daemon's own, from its pane map, never copied
+from what the mod sent (DESIGN.md, Local op socket, "Session events"). The plan's `skill` field
+was left out: nothing reads it before M4's skill filter.
 
 **Scheduler → daemon**: existing `spawn`/`sessions`/`despawn`, addressed from `"scheduler"` by
 the leader's app-role leg (landed with item 3). The target daemon needed no change — it replies
@@ -201,7 +220,10 @@ term, `not_ready` during takeover. M2 adds a temporary `submit` (a `TaskRequest`
 `store-put` into; M3 item 6 removes it, with the PWA's move to `store-put`. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
-(broadcast, apps re-fetch) — no polling.
+(broadcast, apps re-fetch) — no polling. It names the tasks that changed (`tasks`, absent when
+more did or the holds changed), and `queue` takes the same ids as a filter
+(`QueueRequest.tasks`), so an app re-fetches what moved rather than the whole queue; an M2
+leader ignores the filter and answers the newest, which the reader filters again.
 
 **`MachineInfo`.** `exclaves`, `RepoEntry.exclave`/`origin` and `capabilities` landed in M1
 (DESIGN.md _Daemon_, "Exclaves" and "Repo discovery"). `origin` is the scheduler's repo key.
@@ -419,7 +441,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
     `store-refused` with a `STORE_ERROR_CODES` code.
   - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
-    `task:` prefix lists in 4 MiB. Paging stays possible without a break — `after` on the request,
+    `task:` prefix lists in 5 MiB. Paging stays possible without a break — `after` on the request,
     which an older relay ignores and answers whole, and `next` on the reply, which today's
     clients refuse rather than read a page as the whole queue.
   - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
@@ -441,11 +463,54 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `createdAt` is older than the same 30 days. Normal use leaves ~2 MB of tombstones a year;
     junk deleted at the create floor is bounded by that floor over 30 days.
   - An app creates a task only as `queued`; the leader admits it to `blocked` or `ready`.
+- **PR 0b — the schema's review follow-up** (2026-10-17, from the review of M2). What the waves
+  would otherwise each have decided alone, in `types.ts` and `parse.ts`, shapes only:
+  - `SessionsResponse.progress` (Wire changes, _Daemon → scheduler_): the takeover's source for
+    a task's PR, branch, `pushed` and `merged`, so a leader gap loses none of them.
+  - One routing-id bound, `ROUTING_ID_PATTERN`, that `TASK_ID_PATTERN` (no `:` now),
+    `STORE_KEY_PATTERN` and the relay's id checks derive from: a task id is a key part as it stands.
+  - Record headroom: creates cap at `STORE_CREATE_MAX_CT_LENGTH` (28 KiB) under a 40 KiB record,
+    every field the leader writes is bounded (`TARGET_LIMITS`, `TASK_FAILURE_LIMITS`), and a write
+    that would not fit cuts the decision first, marked `Decision.trimmed`.
+  - Dependency semantics (`TaskDep`, `DEP_AFTER`): a `failed` or `cancelled` predecessor fails its
+    dependents, cascading (`dependency_failed`); one the store does not hold past
+    `DEP_MISSING_GRACE_MS` fails them too (`dependency_missing`) — so pruning never deletes a task
+    an unfinished one names; a cycle fails every member at admission (`dependency_cycle`); a
+    `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
+    predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
+  - `cap_reached` scope `batch` (a batch at its strategy's bound; `sequential` is 1). The pause
+    hold's own `Reason` (`paused`) lands with the store port, once the PWA's and MCP's reason
+    wording is one module (the M2 review's quality PR) and adding a code is one edit there.
+  - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
+    `QueueChanged.tasks`.
+- **Before wave 1: the store port** (the M2 review's store PR): `QueueStore.list`/`get` return an
+  unreadable record as `{ id, version, reason }` so "skipped and reported" is testable in the
+  library; write failures beyond `version_conflict`; a home for `queue:pause`; a one-record
+  refresh for `store-changed`; `MemoryQueueStore` with tombstones and fault injection.
 - **Wave 1**, in parallel:
   - **1. Relay store** — `relay/src/store.ts`, with `hub.ts` and `wire.ts`: the four frames, the
     per-prefix rules, term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS` /
-    `MAX_RECORDS`, `STORE_MAX_CT_LENGTH`, the create rate floor, tombstones and their expiry,
-    `store-changed`. The only M3 PR that touches `hub.ts`.
+    `MAX_RECORDS`, `STORE_MAX_CT_LENGTH` and the create cap, the create rate floor, tombstones and
+    their expiry, `store-changed`. The only M3 PR that touches `hub.ts`. It starts by moving the
+    term's state out of `hub.ts` into `leadership.ts` behind `holdsTerm(term, socket)`: a store
+    write is the leader's only from the socket the term was issued to, which today's term-only
+    `#holdsTerm` cannot say. Tombstones get a key range of their own, so a `task:` list and the
+    caps never walk them; counts are kept rather than listed — `#entryCount` reads every value,
+    which for a full `task:` prefix is 5 MiB per create; app sockets get an attachment (only
+    daemon sockets have one today) to hold the create floor's window.
+    `relay/test/layering.test.ts` admits shared values by name, constants free: `STORE_KEY_PATTERN`
+    passes, `isStoreKey` or a parser does not. `STORE_TOMBSTONE_MS` takes an env override so
+    `relay/test/harness.ts` can expire a tombstone inside a test.
+    **The term fence is not a PSK check.** The relay hands the term to whichever listed machine
+    is earliest connected, and a listed machine's seed copied out of `state.json` without the
+    PSK still gets it — it cannot seal a `lead-proof`, so readers call that leader unverified and
+    send it nothing, but the relay cannot read the proof and still accepts its term-fenced writes. Such a thief cannot
+    forge or read a record, so an overwrite fails `bindTaskRecord` and is skipped; a delete,
+    though, loses the task. Item 1 decides whether a delete's tombstone keeps the last `env`, so
+    a person can put a task deleted that way back within `STORE_TOMBSTONE_MS` — cheap (records
+    are small, deletes rare) — or records the loss as accepted, beside DESIGN.md _Threat model_
+    item 3. Version binding and tombstones stop a token holder, not the relay itself: a
+    compromised relay can still roll a record back or resurrect one.
     **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
     task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
     `version_conflict` there means the first put landed — the client reads it as queued, never as
@@ -453,19 +518,47 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     got no interim fix; until item 6 a lost `submit` reply stays "may have queued", with no retry.
   - **2. The at-rest `task` op and version binding** — sealing in `shared/src/crypto.ts`, the
     app-client's store methods in `shared/src/app-client.ts`; readers open without the
-    `ReplayGuard` and reject a mismatched version or id.
-  - **4a. The library's M3 states**, batches, hand-declared deps (`after: opened` / `merged`), done
-    detection from `branch-state` and `awaiting-merge`, against `MemoryQueueStore`
-    (`scheduler/`).
-  - **4b. The daemon's `branch-state` emitter.**
+    `ReplayGuard` and keep a record only through `bindTaskRecord`. A create checks its sealed
+    length against the create cap before sending.
+  - **4a. The library's M3 states**, batches, hand-declared deps with PR 0b's semantics, done
+    detection — `branch-state` live, `progress` on takeover and when a machine holding a waiting
+    task comes back — and `awaiting-merge`, against `MemoryQueueStore` (`scheduler/`). The M3
+    states join `shared/src/task-phase.ts`, which `FINISHED` and `PLACED` derive from. Pruning
+    moves into the library: finished tasks past a keep count, never one an unfinished task names,
+    after takeover and on `store_full`. Today its one caller is `submit`, so without this, item 6
+    deleting `submit` would leave creates at `store_full` once 128 tasks had ever run.
+  - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show
+    only after a fetch, and `reap` — the one thing that fetches — is off by default, so the
+    emitter fetches on a cadence of its own; the launch ledger holds ids and times, no worktree
+    path, branch or PR URL, and `progress` must survive a restart, so it gains them; `claude
+--worktree` branches `--no-track`, so `pushed` compares with the remote ref, not an upstream;
+    and a session can rename its branch, so the branch is read from the worktree each time, never
+    remembered from the spawn. The leader's own machine hands its `branch-state` over in process,
+    as `run.ts` already does its session events.
+- **Before wave 2: split `leader.ts`**, no behaviour change: its store and fleet adapters, its
+  request handlers (`answer`, `queueView`), and the term lifecycle, so items 3 and 5 can run in
+  parallel. `scheduler/test/layering.test.ts` names one `LEADER` file; it takes the set, which
+  item 3's `queue-store.ts` then joins — as the test stands, any second daemon file importing
+  the library fails it.
 - **Wave 2**, in parallel:
   - **3. The `QueueStore` adapter** on the store ops (new `daemon/src/queue-store.ts`, wired in
-    `leader.ts`); takeover reconciliation over opened, version-checked bodies.
+    the term lifecycle); takeover reconciliation over opened, `bindTaskRecord`-checked bodies.
+    Also, unowned until now: the store frames' send and correlate on the daemon leg
+    (`daemon/src/relay-client.ts`; item 2 does the app leg); `store-changed` driving the
+    one-record refresh; the leader handling `branch-state` (its event handler drops every op but
+    `session-event`) and the PR URL reaching the library (`run.ts`'s in-process forward and the
+    leader's handler both drop `prUrl` before `onSession`); `e2e/harness.ts` no longer injecting
+    `MemoryQueueStore`; and a store double in `daemon/test/harness.ts` — term fence, tombstones,
+    `store-changed` — for the adapter's daemon tests.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
-    credits-spill detection (logged and shown in the PWA; the push alert is M4).
+    credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
+    handlers after the split.
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
-  **Removes M2's `submit`** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS`,
-  `parseSubmitReply`; the `submit` case in `leader.ts`). Moved here from item 1, where the plan
+  **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
+  `SubmitReply`, `MAX_ACTIVE_TASKS`, the `queue_full` code and its wording, `parseSubmitReply`,
+  the `submit` methods on `RelayClient`, `AppRelay` and `daemon/src/fleet.ts`'s scheduler, the
+  leader's `submit` case with `KEEP_FINISHED`, and `Scheduler.submit` (with `newId` unless
+  something else mints ids). Moved here from item 1, where the plan
   first put it: the PWA's `auto` sends `submit` until this item gives it `store-put`, so dropping
   the op with the store would leave `auto` broken for every PR in between. **Also moves MCP's
   `auto`** (`spawn_session { machine: "auto" }` and `get_queue`, built on M2's `submit` on
@@ -473,12 +566,18 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   other `submit` caller, so it must move in the same PR that drops the op. Its verdict then
   becomes "queued" plus the task id, and its tool descriptions lose the in-memory caveat.
 
-**Who edits what** — the collision map that makes the waves parallel: `shared/src/types.ts` is
-PR 0's alone (a later PR that finds a shape missing changes it in a PR of its own, not inside
-its wave); `relay/src/hub.ts` is item 1's alone; `daemon/src/leader.ts` goes 3 → 5 → 6, one per
-wave; `scheduler/src/scheduler.ts` goes 4a → 5. PR 0 touched `leader.ts` (a `not supported yet`
-answer for the four new ops, so they are refused rather than met with silence), `task.ts` (the
-three states with no edges) and the PWA's state wording, only as the widened types forced.
+**Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
+`parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
+own, not inside its wave. The one exception is item 6, which deletes M2's `submit` shapes from
+both — a deletion in the last wave, so it races nothing. `relay/src/hub.ts` and `leadership.ts`
+are item 1's alone. `daemon/src/leader.ts` is split before wave 2; then item 3 owns the adapters
+and the term lifecycle, and the request handlers go 5 → 6. `scheduler/src/scheduler.ts` goes
+4a → 5. `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
+`daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
+harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. PR 0 touched
+`leader.ts` (a `not supported yet` answer for the four new ops, so they are refused rather than
+met with silence), `task.ts` (the three states with no edges) and the PWA's state wording, only
+as the widened types forced.
 
 **Exit.**
 
@@ -492,7 +591,13 @@ three states with no edges) and the PWA's state wording, only as the widened typ
 - `after: opened` releases on the first `branch-state pushed` with a PR, `after: merged` only
   on `merged`; `pause` stops dispatch and keeps running sessions; `resume` continues (scheduler).
 - A task that does not decrypt, or whose version mismatches, is skipped and reported, never
-  fatal (scheduler).
+  fatal, and is still in the store after the takeover (scheduler).
+- A leader that takes over after a gap settles a task whose session ended with an open PR as
+  `awaiting-merge`, and one whose branch merged meanwhile as `done` (scheduler + daemon).
+- A `failed` or `cancelled` predecessor fails its dependents; a cycle fails every member
+  (scheduler).
+- A create past the create cap is `too_large`; a leader write that would not fit cuts the
+  decision and lands (relay + scheduler).
 - `relay/test/layering.test.ts` still passes with the store in place (relay).
 
 **Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until
@@ -637,12 +742,16 @@ same PR, with the reason.
     either way: the machine's own `sessions` settles it when it returns, so a short bound costs a
     label, never a twin.
 11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
-    (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 32 KiB (`STORE_MAX_CT_LENGTH`), and
-    `task:` holds 128 (`MAX_TASKS`), so the whole queue lists in one frame with no paging. A task
-    names its work ("implement this Linear issue, and here are the details") and the session
-    gathers the rest with tools; 8K characters is far more than that takes. A direct spawn is
-    not bound by it. Measured: at the prompt limit in two-byte characters a record still holds a
-    15-candidate decision; past what the record holds, the leader trims the stored decision.
+    (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 40 KiB (`STORE_MAX_CT_LENGTH`) and a
+    create's 28 KiB (`STORE_CREATE_MAX_CT_LENGTH`), and `task:` holds 128 (`MAX_TASKS`), so the
+    whole queue lists in one 5 MiB frame with no paging. A task names its work ("implement this
+    Linear issue, and here are the details") and the session gathers the rest with tools; 8K
+    characters is far more than that takes. A direct spawn is not bound by it. Measured: a
+    create with every field at its bound and the prompt in two-byte characters fits the create
+    cap, and all a leader adds at every bound fits beside it with a 10-candidate decision; past
+    that the leader cuts the stored decision. Raised from 32 KiB on 2026-10-17 (the M2 review):
+    at 32 a full create left the leader no room for its own fields, and its first write would
+    have been `too_large`, leaving the task `queued` for good.
 12. **Running tasks are checked against their machines every 2 min** (`sweepIntervalMs`, set
     with the M2 review, 2026-10-17): the backstop for an `ended` event that never arrived,
     whose task would otherwise hold its slot for good. One `sessions` per connected machine

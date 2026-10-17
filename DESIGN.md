@@ -1785,9 +1785,12 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   lookup and before any window opens; `sessions` reports it per entry. Live, not
   registered: a pane still on a startup dialog is running the task, and a dead
   one held by remain-on-exit is not. Bounded to `TASK_ID_PATTERN` (1–64 of
-  `[A-Za-z0-9._:-]`) by `isSpawnRequest`, so an out-of-bounds id is a malformed
-  request. **The record is a tmux pane user option, `@seance-task`**, set by
-  argv right after `new-window` and read back as a field of the `list-panes`
+  `[A-Za-z0-9._-]`, the routing-id bound `ROUTING_ID_PATTERN` that `deviceId`s
+  and store keys share, so a task id is a `task:` key's id part as it stands;
+  `:` was allowed until 2026-10-17, and nothing minted one) by `isSpawnRequest`,
+  so an out-of-bounds id is a malformed request. **The record is a tmux pane
+  user option, `@seance-task`**, set by argv right after `new-window` and read
+  back as a field of the `list-panes`
   formats `sessions.ts` already runs. It lives exactly as long as the session:
   a restarted daemon reads the same answer, and nothing can outlive the pane it
   names, so there is no reconciliation and no stale entry to sweep. Two spawns

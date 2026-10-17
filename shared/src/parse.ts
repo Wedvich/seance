@@ -1,10 +1,20 @@
+import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
   BRANCH_MAX_LENGTH,
+  CANDIDATE_MAX_REASONS,
+  DECISION_MAX_CANDIDATES,
   DEP_AFTER,
   DONE_SIGNALS,
   MAX_PAUSE_HOLDS,
   PAUSE_UNTIL,
+  QUEUE_MAX_TASKS,
+  ROUTING_ID_MAX_LENGTH,
+  ROUTING_ID_PATTERN,
+  SESSIONS_MAX_PROGRESS,
   STORE_KEY_PATTERN,
+  STORE_PREFIXES,
+  TARGET_LIMITS,
+  TASK_FAILURE_LIMITS,
   TASK_SPEC_LIMITS,
   type BatchMembership,
   type BatchStrategy,
@@ -17,11 +27,14 @@ import {
   type PauseRequest,
   type Placement,
   type QueueChanged,
+  type QueueRequest,
+  type RecordUnreadable,
   type ResumeRequest,
   type StoreChangedFrame,
   type StoreRecord,
   type StoreReplyFrame,
   type TaskDep,
+  type TaskProgress,
   type TaskRecord,
   type TaskRef,
   type TaskReply,
@@ -112,6 +125,15 @@ function isUint(value: unknown): value is number {
 
 function isOptionalUint(value: unknown): value is number | undefined {
   return value === undefined || isUint(value);
+}
+
+/**
+ * A scheduler term: a counter only the relay mints, so anything but a safe
+ * non-negative integer is malformed. One copy for every tier that reads one —
+ * `msg.term`, `lead.term`, the registry push's `scheduler.term`.
+ */
+export function isTerm(value: unknown): value is number {
+  return isUint(value);
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -407,8 +429,8 @@ export function httpsUrl(value: unknown): string | null {
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
   const { session, taskId, exclave, state, prUrl, at } = value;
-  if (typeof session !== "string" || session === "" || session.length > 64) return null;
-  if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > 64) return null;
+  if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
+  if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isSessionState(state) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const url = prUrl === undefined ? null : httpsUrl(prUrl);
   if (prUrl !== undefined && url === null) return null;
@@ -461,13 +483,13 @@ function isPlacementField(value: unknown): value is string {
 function parsePlacement(value: unknown): Placement | null {
   if (!isRecord(value)) return null;
   const { deviceId, exclave } = value;
-  return isPlacementField(deviceId) && isPlacementField(exclave) ? { deviceId, exclave } : null;
+  return isRoutingId(deviceId) && isPlacementField(exclave) ? { deviceId, exclave } : null;
 }
 
 function parsePin(value: unknown): TaskSpec["pin"] | null {
   if (!isRecord(value)) return null;
   const { deviceId, exclave } = value;
-  if (deviceId !== undefined && !isPlacementField(deviceId)) return null;
+  if (deviceId !== undefined && !isRoutingId(deviceId)) return null;
   if (exclave !== undefined && !isPlacementField(exclave)) return null;
   return { ...(deviceId === undefined ? {} : { deviceId }), ...(exclave === undefined ? {} : { exclave }) };
 }
@@ -533,12 +555,25 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   };
 }
 
+function isRoutingId(value: unknown): value is string {
+  return typeof value === "string" && ROUTING_ID_PATTERN.test(value);
+}
+
+/** A non-empty name under `max` — what every name a leader writes into a task is held to. */
+function isName(value: unknown, max: number): value is string {
+  return isBoundedString(value, max) && value !== "";
+}
+
+/** Bounded, as everything a leader adds to a record is: only the decision may grow, and it is trimmed first. */
 function parseTarget(value: unknown): Target | null {
   if (!isRecord(value)) return null;
   const { deviceId, exclave, clone } = value;
-  if (typeof deviceId !== "string" || typeof exclave !== "string" || typeof clone !== "string") return null;
+  if (!isRoutingId(deviceId) || !isPlacementField(exclave) || !isName(clone, TARGET_LIMITS.clone)) return null;
   return { deviceId, exclave, clone };
 }
+
+/** A quota window's label in a reason: `5h`, `7d`, or a model's display name. */
+const WINDOW_LABEL_MAX_LENGTH = 64;
 
 /**
  * A reason this build knows, with the fields its line reads; null for one it
@@ -570,13 +605,15 @@ function parseReason(value: unknown): Reason | null {
     }
     case "quota_over_line": {
       const { window, projectedPct } = value;
-      return typeof window === "string" && isFiniteNumber(projectedPct) ? { code, window, projectedPct } : null;
+      return isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) && isFiniteNumber(projectedPct)
+        ? { code, window, projectedPct }
+        : null;
     }
     case "cap_reached": {
       const { inFlight, max, scope } = value;
       if (!isUint(inFlight) || !isUint(max)) return null;
       if (scope === undefined) return { code, inFlight, max };
-      return scope === "global" || scope === "account" ? { code, inFlight, max, scope } : null;
+      return scope === "global" || scope === "account" || scope === "batch" ? { code, inFlight, max, scope } : null;
     }
     default:
       return null;
@@ -604,23 +641,26 @@ function parseScore(value: unknown): Score | null {
 function parseCandidate(value: unknown): Candidate | null {
   if (!isRecord(value)) return null;
   const { deviceId, machine, exclave, clone, rejected, score, quota, spill } = value;
-  if (typeof deviceId !== "string" || typeof machine !== "string") return null;
-  if (exclave !== null && typeof exclave !== "string") return null;
-  if (!isOptionalString(clone) || !Array.isArray(rejected)) return null;
+  if (!isRoutingId(deviceId) || !isBoundedString(machine, TARGET_LIMITS.machine)) return null;
+  if (exclave !== null && !isPlacementField(exclave)) return null;
+  if (clone !== undefined && !isName(clone, TARGET_LIMITS.clone)) return null;
+  if (!Array.isArray(rejected) || rejected.length > CANDIDATE_MAX_REASONS) return null;
   const reasons = rejected.map(parseReason).filter((reason) => reason !== null);
   const parsedScore = score === undefined ? undefined : parseScore(score);
   if (parsedScore === null) return null;
   let basis: QuotaBasis | undefined;
   if (quota !== undefined) {
-    if (!isRecord(quota) || !isUint(quota["observedAt"]) || typeof quota["observer"] !== "string") return null;
+    if (!isRecord(quota) || !isUint(quota["observedAt"]) || !isRoutingId(quota["observer"])) return null;
     const source = QUOTA_SOURCES.find((s) => s === quota["source"]);
     if (source === undefined) return null;
     basis = { observedAt: quota["observedAt"], observer: quota["observer"], source };
   }
   let spilled: Candidate["spill"];
   if (spill !== undefined) {
-    if (!isRecord(spill) || typeof spill["window"] !== "string" || !isFiniteNumber(spill["projectedPct"])) return null;
-    spilled = { window: spill["window"], projectedPct: spill["projectedPct"] };
+    if (!isRecord(spill)) return null;
+    const { window, projectedPct } = spill;
+    if (!isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
+    spilled = { window, projectedPct };
   }
   return {
     deviceId,
@@ -638,15 +678,19 @@ function parseCandidate(value: unknown): Candidate | null {
  * The decision record as the app renders it. Checked like any reply that
  * lands on the render path (DESIGN.md, threat model, relay compromise): one
  * unreadable candidate nulls the record rather than shortening it, since a
- * missing loser would misstate why the winner won.
+ * missing loser would misstate why the winner won — a list the leader cut says
+ * so in `trimmed`.
  */
 export function parseDecision(value: unknown): Decision | null {
   if (!isRecord(value) || !isFiniteNumber(value["at"])) return null;
   const chosen = value["chosen"] === null ? null : parseTarget(value["chosen"]);
   if (value["chosen"] !== null && chosen === null) return null;
-  const candidates = parseList(value["candidates"], parseCandidate);
-  if (candidates === null) return null;
-  return { at: value["at"], chosen, candidates };
+  const listed = value["candidates"];
+  if (!Array.isArray(listed) || listed.length > DECISION_MAX_CANDIDATES) return null;
+  const candidates = parseList(listed, parseCandidate);
+  const { trimmed } = value;
+  if (candidates === null || !isOptionalUint(trimmed)) return null;
+  return { at: value["at"], chosen, candidates, ...(trimmed === undefined ? {} : { trimmed }) };
 }
 
 function parseReservation(value: unknown): Reservation | null {
@@ -659,7 +703,9 @@ function parseAssignment(value: unknown): Assignment | null {
   const target = parseTarget(value);
   if (target === null || !isRecord(value)) return null;
   const { window, pane } = value;
-  if (!isOptionalString(window) || !isOptionalString(pane)) return null;
+  // Empty is a window: a spawn titled "" names its window "".
+  if (window !== undefined && !isBoundedString(window, TARGET_LIMITS.window)) return null;
+  if (pane !== undefined && !isName(pane, ROUTING_ID_MAX_LENGTH)) return null;
   return { ...target, ...(window === undefined ? {} : { window }), ...(pane === undefined ? {} : { pane }) };
 }
 
@@ -668,7 +714,7 @@ function isOptionalFinite(value: unknown): value is number | undefined {
 }
 
 /** The PR, branch and done fields M3 adds, checked as one group; null when any is malformed. */
-function parseTaskProgress(value: Record<string, unknown>): Partial<Task> | null {
+function parseProgressFields(value: Record<string, unknown>): Partial<Task> | null {
   const { prUrl, branch, pushed, doneBy, needsInputSince, escalated } = value;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
@@ -721,11 +767,13 @@ export function parseTask(value: unknown): Task | null {
   if (leftRunning !== undefined && leftRunning !== true) return null;
   let failed: Task["failure"];
   if (failure !== undefined) {
-    if (!isRecord(failure) || typeof failure["code"] !== "string" || typeof failure["message"] !== "string")
-      return null;
-    failed = { code: failure["code"], message: failure["message"] };
+    if (!isRecord(failure) || !isName(failure["code"], TASK_FAILURE_LIMITS.code)) return null;
+    const { message } = failure;
+    if (typeof message !== "string") return null;
+    // Cut rather than refused: an M2 leader stored a daemon's message whole, and its tail must not cost the task.
+    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message) };
   }
-  const progress = parseTaskProgress(value);
+  const progress = parseProgressFields(value);
   if (progress === null) return null;
   return {
     id,
@@ -757,6 +805,26 @@ export function parseTaskRecord(value: unknown): TaskRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
   const task = parseTask(value["task"]);
   return task === null ? null : { version: value["version"], task };
+}
+
+/**
+ * Every reader's rules for an opened `task:<id>` record (`TaskRecord`): its
+ * shape, then its binding to the key and version the relay listed it under,
+ * then the create rules. `now` is the reader's clock. The one copy, so the app,
+ * the leader and any later reader skip the same records for the same reasons.
+ */
+export function bindTaskRecord(
+  payload: unknown,
+  stored: { readonly key: string; readonly version: number },
+  now: number,
+): TaskRecord | RecordUnreadable {
+  const record = parseTaskRecord(payload);
+  if (record === null) return "malformed";
+  if (record.version !== stored.version) return "version_mismatch";
+  if (stored.key !== `${STORE_PREFIXES.task.prefix}${record.task.id}`) return "key_mismatch";
+  if (record.version === 1 && record.task.state !== "queued") return "created_unqueued";
+  if (record.task.createdAt > now + REPLAY_WINDOW_MS) return "created_ahead";
+  return record;
 }
 
 /** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
@@ -821,9 +889,11 @@ function parseSchedulerError(value: unknown): SchedulerError | null {
 
 export function parseQueueReply(value: unknown): QueueReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
-  if (!isRecord(value) || !isFiniteNumber(value["at"]) || !Array.isArray(value["tasks"])) return null;
+  if (!isRecord(value) || !isFiniteNumber(value["at"])) return null;
+  const listed = value["tasks"];
+  if (!Array.isArray(listed) || listed.length > QUEUE_MAX_TASKS) return null;
   // Lenient per task, as the registry is per entry: one a leader ahead wrote must not hide the rest.
-  const tasks = value["tasks"].map(parseTask).filter((task) => task !== null);
+  const tasks = listed.map(parseTask).filter((task) => task !== null);
   // Strict, unlike a task: an unread hold would show a paused queue as running.
   const holds = value["holds"] === undefined ? undefined : parseHolds(value["holds"]);
   if (holds === null) return null;
@@ -848,12 +918,60 @@ export function parsePauseReply(value: unknown): PauseReply | null {
 export function parseLeadProof(value: unknown): LeadProof | null {
   if (!isRecord(value)) return null;
   const { term } = value;
-  return typeof term === "number" && Number.isSafeInteger(term) && term >= 0 ? { term } : null;
+  return isTerm(term) ? { term } : null;
 }
 
-/** The leader's nudge. It carries nothing to act on but its stamp: an app re-fetches `queue`. */
+/** Task ids, as `queue` asks for and `queue-changed` names them: at most `QUEUE_MAX_TASKS`, all or nothing. */
+function parseTaskIds(value: unknown): readonly string[] | null {
+  return Array.isArray(value) && value.length <= QUEUE_MAX_TASKS && value.every(isTaskId) ? value : null;
+}
+
+/** `queue`, at the leader. An unreadable filter is a malformed request, never "everything". */
+export function parseQueueRequest(value: unknown): QueueRequest | null {
+  if (!isRecord(value)) return null;
+  if (value["tasks"] === undefined) return {};
+  const tasks = parseTaskIds(value["tasks"]);
+  return tasks === null ? null : { tasks };
+}
+
+/**
+ * The leader's nudge: a stamp and which tasks changed. Nothing in it is acted
+ * on but a re-fetch, so an unreadable list costs the list — the app re-fetches
+ * the whole queue, as for one that named none.
+ */
 export function parseQueueChanged(value: unknown): QueueChanged | null {
-  return isRecord(value) && isFiniteNumber(value["at"]) ? { at: value["at"] } : null;
+  if (!isRecord(value) || !isFiniteNumber(value["at"])) return null;
+  const tasks = value["tasks"] === undefined ? null : parseTaskIds(value["tasks"]);
+  return { at: value["at"], ...(tasks === null ? {} : { tasks }) };
+}
+
+/**
+ * `SessionsResponse.progress`, at the leader. Strict, like a store page: an
+ * entry dropped would read as a task with no PR, which a takeover settles as
+ * `done`. A caller reads null as it reads `progressTrimmed` — every task's
+ * progress unknown.
+ */
+export function parseTaskProgressList(value: unknown): readonly TaskProgress[] | null {
+  if (!Array.isArray(value) || value.length > SESSIONS_MAX_PROGRESS) return null;
+  return parseList(value, parseTaskProgress);
+}
+
+function parseTaskProgress(value: unknown): TaskProgress | null {
+  if (!isRecord(value)) return null;
+  const { taskId, prUrl, branch, pushed, merged, at } = value;
+  if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
+  const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
+  if (url === null) return null;
+  if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
+  if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
+  return {
+    taskId,
+    at,
+    ...(url === undefined ? {} : { prUrl: url }),
+    ...(branch === undefined ? {} : { branch }),
+    ...(pushed === undefined ? {} : { pushed }),
+    ...(merged === undefined ? {} : { merged }),
+  };
 }
 
 /**
