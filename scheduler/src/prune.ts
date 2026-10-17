@@ -1,4 +1,5 @@
 import { named } from "./deps.ts";
+import { codeUnitOrder } from "./order.ts";
 import { FINISHED, type Task } from "./task.ts";
 
 /**
@@ -14,6 +15,6 @@ export function prunable(tasks: readonly Task[], keep: number): readonly Task[] 
   const kept = named(tasks);
   return finished
     .filter((t) => !kept.has(t.id))
-    .toSorted((a, b) => a.createdAt - b.createdAt)
+    .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id))
     .slice(0, excess);
 }

@@ -3,6 +3,7 @@ import {
   STORE_TOMBSTONE_MS,
   TASK_FAILURE_LIMITS,
   type DepAfter,
+  type TaskDep,
   type TaskFailureCode,
 } from "@seance/shared";
 import { FINISHED, type Task } from "./task.ts";
@@ -77,12 +78,15 @@ export function admission(
       if (pred === undefined) {
         if (unreadable.has(dep.task) || now - task.createdAt < DEP_MISSING_GRACE_MS) blocked = true;
         else return failure("dependency_missing", `its dependency ${dep.task} is not in the queue`);
+      } else if (released(pred, dep.after)) {
+        // Before the failure check: a release is a fact, so a later failure or cancel cannot take it back.
+        continue;
       } else if (failed.has(pred.id) || pred.state === "failed" || pred.state === "cancelled") {
         return failure(
           "dependency_failed",
           `its dependency ${pred.id} ended ${failed.has(pred.id) ? "failed" : pred.state}`,
         );
-      } else if (!released(pred, dep.after)) {
+      } else {
         blocked = true;
       }
     }
@@ -135,13 +139,19 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
   const out = new Map<string, readonly string[]>();
   let next = 0;
 
+  // A finished task's edges have released or failed its dependents, so they cannot be what a loop waits on.
+  const edgesOf = (id: string): readonly TaskDep[] => {
+    const task = byId.get(id);
+    return task === undefined || FINISHED.includes(task.state) ? [] : (task.spec.deps ?? []);
+  };
+
   const visit = (id: string): void => {
     index.set(id, next);
     low.set(id, next);
     next += 1;
     stack.push(id);
     onStack.add(id);
-    for (const dep of byId.get(id)?.spec.deps ?? []) {
+    for (const dep of edgesOf(id)) {
       if (!byId.has(dep.task)) continue;
       if (!index.has(dep.task)) {
         visit(dep.task);
@@ -159,7 +169,7 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
       component.push(member);
       if (member === id) break;
     }
-    const selfEdge = byId.get(id)?.spec.deps?.some((d) => d.task === id) === true;
+    const selfEdge = edgesOf(id).some((d) => d.task === id);
     if (component.length < 2 && !selfEdge) return;
     const loop = component.toReversed();
     for (const member of component) out.set(member, loop);

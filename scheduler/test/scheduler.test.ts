@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import { MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -607,8 +607,26 @@ describe("prune", () => {
     expect((await store.list()).map((s) => s.id)).toEqual(["named", "next"]);
   });
 
-  test("takeover and every pass prune to the configured keep", async () => {
-    const config = { ...DEFAULT_CONFIG, keepFinished: 1 };
+  test("a pass prunes only once the store holds pruneAt records, so a finished task is not gone before an app can name it", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 4 };
+    const { store, fleet, scheduler } = setup(new FakeFleet([machine("a")]), config);
+    for (const [i, id] of ["f1", "f2", "f3"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW - 10 + i });
+    }
+    await scheduler.load();
+    await pass(scheduler);
+    expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
+
+    await store.put("f4", 0, { id: "f4", spec: spec(), state: "done", createdAt: NOW });
+    await scheduler.refresh("f4");
+    await pass(scheduler);
+    expect((await store.list()).map((s) => s.id)).toEqual(["f4"]);
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("takeover and a pass at pruneAt prune to the configured keep", async () => {
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 2 };
     const { store, fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), config);
     for (const id of ["f1", "f2", "f3"]) {
       // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
@@ -623,6 +641,21 @@ describe("prune", () => {
     await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
     await pass(scheduler);
     expect((await store.list()).map((s) => s.id)).toEqual([task.id]);
+  });
+
+  test("equally old finished tasks go in id order, so two leaders prune the same ones", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    for (const id of ["b", "c", "a"]) {
+      // oxlint-disable-next-line no-await-in-loop -- stored in an order unrelated to the ids
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW });
+    }
+    await scheduler.load();
+    await scheduler.prune(1);
+    expect((await store.list()).map((s) => s.id)).toEqual(["c"]);
+  });
+
+  test("the default pruneAt leaves room under the store's cap for apps' creates", () => {
+    expect(DEFAULT_CONFIG.pruneAt).toBeLessThan(MAX_TASKS);
   });
 
   test("a create meeting a full store prunes, then lands", async () => {

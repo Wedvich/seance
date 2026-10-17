@@ -1077,7 +1077,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `submit` (a `TaskRequest`) → `{ task }`, the task as queued — **M2 only**. M2's queue is in
   memory on the leader, so this op is the one way in; it ends in `Scheduler.submit`, refuses
   `queue_full` past `MAX_ACTIVE_TASKS` unfinished tasks, and prunes all but the newest 50
-  finished ones first (the library also prunes after takeover and every pass since M3 item 4a,
+  finished ones first (the library also prunes after takeover and, near the store's cap, in a pass since M3 item 4a,
   "The library", below). M3 replaces it with the
   app sealing the task and `store-put`ting it at `expect: 0`, which queues with no leader up, and
   removes the op (docs/scheduler.md, M3).
@@ -1464,9 +1464,12 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
 - **The sweep** (M2 review, 2026-10-17). A running task whose `ended` event never arrived
   would read `running` forever and hold its slot; after `globalMax` of them `auto` places
   nothing (`cap_reached`). So once per `sweepIntervalMs` (120s, docs/scheduler.md Settled
-  defaults 12) a pass also reads `sessions` from each connected machine holding a running or
-  `needs-input` task, settled as takeover settles one: no session carrying its id has ended
-  ("Done detection" below).
+  defaults 12) a pass also reads `sessions` from each connected machine holding a running,
+  `needs-input` or `awaiting-merge` task, settled as takeover settles one: no session carrying
+  its id has ended, and `progress` is applied to a live one ("Done detection" below). The
+  `awaiting-merge` read is the backstop for a `branch-state` merge that never arrived, which
+  would otherwise leave its `after: "merged"` dependents blocked for good; it shares the one
+  cadence, since a merge is no more urgent than a freed slot.
   It shares the pass's one `sessions` call per machine with the TTL and `lost` checks, and
   runs before routing, so a slot it frees is used in the same pass. An answer is applied
   only to a task still where it was when its machine was asked, since one read before an
@@ -1499,8 +1502,12 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   when one never can. An edge releases when its predecessor is `done`, whatever settled
   it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
   `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
-"merged"` only at `done`, a merge being what makes a task done. A `lost` predecessor is
-  waited on, since it may still finish. Three ways an edge never releases, each a
+"merged"` only at `done`, a merge being what makes a task done. A release is a fact: an
+  edge whose condition already holds stays released when its predecessor later fails or is
+  cancelled (a `cancelled` predecessor with a PR and a pushed branch still releases
+  `opened`), checked before the failure so the outcome never depends on which pass saw it
+  first. A `lost` predecessor is waited on, since it may still finish. Three ways an edge
+  never releases, each a
   `TaskFailureCode`: `dependency_failed`, a `failed` or `cancelled` predecessor — computed
   to a fixpoint in one call, so a chain fails in one pass rather than one link per pass;
   `dependency_missing`, an id the store does not hold once `DEP_MISSING_GRACE_MS` has
@@ -1508,7 +1515,9 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   time), where an id held as an unreadable record waits, being in the store; and
   `dependency_cycle`, every `queued` or `blocked` member of a strongly connected component
   over every held task, a self-edge included, so a loop a later create closes fails the
-  member already blocked too. A `queued` task whose `createdAt` is more than
+  member already blocked too — leaving out the edges of a finished task, whose dependents
+  its outcome has already released or failed, so a `cancelled` member's dependent fails
+  `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
   `STORE_TOMBSTONE_MS` old is never admitted: its key's tombstone may be gone, so it may be
   a pruned task's authentic version-1 blob put back. It stays `queued` — no failure code
   says why yet — and its dependents wait on it. A release lands at the next pass, not on
@@ -1516,8 +1525,17 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
 - **Batches** (`batch.ts`, M3 item 4a). No batch record exists: a batch is the tasks that
   name its id, and its strategy is the earliest-created member's (ties to the lower id).
   `sequential` bounds it at one member in flight, `parallel` at `max`, `auto` not at all;
-  at the bound every candidate carries `cap_reached` with `scope: "batch"`. In flight is
-  `IN_FLIGHT`, so an `awaiting-merge` member frees its place. A pass routes ready tasks
+  at the bound every candidate carries `cap_reached` with `scope: "batch"`. The bound
+  counts `IN_FLIGHT` and `lost`, so an `awaiting-merge` member frees its place but a lost
+  one does not: the global cap leaves `lost` out so a forgotten machine cannot pin it, a
+  reason a batch's own serialization lacks, and its session may still run on a machine
+  that only sleeps, so the next `sequential` member would run beside it. `sequential` also
+  enforces `index` order, which routing order alone cannot (a member whose predecessor is
+  unroutable this pass would go first): a member is held, with the same `cap_reached`
+  (`inFlight` the lower indexes not yet over), until every lower index is over — finished
+  in any state, `failed` and `cancelled` included, or `awaiting-merge`. A lower index not
+  yet in the store holds it too, since a client puts a batch one record at a time, and so
+  does one still `blocked`. A pass routes ready tasks
   oldest first, except that one batch's members go in `index` order from where its oldest
   ready member would have gone.
 - **Done detection** (`done.ts`, M3 item 4a). A session that ends with a PR known — the
@@ -1525,12 +1543,18 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
   it is `done`, `doneBy: "session"`. A live session's newer PR URL is recorded even when
   its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
-  the task was placed on only, records `branch` and `pushed` — `pushed` never goes back,
-  so the first pushed report with a PR releases `opened` for good — and a merge makes the
-  task `done`, `doneBy: "merged"`, a session still running included. A `merged` verdict
-  is believed only of a branch with work on it (pushed, or with a PR): reap's `Merged`
-  reads a branch with no commits past the default branch as an ancestor, which is every
-  task branch before its first commit. What `branch-state` carried while no leader
+  the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
+  within one branch, so the first pushed report with a PR releases `opened` for good — and
+  a merge makes the task `done`, `doneBy: "merged"`, a session still running included. A
+  report naming a different branch than the one recorded starts it unpushed. A `merged`
+  verdict is believed only of a branch with work on it (pushed there, or with a PR on the
+  same branch — no PR URL is tied to a branch, so after a switch only one the report
+  itself brings counts): reap's `Merged` reads a branch with no commits past the default
+  branch as an ancestor, which is every task branch before its first commit, and a task
+  that switched branches would otherwise be `done` with its PR unmerged. A `here` task
+  ignores `pushed` and `merged` altogether: its branch is the checkout's, often the
+  default branch, pushed and trivially merged; its `opened` comes from its PR and its
+  `merged` only at `done`. What `branch-state` carried while no leader
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
   task is connected again after a pass saw it away. In a reply the daemon trimmed
@@ -1541,9 +1565,13 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
   deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
-  defaults 13) after takeover and at the end of every pass, writing only when something
-  is over; never a task an unfinished one names in `deps`, whose dependent would
-  otherwise fail `dependency_missing` on work that was there. M2's `submit` also prunes
+  defaults 13) after takeover, on `submit`'s `store_full`, and at the end of a pass only
+  once the store holds `pruneAt` records (96, held plus unreadable; under `MAX_TASKS` so
+  creates still fit): pruning every pass would delete a finished task an app is naming in
+  a create still on its way to us, and the dependent would fail `dependency_missing`. It
+  writes only when something is over the keep; never a task an unfinished one names in
+  `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
+  there. Equally old tasks go in id order, so two leaders prune the same ones. M2's `submit` also prunes
   and retries once when its own create meets `store_full`. `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.

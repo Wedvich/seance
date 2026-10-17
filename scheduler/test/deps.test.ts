@@ -105,6 +105,34 @@ describe("release", () => {
     expect(scheduler.task("next")?.state).toBe("running");
   });
 
+  test("a `here` predecessor's merge is not believed: after: merged waits for done", async () => {
+    const { store, scheduler, put } = setup();
+    await put("here", { state: "running", assignment: ON_A, spec: spec({ mode: "here" }), prUrl: PR });
+    await put("next", after("here", "merged"));
+    await scheduler.load();
+    await scheduler.onBranchState(
+      { taskId: "here", repo: "app", branch: "main", pushed: true, merged: true, at: NOW },
+      "a",
+    );
+    await pass(scheduler);
+    expect(states(scheduler, "here", "next")).toEqual({ here: "running", next: "blocked" });
+    expect(scheduler.task("here")?.pushed).toBeUndefined();
+
+    const held = await store.get("here");
+    const finished: Task = {
+      id: "here",
+      spec: spec({ mode: "here" }),
+      state: "done",
+      createdAt: NOW,
+      prUrl: PR,
+      doneBy: "manual",
+    };
+    await store.put("here", held?.reason === undefined ? (held?.version ?? 0) : 0, finished);
+    await scheduler.refresh("here");
+    await pass(scheduler);
+    expect(scheduler.task("next")?.state).toBe("running");
+  });
+
   test("done releases every edge, whatever settled it", async () => {
     const { scheduler, put } = setup(new FakeFleet([]));
     await put("manual", { state: "done", doneBy: "manual" });
@@ -143,6 +171,27 @@ describe("edges that never release", () => {
     expect(scheduler.task("grandchild")?.failure?.message).toContain("child");
   });
 
+  test("a failure cascades to a fixpoint whatever order the chain was stored in", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("grandchild", after("child", "merged"));
+    await put("child", after("broken", "opened"));
+    await put("broken", { state: "failed", failure: { code: "repo_not_found", message: "gone" } });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(states(scheduler, "child", "grandchild")).toEqual({ child: "failed", grandchild: "failed" });
+  });
+
+  test("an edge that released stays released when its predecessor is cancelled later; one that never did fails", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("pred", { state: "cancelled", prUrl: PR, pushed: true });
+    await put("stacked", after("pred", "opened"));
+    await put("landing", after("pred", "merged"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("stacked")?.state).toBe("ready");
+    expect(scheduler.task("landing")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
   test("a predecessor failing later fails a blocked dependent", async () => {
     const { scheduler, put } = setup();
     await put("pred", { state: "running", assignment: ON_A });
@@ -167,6 +216,18 @@ describe("edges that never release", () => {
       expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_cycle" } });
     }
     expect(scheduler.task("tail")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
+  test("a finished task's edges are not a loop: a cancelled member's dependent fails as dependency_failed", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("dropped", { ...after("tail", "opened"), state: "cancelled" });
+    await put("tail", after("dropped", "merged"));
+    await put("finished", { ...after("after", "opened"), state: "done" });
+    await put("after", after("finished", "merged"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("tail")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+    expect(scheduler.task("after")?.state).toBe("ready");
   });
 
   test("a cycle closed by a later create fails the member already blocked too", async () => {

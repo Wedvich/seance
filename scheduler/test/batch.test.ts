@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BatchStrategy } from "@seance/shared";
-import { MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import { MemoryQueueStore, Scheduler, type Task, type TaskSpec } from "../src/index.ts";
 import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
 
 /** Batches (M3 item 4a): a strategy's bound as `cap_reached` scope `batch`, and members routed in index order. */
@@ -12,13 +12,20 @@ function setup() {
   const fleet = new FakeFleet(FLEET);
   const store = new MemoryQueueStore({ now: () => clock.now });
   const scheduler = new Scheduler({ store, fleet, now: () => clock.now });
-  async function member(id: string, index: number, strategy: BatchStrategy): Promise<void> {
+  async function member(
+    id: string,
+    index: number,
+    strategy: BatchStrategy,
+    fields: Partial<Task> = {},
+    specFields: Partial<TaskSpec> = {},
+  ): Promise<void> {
     clock.now += 1;
     const body: Task = {
       id,
-      spec: spec({ batch: { id: "b1", index, strategy } }),
+      spec: spec({ batch: { id: "b1", index, strategy }, ...specFields }),
       state: "ready",
       createdAt: clock.now,
+      ...fields,
     };
     const write = await store.put(id, 0, body);
     if (!write.ok) throw new Error(`put ${id}: ${write.code}`);
@@ -67,6 +74,86 @@ describe("batches", () => {
     await pass(scheduler);
     expect(dispatched(fleet)).toEqual(["p0", "p1"]);
     expect(scheduler.task("p2")?.state).toBe("ready");
+    expect(scheduler.lastDecision("p2")?.candidates[0]?.rejected).toContainEqual({
+      code: "cap_reached",
+      inFlight: 2,
+      max: 2,
+      scope: "batch",
+    });
+  });
+
+  test("a lost member counts toward the bound: its session may still run on a machine that only sleeps", async () => {
+    const lost: Partial<Task> = {
+      state: "lost",
+      assignment: { deviceId: "z", exclave: "main", clone: "app", pane: "%1" },
+    };
+    const parallel = setup();
+    await parallel.member("l0", 0, { mode: "parallel", max: 1 }, lost);
+    await parallel.member("l1", 1, { mode: "parallel", max: 1 });
+    await parallel.scheduler.load();
+    await pass(parallel.scheduler);
+    expect(dispatched(parallel.fleet)).toEqual([]);
+
+    const sequential = setup();
+    await sequential.member("s0", 0, { mode: "sequential" }, lost);
+    await sequential.member("s1", 1, { mode: "sequential" });
+    await sequential.scheduler.load();
+    await pass(sequential.scheduler);
+    expect(dispatched(sequential.fleet)).toEqual([]);
+  });
+
+  describe("sequential enforces index order, not whichever member routes first", () => {
+    const sequential = { mode: "sequential" } as const;
+
+    test("an unroutable index 0 holds index 1", async () => {
+      const { fleet, scheduler, member } = setup();
+      await member("first", 0, sequential, {}, { repo: "github.com/acme/elsewhere" });
+      await member("second", 1, sequential);
+      await scheduler.load();
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual([]);
+      expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual(
+        expect.objectContaining({ code: "cap_reached", scope: "batch" }),
+      );
+    });
+
+    test("members put before index 0 is in the store wait for it", async () => {
+      const { fleet, scheduler, member } = setup();
+      await member("third", 2, sequential);
+      await member("second", 1, sequential);
+      await scheduler.load();
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual([]);
+
+      await member("first", 0, sequential);
+      await scheduler.refresh("first");
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual(["first"]);
+    });
+
+    test("an index 0 still blocked on a dependency holds index 1", async () => {
+      const { fleet, scheduler, member } = setup();
+      const lost: Partial<Task> = {
+        state: "lost",
+        assignment: { deviceId: "z", exclave: "main", clone: "app", pane: "%1" },
+      };
+      await member("gate", 9, { mode: "auto" }, lost, { batch: undefined });
+      await member("first", 0, sequential, { state: "blocked" }, { deps: [{ task: "gate", after: "merged" }] });
+      await member("second", 1, sequential);
+      await scheduler.load();
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual([]);
+      expect(scheduler.task("first")?.state).toBe("blocked");
+    });
+
+    test("a lower index finished in any state releases the next", async () => {
+      const { fleet, scheduler, member } = setup();
+      await member("first", 0, sequential, { state: "failed", failure: { code: "repo_not_found", message: "gone" } });
+      await member("second", 1, sequential);
+      await scheduler.load();
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual(["second"]);
+    });
   });
 
   test("auto has no batch bound; where members disagree, the earliest-created member's strategy wins", async () => {

@@ -162,9 +162,9 @@ export class Scheduler {
   /**
    * The store caps `task:` (`MAX_TASKS`), so past `keep` the oldest finished
    * tasks are deleted (`prunable`) — never one with anything left to happen,
-   * nor one an unfinished task names. Runs after takeover and every pass, where
-   * it writes only when something is over the keep, since an app's create
-   * meeting `store_full` is never seen here.
+   * nor one an unfinished task names. Runs after takeover, on `submit`'s own
+   * `store_full`, and at the end of a pass once the store holds `pruneAt` records
+   * — an app's create meeting `store_full` is never seen here.
    */
   async prune(keep = this.#config.keepFinished): Promise<void> {
     for (const task of prunable(this.tasks(), keep)) {
@@ -374,7 +374,8 @@ export class Scheduler {
       this.#decisions.delete(task.id);
       this.#launch(reserved, reservation);
     }
-    await this.prune();
+    // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
+    if (this.#held.size + this.#unreadable.size >= this.#config.pruneAt) await this.prune();
   }
 
   /**
@@ -461,8 +462,8 @@ export class Scheduler {
    * the better answer); a `lost` task whose machine is back; every placed or
    * `awaiting-merge` task on a machine back from an absence, whose
    * `branch-state`s went nowhere meanwhile; and, once per `sweepIntervalMs`,
-   * every running task on a connected machine — the only way a task whose
-   * `ended` event was lost ever finishes.
+   * every running or `awaiting-merge` task on a connected machine — the only
+   * way a task whose `ended` or `merged` event was lost ever finishes.
    */
   #due(): readonly Task[] {
     const now = this.#now();
@@ -477,7 +478,7 @@ export class Scheduler {
       }
       const deviceId = t.assignment?.deviceId;
       if (deviceId === undefined || !connected.has(deviceId)) return false;
-      if (t.state === "awaiting-merge") return returned.has(deviceId);
+      if (t.state === "awaiting-merge") return sweep || returned.has(deviceId);
       if (!PLACED.includes(t.state)) return false;
       return t.state === "lost" || sweep || returned.has(deviceId);
     });

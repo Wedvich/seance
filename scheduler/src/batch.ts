@@ -1,5 +1,6 @@
 import type { BatchStrategy, Reason } from "@seance/shared";
-import { IN_FLIGHT, type Task } from "./task.ts";
+import { codeUnitOrder } from "./order.ts";
+import { FINISHED, IN_FLIGHT, type Task, type TaskState } from "./task.ts";
 
 /**
  * Batches (`BatchMembership`): no batch record exists, so a batch is the tasks
@@ -20,7 +21,24 @@ function strategyOf(batchId: string, tasks: readonly Task[]): BatchStrategy | un
     .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id))[0]?.spec.batch?.strategy;
 }
 
-/** `cap_reached` scope `batch` when `task`'s batch already has its bound in flight; null otherwise. */
+/**
+ * What a batch's bound counts: in flight, and `lost` — its session may still
+ * run on a machine that only sleeps. The global cap leaves `lost` out so a
+ * forgotten machine cannot pin it; a batch's own serialization has no such reason.
+ */
+const BATCH_HELD: ReadonlySet<TaskState> = new Set([...IN_FLIGHT, "lost"]);
+
+/** Past its session: finished, or `awaiting-merge` (no slot, no session). */
+function over(t: Task): boolean {
+  return FINISHED.includes(t.state) || t.state === "awaiting-merge";
+}
+
+/**
+ * `cap_reached` scope `batch` when `task`'s batch already holds its bound, or,
+ * for `sequential`, while a lower-`index` member is not over yet — one that is
+ * unroutable this pass, `blocked`, or not in the store yet holds the next, so
+ * `index` order is what runs, not whichever member routes first. Null otherwise.
+ */
 export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const { batch } = task.spec;
   if (batch === undefined) return null;
@@ -28,10 +46,15 @@ export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const strategy = strategyOf(batch.id, members);
   const max = strategy === undefined ? null : bound(strategy);
   if (max === null) return null;
-  const inFlight = tasks.filter(
-    (t) => t.id !== task.id && t.spec.batch?.id === batch.id && IN_FLIGHT.includes(t.state),
-  ).length;
-  return inFlight >= max ? { code: "cap_reached", inFlight, max, scope: "batch" } : null;
+  const others = tasks.filter((t) => t.id !== task.id && t.spec.batch?.id === batch.id);
+  const held = others.filter((t) => BATCH_HELD.has(t.state)).length;
+  if (held >= max) return { code: "cap_reached", inFlight: held, max, scope: "batch" };
+  if (strategy?.mode !== "sequential") return null;
+  let ahead = 0;
+  for (let i = 0; i < batch.index; i += 1) {
+    if (!others.some((t) => t.spec.batch?.index === i && over(t))) ahead += 1;
+  }
+  return ahead > 0 ? { code: "cap_reached", inFlight: ahead, max, scope: "batch" } : null;
 }
 
 /**
@@ -56,9 +79,4 @@ export function dispatchOrder(ready: readonly Task[]): readonly Task[] {
       (a.spec.batch?.index ?? 0) - (b.spec.batch?.index ?? 0) ||
       a.createdAt - b.createdAt,
   );
-}
-
-function codeUnitOrder(a: string, b: string): number {
-  if (a < b) return -1;
-  return a > b ? 1 : 0;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { TaskProgress } from "@seance/shared";
+import type { BranchState, TaskProgress } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
 
@@ -155,5 +155,88 @@ describe("progress, read back", () => {
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+});
+
+function branchState(branch: string, fields: { pushed?: boolean; merged?: boolean } = {}): BranchState {
+  return { taskId: "t", repo: "app", branch, pushed: fields.pushed ?? false, merged: fields.merged ?? false, at: NOW };
+}
+
+describe("branch-state", () => {
+  test("a branch switch starts unpushed: the new branch's ancestor-merge is not the old one's PR landing", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, branch: "feat", pushed: true });
+    await scheduler.load();
+    await scheduler.onBranchState(branchState("scratch", { merged: true }), "a");
+    const task = scheduler.task("t");
+    expect(task).toMatchObject({ state: "running", branch: "scratch", prUrl: PR });
+    expect(task?.pushed).toBeUndefined();
+
+    // Merged work on the branch it switched to, once pushed there, is believed.
+    await scheduler.onBranchState(branchState("scratch", { pushed: true, merged: true }), "a");
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
+  test("pushed never reverts within one branch", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, branch: "feat" });
+    await scheduler.load();
+    await scheduler.onBranchState(branchState("feat", { pushed: true }), "a");
+    await scheduler.onBranchState(branchState("feat"), "a");
+    expect(scheduler.task("t")?.pushed).toBe(true);
+  });
+
+  test("a `here` task's branch is the checkout's: pushed and merged are ignored", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, spec: spec({ mode: "here" }) });
+    await scheduler.load();
+    await scheduler.onBranchState(branchState("main", { pushed: true, merged: true }), "a");
+    const task = scheduler.task("t");
+    expect(task).toMatchObject({ state: "running", branch: "main" });
+    expect(task?.pushed).toBeUndefined();
+  });
+});
+
+describe("the sweep", () => {
+  test("applies progress to a live task and reads an awaiting-merge one, so a lost merge is picked up", async () => {
+    const { fleet, clock, scheduler, put } = setup();
+    await put("live", { assignment: ON_A });
+    await put("waiting", { state: "awaiting-merge", assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [{ id: "%1", window: "w1", repo: "app", path: "/wt/live", taskId: "live" }],
+      progress: [progress("live", { prUrl: PR, branch: "live", pushed: true }), progress("waiting", { merged: true })],
+    });
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual([]);
+
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual(["a"]);
+    expect(scheduler.task("live")).toMatchObject({ state: "running", prUrl: PR, branch: "live", pushed: true });
+    expect(scheduler.task("waiting")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+});
+
+describe("a trimmed reply", () => {
+  test("leaves a reservation whose id is in `ended` unsettled, as it does a placed task", async () => {
+    const { fleet, scheduler, put } = setup();
+    const reservation = { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW - 1 };
+    await put("t", { state: "reserved", reservation, reservedAt: NOW - 1000 });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [], progressTrimmed: 2 });
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("reserved");
+
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      ended: ["t"],
+      progress: [progress("t", { prUrl: PR })],
+      progressTrimmed: 1,
+    });
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "awaiting-merge", prUrl: PR });
   });
 });

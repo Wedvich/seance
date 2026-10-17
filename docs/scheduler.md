@@ -481,7 +481,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     an unfinished one names; a cycle fails every member at admission (`dependency_cycle`); a
     `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
-  - `cap_reached` scope `batch` (a batch at its strategy's bound; `sequential` is 1).
+  - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
+    `sequential` is 1 and also holds a member until every lower `index` is over).
   - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
     `QueueChanged.tasks`.
 - **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
@@ -532,7 +533,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     detection — `branch-state` live (`Scheduler.onBranchState`), `progress` on takeover, the
     sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
     `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
-    into the library (`keepFinished`, Settled defaults 13): after takeover and every pass, since
+    into the library (`keepFinished`, Settled defaults 13): after takeover and, once the store holds `pruneAt` records, a pass, since
     an app's `store_full` never reaches the leader, and on `submit`'s own. Left open: no
     `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
     never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
@@ -776,14 +777,17 @@ same PR, with the reason.
     have been `too_large`, leaving the task `queued` for good.
 12. **Running tasks are checked against their machines every 2 min** (`sweepIntervalMs`, set
     with the M2 review, 2026-10-17): the backstop for an `ended` event that never arrived,
-    whose task would otherwise hold its slot for good. One `sessions` per connected machine
-    holding running tasks, shared with the pass's other checks; a lost event costs at most
+    whose task would otherwise hold its slot for good; `awaiting-merge` tasks ride the same
+    sweep, for a merge event that never arrived. One `sessions` per connected machine
+    holding running or `awaiting-merge` tasks, shared with the pass's other checks; a lost event costs at most
     two minutes of a slot, where a sweep every pass would cost a call per busy machine per
     status beat.
 13. **Fifty finished tasks are kept** (`keepFinished`, set with M3 item 4a, 2026-10-17; M2's
     leader kept the same number as `KEEP_FINISHED`): enough for `queue` to show recent
     history, and with M2's 64 unfinished at most still under `MAX_TASKS` (128). Pruned oldest
-    first, never one an unfinished task names.
+    first (ties by id), never one an unfinished task names. A pass prunes only at `pruneAt`
+    (96) records, so a finished task an app is about to name in `deps` outlives the refresh
+    that tells the leader of the create.
 
 ## Risks / unknowns
 

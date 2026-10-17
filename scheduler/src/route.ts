@@ -18,6 +18,7 @@ import {
 } from "@seance/shared";
 import { batchCap } from "./batch.ts";
 import type { SchedulerConfig } from "./config.ts";
+import { codeUnitOrder } from "./order.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
 
 // The decision record is a wire type — `route-preview` and `queue` carry it —
@@ -294,11 +295,6 @@ function distance(base: Placement | undefined, at: Placement): number {
 
 function samePlacement(a: Placement | undefined, b: Placement): boolean {
   return a !== undefined && a.deviceId === b.deviceId && a.exclave === b.exclave;
-}
-
-function codeUnitOrder(a: string, b: string): number {
-  if (a === b) return 0;
-  return a < b ? -1 : 1;
 }
 
 function clamp(x: number): number {
