@@ -1,10 +1,22 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import type { RepoEntry, RequestOp, SpawnRequest } from "@seance/shared";
+import {
+  QUEUE_MAX_TASKS,
+  RequestFailure,
+  SCHEDULER_ID,
+  TASK_REQUEST_LIMITS,
+  type Decision,
+  type Machine,
+  type RepoEntry,
+  type RequestOp,
+  type SpawnRequest,
+  type Task,
+  type TaskRequest,
+} from "@seance/shared";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
@@ -13,6 +25,8 @@ import { LocalUnavailable } from "./local-client.ts";
 import {
   buildMcpServer,
   isLocalRef,
+  resolveOrigin,
+  type McpServerOpts,
   mcpBunPath,
   mcpScriptCheck,
   mcpScriptPath,
@@ -45,7 +59,11 @@ function fakeLocal(
 }
 
 /** A bare `LazyRelay` is the direct transport, which is what most of these tests drive. */
-async function connectedClient(relay: LazyRelay | Fleet, local: LocalMachine | null = null): Promise<Client> {
+async function connectedClient(
+  relay: LazyRelay | Fleet,
+  local: LocalMachine | null = null,
+  opts: McpServerOpts = {},
+): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
   // point of pinning is that these tests prove the modern era is served. That
@@ -56,7 +74,7 @@ async function connectedClient(relay: LazyRelay | Fleet, local: LocalMachine | n
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, opts), { transport: serverTransport });
   await client.connect(clientTransport);
   return client;
 }
@@ -665,5 +683,393 @@ describe("despawn_session", () => {
     expect(result.isError).toBe(true);
     expect(toolText(result)).toContain("despawn failed (session_not_found)");
     lazy.stop();
+  });
+});
+
+const ORIGIN = "github.com/m/seance";
+const LEADING = { kind: "ready", deviceId: "device-1", term: 3 } as const;
+/** Short enough that a test following a task never waits on the clock. */
+const FAST: McpServerOpts = { autoFollow: { intervalMs: 1, polls: 5 } };
+
+function autoMachines(): Machine[] {
+  return [
+    machine({
+      deviceId: "device-1",
+      name: "MacBook Pro",
+      repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }],
+    }),
+    machine({
+      deviceId: "device-2",
+      name: "Linux Box",
+      repos: [{ name: "seance", path: "/src/seance", defaultBranch: "main", origin: ORIGIN }],
+    }),
+  ];
+}
+
+const decision: Decision = {
+  at: 5_000,
+  chosen: { deviceId: "device-2", exclave: "work", clone: "seance" },
+  candidates: [
+    {
+      deviceId: "device-2",
+      machine: "Linux Box",
+      exclave: "work",
+      clone: "seance",
+      rejected: [],
+      score: {
+        components: { accountPressure: 0.1, machinePressure: 0.2, dependencyDistance: 0, queuePressure: 0 },
+        sticky: 0,
+        total: 0.3,
+      },
+    },
+    { deviceId: "device-1", machine: "MacBook Pro", exclave: "default", rejected: [{ code: "auth_missing" }] },
+  ],
+};
+
+function task(overrides: Partial<Task> = {}): Task {
+  return { id: "t-1", spec: { repo: ORIGIN, mode: "worktree" }, state: "ready", createdAt: 4_000, ...overrides };
+}
+
+const running = task({
+  state: "running",
+  decision,
+  assignment: { deviceId: "device-2", exclave: "work", clone: "seance", window: "fix-it" },
+});
+
+/**
+ * A relay with a verified leader: `submit` answers from `onSubmit`, and each
+ * `queue` from `queues` in turn, the last one repeating.
+ */
+function leaderRelay(
+  onSubmit: () => unknown,
+  queues: readonly unknown[] = [],
+  machines: readonly Machine[] = autoMachines(),
+): ReturnType<typeof fakeRelay> {
+  let polled = 0;
+  const fake = fakeRelay(machines, (op) => {
+    if (op === "submit") return onSubmit();
+    if (op === "queue") return queues[Math.min(polled++, queues.length - 1)] ?? { tasks: [], at: 6_000 };
+    return new Error(`unexpected ${op}`);
+  });
+  fake.setState({ scheduler: LEADING });
+  return fake;
+}
+
+async function callAuto(
+  fake: ReturnType<typeof fakeRelay>,
+  args: Record<string, unknown> = {},
+): Promise<{ text: string; error: boolean }> {
+  const lazy = new LazyRelay({ create: () => fake });
+  const client = await connectedClient(lazy, null, FAST);
+  try {
+    const result = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "auto", repo: "seance", prompt: "fix it", ...args },
+    });
+    return { text: toolText(result), error: result.isError === true };
+  } finally {
+    lazy.stop();
+  }
+}
+
+describe("resolveOrigin", () => {
+  test("an origin passes as itself, and a clone name maps to the one origin behind it", () => {
+    expect(resolveOrigin(autoMachines(), ORIGIN)).toEqual({ origin: ORIGIN });
+    expect(resolveOrigin(autoMachines(), "seance")).toEqual({ origin: ORIGIN });
+  });
+
+  test("a clone name behind two origins is ambiguous, and the error names each with its machines", () => {
+    const machines = [
+      ...autoMachines(),
+      machine({
+        deviceId: "device-3",
+        name: "Work",
+        repos: [{ name: "seance", path: "/w/seance", defaultBranch: "main", origin: "github.com/fork/seance" }],
+      }),
+    ];
+    const resolved = resolveOrigin(machines, "seance");
+    if (!("error" in resolved)) throw new Error("expected an error");
+    expect(resolved.error).toContain('"seance" names clones of more than one repo');
+    expect(resolved.error).toContain(`${ORIGIN} (on MacBook Pro, Linux Box)`);
+    expect(resolved.error).toContain("github.com/fork/seance (on Work)");
+  });
+
+  test("an unknown name lists the known origins, and says when an older daemon has a clone by that name", () => {
+    const machines = [
+      ...autoMachines(),
+      machine({ deviceId: "device-3", name: "Old", repos: [{ name: "legacy", path: "/l", defaultBranch: "main" }] }),
+    ];
+    expect(resolveOrigin(machines, "nope")).toEqual({
+      error: `no repo "nope" for auto — known origins: ${ORIGIN}`,
+    });
+    const legacy = resolveOrigin(machines, "legacy");
+    if (!("error" in legacy)) throw new Error("expected an error");
+    expect(legacy.error).toContain("Old has a clone by that name, but its daemon reports no origin");
+  });
+});
+
+describe("spawn_session on auto", () => {
+  test("submits the origin to the scheduler, follows it to its machine, and reports where and why", async () => {
+    const fake = leaderRelay(
+      () => ({ task: task() }),
+      [
+        { tasks: [task({ decision })], at: 6_000 },
+        { tasks: [running], at: 7_000 },
+      ],
+    );
+    const stdout = spyOn(console, "log");
+    try {
+      const { text, error } = await callAuto(fake, { title: "Fix it", mode: "here", model: "", plan: true });
+      expect(error).toBe(false);
+      expect(text).toContain("task t-1: running on Linux Box (exclave work, clone seance, window fix-it)");
+      expect(text).toContain("decision: chose Linux Box/work (lowest score, 0.30); MacBook Pro/default: not signed in");
+      expect(text).toContain("get_sessions on Linux Box lists it with taskId t-1");
+      // Nothing reachable from `seanced mcp` writes to stdout: it is the JSON-RPC channel.
+      expect(stdout).not.toHaveBeenCalled();
+    } finally {
+      stdout.mockRestore();
+    }
+    const [submit, ...polls] = fake.requests;
+    expect(submit?.deviceId).toBe(SCHEDULER_ID);
+    expect(submit?.op).toBe("submit");
+    // A TaskRequest carries no `client` — the leader stamps its own dispatch — and an empty model means default.
+    expect(submit?.payload).toEqual({
+      repo: ORIGIN,
+      mode: "here",
+      prompt: "fix it",
+      title: "Fix it",
+      plan: true,
+    } satisfies TaskRequest);
+    expect(polls.map((r) => r.op)).toEqual(["queue", "queue"]);
+    // The scheduler places it; this process never spawned on a machine itself.
+    expect(fake.requests.some((r) => r.op === "spawn")).toBe(false);
+  });
+
+  test("a task no machine can take yet answers at once, warning it lives only in the leader's memory", async () => {
+    const waiting = task({ decision: { at: 5_000, chosen: null, candidates: decision.candidates.slice(1) } });
+    const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [waiting], at: 6_000 }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(false);
+    expect(text).toContain(
+      "task t-1: ready\ndecision: no candidate can take it now; MacBook Pro/default: not signed in",
+    );
+    expect(text).toContain("a leader change drops it");
+    expect(fake.requests.filter((r) => r.op === "queue")).toHaveLength(1);
+  });
+
+  test("a task that leaves the queue before it is placed says the leader probably changed", async () => {
+    const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [], at: 6_000 }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(text).toContain("left the leader's queue before it was placed");
+  });
+
+  test("a task pushed out of a full queue view is not reported as dropped", async () => {
+    const newer = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) => task({ id: `n-${i}`, createdAt: 9_000 + i }));
+    const fake = leaderRelay(() => ({ task: task() }), [{ tasks: newer, at: 6_000 }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(false);
+    expect(text).not.toContain("left the leader's queue");
+    expect(text).toContain("pushed it out of the queue's view");
+  });
+
+  test("a task whose session already ended is not sent to get_sessions", async () => {
+    const fake = leaderRelay(() => ({ task: { ...running, state: "done" } }));
+    const { text } = await callAuto(fake);
+    expect(text).toContain("Its session on Linux Box has already ended.");
+    expect(text).not.toContain("get_sessions on Linux Box lists it");
+  });
+
+  test("a spawn the target refused reads as an error, with its code", async () => {
+    const failed = task({ state: "failed", decision, failure: { code: "repo_not_found", message: "no such repo" } });
+    const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [failed], at: 6_000 }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(text).toContain("failure (repo_not_found): no such repo");
+  });
+
+  test("a prompt over the scheduler's bound is refused here, before anything dials the relay", async () => {
+    const fake = leaderRelay(() => ({ task: task() }));
+    const prompt = "x".repeat(TASK_REQUEST_LIMITS.prompt + 1);
+    const { text, error } = await callAuto(fake, { prompt });
+    expect(error).toBe(true);
+    expect(text).toBe(
+      `auto refused: the prompt is ${prompt.length} characters; auto takes at most ${TASK_REQUEST_LIMITS.prompt} — shorten it (the session can gather the rest with tools), or name a machine`,
+    );
+    expect(fake.started).toBe(0);
+  });
+
+  test("an ambiguous repo is refused with the candidates, and nothing is submitted", async () => {
+    const machines = [
+      ...autoMachines(),
+      machine({
+        deviceId: "device-3",
+        name: "Work",
+        repos: [{ name: "seance", path: "/w", defaultBranch: "main", origin: "github.com/fork/seance" }],
+      }),
+    ];
+    const fake = leaderRelay(() => ({ task: task() }), [], machines);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(text).toContain("pass the origin instead");
+    expect(fake.requests).toEqual([]);
+  });
+
+  test("no leader and an unverified leader are worded as unavailable, and nothing is sent", async () => {
+    for (const scheduler of [{ kind: "none" }, { kind: "unverified", deviceId: "device-9", term: 2 }] as const) {
+      const fake = leaderRelay(() => ({ task: task() }));
+      fake.setState({ scheduler });
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const { text, error } = await callAuto(fake);
+      expect(error).toBe(true);
+      expect(text).toStartWith("auto unavailable: ");
+      expect(text).toContain("name a machine instead");
+      expect(fake.requests).toEqual([]);
+    }
+  });
+
+  test("the leader's refusals are worded, and only an unreadable answer says it may have queued", async () => {
+    const cases = [
+      [{ ok: false, code: "not_ready", message: "taking over" }, "still taking over", false],
+      [{ ok: false, code: "queue_full", message: "64" }, "as many unfinished tasks as it will take", false],
+      [{ ok: false, code: "too_large", message: "big" }, "may have queued anyway", true],
+    ] as const;
+    for (const [reply, wording, mayHaveQueued] of cases) {
+      const fake = leaderRelay(() => reply);
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const { text, error } = await callAuto(fake);
+      expect(error).toBe(true);
+      expect(text).toStartWith(`auto failed (${reply.code}): `);
+      expect(text).toContain(wording);
+      expect(text.includes("may have queued")).toBe(mayHaveQueued);
+    }
+  });
+
+  test("a lost reply may have queued: it says to look before retrying, and never submits twice", async () => {
+    const fake = leaderRelay(() => new RequestFailure("timeout", "no reply within 10000ms"));
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(text).toBe(
+      "auto: no answer from the scheduler (no reply within 10000ms) — the task may have queued anyway — check get_queue and get_sessions before retrying",
+    );
+    expect(fake.requests.filter((r) => r.op === "submit")).toHaveLength(1);
+  });
+
+  test("through the broker auto is refused outright — nothing goes to the broker or any machine", async () => {
+    const sent: string[] = [];
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => {
+        throw new Error("no key, so no direct path");
+      },
+      broker: {
+        open: () =>
+          Promise.resolve({
+            machines: autoMachines(),
+            request: <T>(deviceId: string, op: string): Promise<T> => {
+              sent.push(`${op}@${deviceId}`);
+              return Promise.reject(new Error("must not be sent"));
+            },
+            scheduler: null,
+            release: () => {},
+          }),
+        stop: () => {},
+      },
+    });
+    const client = await connectedClient(fleet, fakeLocal(), FAST);
+    const spawned = await client.callTool({ name: "spawn_session", arguments: { machine: "auto", repo: "seance" } });
+    expect(spawned.isError).toBe(true);
+    expect(toolText(spawned)).toBe(
+      "auto needs this machine's own key; unavailable through the broker — name a machine instead (list_machines)",
+    );
+    const queue = await client.callTool({ name: "get_queue", arguments: {} });
+    expect(queue.isError).toBe(true);
+    expect(toolText(queue)).toBe("get_queue needs this machine's own key; unavailable through the broker");
+    expect(sent).toEqual([]);
+  });
+
+  test("auto beats a local machine named auto, which stays reachable by deviceId", async () => {
+    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }), { name: "Auto" });
+    const fake = leaderRelay(() => ({ task: running }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local, FAST);
+    const placed = await client.callTool({ name: "spawn_session", arguments: { machine: "AUTO", repo: "seance" } });
+    expect(toolText(placed)).toContain("task t-1: running on Linux Box");
+    expect(local.requests).toEqual([]);
+    const direct = await client.callTool({ name: "spawn_session", arguments: { machine: "device-1", repo: "seance" } });
+    expect(toolText(direct)).toContain("spawned window w on Auto");
+    lazy.stop();
+  });
+});
+
+describe("get_queue", () => {
+  test("lists the leader's tasks with state, placement and the decision's one line", async () => {
+    const fake = leaderRelay(
+      () => new Error("no submit here"),
+      [{ tasks: [running, task({ id: "t-2", spec: { repo: ORIGIN, mode: "worktree", prompt: "next" } })], at: 6_000 }],
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "get_queue", arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(toolText(result))).toEqual({
+      at: new Date(6_000).toISOString(),
+      tasks: [
+        {
+          id: "t-1",
+          state: "running",
+          repo: ORIGIN,
+          createdAt: new Date(4_000).toISOString(),
+          placement: { machine: "Linux Box", deviceId: "device-2", exclave: "work", clone: "seance", window: "fix-it" },
+          decision: "chose Linux Box/work (lowest score, 0.30); MacBook Pro/default: not signed in",
+        },
+        { id: "t-2", state: "ready", repo: ORIGIN, prompt: "next", createdAt: new Date(4_000).toISOString() },
+      ],
+    });
+    expect(fake.requests.map((r) => `${r.op}@${r.deviceId}`)).toEqual([`queue@${SCHEDULER_ID}`]);
+    lazy.stop();
+  });
+
+  test("with no leader it says so, and a refusal is worded", async () => {
+    const none = fakeRelay(autoMachines());
+    const lazy = new LazyRelay({ create: () => none });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "get_queue", arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toStartWith("get_queue unavailable: no scheduler is leading");
+    lazy.stop();
+
+    const busy = leaderRelay(() => ({}), [{ ok: false, code: "not_ready", message: "loading" }]);
+    const lazyBusy = new LazyRelay({ create: () => busy });
+    const busyClient = await connectedClient(lazyBusy);
+    const refused = await busyClient.callTool({ name: "get_queue", arguments: {} });
+    expect(toolText(refused)).toContain("get_queue failed (not_ready): the scheduler is still taking over");
+    lazyBusy.stop();
+  });
+
+  test("both scheduler tools tell the agent the queue is not a durable backlog", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    const { tools } = await client.listTools();
+    for (const name of ["spawn_session", "get_queue"]) {
+      const description = tools.find((tool) => tool.name === name)?.description ?? "";
+      expect(description).toContain("lives only in the leading daemon's memory");
+      expect(description).toContain("every relay deploy and every daemon self-update");
+      expect(description).toContain("Do not use auto as a durable backlog");
+    }
+    expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
+    lazy.stop();
+  });
+});
+
+describe("spawn_session on auto, when following fails", () => {
+  test("polls the leader refuses every time leave the task as submitted, and say no read came back", async () => {
+    const fake = leaderRelay(() => ({ task: task() }), [{ ok: false, code: "not_ready", message: "loading" }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(false);
+    expect(text).toContain("task t-1: ready");
+    expect(text).toContain("the scheduler never answered a follow-up read");
+    expect(fake.requests.filter((r) => r.op === "queue")).toHaveLength(FAST.autoFollow?.polls ?? 0);
+    expect(fake.requests.filter((r) => r.op === "submit")).toHaveLength(1);
   });
 });

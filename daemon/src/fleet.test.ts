@@ -22,6 +22,7 @@ function countingFleet(machines: readonly Machine[], fail?: unknown): CountingFl
           fleet.sent.push({ deviceId, op });
           return Promise.reject(new Error("not under test"));
         },
+        scheduler: null,
         release: (): void => {},
       });
     },

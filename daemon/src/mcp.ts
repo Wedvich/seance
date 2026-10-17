@@ -6,16 +6,24 @@ import {
   failureReasonText,
   importPsk,
   RequestFailure,
+  QUEUE_MAX_TASKS,
+  TASK_REQUEST_LIMITS,
+  type Candidate,
+  type Decision,
   type DespawnRequest,
   type DespawnResponse,
   type ErrorResponse,
   type Machine,
+  type Reason,
   type RepoEntry,
   type RequestOp,
+  type SchedulerErrorCode,
   type SessionsResponse,
   type SpawnClient,
   type SpawnRequest,
   type SpawnResponse,
+  type Task,
+  type TaskRequest,
 } from "@seance/shared";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
@@ -31,6 +39,7 @@ import {
   selectFleet,
   type Fleet,
   type FleetLease,
+  type SchedulerLeg,
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
@@ -192,8 +201,364 @@ function openFailureText(err: unknown): string {
 }
 
 /**
- * The MCP face of Séance: four tools mapping 1:1 onto the registry and the
- * `sessions`/`spawn`/`despawn` ops. Anything this hands to the relay rides the same
+ * `machine: "auto"`: the scheduler places the spawn. Matched in any case, as
+ * names are; a machine actually named "auto" is still reached by its deviceId.
+ */
+export const AUTO_MACHINE = "auto";
+
+function isAutoRef(ref: string): boolean {
+  return ref.toLowerCase() === AUTO_MACHINE;
+}
+
+/**
+ * Said wherever `auto` is described, because an agent will otherwise take the
+ * queue for a backlog. M2's queue is the leader's memory (docs/scheduler.md, M2 gaps).
+ */
+const AUTO_LIMITS =
+  "The scheduler's queue lives only in the leading daemon's memory: a task still waiting for capacity is lost when leadership changes, and it changes on every relay deploy and every daemon self-update. A task already placed is an ordinary session and survives that. There are no dependencies or ordering between tasks. Do not use auto as a durable backlog — submit only work that should start now.";
+
+/** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
+function keylessText(op: "auto" | "get_queue"): string {
+  const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
+  return `${op} needs this machine's own key; unavailable through the broker${instead}`;
+}
+
+/** A lost reply must never read as a failure: the task may be queued, and a blind retry would run it twice. */
+const MAY_HAVE_QUEUED = "the task may have queued anyway — check get_queue and get_sessions before retrying";
+
+/**
+ * `auto`'s `repo` as the scheduler keys it, `RepoEntry.origin`. Callers hold
+ * clone names from `list_machines`, so either is accepted: an origin exactly,
+ * or a clone name whose clones all share one origin. Clone names are
+ * machine-local, so two unrelated repos can share one — picking between them
+ * would run the task in the wrong repo, so that is an error naming each.
+ */
+export function resolveOrigin(
+  machines: readonly Machine[],
+  repo: string,
+): { readonly origin: string } | { readonly error: string } {
+  const origins = new Set<string>();
+  /** origin → the machines whose clone of it is named `repo` */
+  const named = new Map<string, string[]>();
+  /** Machines whose clone named `repo` reports no origin: an older daemon the scheduler cannot route to. */
+  const unkeyed: string[] = [];
+  for (const machine of machines) {
+    for (const entry of machine.repos) {
+      if (entry.origin === undefined) {
+        if (entry.name === repo) unkeyed.push(machine.name);
+        continue;
+      }
+      origins.add(entry.origin);
+      if (entry.name !== repo) continue;
+      const on = named.get(entry.origin) ?? [];
+      if (!on.includes(machine.name)) on.push(machine.name);
+      named.set(entry.origin, on);
+    }
+  }
+  if (origins.has(repo)) return { origin: repo };
+  const [only, ...rest] = named.keys();
+  if (only !== undefined && rest.length === 0) return { origin: only };
+  if (only !== undefined) {
+    const each = [...named].map(([origin, on]) => `${origin} (on ${on.join(", ")})`).join("; ");
+    return { error: `"${repo}" names clones of more than one repo — pass the origin instead: ${each}` };
+  }
+  const known = [...origins].toSorted().join(", ");
+  const stale =
+    unkeyed.length === 0
+      ? ""
+      : ` (${unkeyed.join(", ")} has a clone by that name, but its daemon reports no origin, so auto cannot route to it)`;
+  return { error: `no repo "${repo}" for auto${stale} — known origins: ${known === "" ? "(none reported)" : known}` };
+}
+
+/**
+ * Past a bound the leader answers `invalid_request`, which reads as a version
+ * mismatch — so it is refused here, naming the bound, as the PWA does.
+ */
+function overBound(field: keyof typeof TASK_REQUEST_LIMITS, value: string | undefined): string | null {
+  const limit = TASK_REQUEST_LIMITS[field];
+  if (value === undefined || value.length <= limit) return null;
+  const fix = field === "prompt" ? " — shorten it (the session can gather the rest with tools), or name a machine" : "";
+  return `the ${field} is ${value.length} characters; auto takes at most ${limit}${fix}`;
+}
+
+function taskRequestError(request: TaskRequest): string | null {
+  return (
+    overBound("prompt", request.prompt) ??
+    overBound("title", request.title) ??
+    overBound("model", request.model) ??
+    overBound("effort", request.effort) ??
+    overBound("repo", request.repo)
+  );
+}
+
+/** Every code worded, so a new one fails the build here as it does in the PWA's table. */
+const SCHEDULER_ERRORS: Record<SchedulerErrorCode, string> = {
+  not_leader: "the scheduler moved to another machine while this was on its way; try again",
+  not_ready: "the scheduler is still taking over after a leader change; try again in a few seconds",
+  invalid_request:
+    "the scheduler refused the request as malformed — are this machine's and the leader's seanced the same version?",
+  queue_full:
+    "the scheduler already holds as many unfinished tasks as it will take; wait for some to start (get_queue), or name a machine",
+  task_not_found: "the scheduler holds no such task",
+  dispatching: "the task is starting on a machine right now; try again in a moment",
+  finished: "the task has already finished",
+  despawn_failed: "its machine refused to end the session; nothing changed",
+  conflict: "the task changed while this was on its way; try again",
+  reset_unknown: "no quota reading says when that account resets",
+  internal_error: "the scheduler hit an error",
+  too_large: "the scheduler's answer was too large to send back",
+};
+
+/** One clause per code, as the PWA's decision card words them, shortened for a line. */
+function reasonText(reason: Reason): string {
+  switch (reason.code) {
+    case "offline":
+      return "offline";
+    case "status_stale":
+      return "no fresh status";
+    case "task_id_unsupported":
+      return "its daemon predates task ids";
+    case "exclaves_unknown":
+      return "its daemon reports no exclaves";
+    case "disk_low":
+      return `disk nearly full (${reason.freeMib} MiB free)`;
+    case "pressure_unknown":
+      return "no CPU or memory load reported";
+    case "pin_mismatch":
+      return reason.field === "deviceId" ? "not the pinned machine" : "not the pinned exclave";
+    case "repo_absent":
+      return "no clone of this repo";
+    case "auth_missing":
+      return "not signed in";
+    case "quota_unknown":
+      return reason.why === "trimmed" ? "quota trimmed from its status" : "quota never observed";
+    case "quota_over_line":
+      return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
+    case "cap_reached":
+      return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
+  }
+}
+
+function candidateWhere(candidate: Candidate): string {
+  return candidate.exclave === null ? candidate.machine : `${candidate.machine}/${candidate.exclave}`;
+}
+
+/** A decision record in one line: who was chosen, and why each other candidate was not. */
+export function decisionText(decision: Decision): string {
+  const { chosen } = decision;
+  const winner =
+    chosen === null
+      ? undefined
+      : decision.candidates.find((c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave);
+  let head = "no candidate can take it now";
+  if (chosen !== null) {
+    const where = winner === undefined ? `${chosen.deviceId}/${chosen.exclave}` : candidateWhere(winner);
+    const score = winner?.score === undefined ? "" : ` (lowest score, ${winner.score.total.toFixed(2)})`;
+    const spill = winner?.spill === undefined ? "" : `, spending credits (${winner.spill.window})`;
+    head = `chose ${where}${score}${spill}`;
+  }
+  const others = decision.candidates
+    .filter((c) => c !== winner)
+    .map((c) => {
+      if (c.rejected.length > 0) return `${candidateWhere(c)}: ${c.rejected.map(reasonText).join(", ")}`;
+      if (c.score === undefined) return `${candidateWhere(c)}: rejected for a reason this seanced cannot read`;
+      // With nothing chosen a scored candidate lost to something other than its score (a hold, a race).
+      const lost = chosen === null ? "scored but not chosen" : "scored higher";
+      return `${candidateWhere(c)}: ${lost}, ${c.score.total.toFixed(2)}`;
+    });
+  return others.length === 0 ? head : `${head}; ${others.join("; ")}`;
+}
+
+interface TaskPlacement {
+  readonly machine: string;
+  readonly deviceId: string;
+  readonly exclave: string;
+  readonly clone: string;
+  readonly window?: string;
+}
+
+/** Where a task landed, or is landing, by registry name where this view still has it. */
+function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | null {
+  const target = task.assignment ?? task.reservation;
+  if (target === undefined) return null;
+  const machine =
+    machines.find((m) => m.deviceId === target.deviceId)?.name ??
+    task.decision?.candidates.find((c) => c.deviceId === target.deviceId)?.machine ??
+    target.deviceId;
+  const { deviceId, exclave, clone } = target;
+  const window = task.assignment?.window;
+  return { machine, deviceId, exclave, clone, ...(window === undefined ? {} : { window }) };
+}
+
+function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
+  const placement = placementOf(task, machines);
+  const { spec } = task;
+  return {
+    id: task.id,
+    state: task.state,
+    repo: spec.repo,
+    ...(spec.title === undefined ? {} : { title: spec.title }),
+    // Cut to QUEUE_PROMPT_PREVIEW by the leader: enough to name the task.
+    ...(spec.prompt === undefined ? {} : { prompt: spec.prompt }),
+    createdAt: new Date(task.createdAt).toISOString(),
+    ...(placement === null ? {} : { placement }),
+    ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
+    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${task.failure.message}` }),
+  };
+}
+
+/**
+ * Still on its way to a machine, so worth another look before answering. A
+ * ready task the last pass routed nowhere waits for capacity — no point
+ * holding the tool call for that.
+ */
+function stillPlacing(task: Task): boolean {
+  if (task.state === "reserved") return true;
+  return task.state === "ready" && task.decision?.chosen !== null;
+}
+
+/** The answer to an `auto` spawn: where the task is and what to do next, worded per state. */
+function renderAutoTask(task: Task, machines: readonly Machine[], note: string | null): ToolResult {
+  const placement = placementOf(task, machines);
+  const window = placement?.window === undefined ? "" : `, window ${placement.window}`;
+  const where =
+    placement === null
+      ? ""
+      : ` on ${placement.machine} (exclave ${placement.exclave}, clone ${placement.clone}${window})`;
+  const lines = [`task ${task.id}: ${task.state}${where}`];
+  if (task.decision !== undefined) lines.push(`decision: ${decisionText(task.decision)}`);
+  if (task.failure !== undefined) lines.push(`failure (${task.failure.code}): ${task.failure.message}`);
+  const machine = placement?.machine ?? "its machine";
+  switch (task.state) {
+    case "running":
+    case "needs-input":
+      lines.push(
+        `It is an ordinary session now: get_sessions on ${machine} lists it with taskId ${task.id}, and despawn_session ends it.`,
+      );
+      break;
+    case "awaiting-merge":
+    case "done":
+      lines.push(`Its session on ${machine} has already ended.`);
+      break;
+    case "reserved":
+      lines.push(`Its spawn on ${machine} is still in flight — check get_queue for the outcome.`);
+      break;
+    case "lost":
+      lines.push(
+        `${machine} stopped answering before the spawn was confirmed — check get_sessions there before retrying.`,
+      );
+      break;
+    case "failed":
+    case "cancelled":
+      break;
+    default:
+      lines.push(
+        "Not placed yet: it waits in the leader's memory for capacity, and a leader change drops it. Check get_queue; if it is gone with no session to show for it, submit again or name a machine.",
+      );
+  }
+  if (note !== null) lines.push(note);
+  const text = lines.join("\n");
+  const settledBadly = task.state === "failed" || task.state === "lost" || task.state === "cancelled";
+  return settledBadly ? errorResult(text) : textResult(text);
+}
+
+/**
+ * Why a scheduler call threw. A reply lost on `submit` is "may have queued",
+ * never "failed": the leader may have queued it before the answer went missing.
+ */
+function schedulerFailureText(op: "auto" | "get_queue", err: unknown): string {
+  if (err instanceof RequestFailure) {
+    if (err.reason === "no_leader" || err.reason === "leader_unverified") {
+      const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
+      return `${op} unavailable: ${failureReasonText(err)}${instead}`;
+    }
+    if (op === "auto" && (err.reason === "timeout" || err.reason === "disconnected")) {
+      return `auto: no answer from the scheduler (${err.message}) — ${MAY_HAVE_QUEUED}`;
+    }
+    return `${op} failed: ${failureReasonText(err)}`;
+  }
+  const detail = err instanceof Error ? err.message : String(err);
+  return op === "auto" ? `auto: ${detail} — ${MAY_HAVE_QUEUED}` : `${op} failed: ${detail}`;
+}
+
+export interface McpServerOpts {
+  /** How an `auto` spawn follows its task to a machine through `queue`; tests shorten it. */
+  readonly autoFollow?: { readonly intervalMs: number; readonly polls: number };
+}
+
+/** About as long as a spawn takes to land and be confirmed; a task still placing past it is reported as such. */
+const AUTO_FOLLOW = { intervalMs: 1_000, polls: 20 } as const;
+
+/**
+ * Submits, then re-reads `queue` while the task is on its way to a machine,
+ * so the answer names where it landed. The leader routes on submit, so this
+ * is usually a poll or two. Nothing here ever submits twice.
+ */
+async function spawnAuto(
+  scheduler: SchedulerLeg,
+  machines: readonly Machine[],
+  request: TaskRequest,
+  follow: NonNullable<McpServerOpts["autoFollow"]>,
+): Promise<ToolResult> {
+  let reply: Awaited<ReturnType<SchedulerLeg["submit"]>>;
+  try {
+    reply = await scheduler.submit(request);
+  } catch (err) {
+    return errorResult(schedulerFailureText("auto", err));
+  }
+  if (reply === null) {
+    return errorResult(
+      `auto: the scheduler's answer was unreadable (a seanced version mismatch?) — ${MAY_HAVE_QUEUED}`,
+    );
+  }
+  if ("ok" in reply) {
+    // `too_large` judges the reply, not the submit; a crashed handler may have got as far as queueing.
+    const landed = reply.code === "too_large" || reply.code === "internal_error" ? ` — ${MAY_HAVE_QUEUED}` : "";
+    return errorResult(`auto failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}${landed}`);
+  }
+  let task = reply.task;
+  const { id } = task;
+  let seen = false;
+  for (let poll = 0; poll < follow.polls && stillPlacing(task); poll += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
+    await Bun.sleep(follow.intervalMs);
+    let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      queue = await scheduler.queue();
+    } catch (err) {
+      const why = schedulerFailureText("get_queue", err);
+      return renderAutoTask(task, machines, `Queued, but following it went wrong (${why}) — check get_queue.`);
+    }
+    // An unreadable or refused poll is one poll lost, not a verdict: the next asks again.
+    if (queue === null || "ok" in queue) continue;
+    seen = true;
+    const found = queue.tasks.find((t) => t.id === id);
+    if (found === undefined) {
+      // The reply is the newest QUEUE_MAX_TASKS only: a full one may just have scrolled past this task.
+      if (queue.tasks.length >= QUEUE_MAX_TASKS) {
+        return renderAutoTask(
+          task,
+          machines,
+          "Newer tasks pushed it out of the queue's view before it was seen placed — check get_sessions before submitting again.",
+        );
+      }
+      return errorResult(
+        `task ${id} was queued, then left the leader's queue before it was placed — the leader probably changed, which drops waiting tasks. Check get_sessions before submitting again.`,
+      );
+    }
+    task = found;
+  }
+  // Each refused poll was not a verdict, but all of them together are worth saying.
+  const unread =
+    !seen && stillPlacing(task) ? "Queued, but the scheduler never answered a follow-up read — check get_queue." : null;
+  return renderAutoTask(task, machines, unread);
+}
+
+/**
+ * The MCP face of Séance: tools mapping 1:1 onto the registry and the
+ * `sessions`/`spawn`/`despawn` ops, plus the scheduler's `submit` and `queue`
+ * behind `machine: "auto"` and `get_queue`. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface, whether
  * this process seals it or the daemon's broker does (`fleet.ts`).
  *
@@ -203,7 +568,8 @@ function openFailureText(err: unknown): string {
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
  */
-export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null): McpServer {
+export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, opts: McpServerOpts = {}): McpServer {
+  const follow = opts.autoFollow ?? AUTO_FOLLOW;
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
@@ -287,14 +653,43 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
   );
 
   server.registerTool(
+    "get_queue",
+    {
+      title: "List the scheduler's queue",
+      description: `List the scheduler's newest tasks — the ones spawn_session with machine "auto" submitted from any client — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. Prompts are cut to a preview. ${AUTO_LIMITS}`,
+      annotations: { readOnlyHint: true },
+    },
+    async () =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(keylessText("get_queue"));
+        let reply: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+        try {
+          reply = await lease.scheduler.queue();
+        } catch (err) {
+          return errorResult(schedulerFailureText("get_queue", err));
+        }
+        if (reply === null)
+          return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
+        if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${SCHEDULER_ERRORS[reply.code]}`);
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
+        return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), tasks }, null, 2));
+      }),
+  );
+
+  server.registerTool(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description:
-        "Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode \"here\" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId.",
+      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" hands the spawn to the scheduler, which picks the machine and account and answers with the task id, where it landed and why; it needs this machine's own key, the relay and a scheduler leading, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
-        machine: z.string().describe("Machine name (or deviceId) from list_machines"),
-        repo: z.string().describe("Repo name from that machine's repo list"),
+        machine: z
+          .string()
+          .describe('Machine name (or deviceId) from list_machines, or "auto" to let the scheduler place the session'),
+        repo: z
+          .string()
+          .describe(
+            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin (host/path) when it does not",
+          ),
         prompt: z.string().optional().describe("The task for the spawned session"),
         title: z
           .string()
@@ -315,6 +710,32 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
       annotations: { readOnlyHint: false },
     },
     async ({ machine, repo, prompt, title, mode, model, effort, plan }) => {
+      if (isAutoRef(machine)) {
+        // `client` is not a TaskRequest field: the leader stamps its own
+        // dispatch `client=scheduler`, so the target audits the session as the
+        // scheduler's. Empty model/effort mean "default", which a task spells as absent.
+        const task = {
+          mode,
+          ...(prompt === undefined ? {} : { prompt }),
+          ...(title === undefined ? {} : { title }),
+          ...(model === undefined || model === "" ? {} : { model }),
+          ...(effort === undefined || effort === "" ? {} : { effort }),
+          ...(plan === undefined ? {} : { plan }),
+        };
+        // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
+        const tooLong = taskRequestError({ repo, ...task });
+        if (tooLong !== null) return errorResult(`auto refused: ${tooLong}`);
+        return withFleet(async (lease) => {
+          // Never a fallback: through the broker there is no scheduler leg at all.
+          if (lease.scheduler === null) return errorResult(keylessText("auto"));
+          const resolved = resolveOrigin(lease.machines, repo);
+          if ("error" in resolved) return errorResult(resolved.error);
+          // The origin a clone name resolved to is what the leader bounds, not the name.
+          const longOrigin = overBound("repo", resolved.origin);
+          if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}`);
+          return spawnAuto(lease.scheduler, lease.machines, { repo: resolved.origin, ...task }, follow);
+        });
+      }
       const request: SpawnRequest = {
         repo,
         mode,

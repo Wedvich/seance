@@ -2364,6 +2364,38 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   daemon still resolves the repo authoritatively, an MCP process outlives many
   rescans, and an empty set means the first scan has not landed — so it denies
   nothing then rather than rejecting every repo until a restart.
+- **`machine: "auto"` and `get_queue`** (added 2026-10-17, on M2's scheduler, so the owner
+  can drive automatic placement from Claude sessions while M3 is built). `auto` sends
+  the PWA's M2 `submit` through the same app client (`RelayClient.submit`, reached via
+  `FleetLease.scheduler`), then re-reads `queue` every second, at most 20 times, while
+  the task is `reserved` or `ready` with a decision that chose somewhere, and answers
+  with the task id, its state, where it landed (machine, exclave, clone, window) and
+  the decision in one line — chosen, then each other candidate's reasons. A task no
+  candidate can take answers at once rather than holding the call. `get_queue` is the
+  `queue` op, read-only, each task with its placement and its decision's line. Behaviour
+  follows the PWA wherever the PWA already decides: a field over `TASK_REQUEST_LIMITS`
+  is refused before the relay is dialled (the leader would answer `invalid_request`,
+  which reads as a version mismatch); `no_leader`/`leader_unverified` read as "auto
+  unavailable — name a machine"; every `SchedulerErrorCode` has its own wording; and a
+  lost reply (`timeout`, `disconnected`, an unreadable answer, `too_large`,
+  `internal_error`) is "may have queued — check get_queue and get_sessions before
+  retrying", never a retry, since a second submit is a second task. `"auto"` is matched
+  in any case before the local short circuit, so a machine named "auto" is reached by
+  `deviceId`. **`repo` on auto** is the `TaskRequest`'s origin, but an agent holds clone
+  names from `list_machines`, so either is accepted: an origin exactly, or a clone name
+  whose clones across the fleet all share one origin. A name behind two origins is an
+  error listing each origin with its machines, never a guess — a guess runs the task in
+  the wrong repo. `list_machines` does not show origins: the clone name serves the
+  common case, the ambiguity error names the origins when it doesn't, and its output
+  keeps its shape. **M2's limits are in both tool descriptions**, since an agent would
+  otherwise take the queue for a backlog: a task waiting for capacity lives only in
+  the leader's memory and is lost on a leader change (every relay deploy, every daemon
+  self-update); a placed session is ordinary and survives; no deps or ordering. **Not
+  through the broker**: a keyless `seanced mcp` gets "auto needs this machine's own
+  key; unavailable through the broker", and nothing falls back. A scheduler action
+  would be a new broker action, which is a threat-model change ("Fleet broker"), so
+  `brokerFleet` leases carry `scheduler: null`. M3 item 6 moves this to `store-put`,
+  as it does the PWA (docs/scheduler.md).
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -2417,6 +2449,13 @@ meaning what it says); validating `client` against a closed union on receive —
 daemons update machine-by-machine behind fast-moving clients, so a daemon must
 never reject a spawn over a client name minted after it was built, and the
 field is display-only, so validation would buy nothing.
+
+An `auto` spawn is not an MCP spawn at its target: `TaskRequest` has no `client`
+field, and the leader dispatches with its own (`client="scheduler"`, audited
+`origin=relay` at another machine and `origin=leader` on its own). The session is the
+scheduler's, which is what its audit line says; that an agent asked for it is in that
+agent's transcript. Carrying `mcp` through would mean a `TaskRequest` schema change,
+not taken for M2.
 
 **Threat-model addendum.**
 

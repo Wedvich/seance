@@ -3,9 +3,12 @@ import {
   RelayClient,
   REGISTRY_SETTLE_MS,
   type ErrorResponse,
+  type QueueReply,
   type SchedulerEventHandler,
   type RelayState,
   type RequestOp,
+  type SubmitReply,
+  type TaskRequest,
 } from "@seance/shared";
 import type { Config } from "./config.ts";
 
@@ -30,6 +33,9 @@ export interface AppRelay {
   readonly subscribe: (listener: () => void) => () => void;
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T | ErrorResponse>;
+  /** As `RelayClient.submit`: refused before sending unless a verified leader is nominated. */
+  readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
+  readonly queue: () => Promise<QueueReply | null>;
 }
 
 /**

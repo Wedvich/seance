@@ -1000,6 +1000,70 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // MCP's `auto` is M2's `submit` over the same app client: a clone name from
+  // list_machines resolves to its origin, the leader places the task, and the
+  // spawn is the scheduler's — audited as the leader's, never as `mcp`.
+  test("an MCP auto spawn lands through the real leader, audited as the scheduler's, and get_queue shows it", async () => {
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-auto", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null, { autoFollow: { intervalMs: 250, polls: 60 } }), {
+      transport: serverTransport,
+    });
+    await client.connect(clientTransport);
+    const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return { text: content.map((entry) => entry.text).join("\n"), error: result.isError === true };
+    };
+    // The suite's daemon audits to its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+
+      const spawned = await call("spawn_session", { machine: "auto", repo: "myrepo", prompt: "route me by mcp" });
+      expect(spawned.error).toBe(false);
+      expect(spawned.text).toMatch(/^task \S+: running on TestMac \(exclave default, clone myrepo, window [^)]+\)/u);
+      expect(spawned.text).toContain("decision: chose TestMac/default");
+      window = /window ([^)]+)\)/u.exec(spawned.text)?.[1] ?? null;
+      if (window === null) throw new Error(`no window in: ${spawned.text}`);
+      expect(await listWindows()).toContain(window);
+
+      const queued = JSON.parse((await call("get_queue", {})).text) as {
+        tasks: { id: string; state: string; placement?: { machine: string } }[];
+      };
+      const id = /^task (\S+):/u.exec(spawned.text)?.[1];
+      expect(queued.tasks.find((t) => t.id === id)).toMatchObject({
+        state: "running",
+        placement: { machine: "TestMac" },
+      });
+
+      // The leader dispatched to its own machine in process; the request carried no `mcp`.
+      const lines = audit.mock.calls.map((args) => args.join(" "));
+      const spawn = lines.find((line) => line.includes("audit spawn origin=leader"));
+      expect(spawn).toContain('client="scheduler"');
+      expect(lines.some((line) => line.includes("route me by mcp"))).toBe(false);
+    } finally {
+      audit.mockRestore();
+      if (window !== null) await killWindow(window);
+      await client.close();
+      lazy.stop();
+    }
+  }, 60_000);
+
   // The M3 gate's exit, with M2's reader check kept as its tripwire. A
   // bearer-token holder's daemon socket with signed roles and no PSK, connected
   // while the real leader is down, is never nominated: auto stays "no

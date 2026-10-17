@@ -512,7 +512,11 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   **Removes M2's `submit`** (`SCHEDULER_OPS`, `SubmitResponse`, `MAX_ACTIVE_TASKS`,
   `parseSubmitReply`; the `submit` case in `leader.ts`). Moved here from item 1, where the plan
   first put it: the PWA's `auto` sends `submit` until this item gives it `store-put`, so dropping
-  the op with the store would leave `auto` broken for every PR in between.
+  the op with the store would leave `auto` broken for every PR in between. **Also moves MCP's
+  `auto`** (`spawn_session { machine: "auto" }` and `get_queue`, built on M2's `submit` on
+  2026-10-17 — DESIGN.md "MCP server") to `store-put`, in `daemon/src/mcp.ts`: it is the
+  other `submit` caller, so it must move in the same PR that drops the op. Its verdict then
+  becomes "queued" plus the task id, and its tool descriptions lose the in-memory caveat.
 
 **Who edits what** — the collision map that makes the waves parallel: `shared/src/types.ts` is
 PR 0's alone (a later PR that finds a shape missing changes it in a PR of its own, not inside
@@ -605,22 +609,22 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; an expired access token alone never reads as `expired` (daemon).
 
-- **CLI/MCP `auto`** — enqueue through the store, as the PWA does (M3 item 6): seal the task,
-  `store-put` it at `expect: 0`, so it queues with no leader up. The scheduler mints the
-  `taskId` and dispatches, so neither surface ever takes a `taskId` itself. The verdict is
-  "queued" plus the task id, not a window; `get_sessions` finds the session by `taskId` once
-  it runs. Spelling is open (e.g. `seanced spawn --auto`, `spawn_session { machine: "auto" }`).
-  Needs M3's store. Two constraints:
-  - `seanced spawn` is relay-free today: it drives local tmux and audits `origin=cli`.
-    `--auto` is the one form that needs the relay and the PSK (an app-role leg, as `seanced
-mcp` has), and a direct spawn stays relay-free.
-  - A keyless `seanced mcp` reaches the relay only through the fleet broker, whose actions
-    are fixed. An enqueue there is a new broker action, which is a threat-model change
-    (DESIGN.md "Fleet broker"); without it, keyless MCP gets no `auto`.
+- **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
+  exists already (DESIGN.md "MCP server"; M3 item 6 moves it to the store). What remains:
+  - `seanced spawn --auto` (spelling open), enqueueing through the store as the PWA does:
+    seal the task, `store-put` it at `expect: 0`, so it queues with no leader up; the
+    verdict is "queued" plus the task id, and `get_sessions` finds the session by
+    `taskId` once it runs. `seanced spawn` is relay-free today: it drives local tmux and
+    audits `origin=cli`. `--auto` is the one form that needs the relay and the PSK (an
+    app-role leg, as `seanced mcp` has), and a direct spawn stays relay-free.
+  - Keyless `seanced mcp`. It reaches the relay only through the fleet broker, whose
+    actions are fixed; today its `auto` is refused ("needs this machine's own key"). An
+    enqueue there is a new broker action, which is a threat-model change (DESIGN.md
+    "Fleet broker"); without it, keyless MCP gets no `auto`.
 
-  Raycast attaches the same way. Exit: a CLI and an MCP `auto` spawn each land as a task with
-  no leader up and run once one leads (e2e); `seanced spawn` without `--auto` still works with
-  the relay unreachable (daemon).
+  Raycast attaches the same way. Exit: a CLI `auto` spawn lands as a task with no leader
+  up and runs once one leads (e2e); `seanced spawn` without `--auto` still works with the
+  relay unreachable (daemon).
 
 ## Settled defaults (interview, 2026-10-15)
 
