@@ -1173,11 +1173,15 @@ export const BRANCH_MAX_LENGTH = 255;
  * reap's verdict (`Merged` in `daemon/src/reap-git.ts`: ancestor, squash or
  * gone) against the default branch; `pushed`, that `refs/remotes/origin/<branch>`
  * holds its work tip (live; exactly, where the repo has no `origin/HEAD`).
- * `pushed` and `merged` are reported only once the branch was seen holding a
- * commit of its own (not reachable from the default branch), and both are about
- * that work tip, not whatever the branch points at now: a branch reset to the
- * default after a push is not merged. `merged` also needs pushed evidence (seen
- * pushed, or a recorded PR URL), since a fresh branch reads as merged. Only a
+ * `pushed` and `merged` are reported only once the branch was seen holding
+ * work of its own (a tip not reachable from the default branch whose tree
+ * differs from the one it forked at: an empty commit or a revert of its only
+ * change is none), and both are about that work tip, not whatever the branch
+ * points at now: a branch reset to the default after a push is not merged. The
+ * one exception: with no `origin/HEAD` nothing can be judged work, so `pushed`
+ * is the exact match alone, and never makes a `merged`, which needs a recorded
+ * work tip. `merged` also needs pushed evidence (seen pushed, or a recorded PR
+ * URL), since a fresh branch reads as merged. Only a
  * daemon sends one; the leader drops an app's. A leader that missed one reads the
  * same state back from `SessionsResponse.progress`.
  */

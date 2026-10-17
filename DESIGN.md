@@ -1819,11 +1819,17 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - **What is tracked.** A spawn with a `taskId` in `mode: "worktree"` that lands notes two paths
   in the launch ledger (Session events, "`sessions` carries `ended`…"): the main clone
   (`RepoEntry.path`) and the worktree (`SpawnOutcome.path`). A `here` spawn has no branch of
-  its own and records neither; a refused spawn records nothing. Every landed launch starts the
+  its own and records neither; a refused spawn records nothing. A launch that lands starts the
   task's note afresh (`LaunchLedger.startNote`): a worktree launch with just those two paths, a
   `here` one with none, whatever an earlier launch of the same id left. A relaunch to the same
   path would otherwise inherit the first attempt's sticky `ahead`, `pushed` and PR URL and read
-  a workless branch as merged. Every ledger task with both
+  a workless branch as merged. Only a spawn that succeeded does it: a `task_running` refusal (its
+  session is the earlier launch) or a crash during spawn settles the id as launched, so it is not
+  retracted, but leaves the note alone, since the mod reports a PR URL once and a wiped note
+  would lose it for good. A PR URL a session reports while the new spawn is still in flight is
+  the new launch's and survives the fresh note. The note also records `siteAt`, when its site
+  was set, which a later change never moves (a note from before it counts as the oldest).
+  Every ledger task with both
   paths and not yet merged is checked once a minute (`BRANCH_CHECK_INTERVAL_MS`); a merged one
   never again. Tasks launched before this landed have no site and are not watched. They are M2
   tasks with no `after:` dependents, so nothing waits on them.
@@ -1833,18 +1839,31 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   is used only once the worktree no longer belongs to the repo (removed, or its directory
   reused by another repo, or `HEAD` is not under `refs/heads/`: `symbolic-ref --short` would
   print `heads/<b>` beside a tag of the same name). When several tasks share a worktree path, the
-  newest launch owns the live read, merged ones counted: `freeWorktreeName` frees a slug only when
-  the directory and the branch `worktree-<slug>` are both gone, so a reused path is a reused branch
-  name, and a newer launch's fresh local ref would otherwise be read as the older task's. A
-  non-owner never reads the local ref by name: it is judged by its recorded tip alone, and the
-  remote ref counts only if it holds that tip or descends from it. A detached head, or no branch
-  at all, is skipped.
+  newest site (`siteAt`) owns the live read, merged ones counted: `freeWorktreeName` frees a slug
+  only when the directory and the branch `worktree-<slug>` are both gone, so a reused path is a
+  reused branch name, and a newer launch's fresh local ref would otherwise be read as the older
+  task's. By `siteAt`, not ledger order: a re-dispatch of an old id that is then refused is
+  re-recorded at the end of the ledger, and would take the path from the launch that holds it.
+  A tie goes to the later in the ledger. A non-owner never reads the local ref by name: it is
+  judged by its recorded tip alone, and the remote ref counts only if it holds that tip or
+  descends from it. Nor does the owner trust the local ref blindly: with a tip recorded, the local
+  ref is used only if it equals it or descends from it. Otherwise something else made a branch of
+  that name once the task's own was removed (a spawn with no task id on the freed path), and
+  reading it would overwrite the recorded tip and read that spawn's merge as the task's; the
+  recorded tip is judged instead. The price is a branch rewritten to different work (a rebase, a
+  reset then new commits) is judged by its last recorded tip, so its new work is not reported
+  pushed or merged; a missed `merged` costs a manual mark-done, a false one settles a task
+  `done` with its PR open. A detached head, or no branch at all, is skipped.
 - **`pushed` is the remote ref, never an upstream.** `claude --worktree` branches `--no-track`,
   so `%(upstream:track)` says nothing for them. `pushed` is true when
   `refs/remotes/origin/<branch>` exists and holds the work tip (or the work tip is its ancestor),
   which `git push origin <b>` with no `-u` satisfies. With no `origin/HEAD` nothing can be judged
   ahead, so the ancestor test is off: `pushed` then needs the remote ref to equal the tip exactly,
-  and a stale ref from an earlier attempt that happens to be ahead of a fresh tip does not pass. In `BranchState` it is live (it reads false once
+  and a stale ref from an earlier attempt that happens to be ahead of a fresh tip does not pass.
+  There the own-work gate below cannot apply either, so such a `pushed` can be reported for a tip
+  with no work of its own (a fresh branch pushed as it is). That is kept on purpose: it is what
+  lets `after: opened` work in a clone with no `origin/HEAD`, and it cannot make `merged`, which
+  needs a recorded own-work tip that only a pass with a default branch writes. In `BranchState` it is live (it reads false once
   a merge deletes the remote branch); in `progress` it is sticky, as `TaskProgress` says none of
   its flags goes back.
 - **`merged` is reap's verdict, with two gates.** `classifyTip` (`ancestor`, `squash` or `gone`,
@@ -1852,12 +1871,16 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   reads as merged (it is an ancestor of the default, and an empty diff is an empty "squash"), and
   reap can afford that because it acts only on branches idle for days. A scheduler cannot: a
   workless branch reading merged settles a running task as `done`. So (1) **own work**: nothing
-  is reported pushed or merged until the branch was seen holding a commit not reachable from the
-  default branch (`ahead`, sticky), and the commit judged is the **work tip**: the current tip
-  while it is ahead now, otherwise the last tip recorded (the note keeps a tip only while ahead).
-  A session that pushes work and then `git reset --hard origin/main` is thus still judged on the
-  pushed commit, never on a main it merely points at; a fast-forward merge still reads merged, since
-  the unchanged tip is then an ancestor. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
+  is reported pushed or merged until the branch was seen holding own work (`ahead`, sticky): a tip
+  that is not an ancestor of the default branch **and** whose tree differs from the tree of the
+  commit it forked at (`merge-base`). The second half matters: an empty commit, pushed under a
+  draft PR, or a revert of the branch's only change is not an ancestor either, and its net change
+  is empty, which `classifyTip` reads as a squash of the default. The commit judged is the **work
+  tip**: the current tip while it holds own work now, otherwise the last tip recorded (the note
+  keeps a tip only while it held own work). A session that pushes work and then
+  `git reset --hard origin/main`, or reverts it, is thus still judged on the pushed commit, never
+  on a main it merely points at; a fast-forward merge still reads merged, since the unchanged tip
+  is then an ancestor. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
   `refs/remotes/origin/<b>` from an earlier attempt from reading as pushed. And (2) **pushed
   evidence**: merged needs the branch seen pushed, or a recorded PR URL, which proves a push even
   when push, merge and prune all happened while the daemon was down. "Gone" is derived, since
@@ -1891,7 +1914,9 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   it is delivered. That memory is kept per ledger object at module scope, so an emitter that is
   stopped and replaced on the same ledger (a config reload) hands its backlog on, and a send that
   finds the emitter stopped after the note was written keeps its state there instead of losing it.
-  An entry whose task has left the ledger is dropped. The memory dies with the process: a state
+  An entry whose task has left the ledger is dropped, and so is one computed under an earlier launch
+  of a relaunched id: it carries the `siteAt` it was computed under and is dropped when the note's
+  differs, or a stale `pushed` would reach the leader after the relaunch. The memory dies with the process: a state
   noted but never sent when the process exits is recovered only through `progress`, which the
   leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of
