@@ -25,6 +25,7 @@ import {
 } from "./config.ts";
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
+import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
 import { createLeader, type Leader, type LeaderOpts } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
@@ -93,6 +94,8 @@ export interface RunOpts {
   readonly selfUpdate?: SelfUpdateOpts;
   /** The scheduler role's store and tick cadence; tests seed the one and shorten the other. */
   readonly leader?: Pick<LeaderOpts, "store" | "tickIntervalMs">;
+  /** Tests only: the branch-state emitter's intervals, which are constants in production. */
+  readonly branchState?: Pick<BranchStateDeps, "intervalMs" | "fetchStaleMs">;
 }
 
 export interface SelfUpdateOpts {
@@ -479,6 +482,19 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     quota: sessionQuota,
     ended: endedTasks,
   });
+  const branchStates = createBranchStates({
+    ledger: endedTasks.ledger,
+    repos: () => state.repos,
+    // The leader reaches itself in process, never by a relay round trip, as session events do.
+    emit: (branch) => {
+      if (leader.term() !== null) {
+        leader.onBranchState(branch, state.deviceId);
+        return Promise.resolve(true);
+      }
+      return client.sendBranchState(branch);
+    },
+    ...opts.branchState,
+  });
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
@@ -543,6 +559,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // Its leg, timer and loop go with the handle too, before the client it hears terms on.
       leader.stop();
       sessionEvents.stop();
+      branchStates.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

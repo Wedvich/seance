@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS } from "./launch-ledger.ts";
+import { parseTaskProgressList } from "@seance/shared";
+import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
 
 let dir: string;
 let path: string;
@@ -126,5 +127,250 @@ describe("LaunchLedger", () => {
     expect((await LaunchLedger.open(path, () => 1)).ids().toSorted()).toEqual(
       Array.from({ length: 20 }, (_, i) => `t${i}`).toSorted(),
     );
+  });
+});
+
+describe("LaunchLedger progress notes", () => {
+  const TIP = "a".repeat(40);
+
+  test("a literal v1 file opens with the same since and ids and no notes", async () => {
+    await writeFile(path, '{"v":1,"since":1234,"tasks":[["t1",2000],["t2",3000]]}\n');
+    const ledger = await LaunchLedger.open(path, () => 5_000);
+    expect(ledger.since()).toBe(1234);
+    expect(ledger.ids()).toEqual(["t1", "t2"]);
+    expect(ledger.notes()).toEqual([]);
+    expect(ledger.progress()).toEqual([]);
+  });
+
+  test("an untouched ledger writes plain v1; a note adds only a top-level progress array", async () => {
+    const ledger = await LaunchLedger.open(path, () => 100);
+    await ledger.record("t1");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ v: 1, since: 100, tasks: [["t1", 100]] });
+    await ledger.note("t1", { repo: "/r", path: "/r/.claude/worktrees/x", branch: "worktree-x" });
+    const raw: unknown = JSON.parse(await readFile(path, "utf8"));
+    expect(raw).toMatchObject({ v: 1, since: 100, tasks: [["t1", 100]] });
+    expect(raw).toHaveProperty("progress");
+  });
+
+  test("a note survives a reopen, and the file keeps the pairs an older daemon reads", async () => {
+    const clock = { now: 100 };
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    await ledger.record("t1");
+    clock.now = 200;
+    await ledger.note("t1", { repo: "/r", path: "/w", branch: "worktree-x", tip: TIP, ahead: true, pushed: true });
+    const raw: unknown = JSON.parse(await readFile(path, "utf8"));
+    expect(raw).toMatchObject({ v: 1, tasks: [["t1", 100]] });
+
+    const reopened = await LaunchLedger.open(path, () => 300);
+    expect(reopened.notes()).toEqual([
+      {
+        taskId: "t1",
+        at: 200,
+        siteAt: 200,
+        repo: "/r",
+        path: "/w",
+        branch: "worktree-x",
+        tip: TIP,
+        ahead: true,
+        pushed: true,
+      },
+    ]);
+  });
+
+  test("siteAt is read leniently: a note without one, or with a bad one, is the oldest, never dropped", async () => {
+    const file = {
+      v: 1,
+      since: 1,
+      tasks: [
+        ["a", 10],
+        ["b", 20],
+        ["c", 30],
+      ],
+      progress: [
+        { taskId: "a", at: 5, path: "/w" },
+        { taskId: "b", at: 6, path: "/w", siteAt: "later" },
+        { taskId: "c", at: 7, path: "/w", siteAt: 9 },
+      ],
+    };
+    await writeFile(path, JSON.stringify(file));
+    const notes = (await LaunchLedger.open(path, () => 100)).notes();
+    expect(notes.map((n) => [n.taskId, n.siteAt])).toEqual([
+      ["a", undefined],
+      ["b", undefined],
+      ["c", 9],
+    ]);
+  });
+
+  test("malformed progress entries are skipped, never the ledger", async () => {
+    const good = { taskId: "t1", at: 5, branch: "worktree-x", pushed: true };
+    const file = {
+      v: 1,
+      since: 77,
+      tasks: [
+        ["t1", 10],
+        ["t2", 20],
+      ],
+      progress: [
+        good,
+        { taskId: "t2", at: 6, branch: "" },
+        { taskId: "ghost", at: 7, branch: "b" },
+        { taskId: "t2", at: 8, prUrl: "http://example.com/pr/1" },
+        { taskId: "t2", at: 9, pushed: false, merged: "yes", tip: "nothex" },
+        "junk",
+        { taskId: "t1", at: Number.NaN },
+      ],
+    };
+    await writeFile(path, JSON.stringify(file));
+    const ledger = await LaunchLedger.open(path, () => 100);
+    expect(ledger.since()).toBe(77);
+    expect(ledger.ids()).toEqual(["t1", "t2"]);
+    // A bad field drops, so a t2 entry survives as a bare note; none carries a bad value.
+    const notes = ledger.notes();
+    expect(notes.find((n) => n.taskId === "t1")).toMatchObject(good);
+    expect(notes.some((n) => n.taskId === "ghost")).toBe(false);
+    for (const note of notes) {
+      expect(note.branch).not.toBe("");
+      expect(note.prUrl).toBeUndefined();
+      expect(note.tip).toBeUndefined();
+      expect(note.merged).toBeUndefined();
+    }
+    expect(ledger.progress().every((entry) => entry.taskId === "t1")).toBe(true);
+
+    await writeFile(path, JSON.stringify({ ...file, progress: "not an array" }));
+    const ignored = await LaunchLedger.open(path, () => 100);
+    expect(ignored.since()).toBe(77);
+    expect(ignored.notes()).toEqual([]);
+  });
+
+  test("note on an unknown id writes nothing", async () => {
+    const ledger = await LaunchLedger.open(path, () => 1);
+    await ledger.note("ghost", { branch: "b" });
+    expect(ledger.notes()).toEqual([]);
+    await expect(readFile(path, "utf8")).rejects.toThrow();
+  });
+
+  test("eviction and retract remove the note", async () => {
+    const clock = { now: 0 };
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    clock.now = 10;
+    await ledger.record("old");
+    await ledger.note("old", { branch: "a" });
+    clock.now = 20;
+    await ledger.record("gone");
+    await ledger.note("gone", { branch: "b" });
+    await ledger.retract("gone");
+    expect(ledger.notes().map((n) => n.taskId)).toEqual(["old"]);
+    expect(JSON.stringify(JSON.parse(await readFile(path, "utf8")))).not.toContain('"gone"');
+    clock.now = 10 + LEDGER_MAX_AGE_MS + 1;
+    expect(ledger.notes()).toEqual([]);
+  });
+
+  test("a new path replaces the note; pushed, merged and ahead never clear; an unchanged note keeps its at", async () => {
+    const clock = { now: 1 };
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    await ledger.record("t1");
+    await ledger.note("t1", {
+      repo: "/r",
+      path: "/w1",
+      branch: "a",
+      pushed: true,
+      ahead: true,
+      prUrl: "https://x.test/1",
+    });
+    clock.now = 2;
+    await ledger.note("t1", { branch: "b", tip: TIP });
+    expect(ledger.notes()[0]).toMatchObject({
+      branch: "b",
+      pushed: true,
+      ahead: true,
+      prUrl: "https://x.test/1",
+      at: 2,
+    });
+    clock.now = 3;
+    await ledger.note("t1", { branch: "b", tip: TIP });
+    expect(ledger.notes()[0]?.at).toBe(2);
+
+    clock.now = 4;
+    await ledger.note("t1", { repo: "/r", path: "/w2" });
+    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 4, siteAt: 4, repo: "/r", path: "/w2" });
+    // The site's age survives later changes: ownership of a path goes by it.
+    clock.now = 6;
+    await ledger.note("t1", { branch: "c" });
+    expect(ledger.notes()[0]).toMatchObject({ at: 6, siteAt: 4 });
+  });
+
+  test("a landed relaunch starts the note afresh, to the same path or none, and only for a launched id", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    const worked: TaskNote = {
+      repo: "/r",
+      path: "/w",
+      branch: "b",
+      tip: TIP,
+      ahead: true,
+      pushed: true,
+      prUrl: "https://x.test/1",
+    };
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, siteAt: 5, repo: "/r", path: "/w" }]);
+
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1");
+    expect(ledger.notes()).toEqual([]);
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("progress");
+
+    // A PR URL its session reported while the spawn ran is the new launch's, whatever the old note said.
+    await ledger.note("t1", worked);
+    await ledger.startNote("t1", { repo: "/r", path: "/w" }, "https://x.test/2");
+    expect(ledger.notes()).toEqual([
+      { taskId: "t1", at: 5, siteAt: 5, repo: "/r", path: "/w", prUrl: "https://x.test/2" },
+    ]);
+    await ledger.startNote("t1", undefined, "https://x.test/3");
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 5, prUrl: "https://x.test/3" }]);
+    await ledger.startNote("t1");
+    expect(ledger.notes()).toEqual([]);
+
+    await ledger.startNote("ghost", { repo: "/r", path: "/w" });
+    expect(ledger.notes()).toEqual([]);
+  });
+
+  test("a patch pinned to a launch is refused once a relaunch moved siteAt", async () => {
+    let clock = 5;
+    const ledger = await LaunchLedger.open(path, () => clock);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    clock = 9;
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    expect(await ledger.note("t1", { branch: "old", pushed: true }, { siteAt: 5 })).toBe(false);
+    expect(ledger.notes()).toEqual([{ taskId: "t1", at: 9, siteAt: 9, repo: "/r", path: "/w" }]);
+    expect(await ledger.note("t1", { branch: "new" }, { siteAt: 9 })).toBe(true);
+    expect(ledger.notes()[0]?.branch).toBe("new");
+    expect(await ledger.note("ghost", { branch: "x" })).toBe(false);
+  });
+
+  test("a failed write resolves, and the note stays in memory", async () => {
+    const ledger = await LaunchLedger.open(path, () => 1);
+    await ledger.record("t1");
+    await rm(path);
+    // A directory where the file should be: the rename fails.
+    await mkdir(join(path, "x"), { recursive: true });
+    await ledger.note("t1", { branch: "kept" });
+    expect(ledger.notes()[0]?.branch).toBe("kept");
+    expect(ledger.ids()).toEqual(["t1"]);
+  });
+
+  test("progress strips repo and path, omits empty notes and passes the leader's parser", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    for (const id of ["a", "b", "c"]) await ledger.record(id);
+    await ledger.note("a", { repo: "/r", path: "/w", tip: TIP, ahead: true });
+    await ledger.note("b", { repo: "/r", path: "/w2", branch: "worktree-b", pushed: true, merged: true, tip: TIP });
+    await ledger.note("c", { prUrl: "https://example.com/pr/3" });
+    const progress = ledger.progress();
+    expect(progress).toEqual([
+      { taskId: "b", at: 9, branch: "worktree-b", pushed: true, merged: true },
+      { taskId: "c", at: 9, prUrl: "https://example.com/pr/3" },
+    ]);
+    expect(parseTaskProgressList(progress)).not.toBeNull();
   });
 });

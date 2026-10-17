@@ -1102,7 +1102,6 @@ export interface SessionsResponse {
    * cannot settle a task that ended with an open PR as `done`, or hold an
    * `after: "merged"` dependent past a merge it missed. At most
    * `SESSIONS_MAX_PROGRESS`; absent from older daemons and when there is none.
-   * Not sent yet (M3 item 4b).
    */
   readonly progress?: readonly TaskProgress[];
   /**
@@ -1128,11 +1127,14 @@ export interface TaskProgress {
   readonly prUrl?: string;
   /** Absent for a `here` session, which has no task branch of its own. */
   readonly branch?: string;
-  /** Its upstream held its tip. */
+  /**
+   * origin's ref for the branch (`refs/remotes/origin/<branch>`) held its tip at
+   * least once — never an upstream: `claude --worktree` branches `--no-track`.
+   */
   readonly pushed?: true;
   /** `BranchState.merged`'s verdict. */
   readonly merged?: true;
-  /** When the daemon last observed any of these, ms. */
+  /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
@@ -1169,9 +1171,19 @@ export const BRANCH_MAX_LENGTH = 255;
  * "Done detection"). Like `SessionEvent`, every field is the daemon's own: the
  * task id from its pane map or launch ledger, never from a session. `merged` is
  * reap's verdict (`Merged` in `daemon/src/reap-git.ts`: ancestor, squash or
- * gone) against the default branch; `pushed`, that the branch's upstream holds
- * its tip. A leader that missed one reads the same state back from
- * `SessionsResponse.progress`. Not sent yet (M3 item 4b).
+ * gone) against the default branch; `pushed`, that `refs/remotes/origin/<branch>`
+ * holds its work tip (live; exactly, where the repo has no `origin/HEAD`).
+ * `pushed` and `merged` are reported only once the branch was seen holding
+ * work of its own (a tip not reachable from the default branch whose tree
+ * differs from the one it forked at: an empty commit or a revert of its only
+ * change is none), and both are about that work tip, not whatever the branch
+ * points at now: a branch reset to the default after a push is not merged. The
+ * one exception: with no `origin/HEAD` nothing can be judged work, so `pushed`
+ * is the exact match alone, and never makes a `merged`, which needs a recorded
+ * work tip. `merged` also needs pushed evidence (seen pushed, or a recorded PR
+ * URL), since a fresh branch reads as merged. Only a
+ * daemon sends one; the leader drops an app's. A leader that missed one reads the
+ * same state back from `SessionsResponse.progress`.
  */
 export interface BranchState {
   readonly taskId: string;

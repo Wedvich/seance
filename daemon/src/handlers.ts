@@ -11,6 +11,7 @@ import type {
   SessionsResponse,
   SpawnRequest,
   SpawnResponse,
+  TaskProgress,
   UpdateAvailable,
 } from "@seance/shared";
 import { isMetricsRequest, isRecord, isTaskId, quote, SCHEDULER_ID } from "@seance/shared";
@@ -24,6 +25,7 @@ import {
 } from "./audit.ts";
 import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
 import { log } from "./log.ts";
+import type { SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
   readonly backend: SessionBackend;
@@ -53,9 +55,11 @@ export interface HandlerContext {
 /** What the handlers need of `EndedTasks` (`session-events.ts`). */
 export interface TaskLaunches {
   /** Write-ahead: throws when the task cannot be recorded, and the spawn then must not run. */
-  readonly launch: (taskId: string) => Promise<(launched: boolean) => Promise<void>>;
+  readonly launch: (taskId: string) => Promise<SettleLaunch>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
+  /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
+  readonly progress: () => readonly TaskProgress[];
   readonly report: (carried: ReadonlySet<string>) => {
     readonly ended: readonly string[];
     readonly ledgerSince: number;
@@ -113,7 +117,7 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
   await audit.request(payload);
-  let settle: ((launched: boolean) => Promise<void>) | undefined;
+  let settle: SettleLaunch | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
     try {
       settle = await ctx.tasks.launch(payload.taskId);
@@ -130,14 +134,19 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   }
   try {
     let outcome: SpawnOutcome;
+    // Read once: a rescan in between must not pair the spawn with another clone.
+    const repos = ctx.getRepos();
     try {
-      outcome = await ctx.backend.spawn(payload, ctx.getRepos());
+      outcome = await ctx.backend.spawn(payload, repos);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
+      // Neither it nor a crash starts a note: the earlier launch's stays.
       await settle?.(!(err instanceof SpawnFailure) || err.code === "task_running");
       throw err;
     }
-    await settle?.(true);
+    // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
+    const entry = payload.mode === "worktree" ? repos.find((r) => r.name === payload.repo) : undefined;
+    await settle?.(true, entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } });
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
@@ -233,8 +242,8 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
  * Only the scheduler waits out a launch in flight, which is what makes the two
  * fields a proof (DESIGN.md, "Session events"), and only it gets them. A spawn
  * can run for a minute; a PWA refresh or an MCP `get_sessions` behind it would
- * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. M3's
- * `progress` is the leader's to read too, and belongs on the same side.
+ * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. `progress`
+ * is the leader's to read too, and is sent on the same side, trimmed to fit.
  */
 async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<SessionsResponse> {
   if (scheduler) await ctx.tasks?.settled();
@@ -242,7 +251,64 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };
   const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
-  return { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
+  const base: SessionsResponse = { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
+  return fitProgress(base, ctx.tasks.progress());
+}
+
+/**
+ * UTF-8 bytes of payload JSON one scheduler `sessions` reply may carry. The
+ * same 4/3 sealing headroom as `QUEUE_REPLY_BUDGET` in `leader.ts`: against
+ * `ENVELOPE_MAX_CT_LENGTH`'s 65 536, 44 000 seals to about 58 900. Over it,
+ * `RelayClient` answers `too_large` instead, losing `ended` and `ledgerSince`.
+ */
+export const SESSIONS_REPLY_BUDGET = 44_000;
+
+const PROGRESS_KEY_BYTES = Buffer.byteLength(',"progress":[]', "utf8");
+const TRIMMED_KEY_BYTES = Buffer.byteLength(',"progressTrimmed":', "utf8");
+
+/**
+ * `base` with `progress`, dropped to fit `budget` and the count recorded in
+ * `progressTrimmed`. `at` is the last change, not the last look, so an open PR
+ * untouched for days has the oldest `at` and is what a takeover needs most:
+ * merged entries go first (finished; a missed one costs a re-read), then the
+ * rest oldest first. Survivors keep their order.
+ */
+export function fitProgress(
+  base: SessionsResponse,
+  progress: readonly TaskProgress[],
+  budget: number = SESSIONS_REPLY_BUDGET,
+): SessionsResponse {
+  if (progress.length === 0) return base;
+  const sized = progress.map((entry, index) => ({
+    entry,
+    index,
+    bytes: Buffer.byteLength(JSON.stringify(entry), "utf8"),
+  }));
+  const baseBytes = Buffer.byteLength(JSON.stringify(base), "utf8");
+  let kept = sized.length;
+  let sum = sized.reduce((total, item) => total + item.bytes, 0);
+  let dropped = 0;
+  const total = (): number =>
+    baseBytes +
+    (kept === 0 ? 0 : PROGRESS_KEY_BYTES + sum + kept - 1) +
+    (dropped === 0 ? 0 : TRIMMED_KEY_BYTES + String(dropped).length);
+  const order = sized.toSorted(
+    (a, b) => Number(b.entry.merged === true) - Number(a.entry.merged === true) || a.entry.at - b.entry.at,
+  );
+  const gone = new Set<number>();
+  for (const item of order) {
+    if (total() <= budget) break;
+    gone.add(item.index);
+    kept -= 1;
+    sum -= item.bytes;
+    dropped += 1;
+  }
+  const survivors = progress.filter((_, index) => !gone.has(index));
+  return {
+    ...base,
+    ...(survivors.length === 0 ? {} : { progress: survivors }),
+    ...(dropped === 0 ? {} : { progressTrimmed: dropped }),
+  };
 }
 
 /** The three ops the scheduler dispatches, typed, for a caller inside this process. */

@@ -13,6 +13,7 @@ import {
   deleteBranch,
   fetchIfStale,
   gitDirOf,
+  isMerged,
   lastTouched,
   listBranches,
   listWorktrees,
@@ -263,10 +264,6 @@ function emptyLists(): RepoLists {
 
 function emptyRepoReport(repo: string): RepoReport {
   return { repo, ...emptyLists(), young: 0 };
-}
-
-function isMerged(verdict: BranchVerdict): verdict is Merged {
-  return verdict === "ancestor" || verdict === "squash" || verdict === "gone";
 }
 
 interface Target {

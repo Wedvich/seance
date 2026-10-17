@@ -13,17 +13,19 @@ import { exec, execFailure, type ExecResult } from "./exec.ts";
  * timeout keep a fetch that wants credentials from hanging, as Claude Code does;
  * `stdin` is for the plumbing that reads it (`patch-id`, `diff-tree --stdin`), never a fetch.
  * What still runs is what a fetch needs — credential helpers, `core.sshCommand`.
+ * The branch-state emitter (`branch-state.ts`) makes its calls through it too.
  */
 export async function reapGit(
   cwd: string,
   args: readonly string[],
   timeoutMs = 15_000,
   stdin?: string,
+  env: Readonly<Record<string, string | undefined>> = {},
 ): Promise<ExecResult> {
   return exec(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
     cwd,
     timeoutMs,
-    env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+    env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", ...env },
     ...(stdin === undefined ? {} : { stdin }),
   });
 }
@@ -35,7 +37,12 @@ const FETCH_TIMEOUT_MS = 30_000;
 export type FetchOutcome =
   | { readonly kind: "fresh" }
   | { readonly kind: "fetched" }
-  | { readonly kind: "failed"; readonly detail: string };
+  | {
+      readonly kind: "failed";
+      readonly detail: string;
+      /** `detail` without git's stderr, which can carry a remote URL's credentials: safe for a log that is not reap's. */
+      readonly brief: string;
+    };
 
 /**
  * The newest `FETCH_HEAD` across the clone and its worktrees: a fetch run inside
@@ -51,10 +58,23 @@ async function lastFetchedAt(commonDir: string): Promise<number> {
   return Math.max(0, ...times);
 }
 
-export async function fetchIfStale(repoPath: string, commonDir: string, now: number): Promise<FetchOutcome> {
-  if (now - (await lastFetchedAt(commonDir)) < FETCH_STALE_MS) return { kind: "fresh" };
-  const result = await reapGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS);
-  return result.exitCode === 0 ? { kind: "fetched" } : { kind: "failed", detail: execFailure(result) };
+/** `staleMs` and `env` are the emitter's: a shorter window, and `GCM_INTERACTIVE=never` against a credential GUI. */
+export async function fetchIfStale(
+  repoPath: string,
+  commonDir: string,
+  now: number,
+  staleMs = FETCH_STALE_MS,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<FetchOutcome> {
+  if (now - (await lastFetchedAt(commonDir)) < staleMs) return { kind: "fresh" };
+  const result = await reapGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS, undefined, env);
+  return result.exitCode === 0
+    ? { kind: "fetched" }
+    : {
+        kind: "failed",
+        detail: execFailure(result),
+        brief: result.timedOut ? "timed out" : `exit ${result.exitCode}`,
+      };
 }
 
 /**
@@ -156,6 +176,10 @@ export async function listBranches(repoPath: string): Promise<readonly BranchRec
  */
 export type Merged = "ancestor" | "squash" | "gone";
 export type BranchVerdict = Merged | "unmerged-gone" | "active";
+
+export function isMerged(verdict: BranchVerdict): verdict is Merged {
+  return verdict === "ancestor" || verdict === "squash" || verdict === "gone";
+}
 
 /** `git patch-id` output as commit → patch id; a diff with no commit header reports the zero sha. */
 function parsePatchIds(raw: string): ReadonlyMap<string, string> {

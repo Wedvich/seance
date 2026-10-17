@@ -15,6 +15,7 @@ import {
   quote,
   seal,
   signRegister,
+  type BranchState,
   type DaemonFrame,
   type Envelope,
   type ErrorResponse,
@@ -199,9 +200,18 @@ export class RelayClient {
    * relay drops it when no leader is nominated — every event is also in the
    * `sessions` reply a new leader reconciles against, so nothing is retried.
    */
-  async sendToScheduler(event: SessionEvent): Promise<boolean> {
+  sendToScheduler(event: SessionEvent): Promise<boolean> {
+    return this.#toScheduler("session-event", event);
+  }
+
+  /** Fire-and-forget like `sendToScheduler`, for the `branch-state` op; false when it was not sent. */
+  sendBranchState(state: BranchState): Promise<boolean> {
+    return this.#toScheduler("branch-state", state);
+  }
+
+  async #toScheduler(op: "session-event" | "branch-state", payload: SessionEvent | BranchState): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
-    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload: event };
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
     const sealed = await seal(this.#opts.key, { to: SCHEDULER_ID, from: this.#opts.identity.deviceId }, plain);
     // Re-checked after the seal: a redial meanwhile leaves a socket that is open
     // but not yet registered, and the relay drops anything sent on it before one.

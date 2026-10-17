@@ -556,7 +556,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
 --worktree` branches `--no-track`, so `pushed` compares with the remote ref, not an upstream;
     and a session can rename its branch, so the branch is read from the worktree each time, never
     remembered from the spawn. The leader's own machine hands its `branch-state` over in process,
-    as `run.ts` already does its session events.
+    as `run.ts` already does its session events, to `leader.onBranchState`, which item 3 feeds to
+    the library. **Landed** (2026-10-17): DESIGN.md, "Branch state".
 - **Before wave 2: split `leader.ts`**, no behaviour change: its store and fleet adapters, its
   request handlers (`answer`, `queueView`), and the term lifecycle, so items 3 and 5 can run in
   parallel. `scheduler/test/layering.test.ts` names one `LEADER` file; it takes the set, which
@@ -567,9 +568,11 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     the term lifecycle); takeover reconciliation over opened, `bindTaskRecord`-checked bodies.
     Also, unowned until now: the store frames' send and correlate on the daemon leg
     (`daemon/src/relay-client.ts`; item 2 does the app leg); `store-changed` driving the
-    one-record refresh; the leader handling `branch-state` (its event handler drops every op but
-    `session-event`) and the PR URL reaching the library (`run.ts`'s in-process forward and the
-    leader's handler both drop `prUrl` before `onSession`); `e2e/harness.ts` no longer injecting
+    one-record refresh; the leader handling `branch-state` (item 4b's handler parses it into a no-op sink and drops
+    every other op but `session-event`) and the PR URL reaching the library (`run.ts`'s in-process forward and the
+    leader's handler both drop `prUrl` before `onSession`), and feeding the in-process
+    `branch-state` hand-off in `run.ts`'s emitter `emit` (item 4b's `leader.onBranchState`
+    sink, a no-op until then) to the library; `e2e/harness.ts` no longer injecting
     `MemoryQueueStore`; and a store double in `daemon/test/harness.ts` — term fence, tombstones,
     `store-changed` — for the adapter's daemon tests.
     **Precondition: `submit` must not create `ready` through this adapter.** M2's
