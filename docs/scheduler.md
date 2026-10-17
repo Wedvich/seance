@@ -526,7 +526,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   - **2. The at-rest `task` op and version binding** — sealing in `shared/src/crypto.ts`, the
     app-client's store methods in `shared/src/app-client.ts`; readers open without the
     `ReplayGuard` and keep a record only through `bindTaskRecord`. A create checks its sealed
-    length against the create cap before sending.
+    length against the create cap before sending. **Landed 2026-10-17** (DESIGN.md _Scheduler_,
+    "Task records and the app's store leg"): `sealAtRest` in `crypto.ts`, the record helpers in
+    `shared/src/task-record.ts` for item 3 to reuse, and `listTasks` / `getTask` / `createTask`.
   - **4a. The library's M3 states**, batches, hand-declared deps with PR 0b's semantics, done
     detection — `branch-state` live, `progress` on takeover and when a machine holding a waiting
     task comes back — and `awaiting-merge`, against `MemoryQueueStore` (`scheduler/`). The M3

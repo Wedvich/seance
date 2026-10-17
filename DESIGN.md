@@ -499,9 +499,13 @@ nothing checked it. The last is the gap they leave.
   `lead-proof` are data at rest — the relay re-sends the same envelope on every
   push — so no guard sees them, and only `from` says which machine a blob
   describes and only `op` which kind of blob it is: payload shape would let a
-  `status` (or M3's `task`) stand in for whatever its slot expects. All go
+  `status` (or a stored `task`) stand in for whatever its slot expects. All go
   through `openAtRest`
-  (`shared/src/crypto.ts`), which throws unless `plain.op` is the one asked for.
+  (`shared/src/crypto.ts`), which throws unless `plain.op` is the one asked for
+  and takes only an `AT_REST_OPS` op. A `task` record is the store's, so its
+  `from` names a writer (an app or the leader), not a machine; what binds it is
+  its sealed `version` and `task.id` against the relay's (`openTaskRecord`,
+  then `bindTaskRecord`), and one that fails either is skipped and reported.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -779,10 +783,10 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (relay→app)                                                     | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                 |
 | op `metrics`                                                             | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                     |
 | op `session-event` (→`"scheduler"`)                                      | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                         |
-| `store-list` / `store-get` / `store-put` / `store-delete` — M3           | apps via `shared/src/app-client.ts` (M3 item 2); the leader's daemon socket via `daemon/src/queue-store.ts` (item 3), with `term` on writes        | `relay/src/store.ts` through `relay/src/hub.ts`, bounds in `relay/src/wire.ts` (item 1); `parseDaemonFrame` / `parseAppFrame` return none of them until then                                                                                                                                                                           |
-| `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/store.ts` (item 1)                                                                                                                      | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client (item 2) and the queue store (item 3)                                                                                                                                                                                                                 |
+| `store-list` / `store-get` / `store-put` / `store-delete` — M3           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` (item 3), with `term` on writes  | `relay/src/store.ts` through `relay/src/hub.ts`, bounds in `relay/src/wire.ts` (item 1); `parseDaemonFrame` / `parseAppFrame` return none of them until then                                                                                                                                                                           |
+| `store-listed` / `store-record` / `store-written` / `store-refused` — M3 | `relay/src/store.ts` (item 1)                                                                                                                      | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store (item 3)                                                                                                                                                              |
 | `store-changed` — M3                                                     | `relay/src/hub.ts`, to the leader's daemon socket after a write it did not make (item 1)                                                           | `daemon/src/relay-client.ts` → `daemon/src/leader.ts` (item 3), via `parseStoreChanged`                                                                                                                                                                                                                                                |
-| records `task` / `pause-state` (at rest) — M3                            | sealed by the app-client (item 2) and the queue store (item 3)                                                                                     | opened with `openAtRest`, then `parseTaskRecord` / `parsePauseRecord` and the version and id binding (items 2–3)                                                                                                                                                                                                                       |
+| records `task` / `pause-state` (at rest) — M3                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store (item 3)                              | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` (item 5)                                                                                                                                   |
 | ops `mark-done` / `pause` / `resume` — M3                                | an app via `shared/src/app-client.ts` (item 6)                                                                                                     | `daemon/src/leader.ts` `answer` — `invalid_request` "this leader does not handle <op> yet" until items 5 and 6                                                                                                                                                                                                                         |
 | op `queue-changed` (→`"app"`) — M3                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"` (item 6)                                                                          | `shared/src/app-client.ts`, via `parseQueueChanged` (item 6)                                                                                                                                                                                                                                                                           |
 | op `branch-state` (→`"scheduler"`) — M3                                  | the daemon's emitter (item 4b) via `sendToScheduler()`                                                                                             | `daemon/src/leader.ts`, via `parseBranchState` (item 4a's library, wired in item 3)                                                                                                                                                                                                                                                    |
@@ -1514,6 +1518,34 @@ done`, `failed`/`cancelled` off-path, one transition table, an illegal move a th
   later event or `sessions` reply for it changes nothing. The earlier refusal (`unreachable`)
   left a task the owner had given up on holding its place indefinitely, to protect a session
   the cancel could not reach anyway. Takeover settles `lost` tasks with the running ones.
+
+### Task records and the app's store leg — landed 2026-10-17, M3 item 2
+
+The relay's store (M3 item 1) holds ciphertext; what a record is, and who reads it how, is
+`shared/src/task-record.ts` and the app-client. Nothing calls these yet: the PWA and MCP
+enqueue through them in item 6, and the leader's adapter (item 3) reuses the record helpers.
+
+- **One sealer, one reader.** `sealTaskRecord` seals `{ version, task }` as op `task` to
+  `"scheduler"`, from its writer. `openTaskRecord` opens with `openAtRest` — never the replay
+  guard, since a record is days old by design — refuses one sealed to anyone else, and keeps it
+  only through `bindTaskRecord`. A blob that does not decrypt, is another op or is addressed
+  elsewhere is `unopenable`; the binding gives the rest of `RecordUnreadable`.
+- **Unreadable is reported, never fatal, never deleted.** `RelayClient.listTasks` returns the
+  tasks that bound beside `{ key, version, reason }` for each that did not; `getTask` returns
+  either. The app leg has no delete at all (the relay forbids it), so clearing junk stays a
+  person's act. A `get` answered with another key's record reads as no answer: the binding
+  checks a record against the key it came with, so that key must be the one asked for.
+- **A create is checked before it is sent.** `createTask` takes a task whose id the app
+  minted, and refuses locally — `invalid_request` — a record every reader would skip (not
+  `queued`, a malformed id), and — `too_large` — one whose sealed `ct` passes
+  `STORE_CREATE_MAX_CT_LENGTH`. It puts at `expect: 0`; `version_conflict` there is the
+  answer to a retry whose first put landed, so it reads as queued (`landedEarlier`), never a
+  failure. Any other refusal comes back raw.
+- **Store frames correlate on their own `id`**, in a pending map apart from sealed requests:
+  they are Layer 1 plaintext the relay answers itself, so no envelope, leader or guard is
+  involved. A store reply that does not parse (a `next` page included) still names its request
+  and settles it as `null` at once rather than at `STORE_TIMEOUT_MS`; a close fails it
+  `dropped`, as it does a sealed request.
 
 ## Daemon (`seanced`, Bun)
 
