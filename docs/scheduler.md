@@ -264,8 +264,10 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
 - **Quota freshness** (the observation's, not the status's) — DESIGN.md "One routing
   function": pressure only from a live, unstale status, quota from every status by its own
   `at`. Why there is no age cap: _Settled defaults_ 7.
-- **Task states** and **Takeover** — M2's half is DESIGN.md "States are M2's slice",
-  "`lost`" and "Takeover", with `scheduler/src/task.ts` the table that runs; M3's is below.
+- **Task states**, **Takeover** and **Done detection** — DESIGN.md "States", "Admission and
+  dependencies", "Batches", "Done detection", "Pruning", "`lost`" and "Takeover" (M2, and M3
+  item 4a), with `scheduler/src/task.ts` the table that runs; the store's half of takeover is
+  below.
 
 **The store adapter (M3 item 3).** M2's leader runs on the library's `MemoryQueueStore`. M3's
 `QueueStore` is `daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as
@@ -283,13 +285,6 @@ leader change then loses only the in-memory view (the absence clock, an unplaced
 decision). M4's `settings` (_Secrets_) and push subscriptions need prefixes of their own in
 `STORE_PREFIXES`, decided with that item.
 
-**Task states.** The full lifecycle is `queued → blocked → ready → reserved → running ⇄
-needs-input → awaiting-merge → done`, with `failed`, `cancelled` and `lost` off-path. M2 built the
-slice from `ready`. M3 adds `queued` (an app's create, which the leader admits to `blocked` or
-`ready`), `blocked` (until every dependency edge releases) and `awaiting-merge`, which frees the
-concurrency slot (the session ended) but keeps `after: merged` dependents blocked. The three are
-in the schema already, with no edges until M3 item 4a.
-
 **Takeover (M3).** M2's reconcile stands. M3 adds the store's half: list the store, open every
 body, and skip and report one that does not decrypt or whose version or id disagrees with its
 key — as the PWA skips registry entries, never fatal — before the reconcile runs.
@@ -300,8 +295,8 @@ whether or not anything is ready; reservation TTLs and `lost` are checked only i
 task's decision is written with its reservation (one store write) — never after the spawn —
 and an unplaced task's stays in memory. M3 and M4 add:
 
-- Filters: the per-account cap (`cap_reached` with `scope: "account"`, M3 item 5) and the
-  per-batch strategy (`sequential` / `parallel(n)` / `auto`, M3 item 4a); `skill absent` (M4,
+- Filters: the per-account cap (`cap_reached` with `scope: "account"`, M3 item 5; the per-batch
+  bound landed with item 4a, DESIGN.md "Batches"); `skill absent` (M4,
   _Skills_: a hard filter when declared or the prompt starts with `/name`); stacked base
   unpushed and not on this exclave (M4, _Stacking_).
 - Score: `dependencyDistance` gets an input once M3's deps fill `TaskSpec.base`. The Proxmox
@@ -315,9 +310,12 @@ candidate the record already marks `spill` — is detected and shown in the PWA 
 and from M4 fires a Web Push ("Spending credits on <account> for <task>" + Pause actions).
 Re-alerts once per account per window, not per task.
 
-**Done detection:** Linear Done (if linked, poll) or daemon `branch-state merged` → `done`;
-session `ended` without merge → `awaiting-merge` (PR open) or `failed` (no PR, nonzero) —
-manual override always wins.
+**Done detection, ahead.** `branch-state merged` → `done`, a session ending with a PR open →
+`awaiting-merge`, and the read-back from `progress` landed with M3 item 4a (DESIGN.md "Done
+detection"); the leader passing them on is item 3's. Still ahead: Linear Done (M4, if linked,
+poll); the `mark-done` op, which always wins; and `failed` for a session that ends with no
+PR and a nonzero exit, which needs an exit status no event carries — until then a PR-less end
+is `done` by `session`.
 
 **Secrets (M4).** The first draft gave a fixed box a Linear key, a VAPID key and a Proxmox
 token. Under a moving leader: the Proxmox token stays on the LXC daemons, which read their own
@@ -529,13 +527,18 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     length against the create cap before sending. **Landed 2026-10-17** (DESIGN.md _Scheduler_,
     "Task records and the app's store leg"): `sealAtRest` in `crypto.ts`, the record helpers in
     `shared/src/task-record.ts` for item 3 to reuse, and `listTasks` / `getTask` / `createTask`.
-  - **4a. The library's M3 states**, batches, hand-declared deps with PR 0b's semantics, done
-    detection — `branch-state` live, `progress` on takeover and when a machine holding a waiting
-    task comes back — and `awaiting-merge`, against `MemoryQueueStore` (`scheduler/`). The M3
-    states join `shared/src/task-phase.ts`, which `FINISHED` and `PLACED` derive from. Pruning
-    moves into the library: finished tasks past a keep count, never one an unfinished task names,
-    after takeover and on `store_full`. Today its one caller is `submit`, so without this, item 6
-    deleting `submit` would leave creates at `store_full` once 128 tasks had ever run.
+  - **4a. The library's M3 states** (landed 2026-10-17; DESIGN.md _Scheduler_, "The library",
+    is the record): admission, batches, hand-declared deps with PR 0b's semantics, done
+    detection — `branch-state` live (`Scheduler.onBranchState`), `progress` on takeover, the
+    sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
+    `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
+    into the library (`keepFinished`, Settled defaults 13): after takeover and every pass, since
+    an app's `store_full` never reaches the leader, and on `submit`'s own. Left open: no
+    `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
+    never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
+    for it is a schema PR of its own. And M2's `submit` still creates `ready`, which
+    `bindTaskRecord` refuses at version 1 (`created_unqueued`): item 3's adapter must not meet
+    a `submit` create, so `submit` goes or creates `queued` before it lands.
   - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show
     only after a fetch, and `reap` — the one thing that fetches — is off by default, so the
     emitter fetches on a cadence of its own; the launch ledger holds ids and times, no worktree
@@ -777,6 +780,10 @@ same PR, with the reason.
     holding running tasks, shared with the pass's other checks; a lost event costs at most
     two minutes of a slot, where a sweep every pass would cost a call per busy machine per
     status beat.
+13. **Fifty finished tasks are kept** (`keepFinished`, set with M3 item 4a, 2026-10-17; M2's
+    leader kept the same number as `KEEP_FINISHED`): enough for `queue` to show recent
+    history, and with M2's 64 unfinished at most still under `MAX_TASKS` (128). Pruned oldest
+    first, never one an unfinished task names.
 
 ## Risks / unknowns
 
