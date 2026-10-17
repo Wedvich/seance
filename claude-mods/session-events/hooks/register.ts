@@ -54,13 +54,20 @@ export function prUrlFrom(toolName: string, input: unknown, response: unknown): 
   return PR_URL.exec(out)?.[0] ?? null;
 }
 
-function send($: EngineInterface, report: Report): void {
+async function report($: EngineInterface, body: Report): Promise<void> {
+  // Outside a tmux pane (no tmux, or a `claude --bg` session's pty host) the daemon
+  // answers `unbound` every time: not worth a Bun start and its tmux and ps calls
+  // per event. The daemon still decides the binding for every report that goes out.
+  const pane = await $.env.get("TMUX_PANE");
+  if (pane === undefined || pane === "") return;
+  await $.process.run(["seanced", "session-event"], { stdin: JSON.stringify(body), timeoutMs: SEND_TIMEOUT_MS });
+}
+
+function send($: EngineInterface, body: Report): void {
   // Unawaited: the run resolves when seanced exits, and no hook should wait for that.
-  void $.process
-    .run(["seanced", "session-event"], { stdin: JSON.stringify(report), timeoutMs: SEND_TIMEOUT_MS })
-    .catch(() => {
-      // seanced not on PATH, or it timed out: nothing for the session to do about it.
-    });
+  void report($, body).catch(() => {
+    // seanced not on PATH, or it timed out: nothing for the session to do about it.
+  });
 }
 
 // Every hook fails open: a report that throws must never cost the event itself.

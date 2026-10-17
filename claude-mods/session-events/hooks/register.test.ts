@@ -1,12 +1,22 @@
-import { describe, expect, test } from "claude-code/testing";
+import { describe, expect, mock, test } from "claude-code/testing";
 import type { On } from "claude-code";
 import { notificationState, prUrlFrom } from "./register.ts";
 
 type Sent = { readonly argv: readonly string[]; readonly report: unknown }[];
 
-/** Records every `seanced session-event` the mod runs, answering as seanced does: silently. */
-function record(on: On, { fail = false }: { readonly fail?: boolean } = {}): Sent {
+/**
+ * Records every `seanced session-event` the mod runs, answering as seanced does: silently.
+ * `env` is the session's: in a tmux pane unless a test says otherwise.
+ */
+function record(
+  on: On,
+  {
+    fail = false,
+    env = { TMUX_PANE: "%7" },
+  }: { readonly fail?: boolean; readonly env?: Readonly<Record<string, string>> } = {},
+): Sent {
   const sent: Sent = [];
+  mock.env(on, env);
   // The engine's own step beneath each event; the mod only observes, so any answer does.
   for (const event of [
     "classic.SessionStart",
@@ -114,6 +124,15 @@ describe("reports", () => {
     await $.session.measure({ context, rateLimits, changed: ["rateLimits"] });
     await settled(sent, 1);
     expect(sent.map((s) => s.report)).toEqual([{ rateLimits }]);
+  });
+
+  test("a session in no tmux pane sends nothing: the daemon could only answer unbound", async ($, on) => {
+    const sent = record(on, { env: {} });
+    await $.classic.UserPromptSubmit({ prompt: "hi" });
+    await $.classic.Stop({ stop_hook_active: false });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 1);
+    expect(sent).toEqual([]);
   });
 
   test("seanced missing costs the session nothing", async ($, on) => {
