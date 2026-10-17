@@ -11,6 +11,20 @@ export function skillOptionId(listId: string, index: number): string {
  * the on-screen keyboard can never cover it; the textarea keeps focus and owns
  * the keys (`spawn-screen.tsx`), so this only renders and takes taps.
  */
+/** The typed text in bold where it sits in the name, so a substring hit reads as one. */
+function MatchedName(props: { name: string; query: string }): JSX.Element {
+  const { name, query } = props;
+  const at = query === "" ? -1 : name.toLowerCase().indexOf(query.toLowerCase());
+  if (at < 0) return <>{name}</>;
+  return (
+    <>
+      {name.slice(0, at)}
+      <b>{name.slice(at, at + query.length)}</b>
+      {name.slice(at + query.length)}
+    </>
+  );
+}
+
 export function SkillPicker(props: {
   id: string;
   query: string;
@@ -61,7 +75,9 @@ export function SkillPicker(props: {
           onPointerDown={(event) => event.preventDefault()}
           onClick={() => onPick(name)}
         >
-          <span className="skill-name">/{name}</span>
+          <span className="skill-name">
+            /<MatchedName name={name} query={query} />
+          </span>
         </button>
       ))}
     </div>
