@@ -561,11 +561,14 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     remembered from the spawn. The leader's own machine hands its `branch-state` over in process,
     as `run.ts` already does its session events, to `leader.onBranchState`, which item 3 feeds to
     the library. **Landed** (2026-10-17): DESIGN.md, "Branch state".
-- **Before wave 2: split `leader.ts`**, no behaviour change: its store and fleet adapters, its
-  request handlers (`answer`, `queueView`), and the term lifecycle, so items 3 and 5 can run in
-  parallel. `scheduler/test/layering.test.ts` names one `LEADER` file; it takes the set, which
-  item 3's `queue-store.ts` then joins — as the test stands, any second daemon file importing
-  the library fails it.
+- **Before wave 2: split `leader.ts` — landed 2026-10-17**, no behaviour change, so items 3 and
+  5 can run in parallel: `daemon/src/leader-adapters.ts` (`fencedStore`, `termFleet`),
+  `daemon/src/leader-requests.ts` (`requestHandler` — the app-only check, `not_ready`, the
+  reply — with `answer`, `Asked` and `boundedQueue`), and `daemon/src/leader.ts` keeping the
+  term lifecycle and `createLeader`. `requestHandler` builds `Asked` from what the term hands it
+  (`TermRequests`), so a handler needing more of the `Scheduler` changes only its own file.
+  `scheduler/test/layering.test.ts` takes the set (`LEADER_MODULES`), which item 3's
+  `queue-store.ts` then joins.
 - **Wave 2**, in parallel:
   - **3. The `QueueStore` adapter** on the store ops (new `daemon/src/queue-store.ts`, wired in
     the term lifecycle); takeover reconciliation over opened, `bindTaskRecord`-checked bodies.
@@ -619,8 +622,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
 `parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
 own, not inside its wave. The one exception is item 6, which deletes M2's `submit` shapes from
 both — a deletion in the last wave, so it races nothing. `relay/src/hub.ts` and `leadership.ts`
-are item 1's alone. `daemon/src/leader.ts` is split before wave 2; then item 3 owns the adapters
-and the term lifecycle, and the request handlers go 5 → 6. `scheduler/src/scheduler.ts` goes
+are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adapters.ts` are item 3's, with
+`scheduler/test/layering.test.ts` (`leader.ts` then goes to 6 for `queue-changed`); `leader-requests.ts` (the request handlers) goes 5 → 6. `scheduler/src/scheduler.ts` goes
 4a → 5. `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
 `daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
 harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. PR 0 touched
