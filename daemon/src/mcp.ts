@@ -10,6 +10,7 @@ import {
   RequestFailure,
   QUEUE_MAX_TASKS,
   schedulerErrorText,
+  taskFailureText,
   TASK_PHASES,
   TASK_REQUEST_LIMITS,
   type Candidate,
@@ -354,6 +355,15 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
   return { machine, deviceId, exclave, clone, ...(window === undefined ? {} : { window }) };
 }
 
+/**
+ * A scheduler-set code leads with its shared wording, but keeps the raw message: it alone names
+ * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
+ */
+function failureMessage(failure: NonNullable<Task["failure"]>): string {
+  const worded = taskFailureText(failure.code);
+  return worded === null ? failure.message : `${worded} (${failure.message})`;
+}
+
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const { spec } = task;
@@ -367,7 +377,7 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     createdAt: new Date(task.createdAt).toISOString(),
     ...(placement === null ? {} : { placement }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
-    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${task.failure.message}` }),
+    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
   };
 }
 
@@ -391,7 +401,7 @@ function renderAutoTask(task: Task, machines: readonly Machine[], note: string |
       : ` on ${placement.machine} (exclave ${placement.exclave}, clone ${placement.clone}${window})`;
   const lines = [`task ${task.id}: ${task.state}${where}`];
   if (task.decision !== undefined) lines.push(`decision: ${decisionText(task.decision)}`);
-  if (task.failure !== undefined) lines.push(`failure (${task.failure.code}): ${task.failure.message}`);
+  if (task.failure !== undefined) lines.push(`failure (${task.failure.code}): ${failureMessage(task.failure)}`);
   const machine = placement?.machine ?? "its machine";
   switch (task.state) {
     case "running":
