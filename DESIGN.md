@@ -1662,7 +1662,9 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   its outcome has already released or failed, so a `cancelled` member's dependent fails
   `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
   `STORE_TOMBSTONE_MS` old is never admitted: its key's tombstone may be gone, so it may be
-  a pruned task's authentic version-1 blob put back. It fails `queue_expired`, first in the
+  a pruned task's authentic version-1 blob put back (`createdAt` is app-sealed, so an app clock
+  30 days behind fails a fresh task: accepted, skew of that size is out of scope, as for
+  `DEP_MISSING_GRACE_MS`). It fails `queue_expired`, first in the
   call, so its dependents fail `dependency_failed` with it and pruning can take it — held
   `queued` instead, it would wait forever and hold its dependents with it. A release lands at the next pass, not on
   the event: the host ticks at least every 30s.
@@ -1719,7 +1721,11 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   task's entry; accepted (decided 2026-10-17, over accepting the whole leak): the daemon
   trims only to fit one envelope, oldest first, from at most `SESSIONS_MAX_PROGRESS`
   entries, so it takes an old, PR-less task on a machine with a long history, and a held
-  slot is no twin risk — the task is never re-dispatched, only late to free its place. A daemon that sends no `progress` settles by
+  slot is no twin risk — the task is never re-dispatched, only late to free its place. The
+  one wider case is version skew: an adapter whose `progress` did not parse (`parseTaskProgressList`
+  nulls the whole list on one bad entry) sets `progressTrimmed` too, so every PR-less
+  session-less task on that machine holds its slot until the daemon and leader agree on the shape
+  (an update); accepted on the same ground. A daemon that sends no `progress` settles by
   the PR the record holds. The leader does not yet pass `prUrl`, `progress` or `branch-state` on
   (M3 item 3), so until then a session that ends is `done`.
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an

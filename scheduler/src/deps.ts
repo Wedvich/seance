@@ -70,7 +70,8 @@ export function admission(
     if (isExpired(task, now)) fail(task, "queue_expired", "it was queued too long ago to be admitted");
   }
 
-  const loops = cycles(tasks);
+  // A task failed above is finished for the loop check, so its loop-mates fail `dependency_failed` below, not `dependency_cycle`.
+  const loops = cycles(tasks.filter((t) => !failed.has(t.id)));
   for (const task of waiting) {
     const loop = loops.get(task.id);
     if (loop !== undefined && !failed.has(task.id)) {

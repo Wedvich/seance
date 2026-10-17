@@ -160,7 +160,7 @@ test("every reason has its own words", () => {
   expect(texts).toContain("disk nearly full (512 MiB free)");
   expect(texts).toContain("5h quota would reach 92%");
   expect(texts).toContain("8 of 8 auto tasks already in flight");
-  expect(texts).toContain("its batch runs in order, and member 2 has not ended yet");
+  expect(texts).toContain("its batch runs in order, and it waits for batch member #2, earlier in its order");
 });
 
 describe("taskHeadline", () => {

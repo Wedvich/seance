@@ -5,6 +5,7 @@ import {
   abbreviatePath,
   abbreviatePaths,
   deriveView,
+  failedBody,
   failureBody,
   formatSeen,
   resolveMachine,
@@ -532,5 +533,15 @@ describe("auto", () => {
     const view = deriveView(state({ relay: relay({ scheduler: ready }) }, { auto: true }), NOW);
     expect(view.auto?.repos).toEqual([]);
     expect(view.button).toEqual({ label: "No repo to run", enabled: false, busy: false });
+  });
+});
+
+describe("failedBody", () => {
+  test("words a scheduler code by taskFailureText, and leaves any other to the spawn-refusal line", () => {
+    expect(failedBody("queue_expired")).toContain("30 days");
+    expect(failedBody("queue_expired")).toEndWith("Nothing is running.");
+    expect(failedBody("repo_not_found")).toBe("The machine refused the spawn. Nothing is running.");
+    expect(failedBody(undefined)).toBe("The machine refused the spawn. Nothing is running.");
+    expect(failedBody("dispatch_unconfirmed")).toContain("will not start it again");
   });
 });

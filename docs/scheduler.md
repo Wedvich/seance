@@ -582,7 +582,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     credits-spill detection (logged and shown in the PWA; the push alert is M4). Owns the request
     handlers after the split.
 - **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
-  **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
+  Batch creation must refuse a spec whose `batch.index` is past `TASK_SPEC_LIMITS.batchIndex`
+  (= `MAX_TASKS`) at submit time: `parseBatch` bounds it, and a spec past it makes the whole record
+  unreadable. **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
   `SubmitReply`, `MAX_ACTIVE_TASKS`, the `queue_full` code and its wording, `parseSubmitReply`,
   the `submit` methods on `RelayClient`, `AppRelay` and `daemon/src/fleet.ts`'s scheduler, the
   leader's `submit` case with `KEEP_FINISHED`, and `Scheduler.submit` (with `newId` unless

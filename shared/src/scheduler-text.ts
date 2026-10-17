@@ -84,7 +84,7 @@ export function reasonText(reason: Reason): string {
       if (reason.scope === "batch") return `${reason.inFlight} of ${reason.max} of its batch already in flight`;
       return `${reason.inFlight} of ${reason.max} auto tasks already in flight`;
     case "batch_order":
-      return `its batch runs in order, and member ${reason.index} has not ended yet`;
+      return `its batch runs in order, and it waits for batch member #${reason.index}, earlier in its order`;
     case "paused": {
       const why = reason.until === "reset" ? "until its quota resets" : "until resumed";
       return reason.scope === "account" ? `its account is paused ${why}` : `the queue is paused ${why}`;

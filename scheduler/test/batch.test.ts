@@ -139,7 +139,7 @@ describe("batches", () => {
       expect(dispatched(fleet)).toEqual(["second"]);
     });
 
-    test("the highest index routes promptly: the hold costs the members, not the index", async () => {
+    test("an index at the bound is readable and routes: the hold costs the members, not the index", async () => {
       const { fleet, scheduler, member } = setup();
       await member("first", 0, sequential);
       await member("last", TASK_SPEC_LIMITS.batchIndex, sequential);
@@ -178,6 +178,10 @@ describe("batches", () => {
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual([]);
       expect(scheduler.task("first")?.state).toBe("blocked");
+      expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual({
+        code: "batch_order",
+        index: 0,
+      });
     });
 
     test("a lower index finished in any state releases the next", async () => {

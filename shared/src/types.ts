@@ -1108,8 +1108,8 @@ export interface SessionsResponse {
   /**
    * Present only when the daemon dropped entries from `progress` to fit the
    * reply in one envelope, oldest first: how many. In a trimmed reply a task
-   * with no entry is unknown, not progress-free, and a reader waits for a later
-   * read rather than settle it.
+   * with no entry is unknown, not progress-free: a reader settles it by the PR
+   * its record holds, and with none waits for a later read.
    */
   readonly progressTrimmed?: number;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { taskFailureText } from "./scheduler-text.ts";
+import { reasonText, taskFailureText } from "./scheduler-text.ts";
 import { TASK_FAILURE_CODES } from "./types.ts";
 
 describe("taskFailureText", () => {
@@ -10,5 +10,13 @@ describe("taskFailureText", () => {
     expect(taskFailureText("queue_expired")).toContain("30 days");
     expect(taskFailureText("repo_not_found")).toBeNull();
     expect(taskFailureText("minted_later")).toBeNull();
+  });
+});
+
+describe("reasonText", () => {
+  test("batch_order names the member it waits for by the spec's own index, without claiming it started", () => {
+    const text = reasonText({ code: "batch_order", index: 0 });
+    expect(text).toContain("#0");
+    expect(text).not.toContain("ended");
   });
 });

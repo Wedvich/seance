@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DEP_MISSING_GRACE_MS, STORE_TOMBSTONE_MS, type TaskDep } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import { prunable } from "../src/prune.ts";
 import { FakeFleet, machine, NOW, spec } from "./fixtures.ts";
 
 /**
@@ -65,6 +66,22 @@ describe("admission", () => {
     expect(scheduler.task("old")?.failure?.code).toBe("queue_expired");
     expect(scheduler.task("dependent")?.failure?.code).toBe("dependency_failed");
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["edge"]);
+    // Finished, so the prune path can take both.
+    expect(
+      prunable(scheduler.tasks(), 0)
+        .map((t) => t.id)
+        .toSorted(),
+    ).toEqual(["dependent", "old"]);
+  });
+
+  test("an expired task on a loop gives its loop-mate dependency_failed, not dependency_cycle", async () => {
+    const { clock, scheduler, put } = setup();
+    await put("x", { createdAt: clock.now - STORE_TOMBSTONE_MS - 1, ...after("y", "merged") });
+    await put("y", { state: "blocked", ...after("x", "merged") });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("x")?.failure?.code).toBe("queue_expired");
+    expect(scheduler.task("y")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 });
 

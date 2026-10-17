@@ -163,7 +163,8 @@ export type TaskSessionsReply =
       readonly progress?: readonly TaskProgress[];
       /**
        * `SessionsResponse.progressTrimmed`. Present, a task with no `progress`
-       * entry is unknown, and waits for a later read. An adapter whose
+       * entry is unknown: it settles by the PR its record holds, and with none
+       * waits for a later read. An adapter whose
        * `progress` did not parse sets it too.
        */
       readonly progressTrimmed?: number;
