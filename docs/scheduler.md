@@ -103,8 +103,10 @@ reasoning, `types.ts` is the record, and where they differ `types.ts` wins.
 **Relay (`hub.ts`, `wire.ts`, `index.ts`)**
 
 - **Leadership** (M2; DESIGN.md _Scheduler_, "Leadership", is the record): signed `roles`,
-  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow` and the term fence.
-  Every leader write in M3 carries its term through the same check.
+  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow`, the term fence and
+  (M2 review) the `lead-proof` apps believe a nominee by. Every leader write in M3 carries its
+  term through the same fence — which checks the term, not the proof the relay cannot read (M3
+  item 1).
 - **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
 version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (what a
   `version_conflict` refreshes from, so a lost race costs one read, not the whole queue
@@ -499,6 +501,16 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `relay/test/layering.test.ts` admits shared values by name, constants free: `STORE_KEY_PATTERN`
     passes, `isStoreKey` or a parser does not. `STORE_TOMBSTONE_MS` takes an env override so
     `relay/test/harness.ts` can expire a tombstone inside a test.
+    **The term fence is not a PSK check.** The relay hands the term to whichever listed machine
+    is earliest connected, and a listed machine's seed copied out of `state.json` without the
+    PSK still gets it — it cannot seal a `lead-proof`, so readers call that leader unverified and
+    send it nothing, but the relay cannot read the proof and still accepts its term-fenced writes. Such a thief cannot
+    forge or read a record, so an overwrite fails `bindTaskRecord` and is skipped; a delete,
+    though, loses the task. Item 1 decides whether a delete's tombstone keeps the last `env`, so
+    a person can put a task deleted that way back within `STORE_TOMBSTONE_MS` — cheap (records
+    are small, deletes rare) — or records the loss as accepted, beside DESIGN.md _Threat model_
+    item 3. Version binding and tombstones stop a token holder, not the relay itself: a
+    compromised relay can still roll a record back or resurrect one.
     **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
     task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
     `version_conflict` there means the first put landed — the client reads it as queued, never as
