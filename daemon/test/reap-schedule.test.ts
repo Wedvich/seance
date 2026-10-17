@@ -119,10 +119,12 @@ describe("the reap schedule", () => {
     await git("branch", "merged-already");
     const daemon = await daemonWith({ intervalHours: 24, minAgeDays: 7 });
     try {
-      await pollUntil(() => logged().includes("audit reap origin=schedule done"), "a scheduled run");
+      // The summary is logged after runReap returns, so it is the last line of
+      // the run to land — waiting for the audit's `done` raced it under shard load.
+      await pollUntil(() => logged().includes("reap: removed 0 worktrees · deleted 1 branch"), "a scheduled run");
       expect(await branchExists("merged-already")).toBe(false);
+      expect(logged()).toContain("audit reap origin=schedule done");
       expect(logged()).toContain('audit reap origin=schedule deleted-branch repo="myrepo" branch="merged-already"');
-      expect(logged()).toContain("reap: removed 0 worktrees · deleted 1 branch");
       await pollUntil(async () => (await readState())?.lastReapAt !== undefined, "lastReapAt saved");
     } finally {
       daemon.stop();
