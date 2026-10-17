@@ -20,6 +20,22 @@ export const BRANCH_FETCH_STALE_MS = 5 * 60_000;
 const FETCH_BACKOFF_MAX_MS = 3_600_000;
 const GROUP_CONCURRENCY = 4;
 
+/**
+ * How long a task that never held own work is still checked once no live
+ * session carries it. Its work is local, so a commit made just before the
+ * session ended (pushed or not) is read by the next pass, a minute later; the
+ * rest of the hour is for a person who picks the worktree up by hand right
+ * after. Work added later than that is missed, which costs a manual mark-done,
+ * while checking every such task for the ledger's week costs several git runs a
+ * minute each, slow ones on WSL's `/mnt/c`. The hour is an unbroken run of checks that
+ * judged the task (a default branch, own-work answered), since a task never judged might hold
+ * work: a pass that does not judge restarts it. A session that registers again revives the task.
+ * Memory only: a restart restarts it.
+ */
+export const BRANCH_ENDED_GRACE_MS = 3_600_000;
+/** A tmux that hangs reads as unknown: nothing is cut off that pass, and the pass is not held up. */
+export const BRANCH_LIVE_READ_TIMEOUT_MS = 5_000;
+
 export interface BranchStateDeps {
   readonly ledger: Pick<LaunchLedger, "notes" | "note">;
   readonly repos: () => readonly RepoEntry[];
@@ -30,6 +46,13 @@ export interface BranchStateDeps {
   readonly fetchStaleMs?: number;
   /** A seam for tests to count fetches; reap's guarded fetch otherwise. */
   readonly fetch?: typeof fetchIfStale;
+  /**
+   * Task ids a live session carries, as the `sessions` reply's `ended` reckons them. Read every pass while a quiet
+   * task exists. Absent, rejecting or timing out, nothing new is cut off (one already cut stays skipped that pass).
+   */
+  readonly liveTasks?: () => Promise<ReadonlySet<string>>;
+  readonly endedGraceMs?: number;
+  readonly liveTimeoutMs?: number;
 }
 
 export interface BranchStates {
@@ -63,17 +86,25 @@ async function isAncestor(cwd: string, ancestor: string, of: string): Promise<bo
 /**
  * Own work: a tip the default branch does not already contain, whose tree differs from the one it forked at.
  * An empty commit or a revert of the branch's only change has no net change, and `classifyTip` reads it as
- * an empty "squash" of the default. A git failure reads as no work, the safe direction.
+ * an empty "squash" of the default. Null when git could not answer: callers treat it as no work (the safe
+ * direction) but it is not a judgement, and is never memoized.
  */
-async function holdsOwnWork(repoPath: string, tip: string, base: string): Promise<boolean> {
-  if ((await isAncestor(repoPath, tip, base)) !== false) return false;
+async function holdsOwnWork(repoPath: string, tip: string, base: string): Promise<boolean | null> {
+  const ancestor = await isAncestor(repoPath, tip, base);
+  if (ancestor === null) return null;
+  if (ancestor) return false;
   const fork = await hardenedGit(repoPath, ["merge-base", tip, base]);
   const forkSha = fork.stdout.trim();
-  if (fork.exitCode !== 0 || forkSha === "") return false;
+  if (fork.exitCode !== 0 || forkSha === "") return null;
   const trees = await hardenedGit(repoPath, ["rev-parse", `${tip}^{tree}`, `${forkSha}^{tree}`]);
-  if (trees.exitCode !== 0) return false;
+  if (trees.exitCode !== 0) return null;
   const [tipTree, forkTree] = trees.stdout.split("\n");
   return tipTree !== undefined && tipTree !== "" && tipTree !== forkTree;
+}
+
+/** Nothing a merge could follow from yet: no own work seen, no push, no PR URL. Only such a task is ever cut off. */
+function isQuiet(note: NotedTask): boolean {
+  return note.ahead !== true && note.pushed !== true && note.prUrl === undefined;
 }
 
 const HEADS = "refs/heads/";
@@ -168,6 +199,14 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
   const verdicts = new Map<string, { key: string; merged: boolean }>();
   /** Whether a tip holds own work, per task and tip + default sha: it is up to three git runs. */
   const ownWork = new Map<string, { key: string; own: boolean }>();
+  /**
+   * Per quiet task seen with no live session, under the launch it was seen for: when the current unbroken run of
+   * judged checks began (undefined: none yet, or a later check did not judge), and whether it is cut off. Seen
+   * live again, or relaunched, the entry is dropped.
+   */
+  const ended = new Map<string, { siteAt: number | undefined; judgedSince: number | undefined; cut: boolean }>();
+  const endedGraceMs = deps.endedGraceMs ?? BRANCH_ENDED_GRACE_MS;
+  const liveTimeoutMs = deps.liveTimeoutMs ?? BRANCH_LIVE_READ_TIMEOUT_MS;
 
   const send = async (state: BranchState, siteAt: number | undefined): Promise<void> => {
     // Noted already, so the state is kept for whichever emitter replaces this one.
@@ -205,21 +244,22 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     if (failures === 1) log.warn(`branch state: fetch failed in ${repo.name} (${outcome.brief})`);
   };
 
-  const ownsWork = async (repoPath: string, taskId: string, tip: string, baseSha: string): Promise<boolean> => {
+  const ownsWork = async (repoPath: string, taskId: string, tip: string, baseSha: string): Promise<boolean | null> => {
     const key = `${tip} ${baseSha}`;
     const known = ownWork.get(taskId);
     if (known?.key === key) return known.own;
     const own = await holdsOwnWork(repoPath, tip, baseSha);
-    ownWork.set(taskId, { key, own });
+    if (own !== null) ownWork.set(taskId, { key, own });
     return own;
   };
 
-  const checkTask = async (ctx: RepoContext, note: NotedTask, owner: boolean): Promise<void> => {
+  /** True when the pass judged the task: a default branch to compare with, and the own-work question answered. */
+  const checkTask = async (ctx: RepoContext, note: NotedTask, owner: boolean): Promise<boolean> => {
     const branch = await liveBranch(ctx, note, owner);
-    if (branch === undefined || branch === "" || branch.length > BRANCH_MAX_LENGTH) return;
+    if (branch === undefined || branch === "" || branch.length > BRANCH_MAX_LENGTH) return false;
 
     const refs = await readRefs(ctx.repo.path, branch);
-    if (refs === null) return;
+    if (refs === null) return false;
     // The branch can be deleted (claude's worktree-exit) before its PR merges; the commit outlives the ref until gc.
     // A non-owner's name now belongs to a newer launch (a freed worktree name frees its branch too): that local ref is
     // not this task's, so it is judged by its recorded tip alone.
@@ -238,13 +278,17 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       const kept = await hardenedGit(ctx.repo.path, ["cat-file", "-e", `${note.tip}^{commit}`]);
       if (kept.exitCode === 0) tip = note.tip;
     }
-    if (tip === undefined) return;
+    if (tip === undefined) return false;
 
     // Own work (`holdsOwnWork`) gates both pushed and merged: a fresh branch is an ancestor of the default and an
     // empty "squash", as is a pushed empty commit, and it may reuse the name of a stale remote ref from an earlier
     // attempt. `ahead` is sticky once seen.
-    const liveAhead = ctx.base !== null && (await ownsWork(ctx.repo.path, note.taskId, tip, ctx.base.sha));
+    const own = ctx.base === null ? null : await ownsWork(ctx.repo.path, note.taskId, tip, ctx.base.sha);
+    // A failed read is no work for the verdicts, exactly as before, but not a judgement.
+    const liveAhead = own === true;
     const ahead = note.ahead === true || liveAhead;
+    // Not-ahead is only a judgement against a default branch; without one, or on a failed read, `ahead` is unknowable.
+    const judged = own !== null;
     // What the verdicts are about: the tip while it holds own work, else the last tip that did (recorded only while
     // ahead) — a branch reset to main, or whose work was reverted, has none left to call merged. Without an
     // origin/HEAD nothing can be judged ahead, so the tip stands in and only pushed is reported, on an exact match.
@@ -279,7 +323,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
 
     const reportable = branch !== note.branch || (livePushed && note.pushed !== true) || merged;
     const recordable = reportable || (liveAhead && (note.ahead !== true || tip !== note.tip));
-    if (!recordable || stopped) return;
+    if (!recordable || stopped) return judged;
     const applied = await deps.ledger.note(
       note.taskId,
       {
@@ -293,17 +337,19 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       // A relaunch that landed mid-pass owns the note now; this pass judged the old launch.
       { siteAt: note.siteAt },
     );
-    if (!applied) return;
+    if (!applied) return false;
     const origin = ctx.repo.origin;
-    if (!reportable || origin === undefined || origin === "" || origin.length > 512) return;
+    if (!reportable || origin === undefined || origin === "" || origin.length > 512) return judged;
     // Past a stop `send` keeps it: the note is written, so no later pass would report it again.
     await send({ taskId: note.taskId, repo: origin, branch, pushed: livePushed, merged, at: now() }, note.siteAt);
+    return judged;
   };
 
   const checkRepo = async (
     repo: RepoEntry,
     tasks: readonly NotedTask[],
     owners: ReadonlyMap<string, string>,
+    judgedIds: Set<string>,
   ): Promise<void> => {
     const checkout = await inspectCheckout(repo.path);
     if (checkout.kind !== "main") return;
@@ -316,7 +362,68 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     for (const task of tasks) {
       if (stopped) return;
       // oxlint-disable-next-line no-await-in-loop -- one task at a time within a repo; repos run in parallel
-      await checkTask(judged, task, task.path !== undefined && owners.get(task.path) === task.taskId);
+      const done = await checkTask(judged, task, task.path !== undefined && owners.get(task.path) === task.taskId);
+      if (done) judgedIds.add(task.taskId);
+    }
+  };
+
+  /** Unknown is live: a hung tmux must not stall the pass, nor cut anything off. */
+  const readLive = async (read: () => Promise<ReadonlySet<string>>): Promise<ReadonlySet<string> | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        read(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), liveTimeoutMs);
+        }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  /**
+   * Quiet tasks with no live session, and judged by every check for the grace, are skipped before any git. The clock
+   * starts at the first check that judged the task after its session was seen ended and restarts at any later one
+   * that did not (`noteChecks`), so a task never judged blind is never cut off. Never one with own work seen, a push
+   * or a PR URL, whose merge would be missed. A task seen live again is checked again, so `liveTasks` is read every
+   * pass while a quiet task exists; unknown (timeout, rejection) cuts nothing new off and leaves the cut ones skipped.
+   */
+  const cutOff = async (tracked: readonly NotedTask[]): Promise<ReadonlySet<string>> => {
+    const quiet = tracked.filter(isQuiet);
+    for (const id of ended.keys()) if (!quiet.some((note) => note.taskId === id)) ended.delete(id);
+    const skipped = new Set<string>();
+    if (quiet.length === 0 || deps.liveTasks === undefined) return skipped;
+    const live = await readLive(deps.liveTasks);
+    const at = now();
+    for (const note of quiet) {
+      const seen = ended.get(note.taskId);
+      // A relaunch (a new `siteAt`) is a new session, and starts over.
+      const known = seen !== undefined && seen.siteAt === note.siteAt ? seen : undefined;
+      if (live === null) {
+        if (known?.cut === true) skipped.add(note.taskId);
+        continue;
+      }
+      if (live.has(note.taskId)) {
+        ended.delete(note.taskId);
+        continue;
+      }
+      const entry = known ?? { siteAt: note.siteAt, judgedSince: undefined, cut: false };
+      ended.set(note.taskId, entry);
+      if (!entry.cut && entry.judgedSince !== undefined && at - entry.judgedSince >= endedGraceMs) entry.cut = true;
+      if (entry.cut) skipped.add(note.taskId);
+    }
+    return skipped;
+  };
+
+  /** Starts or breaks each checked, session-less task's run of judged checks. */
+  const noteChecks = (checked: readonly NotedTask[], judgedIds: ReadonlySet<string>): void => {
+    for (const note of checked) {
+      const entry = ended.get(note.taskId);
+      if (entry === undefined || entry.siteAt !== note.siteAt || entry.cut) continue;
+      entry.judgedSince = judgedIds.has(note.taskId) ? (entry.judgedSince ?? now()) : undefined;
     }
   };
 
@@ -347,9 +454,12 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       if (held === undefined || (note.siteAt ?? 0) >= (held.siteAt ?? 0)) newest.set(note.path, note);
     }
     const owners = new Map([...newest].map(([path, note]) => [path, note.taskId]));
+    const skipped = await cutOff(tracked);
     const groups = new Map<string, NotedTask[]>();
+    const judgedIds = new Set<string>();
+    const checked = tracked.filter((note) => !skipped.has(note.taskId));
     for (const note of tracked) {
-      if (note.repo === undefined) continue;
+      if (note.repo === undefined || skipped.has(note.taskId)) continue;
       groups.set(note.repo, [...(groups.get(note.repo) ?? []), note]);
     }
     const repos = deps.repos();
@@ -357,7 +467,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       const repo = repos.find((entry) => entry.path === path);
       if (repo === undefined) return;
       try {
-        await checkRepo(repo, tasks, owners);
+        await checkRepo(repo, tasks, owners, judgedIds);
         failing.delete(path);
       } catch (err) {
         if (failing.has(path)) return;
@@ -366,6 +476,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
         log.warn(`branch state: could not check ${repo.name} (${code})`);
       }
     });
+    noteChecks(checked, judgedIds);
   };
 
   let queue: Promise<void> = Promise.resolve();
