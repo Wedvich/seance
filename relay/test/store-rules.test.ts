@@ -5,6 +5,7 @@ import {
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
 } from "@seance/shared";
+import type { Envelope } from "@seance/shared";
 import { LEADER_KEY } from "../src/leadership.ts";
 import {
   COUNTS_KEY,
@@ -17,8 +18,10 @@ import {
   authorize,
   ruleFor,
   tombstoneAgeKey,
+  RelayStore,
   type CreateWindow,
   type StoreAct,
+  type StoreStorage,
 } from "../src/store.ts";
 
 const ACTS: readonly StoreAct[] = ["create", "overwrite", "delete"];
@@ -156,5 +159,94 @@ describe("purge batch", () => {
   // Cloudflare caps a storage delete at 128 keys per call: the record plus a tombstone and its age entry per purge.
   test("a delete's key list stays under the 128-key storage limit", () => {
     expect(1 + 2 * PURGE_BATCH).toBeLessThanOrEqual(128);
+  });
+});
+
+/** In-memory `StoreStorage`; `deleteSizes` is the key count of every `delete` call. */
+function fakeStorage(): StoreStorage & { readonly data: Map<string, unknown>; readonly deleteSizes: number[] } {
+  const data = new Map<string, unknown>();
+  const deleteSizes: number[] = [];
+  return {
+    data,
+    deleteSizes,
+    get: async <T>(key: string) => data.get(key) as T | undefined,
+    put: async <T>(entries: Record<string, T>) => {
+      for (const [key, value] of Object.entries(entries)) data.set(key, value);
+    },
+    delete: async (keys: string[]) => {
+      deleteSizes.push(keys.length);
+      return keys.filter((key) => data.delete(key)).length;
+    },
+    list: async <T>({ prefix, limit }: { prefix: string; limit?: number }) => {
+      const keys = [...data.keys()].filter((key) => key.startsWith(prefix)).toSorted();
+      return new Map(keys.slice(0, limit).map((key) => [key, data.get(key) as T]));
+    },
+  };
+}
+
+const ENV: Envelope = { v: 1, to: "app", from: "scheduler", iv: "AAAAAAAAAAAAAAAA", ct: "AAAA" };
+
+function seedTombstone(storage: ReturnType<typeof fakeStorage>, key: string, at: number): void {
+  storage.data.set(TOMBSTONE_NS + key, { version: 1, at });
+  storage.data.set(tombstoneAgeKey(at, key), key);
+}
+
+describe("RelayStore.delete purge", () => {
+  const TOMBSTONE_MS = 1_000;
+  const NOW = 100_000;
+
+  function seeded(): { storage: ReturnType<typeof fakeStorage>; store: RelayStore } {
+    const storage = fakeStorage();
+    return { storage, store: new RelayStore(storage, TOMBSTONE_MS) };
+  }
+
+  test("removes min(N, PURGE_BATCH) expired tombstones with their age entries, oldest first, keeps the rest", async () => {
+    const { storage, store } = seeded();
+    const expired = PURGE_BATCH + 10;
+    // Key order is the reverse of age order, so only the age index finds the oldest.
+    const oldKey = (i: number): string => `task:old-${String(expired - i).padStart(3, "0")}`;
+    for (let i = 0; i < expired; i += 1) seedTombstone(storage, oldKey(i), 1 + i);
+    for (let i = 0; i < 5; i += 1) seedTombstone(storage, `task:new-${i}`, NOW - 10 + i);
+    expect(await store.put("task:victim", 0, ENV, NOW - 20_000, true)).toMatchObject({ ok: true, version: 1 });
+    storage.deleteSizes.length = 0;
+
+    expect(await store.delete("task:victim", 1, NOW)).toMatchObject({ ok: true, version: 1 });
+
+    for (let i = 0; i < expired; i += 1) {
+      const kept = i >= PURGE_BATCH;
+      expect(storage.data.has(TOMBSTONE_NS + oldKey(i))).toBe(kept);
+      expect(storage.data.has(tombstoneAgeKey(1 + i, oldKey(i)))).toBe(kept);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      expect(storage.data.has(TOMBSTONE_NS + `task:new-${i}`)).toBe(true);
+      expect(storage.data.has(tombstoneAgeKey(NOW - 10 + i, `task:new-${i}`))).toBe(true);
+    }
+    // The delete's own tombstone stands, and the record is gone.
+    expect(storage.data.has(TOMBSTONE_NS + "task:victim")).toBe(true);
+    expect(storage.data.has(RECORD_NS + "task:victim")).toBe(false);
+    expect(storage.deleteSizes).toEqual([1 + 2 * PURGE_BATCH]);
+    expect(Math.max(...storage.deleteSizes)).toBeLessThanOrEqual(128);
+  });
+
+  test("fewer expired than the batch: all go, the walk stops at the first unexpired one", async () => {
+    const { storage, store } = seeded();
+    seedTombstone(storage, "task:a", 1);
+    seedTombstone(storage, "task:b", 2);
+    seedTombstone(storage, "task:fresh", NOW - 10);
+    await store.put("task:victim", 0, ENV, NOW - 20_000, true);
+    storage.deleteSizes.length = 0;
+
+    await store.delete("task:victim", 1, NOW);
+
+    for (const [at, key] of [
+      [1, "task:a"],
+      [2, "task:b"],
+    ] as const) {
+      expect(storage.data.has(TOMBSTONE_NS + key)).toBe(false);
+      expect(storage.data.has(tombstoneAgeKey(at, key))).toBe(false);
+    }
+    expect(storage.data.has(TOMBSTONE_NS + "task:fresh")).toBe(true);
+    expect(storage.data.has(tombstoneAgeKey(NOW - 10, "task:fresh"))).toBe(true);
+    expect(storage.deleteSizes).toEqual([1 + 2 * 2]);
   });
 });

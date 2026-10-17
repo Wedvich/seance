@@ -583,27 +583,4 @@ describe("relay store: tombstone expiry", () => {
     await rigC.dismiss(observer, leader);
     observer.close();
   }, 30_000);
-
-  test("later deletes purge expired tombstones, and the relay says how many", async () => {
-    const observer = await connectApp(rigC.relay());
-    const leader = await rigC.lead(observer);
-    const stale = taskKey("p");
-    expect(await put(leader.daemon, stale, 0, sealed(), leader.term)).toMatchObject(written(1));
-    expect(await del(leader.daemon, stale, 1, leader.term)).toMatchObject(written(1));
-
-    await until(async () => {
-      // Each round's delete is what purges the ones that have aged out.
-      const key = taskKey("p");
-      await put(leader.daemon, key, 0, sealed(), leader.term);
-      await del(leader.daemon, key, 1, leader.term);
-      return rigC
-        .relay()
-        .logs()
-        .some((line) => /store purged expired tombstones=\d+/u.test(line));
-    }, "a purge line");
-    // The purged key is free again.
-    expect(await put(leader.daemon, stale, 0, sealed(), leader.term)).toMatchObject(written(1));
-    await rigC.dismiss(observer, leader);
-    observer.close();
-  }, 30_000);
 });

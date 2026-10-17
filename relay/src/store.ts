@@ -39,8 +39,9 @@ export const COUNTS_KEY = "store-meta:counts";
 /**
  * Tombstones one delete may purge. Cloudflare's KV-style storage API caps
  * `get`/`put`/`delete` at 128 keys per call, and local workerd does not enforce
- * it on `delete`. A delete sends 1 record key + 2 keys per purged tombstone
- * (the tombstone and its age entry) + the counts: 1 + 2 * 32 = 65, well under.
+ * it on `delete`. The delete call carries 1 record key + 2 keys per purged
+ * tombstone (the tombstone and its age entry): 1 + 2 * 32 = 65, well under. The
+ * counts row goes in the `put` call.
  */
 export const PURGE_BATCH = 32;
 
@@ -136,9 +137,8 @@ function bumped(counts: Counts, prefix: string, by: 1 | -1): Counts {
   };
 }
 
-/** `purged`: expired tombstones a delete removed, always 0 for a put. */
 export type WriteResult =
-  | { readonly ok: true; readonly version: number; readonly purged: number }
+  | { readonly ok: true; readonly version: number }
   | { readonly ok: false; readonly code: StoreErrorCode };
 
 const REFUSED_CONFLICT = { ok: false, code: "version_conflict" } as const;
@@ -208,7 +208,7 @@ export class RelayStore {
     const writes: Promise<unknown>[] = [this.#storage.put(entries)];
     if (stone !== undefined) writes.push(this.#storage.delete([TOMBSTONE_NS + key, tombstoneAgeKey(stone.at, key)]));
     await Promise.all(writes);
-    return { ok: true, version: version + 1, purged: 0 };
+    return { ok: true, version: version + 1 };
   }
 
   /**
@@ -236,16 +236,14 @@ export class RelayStore {
 
     // A tombstone and its age entry are written and removed together (here, and
     // by a put clearing an expired one), so the purge needs no cross-check.
-    let purged = 0;
     const aged = await this.#storage.list<string>({ prefix: TOMBSTONE_AGE_NS, limit: PURGE_BATCH });
     for (const [ageKey, storeKey] of aged) {
       const at = Number(ageKey.slice(TOMBSTONE_AGE_NS.length, TOMBSTONE_AGE_NS.length + 16));
       if (now - at < this.#tombstoneMs) break;
       deletes.push(ageKey, TOMBSTONE_NS + storeKey);
-      purged += 1;
     }
 
     await Promise.all([this.#storage.put(entries), this.#storage.delete(deletes)]);
-    return { ok: true, version: current.version, purged };
+    return { ok: true, version: current.version };
   }
 }

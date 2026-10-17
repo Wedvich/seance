@@ -318,7 +318,7 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.t === "lead-proof") {
-      await this.#leadProof(ws, deviceId, frame.term, frame.env);
+      await this.#leadProof(ws, frame.term, frame.env);
       return;
     }
     await this.#route(frame.env, ws, "daemon");
@@ -370,7 +370,7 @@ export class Hub implements DurableObject {
    * and one push per term, however often a socket sends — and a later term
    * starts without one, since `#renominate` writes a fresh record.
    */
-  async #leadProof(ws: WebSocket, deviceId: string, term: number, env: Envelope): Promise<void> {
+  async #leadProof(ws: WebSocket, term: number, env: Envelope): Promise<void> {
     if (env.to !== APP_ID) {
       wireLog("dropped", env, " reason=lead-proof-not-app");
       return;
@@ -591,9 +591,10 @@ export class Hub implements DurableObject {
     // Tentative: only a create that lands is written back to the attachment, so
     // a refusal of any kind leaves the window as it was. No floor on the daemon
     // leg: every write there is term-fenced, so only the leader writes, bounded
-    // by `MAX_TASKS`.
-    const attachment = ws.deserializeAttachment() as AppAttachment | null;
+    // by `MAX_TASKS`. The attachment is an `AppAttachment` only on an app
+    // socket, so it is read only when the floor applies.
     const floored = leg === "app" && act === "create";
+    const attachment = floored ? (ws.deserializeAttachment() as AppAttachment | null) : null;
     const window = floored ? admitCreate(attachment?.createWindow, now) : null;
     let result: WriteResult;
     try {
@@ -611,13 +612,15 @@ export class Hub implements DurableObject {
       return;
     }
     if (window !== null) ws.serializeAttachment({ ...attachment, createWindow: window } satisfies AppAttachment);
-    if (result.purged > 0) console.log(`store purged expired tombstones=${result.purged}`);
     this.#storeReply(ws, { t: "store-written", re: frame.id, version: result.version });
     if (leg === "app") await this.#nudgeLeader(frame.key, frame.t === "store-put" ? result.version : 0);
   }
 
   #refuseStore(ws: WebSocket, leg: Role, re: string, t: string, key: string | undefined, code: string): void {
-    console.log(`store refused t=${t} key=${key === undefined ? "-" : quote(key)} leg=${leg} code=${code}`);
+    // No key on a conflict: it is the normal answer to a retried enqueue and to
+    // leader races, and a key with a time would link task ids to retries.
+    const keyField = key === undefined || code === "version_conflict" ? "" : ` key=${quote(key)}`;
+    console.log(`store refused t=${t}${keyField} leg=${leg} code=${code}`);
     this.#storeReply(ws, { t: "store-refused", re, code });
   }
 
