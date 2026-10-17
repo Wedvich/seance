@@ -6,6 +6,7 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
   isSchedulerOp,
+  isTerm,
   MACHINES_ID,
   ReplayError,
   ReplayGuard,
@@ -357,7 +358,7 @@ export class RelayClient {
     // Plaintext relay assertions, acted on by `leader.ts`; the term it runs
     // under is what the relay fences every scheduler send on.
     if (frame.t === "lead") {
-      if (typeof frame.term !== "number" || !Number.isSafeInteger(frame.term) || frame.term < 0) {
+      if (!isTerm(frame.term)) {
         log.warn("dropped lead frame without a term");
         return;
       }

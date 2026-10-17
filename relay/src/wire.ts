@@ -5,6 +5,7 @@ import {
   IDENTITY_SIGNATURE_BYTES,
   base64Length,
   isRecord,
+  isTerm,
   MACHINES_ID,
   MAX_REGISTER_ROLES,
   parseEnvelope as parseEnvelopeShape,
@@ -81,10 +82,6 @@ function parseRoles(value: unknown): readonly string[] | null {
 }
 
 /** A term is a counter the relay minted, so anything but a non-negative integer is malformed. */
-function isTerm(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text) as unknown;

@@ -13,7 +13,7 @@ import { describe, expect, test } from "bun:test";
 const SRC = join(import.meta.dir, "../src");
 
 /** Everything the relay may take from shared as a value; types are free. */
-const ALLOWED_VALUES = new Set(["isRecord", "quote", "base64Length", "parseEnvelope", "verifyRegister"]);
+const ALLOWED_VALUES = new Set(["isRecord", "isTerm", "quote", "base64Length", "parseEnvelope", "verifyRegister"]);
 const CONSTANT = /^[A-Z][A-Z0-9_]*$/u;
 
 function sharedValueImports(source: string): readonly string[] {

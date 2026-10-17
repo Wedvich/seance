@@ -33,6 +33,7 @@ import {
 } from "./types.ts";
 import {
   isRecord,
+  isTerm,
   parseEnvelope,
   parseLeadProof,
   parseMachineInfo,
@@ -277,7 +278,7 @@ function parseRegistryView(value: unknown): RegistryView | null {
 function parseLeader(value: unknown): SchedulerLeader | null {
   if (!isRecord(value)) return null;
   const { deviceId, term } = value;
-  if (typeof deviceId !== "string" || typeof term !== "number" || !Number.isSafeInteger(term) || term < 0) return null;
+  if (typeof deviceId !== "string" || !isTerm(term)) return null;
   const proof = value["proof"] === undefined ? null : parseEnvelope(value["proof"]);
   return { deviceId, term, ...(proof === null ? {} : { proof }) };
 }
