@@ -202,6 +202,7 @@ describe("branch-state emitter", () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
+    await emitter.check();
     await commitAndPush(path, "a.txt", "worktree-x");
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
@@ -215,6 +216,7 @@ describe("branch-state emitter", () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
+    await emitter.check();
     await commitAndPush(path, "a.txt", "worktree-x");
     await emitter.check();
     await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
@@ -228,6 +230,7 @@ describe("branch-state emitter", () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
+    await emitter.check();
     await commitAndPush(path, "a.txt", "worktree-x");
     await emitter.check();
     await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
@@ -251,6 +254,7 @@ describe("branch-state emitter", () => {
       await emitter.check();
     });
     expect(lines.filter((line) => line.includes("fetch failed"))).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain("nowhere");
     expect(w.states).toHaveLength(sent);
     expect(w.ledger.notes()[0]?.merged).toBeUndefined();
     stopAll(w);
@@ -264,7 +268,7 @@ describe("branch-state emitter", () => {
     const emitter = start(w, {
       fetch: () => {
         fetches += 1;
-        return Promise.resolve({ kind: "failed", detail: "exit 128: no route" });
+        return Promise.resolve({ kind: "failed", detail: "exit 128: no route", brief: "exit 128" });
       },
     });
     await emitter.check();
@@ -275,10 +279,35 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
+  test("the fetch warning names the repo and the exit code, never git's stderr", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    await commitAndPush(path, "a.txt", "worktree-x");
+    const emitter = start(w, {
+      fetch: () =>
+        Promise.resolve({
+          kind: "failed",
+          detail: "exit 128: fatal: https://user:hunter2@example.test/org/myrepo.git unreachable",
+          brief: "exit 128",
+        }),
+    });
+    const lines = await captureLog(async () => {
+      await emitter.check();
+      await emitter.check();
+    });
+    const warned = lines.filter((line) => line.includes("fetch failed"));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("myrepo");
+    expect(warned[0]).toContain("exit 128");
+    expect(warned[0]).not.toContain("hunter2");
+    stopAll(w);
+  });
+
   test("a restart re-sends nothing that did not change, and keeps the progress", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const first = start(w);
+    await first.check();
     await commitAndPush(path, "a.txt", "worktree-x");
     await first.check();
     first.stop();
@@ -297,6 +326,7 @@ describe("branch-state emitter", () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const first = start(w);
+    await first.check();
     await commitAndPush(path, "a.txt", "worktree-x");
     await first.check();
     first.stop();
@@ -359,24 +389,224 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
-  test("two tasks on one path: the newer reads live, the older is judged by its recorded branch", async () => {
+  /** What `freeWorktreeName` allows: the worktree and its local branch are gone, origin's ref stays, the name is reused. */
+  async function reuseName(w: World, oldPath: string, name: string, taskId: string): Promise<string> {
+    await git(w.fixture.repoPath, "worktree", "remove", "--force", oldPath);
+    await git(w.fixture.repoPath, "branch", "-D", `worktree-${name}`);
+    return launch(w, taskId, name);
+  }
+
+  test("a reused branch name: the newer task reads live, the older is judged by its recorded tip alone", async () => {
     const w = await world();
     const path = await launch(w, "old", "x");
-    await commitAndPush(path, "a.txt", "worktree-x");
-    const oldTip = await git(path, "rev-parse", "HEAD");
-    await w.ledger.note("old", { branch: "worktree-x", tip: oldTip, ahead: true, pushed: true });
-    // The worktree name is reused: the same directory now holds a newer task's branch.
-    await git(path, "switch", "-q", "--no-track", "-c", "worktree-new", "origin/main");
-    await w.ledger.record("new");
-    await w.ledger.note("new", { repo: w.repo.path, path });
-
     const emitter = start(w);
     await emitter.check();
-    expect(w.states.map((s) => [s.taskId, s.branch])).toEqual([["new", "worktree-new"]]);
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.ledger.note("old", { prUrl: "https://github.com/org/myrepo/pull/1" });
+    await emitter.check();
+    const oldTip = w.ledger.notes().find((n) => n.taskId === "old")?.tip;
+    expect(oldTip).toBe(await git(path, "rev-parse", "HEAD"));
+    const sent = w.states.length;
+
+    // B is spawned at origin/main under the same name, while A's PR is open on origin.
+    await reuseName(w, path, "x", "new");
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.slice(sent).map((s) => [s.taskId, s.branch, s.merged])).toEqual([["new", "worktree-x", false]]);
+    const old = w.ledger.notes().find((n) => n.taskId === "old");
+    expect(old).toMatchObject({ tip: oldTip, pushed: true });
+    expect(old?.merged).toBeUndefined();
+
+    // A's real merge still settles it, by its own tip, and never B.
+    await squashMergeOnOrigin(w, "worktree-x");
+    await emitter.check();
+    expect(w.states.slice(sent + 1).map((s) => [s.taskId, s.merged])).toEqual([["old", true]]);
+    expect(w.ledger.notes().find((n) => n.taskId === "new")?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a merged newer launch still owns its path, so the older one never reads its branch", async () => {
+    const w = await world();
+    const path = await launch(w, "old", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    await reuseName(w, path, "x", "new");
+    await w.ledger.note("new", { branch: "worktree-x", ahead: true, pushed: true, merged: true });
+    const sent = w.states.length;
+    await emitter.check();
+    await emitter.check();
+    expect(w.states).toHaveLength(sent);
+    expect(w.ledger.notes().find((n) => n.taskId === "old")?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a branch reset to origin/main after a push is not merged", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    const sent = w.states.length;
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    await git(path, "reset", "-q", "--hard", "origin/main");
+    await emitter.check();
+    await emitter.check();
+    expect(w.states).toHaveLength(sent);
+    expect(w.ledger.notes()[0]?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a relaunch of the task id to the same path starts fresh: nothing merged on its first pass", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.ledger.note("t1", { prUrl: "https://github.com/org/myrepo/pull/1" });
+    await emitter.check();
+    const sent = w.states.length;
+    await git(path, "reset", "-q", "--hard", "origin/main");
+    await w.ledger.startNote("t1", { repo: w.repo.path, path });
+    await emitter.check();
+    await emitter.check();
+    // Its one state is the fresh branch's own, unpushed and unmerged.
+    expect(w.states.slice(sent)).toEqual([expect.objectContaining({ taskId: "t1", pushed: false, merged: false })]);
+    expect(w.ledger.notes()[0]).not.toHaveProperty("ahead");
+    expect(w.ledger.notes()[0]).not.toHaveProperty("merged");
+    stopAll(w);
+  });
+
+  test("a `here` relaunch clears the worktree note, and the emitter then watches nothing", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    const sent = w.states.length;
+    await w.ledger.startNote("t1");
+    await squashMergeOnOrigin(w, "worktree-x");
+    await emitter.check();
+    expect(w.ledger.notes()).toEqual([]);
+    expect(w.states).toHaveLength(sent);
+    stopAll(w);
+  });
+
+  test("with no origin/HEAD, pushed needs the remote ref at the tip exactly, and nothing is merged", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w, { repos: () => [{ ...w.repo, defaultBranch: null }] });
+    await emitter.check();
+    expect(w.states).toHaveLength(1);
+
+    seq += 1;
+    const server = join(base, `server-${seq}`);
+    await git(base, "clone", "-q", w.fixture.barePath, server);
+    await git(server, "switch", "-q", "-c", "worktree-x");
+    await writeFile(join(server, "old.txt"), "old\n");
+    await git(server, "add", "old.txt");
+    await git(server, "commit", "-q", "-m", "an earlier attempt");
+    await git(server, "push", "-q", "origin", "worktree-x");
+    await git(w.fixture.repoPath, "fetch", "-q", "origin");
+    await emitter.check();
+    // The stale ref is ahead of the fresh tip, which would pass an ancestor test.
+    expect(w.states).toHaveLength(1);
+    expect(w.states[0]).toMatchObject({ pushed: false, merged: false });
+
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a.txt");
+    await git(path, "push", "-q", "--force", "origin", "worktree-x");
+    await emitter.check();
+    expect(w.states).toHaveLength(2);
+    expect(w.states[1]).toMatchObject({ pushed: true, merged: false });
 
     await squashMergeOnOrigin(w, "worktree-x");
     await emitter.check();
-    expect(w.states.slice(1).map((s) => [s.taskId, s.branch, s.merged])).toEqual([["old", "worktree-x", true]]);
+    expect(w.states.every((s) => !s.merged)).toBe(true);
+    expect(w.ledger.notes()[0]?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
+  test("a tag named like the branch does not break branch detection", async () => {
+    const w = await world();
+    await launch(w, "t1", "x");
+    await git(w.fixture.repoPath, "tag", "worktree-x");
+    const emitter = start(w);
+    await emitter.check();
+    expect(w.states.map((s) => s.branch)).toEqual(["worktree-x"]);
+    stopAll(w);
+  });
+
+  test("a stop leaves the backlog to the emitter that replaces it on the same ledger", async () => {
+    const w = await world();
+    await launch(w, "t1", "x");
+    const first = start(w, { emit: () => Promise.resolve(false) });
+    await first.check();
+    first.stop();
+    const delivered: BranchState[] = [];
+    const second = start(w, {
+      emit: (state) => {
+        delivered.push(state);
+        return Promise.resolve(true);
+      },
+    });
+    await second.check();
+    await second.check();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ taskId: "t1", branch: "worktree-x" });
+    stopAll(w);
+  });
+
+  test("a stop while the note is being written keeps the state for the next emitter", async () => {
+    const w = await world();
+    await launch(w, "t1", "x");
+    const real = w.ledger.note.bind(w.ledger);
+    let first: BranchStates | undefined;
+    w.ledger.note = async (taskId, patch) => {
+      await real(taskId, patch);
+      first?.stop();
+    };
+    first = start(w, { emit: () => Promise.resolve(true) });
+    // The constructor's pass is the one that notes and is stopped under it.
+    await first.check();
+    w.ledger.note = real;
+    expect(w.states).toEqual([]);
+    expect(w.ledger.notes()[0]?.branch).toBe("worktree-x");
+
+    const second = start(w);
+    await second.check();
+    await second.check();
+    expect(w.states).toHaveLength(1);
+    expect(w.states[0]).toMatchObject({ taskId: "t1", branch: "worktree-x" });
+    stopAll(w);
+  });
+
+  test("a retried state keeps its observation time, and one whose task left the ledger is dropped", async () => {
+    const w = await world();
+    await launch(w, "t1", "x");
+    await launch(w, "t2", "y");
+    const clock = { now: 1_000 };
+    const delivered: BranchState[] = [];
+    let deliver = false;
+    const emitter = start(w, {
+      now: () => clock.now,
+      emit: (state) => {
+        if (deliver) delivered.push(state);
+        return Promise.resolve(deliver);
+      },
+    });
+    await emitter.check();
+    clock.now = 2_000;
+    await w.ledger.retract("t2");
+    deliver = true;
+    await emitter.check();
+    expect(delivered.map((s) => [s.taskId, s.at])).toEqual([["t1", 1_000]]);
+    await emitter.check();
+    expect(delivered).toHaveLength(1);
     stopAll(w);
   });
 });

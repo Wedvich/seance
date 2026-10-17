@@ -37,7 +37,12 @@ const FETCH_TIMEOUT_MS = 30_000;
 export type FetchOutcome =
   | { readonly kind: "fresh" }
   | { readonly kind: "fetched" }
-  | { readonly kind: "failed"; readonly detail: string };
+  | {
+      readonly kind: "failed";
+      readonly detail: string;
+      /** `detail` without git's stderr, which can carry a remote URL's credentials: safe for a log that is not reap's. */
+      readonly brief: string;
+    };
 
 /**
  * The newest `FETCH_HEAD` across the clone and its worktrees: a fetch run inside
@@ -63,7 +68,13 @@ export async function fetchIfStale(
 ): Promise<FetchOutcome> {
   if (now - (await lastFetchedAt(commonDir)) < staleMs) return { kind: "fresh" };
   const result = await reapGit(repoPath, ["fetch", "--prune", "--quiet", "origin"], FETCH_TIMEOUT_MS, undefined, env);
-  return result.exitCode === 0 ? { kind: "fetched" } : { kind: "failed", detail: execFailure(result) };
+  return result.exitCode === 0
+    ? { kind: "fetched" }
+    : {
+        kind: "failed",
+        detail: execFailure(result),
+        brief: result.timedOut ? "timed out" : `exit ${result.exitCode}`,
+      };
 }
 
 /**
