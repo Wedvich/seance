@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   APP_ID,
   AT_REST_OPS,
@@ -8,6 +8,7 @@ import {
   MAX_PAUSE_HOLDS,
   openAtRest,
   REPLAY_WINDOW_MS,
+  RequestFailure,
   sealAtRest,
   sealTaskRecord,
   SCHEDULER_ID,
@@ -22,6 +23,7 @@ import {
 } from "@seance/shared";
 import { StoreRevoked, type QueueStore, type Task } from "../src/leader.ts";
 import { createQueueStore } from "../src/queue-store.ts";
+import { log } from "../src/log.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import { pollUntil } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
@@ -55,6 +57,8 @@ interface RigOpts {
   /** The term the adapter writes under; the relay's is 2. */
   readonly term?: number;
   readonly storeTimeoutMs?: number;
+  /** Defaults to `storeTimeoutMs`: production's longer list deadline would make a held list wait it out. */
+  readonly storeListTimeoutMs?: number;
   readonly onStoreChanged?: (key: string, version: number) => void;
 }
 
@@ -75,6 +79,7 @@ async function withRig(body: (rig: Rig) => Promise<void>, opts: RigOpts = {}): P
       ),
     handle: () => Promise.resolve(null),
     storeTimeoutMs: opts.storeTimeoutMs ?? 300,
+    storeListTimeoutMs: opts.storeListTimeoutMs ?? opts.storeTimeoutMs ?? 300,
     ...(opts.onStoreChanged === undefined ? {} : { onStoreChanged: opts.onStoreChanged }),
   });
   client.start();
@@ -274,6 +279,49 @@ describe("write mapping", () => {
         expect(Date.now() - started).toBeLessThan(5_000);
       },
       { storeTimeoutMs: 30_000 },
+    );
+  });
+
+  test("a send that throws leaves nothing pending and reads as no socket: the term is over", async () => {
+    await withRig(async ({ client, store }) => {
+      const real = WebSocket.prototype.send;
+      const refuse = spyOn(WebSocket.prototype, "send").mockImplementation(function (
+        this: WebSocket,
+        data: Parameters<typeof real>[0],
+      ) {
+        if (typeof data === "string" && data.includes('"t":"store-')) throw new Error("socket is closing");
+        return real.call(this, data);
+      });
+      const warn = spyOn(log, "warn");
+      try {
+        const frame = { t: "store-get", id: crypto.randomUUID(), key: "task:a" } as const;
+        const failure = await client.store(frame).catch((err: unknown) => err);
+        expect(failure).toBeInstanceOf(RequestFailure);
+        expect(failure).toMatchObject({ reason: "disconnected" });
+        await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
+        // A non-event cannot be polled for: wait past the 300ms deadline a leaked timer would fire at.
+        await Bun.sleep(400);
+        expect(warn.mock.calls.filter(([line]) => String(line).includes("store timeout"))).toEqual([]);
+      } finally {
+        refuse.mockRestore();
+        warn.mockRestore();
+      }
+    });
+  });
+
+  test("a list waits out its own, longer deadline while a single read gives up at the short one", async () => {
+    await withRig(
+      async ({ relay, store }) => {
+        relay.holdStoreReplies = true;
+        const single = Date.now();
+        await expect(store.get("a")).rejects.toThrow("timed out after 200ms");
+        expect(Date.now() - single).toBeLessThan(900);
+        const list = Date.now();
+        await expect(store.list()).rejects.toThrow("timed out after 1000ms");
+        // A timer cannot fire early, so a lower bound is not a race.
+        expect(Date.now() - list).toBeGreaterThanOrEqual(950);
+      },
+      { storeTimeoutMs: 200, storeListTimeoutMs: 1_000 },
     );
   });
 

@@ -36,6 +36,14 @@ import {
 } from "@seance/shared";
 import { log } from "./log.ts";
 
+/**
+ * A full `store-list` is `MAX_TASKS` records of up to `STORE_MAX_CT_LENGTH`
+ * each, one frame of about 5.2 MB; `STORE_TIMEOUT_MS` is sized for a single
+ * record. Measured at 100-250 ms on a good link, so this is slack for a slow
+ * one — a takeover that times out here retries, but never lists faster.
+ */
+const STORE_LIST_TIMEOUT_MS = 30_000;
+
 export interface RelayClientOpts {
   readonly url: string;
   readonly bearerToken: string;
@@ -75,6 +83,8 @@ export interface RelayClientOpts {
   readonly onStoreChanged?: (key: string, version: number) => void;
   /** Tests only; defaults to `STORE_TIMEOUT_MS`. */
   readonly storeTimeoutMs?: number;
+  /** Tests only; defaults to `STORE_LIST_TIMEOUT_MS`. */
+  readonly storeListTimeoutMs?: number;
   readonly pingIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   readonly baseBackoffMs?: number;
@@ -89,7 +99,10 @@ export interface RelayClientOpts {
  */
 export class RelayClient {
   readonly #opts: Required<
-    Pick<RelayClientOpts, "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs" | "storeTimeoutMs">
+    Pick<
+      RelayClientOpts,
+      "pingIntervalMs" | "pongTimeoutMs" | "baseBackoffMs" | "maxBackoffMs" | "storeTimeoutMs" | "storeListTimeoutMs"
+    >
   > &
     RelayClientOpts;
   readonly #guard = new ReplayGuard();
@@ -141,6 +154,7 @@ export class RelayClient {
       baseBackoffMs: 1_000,
       maxBackoffMs: 60_000,
       storeTimeoutMs: STORE_TIMEOUT_MS,
+      storeListTimeoutMs: STORE_LIST_TIMEOUT_MS,
       ...opts,
     };
   }
@@ -288,7 +302,7 @@ export class RelayClient {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay"));
     }
     return new Promise<StoreReplyFrame | null>((resolve, reject) => {
-      const limit = this.#opts.storeTimeoutMs;
+      const limit = frame.t === "store-list" ? this.#opts.storeListTimeoutMs : this.#opts.storeTimeoutMs;
       const timer = setTimeout(() => {
         log.warn(`store timeout id=${quote(frame.id)} t=${frame.t} after=${limit}ms`);
         this.#storePending.delete(frame.id);
@@ -304,7 +318,15 @@ export class RelayClient {
           else reject(result.error);
         },
       });
-      socket.send(JSON.stringify(frame));
+      try {
+        socket.send(JSON.stringify(frame));
+      } catch (err) {
+        // Nothing left: no reply or timeout may fire for a frame that was never sent, and the
+        // adapter reads `disconnected` as the term's end rather than a write that may have landed.
+        clearTimeout(timer);
+        this.#storePending.delete(frame.id);
+        reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`));
+      }
     });
   }
 
