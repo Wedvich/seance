@@ -1,5 +1,6 @@
 import {
   reasonText,
+  taskFailureText,
   type Candidate,
   type Decision,
   type Machine,
@@ -206,8 +207,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "done":
       return `It finished${place}.`;
     case "failed":
-      return task.failure?.code === "dispatch_unconfirmed"
-        ? `Never confirmed${place} — it may have started there.`
+      if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
+      // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
+      return task.failure !== undefined && taskFailureText(task.failure.code) !== null
+        ? "It won't run."
         : `It didn't take${place}.`;
     case "cancelled":
       return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";

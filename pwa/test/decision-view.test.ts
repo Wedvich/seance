@@ -200,4 +200,17 @@ describe("taskHeadline", () => {
       "Never confirmed on Mac · default — it may have started there.",
     );
   });
+
+  test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
+    const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
+    for (const code of ["queue_expired", "dependency_failed", "dependency_missing", "dependency_cycle"]) {
+      expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
+    }
+    expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
+      "It didn't take on Mac · default.",
+    );
+    // A code minted after this build is no scheduler code it knows: read as a refusal.
+    expect(taskHeadline(failed("minted_later"), machines, NOW)).toBe("It didn't take.");
+    expect(taskHeadline(task({ state: "failed" }), machines, NOW)).toBe("It didn't take.");
+  });
 });

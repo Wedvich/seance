@@ -9,6 +9,7 @@ import {
   RequestFailure,
   SCHEDULER_ID,
   TASK_REQUEST_LIMITS,
+  taskFailureText,
   type Decision,
   type Machine,
   type RepoEntry,
@@ -903,6 +904,16 @@ describe("spawn_session on auto", () => {
     expect(text).toContain("failure (repo_not_found): no such repo");
   });
 
+  test("a failure the scheduler set reads in its shared wording, not the raw message", async () => {
+    const failure = { code: "dependency_cycle", message: "t-1 -> t-2 -> t-1" };
+    const failed = task({ state: "failed", decision, failure });
+    const fake = leaderRelay(() => ({ task: task() }), [{ tasks: [failed], at: 6_000 }]);
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(text).toContain("failure (dependency_cycle): its dependencies wait on each other in a loop");
+    expect(text).not.toContain(failure.message);
+  });
+
   test("a prompt over the scheduler's bound is refused here, before anything dials the relay", async () => {
     const fake = leaderRelay(() => ({ task: task() }));
     const prompt = "x".repeat(TASK_REQUEST_LIMITS.prompt + 1);
@@ -1051,6 +1062,24 @@ describe("get_queue", () => {
       ],
     });
     expect(fake.requests.map((r) => `${r.op}@${r.deviceId}`)).toEqual([`queue@${SCHEDULER_ID}`]);
+    lazy.stop();
+  });
+
+  test("a failed task's line words a scheduler code and keeps a daemon refusal's own message", async () => {
+    const failed = (id: string, code: string, message: string) =>
+      task({ id, state: "failed", failure: { code, message } });
+    const fake = leaderRelay(
+      () => new Error("no submit here"),
+      [{ tasks: [failed("t-1", "queue_expired", "raw"), failed("t-2", "repo_not_found", "no such repo")], at: 6_000 }],
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "get_queue", arguments: {} });
+    const { tasks } = JSON.parse(toolText(result));
+    expect(tasks.map((t: { failure: string }) => t.failure)).toEqual([
+      `queue_expired: ${taskFailureText("queue_expired")}`,
+      "repo_not_found: no such repo",
+    ]);
     lazy.stop();
   });
 
