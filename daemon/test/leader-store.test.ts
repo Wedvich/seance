@@ -270,9 +270,9 @@ describe("store-changed while takeover's buffered nudges are refreshing", () => 
 /** Writes go through until `armed`, then every one meets the relay's `not_leader`. */
 class Revocable extends MemoryQueueStore {
   armed = false;
-  override put(id: string, expect: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+  override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
     if (this.armed) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
-    return super.put(id, expect, body);
+    return super.put(id, version, body);
   }
 }
 
@@ -323,9 +323,9 @@ describe("a revoked term, from the paths that write on an event", () => {
 
   test("an app's request is answered not_leader, not internal_error", async () => {
     class RevokedCreate extends MemoryQueueStore {
-      override put(id: string, expect: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
-        if (expect === 0) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
-        return super.put(id, expect, body);
+      override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (version === 0) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
+        return super.put(id, version, body);
       }
     }
     await withLeader(async ({ leader, replies, resigned }) => {
