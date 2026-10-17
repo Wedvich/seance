@@ -35,13 +35,13 @@ export function over(t: Task): boolean {
 
 /**
  * `cap_reached` scope `batch` when `task`'s batch already holds its bound, or,
- * for `sequential`, while a lower-`index` member the scheduler holds is not over
- * yet — one unroutable this pass or `blocked` holds the next, so `index` order
- * is what runs, not whichever member routes first. Order is among held members:
- * a lower index never put, not yet refreshed, or pruned holds nothing, so gaps,
- * 1-based numbering and pruning never wedge a batch, and the cost is the
- * members, not the `index`. The hold reports `inFlight: 1` of `max: 1`: the
- * schema has no reason for "an earlier member is not over".
+ * for `sequential`, `batch_order` while a lower-`index` member the scheduler
+ * holds is not over yet — one unroutable this pass or `blocked` holds the next,
+ * so `index` order is what runs, not whichever member routes first. It names
+ * the nearest such index, the one `orderEdges` waits on. Order is among held
+ * members: a lower index never put, not yet refreshed, or pruned holds
+ * nothing, so gaps, 1-based numbering and pruning never wedge a batch, and the
+ * cost is the members, not the `index`.
  */
 export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const { batch } = task.spec;
@@ -54,8 +54,8 @@ export function batchCap(task: Task, tasks: readonly Task[]): Reason | null {
   const held = others.filter((t) => BATCH_HELD.has(t.state)).length;
   if (held >= max) return { code: "cap_reached", inFlight: held, max, scope: "batch" };
   if (strategy?.mode !== "sequential") return null;
-  const earlier = others.some((t) => (t.spec.batch?.index ?? 0) < batch.index && !over(t));
-  return earlier ? { code: "cap_reached", inFlight: 1, max, scope: "batch" } : null;
+  const earlier = others.filter((t) => indexOf(t) < batch.index && !over(t)).map(indexOf);
+  return earlier.length === 0 ? null : { code: "batch_order", index: Math.max(...earlier) };
 }
 
 /**

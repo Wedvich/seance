@@ -1527,7 +1527,8 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   bills; an empty list reads the same, since a real daemon always lists `default`, and
   stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
-  `quota_over_line`, `cap_reached` (global, or `scope: "batch"`, "Batches" below). Skill and
+  `quota_over_line`, `cap_reached` (global, or `scope: "batch"`, "Batches" below),
+  `batch_order` ("Batches"). Skill and
   stacked-base filters are M4's. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
@@ -1661,8 +1662,9 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   its outcome has already released or failed, so a `cancelled` member's dependent fails
   `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
   `STORE_TOMBSTONE_MS` old is never admitted: its key's tombstone may be gone, so it may be
-  a pruned task's authentic version-1 blob put back. It stays `queued` — no failure code
-  says why yet — and its dependents wait on it. A release lands at the next pass, not on
+  a pruned task's authentic version-1 blob put back. It fails `queue_expired`, first in the
+  call, so its dependents fail `dependency_failed` with it and pruning can take it — held
+  `queued` instead, it would wait forever and hold its dependents with it. A release lands at the next pass, not on
   the event: the host ticks at least every 30s.
 - **Batches** (`batch.ts`, M3 item 4a). No batch record exists: a batch is the tasks that
   name its id, and its strategy is the earliest-created member's (ties to the lower id).
@@ -1673,12 +1675,14 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   reason a batch's own serialization lacks, and its session may still run on a machine
   that only sleeps, so the next `sequential` member would run beside it. `sequential` also
   enforces `index` order, which routing order alone cannot (a member whose predecessor is
-  unroutable this pass would go first): a member is held, with the same `cap_reached`
-  (`inFlight` the lower indexes not yet over), until every held lower index is over —
-  finished in any state, `failed` and `cancelled` included, or `awaiting-merge` — with
-  `inFlight: 1` of `max: 1`, one earlier member holding the sequential slot (the schema has
-  no reason for "an earlier member is not over"; a `batch_order` reason is a schema
-  follow-up). One still `blocked` or unroutable holds it. Order is enforced among held
+  unroutable this pass would go first): a member is held until every held lower index is
+  over — finished in any state, `failed` and `cancelled` included, or `awaiting-merge` —
+  with `batch_order`, naming the nearest lower index not over (the one cycle detection
+  counts as its edge). Its own reason, not `cap_reached`: the earlier member may be in
+  flight, but as often `blocked` or unroutable, and "1 of 1 in flight" would misstate that;
+  at the bound `cap_reached` comes first. One still `blocked` or unroutable holds it.
+  `parseBatch` bounds `index` at `MAX_TASKS` (`TASK_SPEC_LIMITS.batchIndex`): the store holds
+  no more task records, so no batch held at once has more members. Order is enforced among held
   members only: a lower index not in the store (never put, not yet refreshed, or pruned)
   holds nothing, so gaps, 1-based numbering and pruning never wedge a batch, and the check
   costs the members, not the `index`. One client puts a batch together, so the window is a

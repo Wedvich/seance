@@ -52,6 +52,7 @@ import {
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
+  type BatchMembership,
   type BranchState,
   type Candidate,
   type MachineStatus,
@@ -371,6 +372,8 @@ describe("parseTaskSpec", () => {
     for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
       expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
     }
+    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: { mode: "sequential" } };
+    expect(parseTaskSpec({ ...full, batch: last })?.batch).toEqual(last);
   });
 
   test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
@@ -381,6 +384,8 @@ describe("parseTaskSpec", () => {
       { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
       { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel + 1 } } },
       { ...full, batch: { ...full.batch, strategy: { mode: "round-robin" } } },
+      { ...full, batch: { ...full.batch, index: TASK_SPEC_LIMITS.batchIndex + 1 } },
+      { ...full, batch: { ...full.batch, index: -1 } },
       { ...full, deps: [{ task: "t-1", after: "pushed" }] },
       { ...full, deps: [{ task: "t 1", after: "opened" }] },
       { ...full, deps: [{ task: "t-1", after: "opened" }, null] },
@@ -451,6 +456,16 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
+  });
+
+  test("a batch order hold names the member it waits on; an index past the batch bound drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const order: Reason = { code: "batch_order", index: 3 };
+    expect(parseDecision(decision(order))?.candidates[0]?.rejected).toEqual([order]);
+    for (const index of [TASK_SPEC_LIMITS.batchIndex + 1, -1, 1.5, "3", undefined]) {
+      expect(parseDecision(decision({ code: "batch_order", index }))?.candidates[0]?.rejected).toEqual([]);
+    }
   });
 
   test("a pause reads with its scope and how it lifts; a malformed one drops the reason", () => {

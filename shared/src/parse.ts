@@ -511,7 +511,8 @@ function parseBatch(value: unknown): BatchMembership | null {
   if (!isRecord(value)) return null;
   const { id, index } = value;
   const strategy = parseBatchStrategy(value["strategy"]);
-  return isTaskId(id) && isUint(index) && strategy !== null ? { id, index, strategy } : null;
+  if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex || strategy === null) return null;
+  return { id, index, strategy };
 }
 
 function parseDep(value: unknown): TaskDep | null {
@@ -619,6 +620,10 @@ function parseReason(value: unknown): Reason | null {
       if (!isUint(inFlight) || !isUint(max)) return null;
       if (scope === undefined) return { code, inFlight, max };
       return scope === "global" || scope === "account" || scope === "batch" ? { code, inFlight, max, scope } : null;
+    }
+    case "batch_order": {
+      const { index } = value;
+      return isUint(index) && index <= TASK_SPEC_LIMITS.batchIndex ? { code, index } : null;
     }
     case "paused": {
       const until = PAUSE_UNTIL.find((u) => u === value["until"]);

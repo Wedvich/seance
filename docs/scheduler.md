@@ -482,7 +482,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
   - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
-    `sequential` is 1 and also holds a member until every held lower `index` is over).
+    `sequential` is 1 and also holds a member until every held lower `index` is over —
+    `batch_order`, its own reason, since the 4a follow-up).
   - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
     `QueueChanged.tasks`.
 - **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
@@ -541,10 +542,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     own `store_full`. Per pass, because an app's `store_full` never reaches the leader; gated,
     because a prune can race a create naming the finished task it deletes, and leader changes
     are routine (a deviation from "after takeover"; the gate narrows that race, it does not close
-    it). Left open: no
-    `TaskFailureCode` says "queued past `STORE_TOMBSTONE_MS`", so such a task is held `queued`,
-    never admitted, rather than failed and pruned as the `TaskRecord` comment has it — a code
-    for it is a schema PR of its own. And M2's `submit` still creates `ready`, which
+    it). Its schema follow-up landed beside it: `queue_expired` fails a task `queued` past
+    `STORE_TOMBSTONE_MS` (and its dependents), and `batch_order` words a `sequential` order
+    hold. Left open: M2's `submit` still creates `ready`, which
     `bindTaskRecord` refuses at version 1 (`created_unqueued`): item 3's adapter must not meet
     a `submit` create, so `submit` goes or creates `queued` before it lands.
   - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show

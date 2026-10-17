@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { isRouted, isSettled, type Machine, type Task } from "@seance/shared";
+import { isRouted, isSettled, sentence, taskFailureText, type Machine, type Task } from "@seance/shared";
 import { describeDecision, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
 import { failureBody } from "../view.ts";
@@ -13,6 +13,17 @@ interface Content {
   readonly detail: string | null;
   readonly primary: { readonly label: string; readonly onClick: "retry" | "another" | "back" };
   readonly showBack: boolean;
+}
+
+function failedBody(code: string | undefined): string {
+  if (code === "dispatch_unconfirmed") {
+    return "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another.";
+  }
+  // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
+  const scheduler = code === undefined ? null : taskFailureText(code);
+  return scheduler === null
+    ? "The machine refused the spawn. Nothing is running."
+    : `${sentence(scheduler)} Nothing is running.`;
 }
 
 /** What the person can do next about a task the scheduler holds, by its state. */
@@ -36,9 +47,7 @@ function queuedBody(task: Task): string {
     case "done":
       return "The session ended.";
     case "failed":
-      return task.failure?.code === "dispatch_unconfirmed"
-        ? "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another."
-        : "The machine refused the spawn. Nothing is running.";
+      return failedBody(task.failure?.code);
     case "cancelled":
       return task.leftRunning === true
         ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."

@@ -50,14 +50,21 @@ describe("admission", () => {
     expect(scheduler.task("q")?.state).toBe("running");
   });
 
-  test("a queued task older than the tombstone window is never admitted: an authentic blob may have been put back", async () => {
+  test("a queued task older than the tombstone window fails, and its dependents with it: an authentic blob may have been put back", async () => {
     const { clock, fleet, scheduler, put } = setup();
     await put("old", { createdAt: clock.now - STORE_TOMBSTONE_MS - 1 });
+    await put("edge", { createdAt: clock.now - STORE_TOMBSTONE_MS });
     await put("dependent", after("old", "merged"));
     await scheduler.load();
     await pass(scheduler);
-    expect(states(scheduler, "old", "dependent")).toEqual({ old: "queued", dependent: "blocked" });
-    expect(fleet.spawns).toEqual([]);
+    expect(states(scheduler, "old", "edge", "dependent")).toEqual({
+      old: "failed",
+      edge: "running",
+      dependent: "failed",
+    });
+    expect(scheduler.task("old")?.failure?.code).toBe("queue_expired");
+    expect(scheduler.task("dependent")?.failure?.code).toBe("dependency_failed");
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["edge"]);
   });
 });
 
