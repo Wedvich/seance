@@ -1,8 +1,29 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { RelayClient, type MetricsReply, type MetricsRequest, type MetricsSeries } from "@seance/shared";
+import {
+  RelayClient,
+  RequestFailure,
+  type Decision,
+  type Machine,
+  type MetricsReply,
+  type MetricsRequest,
+  type MetricsSeries,
+  type QueueReply,
+  type RelayState,
+  type RoutePreviewReply,
+  type SubmitReply,
+  type Task,
+  type TaskRequest,
+} from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
-import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
+import {
+  PREVIEW_DEBOUNCE_MS,
+  PREVIEW_RETRY_MS,
+  QUEUE_POLL_MS,
+  QUEUE_POLLS,
+  Store,
+  UNDO_WINDOW_MS,
+} from "../src/store.ts";
 import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
@@ -335,5 +356,289 @@ describe("layers and history", () => {
     expect(store.getState().sheet).toBeNull();
     expect(store.getState().settings).toBe(true);
     expect(fake.index()).toBe(1);
+  });
+});
+
+/**
+ * A client whose scheduler answers are the test's: registry state it sets, and
+ * `route-preview`, `submit` and `queue` answered by scripts. The relay is a
+ * network boundary; the real client meets the real relay in client.test.ts.
+ */
+class ScriptedClient extends RelayClient {
+  relay: RelayState;
+  readonly listeners = new Set<() => void>();
+  readonly previews: TaskRequest[] = [];
+  onPreview: () => Promise<RoutePreviewReply | null> = async () => ({ decision: DECISION });
+  onSubmit: () => Promise<SubmitReply | null> = async () => ({ task: QUEUED });
+  onQueue: () => Promise<QueueReply | null> = async () => ({ tasks: [QUEUED], at: 1 });
+
+  constructor(relay: Partial<RelayState> = {}) {
+    super({ url: "ws://127.0.0.1:1/app", token: "unused", key });
+    this.relay = { ...LEADING_RELAY, ...relay };
+  }
+
+  override getState = (): RelayState => this.relay;
+
+  override subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  override reconnect(): void {}
+
+  emit(next: Partial<RelayState>): void {
+    this.relay = { ...this.relay, ...next };
+    for (const listener of this.listeners) listener();
+  }
+
+  override routePreview(request: TaskRequest): Promise<RoutePreviewReply | null> {
+    this.previews.push(request);
+    return this.onPreview();
+  }
+
+  override submit(): Promise<SubmitReply | null> {
+    return this.onSubmit();
+  }
+
+  override queue(): Promise<QueueReply | null> {
+    return this.onQueue();
+  }
+}
+
+const ORIGIN = "github.com/acme/app";
+
+function autoMachine(deviceId: string, fields: Partial<Machine> = {}): Machine {
+  return {
+    deviceId,
+    name: deviceId,
+    platform: "linux",
+    repos: [{ name: "app", path: `/r/${deviceId}/app`, defaultBranch: "main", origin: ORIGIN }],
+    scannedAt: 1,
+    lastSeen: 1,
+    connected: true,
+    ...fields,
+  };
+}
+
+const LEADING_RELAY: RelayState = {
+  status: "open",
+  rejection: null,
+  machines: [autoMachine("dev-a"), autoMachine("dev-b")],
+  registrySize: 2,
+  ignored: 0,
+  unbound: 0,
+  skewed: 0,
+  settling: false,
+  registrySettled: true,
+  scheduler: { kind: "ready", deviceId: "dev-a", term: 1 },
+};
+
+const DECISION: Decision = { at: 1, chosen: null, candidates: [] };
+const QUEUED: Task = {
+  id: "t-1",
+  spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" },
+  state: "ready",
+  createdAt: 1,
+};
+
+/**
+ * Every timer the store arms, held until the test fires it by delay — the
+ * preview's retry and debounce, the follow loop's polls — so nothing here waits
+ * on the clock. A host boundary, stubbed as `captureUndoTimer` stubs it.
+ */
+function captureTimers(): { fire: (ms: number) => void; armed: (ms: number) => number; restore: () => void } {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  let next = 1;
+  const pending = new Map<number, { readonly ms: number; readonly callback: () => void }>();
+  Object.defineProperty(globalThis, "setTimeout", {
+    value: (callback: () => void, ms: number) => {
+      const id = next++;
+      pending.set(id, { ms, callback });
+      return id;
+    },
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "clearTimeout", {
+    value: (id: number): void => {
+      pending.delete(id);
+    },
+    configurable: true,
+  });
+  return {
+    fire: (ms) => {
+      for (const [id, timer] of [...pending]) {
+        if (timer.ms !== ms) continue;
+        pending.delete(id);
+        timer.callback();
+      }
+    },
+    armed: (ms) => [...pending.values()].filter((timer) => timer.ms === ms).length,
+    restore: () => {
+      Object.defineProperty(globalThis, "setTimeout", { value: realSet, configurable: true });
+      Object.defineProperty(globalThis, "clearTimeout", { value: realClear, configurable: true });
+    },
+  };
+}
+
+/** Lets the scripted replies' promise chains run, until `ready` holds. */
+async function until(ready: () => boolean, what: string): Promise<void> {
+  for (let turn = 0; turn < 100; turn += 1) {
+    if (ready()) return;
+    // oxlint-disable-next-line no-await-in-loop -- a poll over microtasks
+    await Promise.resolve();
+  }
+  throw new Error(`never: ${what}`);
+}
+
+/** Lets pending microtasks run, before an assertion that nothing more happened. */
+async function drain(): Promise<void> {
+  for (let turn = 0; turn < 100; turn += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    await Promise.resolve();
+  }
+}
+
+function followEnd(store: Store): unknown {
+  const verdict = store.getState().verdict;
+  return verdict?.kind === "queued" ? verdict.follow : undefined;
+}
+
+describe("auto's error paths", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  test("a preview answered not_ready keeps loading and asks again, then shows the decision", async () => {
+    const client = new ScriptedClient();
+    client.onPreview = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    const store = new Store(client);
+    store.selectAuto();
+    await until(() => timers.armed(PREVIEW_RETRY_MS) === 1, "the retry armed");
+    expect(store.getState().preview).toMatchObject({ kind: "loading" });
+
+    client.onPreview = async () => ({ decision: DECISION });
+    timers.fire(PREVIEW_RETRY_MS);
+    await until(() => store.getState().preview?.kind === "ok", "the decision shown");
+    expect(client.previews).toHaveLength(2);
+  });
+
+  test("a preview that answers after a machine was picked is dropped", async () => {
+    const client = new ScriptedClient();
+    const late = Promise.withResolvers<RoutePreviewReply | null>();
+    client.onPreview = () => late.promise;
+    const store = new Store(client);
+    store.selectAuto();
+    store.selectMachine("dev-b");
+    late.resolve({ decision: DECISION });
+    await drain();
+    expect(store.getState().preview).toBeNull();
+    expect(store.getState().form.auto).toBe(false);
+  });
+
+  test("a presence or repo change asks the preview again once its burst settles; a status beat does not", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
+    const detach = store.attach();
+    await until(() => store.getState().preview?.kind === "ok", "the first preview");
+    expect(client.previews).toHaveLength(1);
+
+    // Same presence and repos: nothing to ask.
+    client.emit({ machines: client.relay.machines.map((m) => ({ ...m, lastSeen: 2 })) });
+    expect(timers.armed(PREVIEW_DEBOUNCE_MS)).toBe(0);
+
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b", { connected: false })] });
+    client.emit({ machines: [autoMachine("dev-a")] });
+    expect(timers.armed(PREVIEW_DEBOUNCE_MS)).toBe(1);
+    timers.fire(PREVIEW_DEBOUNCE_MS);
+    await until(() => client.previews.length === 2, "the second preview");
+    detach();
+  });
+
+  test("a submit that times out keeps the prompt and says it may have queued", async () => {
+    const client = new ScriptedClient();
+    client.onSubmit = async () => {
+      throw new RequestFailure("timeout", "submit timed out after 10000ms");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true });
+    expect(store.getState().form.prompt).toBe("fix it");
+  });
+
+  test("a submit that never left is not queued; one dropped after the send may be", async () => {
+    for (const [reason, mayHaveLanded] of [
+      ["disconnected", false],
+      ["dropped", true],
+    ] as const) {
+      const client = new ScriptedClient();
+      client.onSubmit = async () => {
+        throw new RequestFailure(reason, "the relay socket closed");
+      };
+      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store each
+      await store.spawn();
+      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded });
+    }
+  });
+
+  test("following stops once the task is running", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { state: "ready" } });
+    expect(store.getState().form.prompt).toBe("");
+
+    const running: Task = { ...QUEUED, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 2 });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => {
+      const verdict = store.getState().verdict;
+      return verdict?.kind === "queued" && verdict.task.state === "running";
+    }, "the running task shown");
+    await drain();
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: running });
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+  });
+
+  test("following stops and says so when the leader answers without the task, or refuses", async () => {
+    for (const [reply, follow] of [
+      [{ tasks: [], at: 2 }, { kind: "gone" }],
+      [{ ok: false, code: "invalid_request", message: "?" }, { kind: "refused" }],
+    ] as const) {
+      const client = new ScriptedClient();
+      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store each
+      await store.spawn();
+      client.onQueue = async () => reply;
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await until(() => followEnd(store) !== undefined, "following to stop");
+      expect(store.getState().verdict).toMatchObject({ kind: "queued", follow });
+      expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    }
+  });
+
+  test("missed polls keep what was shown and ask again; out of polls, it says what it last knew may be stale", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    client.onQueue = async () => {
+      throw new RequestFailure("timeout", "queue timed out");
+    };
+    const rearmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
+    for (let poll = 1; poll < QUEUE_POLLS; poll += 1) {
+      expect(rearmed()).toBe(true);
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
+      await until(rearmed, "the next poll armed");
+    }
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => followEnd(store) !== undefined, "following to give up");
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: QUEUED, follow: { kind: "unanswered" } });
   });
 });

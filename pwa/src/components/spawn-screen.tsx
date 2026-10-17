@@ -318,7 +318,7 @@ function ActiveSheet(props: {
 
 /**
  * What `auto` would do with the form as it stands, before anything is queued
- * (docs/scheduler.md, M2 item 6). Shown only while the form is on `auto`.
+ * (DESIGN.md, PWA). Shown only while the form is on `auto`.
  */
 function PreviewCard(props: {
   preview: PreviewState | null;
@@ -340,6 +340,7 @@ function PreviewCard(props: {
           summary={describeDecision(preview.decision, machines, now, "would")}
           title="PLACEMENT PREVIEW"
           quota={false}
+          age={formatSeen(preview.decision.at, now)}
         />
         {refresh}
       </div>

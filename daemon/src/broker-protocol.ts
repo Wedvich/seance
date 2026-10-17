@@ -146,6 +146,7 @@ const FAILURE_REASONS: Record<FailureReason, true> = {
   unsupported: true,
   timeout: true,
   disconnected: true,
+  dropped: true,
   not_leader: true,
   no_leader: true,
   leader_unverified: true,

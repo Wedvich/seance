@@ -1,11 +1,11 @@
 import type {
+  Machine,
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
   RepoEntry,
   RescanResponse,
   SchedulerAvailability,
-  SchedulerErrorCode,
   SessionsResponse,
   SpawnClient,
   SpawnRequest,
@@ -13,12 +13,23 @@ import type {
   Task,
   TaskRequest,
 } from "@seance/shared";
-import { failureReasonText, RequestFailure, TASK_REQUEST_LIMITS, type RelayClient } from "@seance/shared";
+import {
+  failureReasonText,
+  isSettled,
+  isTransportError,
+  QUEUE_MAX_TASKS,
+  RequestFailure,
+  schedulerErrorText,
+  sentence,
+  TASK_REQUEST_LIMITS,
+  type RelayClient,
+} from "@seance/shared";
 import {
   DEFAULT_FORM,
   RANGE_SPANS,
   TARGET_METRICS,
   type Effort,
+  type FollowEnd,
   type HistoryRange,
   type HistoryResult,
   type HistoryTarget,
@@ -74,22 +85,6 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   internal_error: "The machine couldn't read its history store.",
 };
 
-/** What a scheduler refusal means to the person who asked; every code is worded, so a new one fails the build. */
-const SCHEDULER_ERRORS: Record<SchedulerErrorCode, string> = {
-  not_leader: "The scheduler moved to another machine while this was on its way. Try again.",
-  not_ready: "The scheduler is still taking over. Try again in a moment.",
-  invalid_request: "The scheduler refused the request. Update seanced and the app to matching versions.",
-  queue_full: "The scheduler already holds as many unfinished tasks as it will take.",
-  task_not_found: "The scheduler holds no such task.",
-  dispatching: "The task is starting on a machine right now. Try again in a moment.",
-  finished: "The task has already finished.",
-  despawn_failed: "Its machine refused to end the session. Nothing changed.",
-  conflict: "The task changed while this was on its way. Try again.",
-  reset_unknown: "No quota reading says when that account resets, so it can't be paused until then.",
-  internal_error: "The scheduler hit an error.",
-  too_large: "The scheduler's answer was too large to send back.",
-};
-
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
 /**
@@ -103,7 +98,7 @@ export const QUEUE_POLL_MS = 2_000;
 export const QUEUE_POLLS = 30;
 
 /** A preview answered `not_ready` (takeover still running) is asked again this often, this many times. */
-const PREVIEW_RETRY_MS = 1_000;
+export const PREVIEW_RETRY_MS = 1_000;
 const PREVIEW_RETRIES = 10;
 
 /**
@@ -113,6 +108,19 @@ const PREVIEW_RETRIES = 10;
 function schedulerKey(scheduler: SchedulerAvailability): string {
   return scheduler.kind === "none" ? "none" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
 }
+
+/**
+ * What a preview reads besides the leader: who is connected and which repos
+ * each holds. A status beat moves neither, so it asks nothing.
+ */
+function fleetKey(machines: readonly Machine[]): string {
+  return machines
+    .map((m) => `${m.deviceId}:${m.connected ? 1 : 0}:${m.repos.map((r) => r.origin ?? "").join(",")}`)
+    .join(";");
+}
+
+/** A presence or repo change asks the preview again after this quiet, so a registry burst asks once. */
+export const PREVIEW_DEBOUNCE_MS = 500;
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -142,6 +150,8 @@ export class Store {
   #held = false;
   /** The leader `auto` last previewed against: a new one, or one verified at last, asks again. */
   #previewedLeader = "";
+  /** The fleet `auto` last previewed against (`fleetKey`). */
+  #previewedFleet = "";
   #followTimer: ReturnType<typeof setTimeout> | null = null;
   #previewRetry: ReturnType<typeof setTimeout> | null = null;
 
@@ -230,7 +240,18 @@ export class Store {
     // a question the reply is about to answer — leaving nothing to reconcile if the
     // reply is the thing that gets dropped.
     if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
-    if (schedulerKey(relay.scheduler) !== this.#previewedLeader && this.#state.form.auto) void this.refreshPreview();
+    if (!this.#state.form.auto) return;
+    if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
+    else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
+  }
+
+  /** Debounced: each change restarts the wait. */
+  #askPreviewSoon(): void {
+    this.#stopPreviewRetry();
+    this.#previewRetry = setTimeout(() => {
+      this.#previewRetry = null;
+      void this.refreshPreview();
+    }, PREVIEW_DEBOUNCE_MS);
   }
 
   /**
@@ -380,6 +401,7 @@ export class Store {
     this.#stopPreviewRetry();
     const { form, relay } = this.#state;
     this.#previewedLeader = schedulerKey(relay.scheduler);
+    this.#previewedFleet = fleetKey(relay.machines);
     const repo = resolveAutoRepo(autoRepos(relay.machines), form);
     if (!form.auto || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
@@ -405,7 +427,7 @@ export class Store {
           }
           return;
         }
-        result = { kind: "failed", repo: repo.origin, message: SCHEDULER_ERRORS[reply.code] };
+        result = { kind: "failed", repo: repo.origin, message: sentence(schedulerErrorText(reply.code)) };
       } else result = { kind: "ok", repo: repo.origin, decision: reply.decision };
     } catch (err) {
       const text = err instanceof RequestFailure ? failureReasonText(err) : "the preview failed";
@@ -670,9 +692,8 @@ export class Store {
       if (reply === null) {
         this.#showVerdict({ kind: "unqueued", message: SCHEDULER_UNREADABLE, mayHaveLanded: true });
       } else if ("ok" in reply) {
-        // `too_large` is the transport's verdict on the reply; the task behind it was queued.
-        const mayHaveLanded = reply.code === "too_large" || reply.code === "internal_error";
-        this.#showVerdict({ kind: "unqueued", message: SCHEDULER_ERRORS[reply.code], mayHaveLanded });
+        const mayHaveLanded = isTransportError(reply.code);
+        this.#showVerdict({ kind: "unqueued", message: sentence(schedulerErrorText(reply.code)), mayHaveLanded });
       } else {
         this.#disarmUndo();
         this.#patch({ form: { ...this.#state.form, prompt: "" }, promptUndo: null });
@@ -680,9 +701,10 @@ export class Store {
         this.#follow(reply.task.id, QUEUE_POLLS);
       }
     } catch (err) {
-      const failure = err instanceof RequestFailure ? err : new RequestFailure("disconnected", String(err));
-      // A timeout or a dropped socket may have come after the leader queued it.
-      const mayHaveLanded = failure.reason === "timeout" || failure.reason === "disconnected";
+      // An error that is no `RequestFailure` says nothing about whether it went out, so it may have.
+      const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
+      // A timeout or a socket closing after the send may have come after the leader queued it.
+      const mayHaveLanded = failure.reason === "timeout" || failure.reason === "dropped";
       const text = failureReasonText(failure);
       this.#showVerdict({
         kind: "unqueued",
@@ -710,18 +732,42 @@ export class Store {
       return verdict?.kind === "queued" && verdict.task.id === taskId ? verdict.task : null;
     };
     if (showing() === null) return;
-    let task: Task | undefined;
+    let read: { readonly task: Task } | FollowEnd | "missed";
     try {
       const reply = await this.#client.queue();
-      task = reply === null || "ok" in reply ? undefined : reply.tasks.find((t) => t.id === taskId);
+      if (reply === null) read = { kind: "refused", message: SCHEDULER_UNREADABLE };
+      // A takeover in progress is a poll lost, not an answer: the next one hears the new leader.
+      else if ("ok" in reply) {
+        read =
+          reply.code === "not_ready"
+            ? "missed"
+            : { kind: "refused", message: sentence(schedulerErrorText(reply.code)) };
+      } else {
+        const task = reply.tasks.find((t) => t.id === taskId);
+        // The reply is the newest QUEUE_MAX_TASKS only: a full one may just have scrolled past it.
+        read = task !== undefined ? { task } : reply.tasks.length >= QUEUE_MAX_TASKS ? "missed" : { kind: "gone" };
+      }
     } catch {
       // A missed poll keeps what was shown; the next one asks again.
+      read = "missed";
     }
     const shown = showing();
     if (shown === null) return;
-    if (task !== undefined) this.#patch({ verdict: { kind: "queued", task } });
-    const state = (task ?? shown).state;
-    if (state === "ready" || state === "reserved") this.#follow(taskId, left);
+    const task = read !== "missed" && "task" in read ? read.task : shown;
+    if (read !== "missed" && !("task" in read)) {
+      this.#patch({ verdict: { kind: "queued", task, follow: read } });
+      return;
+    }
+    if (isSettled(task.state)) {
+      this.#patch({ verdict: { kind: "queued", task } });
+      return;
+    }
+    if (left > 0) {
+      if (task !== shown) this.#patch({ verdict: { kind: "queued", task } });
+      this.#follow(taskId, left);
+      return;
+    }
+    this.#patch({ verdict: { kind: "queued", task, follow: { kind: read === "missed" ? "unanswered" : "stopped" } } });
   }
 
   #stopFollowing(): void {
@@ -777,10 +823,11 @@ export class Store {
         this.#showVerdict({ kind: "failed", code: reply.code, message: reply.message, repo: repo.name });
       }
     } catch (err) {
-      const reason = err instanceof RequestFailure ? err.reason : "disconnected";
+      const reason = err instanceof RequestFailure ? err.reason : "dropped";
       // "refused" belongs with the undeliverables: the relay answered that the
-      // request did not land, so nothing can be running.
-      if (reason === "offline" || reason === "unknown" || reason === "refused") {
+      // request did not land, so nothing can be running — and "disconnected"
+      // never left the app at all.
+      if (reason === "offline" || reason === "unknown" || reason === "refused" || reason === "disconnected") {
         this.#pending = null;
         this.#showVerdict({ kind: "unknown", reason: "undelivered", machine: machine.name, sessionCount: null });
       } else {

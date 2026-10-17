@@ -22,11 +22,14 @@ export type Tone = "fg2" | "err";
 
 export type ConnectionState = "connected" | "connecting" | "offline";
 
+/** A status dot: green online, blue for `auto`, grey otherwise — on the tile and its sheet row alike. */
+export type Dot = "ok" | "off" | "auto";
+
 export interface Tile {
   readonly label: string;
   readonly value: string;
   readonly mono: boolean;
-  readonly dot: "ok" | "off" | "auto" | null;
+  readonly dot: Dot | null;
 }
 
 export interface Banner {
@@ -266,15 +269,16 @@ function deriveMeta(state: AppState): string {
 
 /**
  * `auto` is offered only when a verified leader would answer it. An unverified
- * one is named as such rather than as "no leader": it is what a bearer-token
- * holder squatting the role looks like, and the fix is not to wait (DESIGN.md,
- * Scheduler, "Leadership").
+ * one is named as such rather than as "no leader": the relay nominates only
+ * ids on `SCHEDULER_LEADERS`, so it is a listed daemon that has not shown this
+ * app it holds the PSK — a listed seed running without it, most likely — and
+ * nothing is sent to it (DESIGN.md, Scheduler, "Leadership").
  */
 export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
   if (relay.status !== "open") return { available: false, reason: "Not connected to the relay" };
   if (relay.scheduler.kind === "none") return { available: false, reason: "No scheduler is leading right now" };
   if (relay.scheduler.kind === "unverified") {
-    return { available: false, reason: "Leader unverified — its registry entry doesn't open with this key" };
+    return { available: false, reason: "Leader unverified — it hasn't shown it holds this key" };
   }
   return { available: true, reason: null };
 }
@@ -470,7 +474,12 @@ export function deriveView(state: AppState, now: number): ViewModel {
     relayLine: deriveRelayLine(state.relay),
     banner: deriveBanner(state, machine),
     machineTile: auto
-      ? { label: "MACHINE", value: "Auto", mono: false, dot: "auto" }
+      ? {
+          label: "MACHINE",
+          value: "Auto",
+          mono: false,
+          dot: deriveAutoAvailability(state.relay).available ? "auto" : "off",
+        }
       : {
           label: "MACHINE",
           value: machine?.name ?? "No machines",

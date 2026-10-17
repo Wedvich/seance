@@ -1113,7 +1113,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const view = deriveView(seen, Date.now());
       expect(view.autoAvailability).toEqual({
         available: false,
-        reason: "Leader unverified — its registry entry doesn't open with this key",
+        reason: "Leader unverified — it hasn't shown it holds this key",
       });
       expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
       // The form can neither preview nor queue, and the client refuses at the source.

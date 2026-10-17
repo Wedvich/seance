@@ -235,15 +235,6 @@ export function paneRunningTask(panes: readonly PaneInfo[], taskId: string): Pan
   return panes.find((pane) => !pane.dead && pane.taskId === taskId) ?? null;
 }
 
-/**
- * The task a pane was spawned for, from the pane itself — never from anything
- * a caller says about it. The lookup a pane-bound event attributes through;
- * `paneId` must already be a validated `%n`, as for `paneInfo`.
- */
-export async function taskIdOfPane(paneId: string): Promise<string | null> {
-  return (await paneInfo(paneId))?.taskId ?? null;
-}
-
 /** What the list-panes fields settle alone; null when only the screen can tell. */
 function stateWithoutScreen(pane: PaneInfo): PaneState | null {
   if (pane.dead) return "dead";

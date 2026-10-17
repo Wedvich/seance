@@ -1456,6 +1456,11 @@
   text-align: left;
 }
 
+/* Part of the label row, but lighter: when the card was decided, not what it is. */
+.decision-age {
+  font-weight: 400;
+}
+
 .decision-headline {
   margin: 0;
   font-size: 15px;

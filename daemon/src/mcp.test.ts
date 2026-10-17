@@ -17,7 +17,7 @@ import {
   type Task,
   type TaskRequest,
 } from "@seance/shared";
-import { fakeRelay, machine } from "../test/fake-app-relay.ts";
+import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
@@ -955,6 +955,15 @@ describe("spawn_session on auto", () => {
     expect(fake.requests.filter((r) => r.op === "submit")).toHaveLength(1);
   });
 
+  test("a socket closing after the send may have queued; one closed before it never left", async () => {
+    const dropped = await callAuto(leaderRelay(() => new RequestFailure("dropped", "the relay socket closed")));
+    expect(dropped.text).toContain(
+      "auto: no answer from the scheduler (the relay socket closed) — the task may have queued",
+    );
+    const unsent = await callAuto(leaderRelay(() => new RequestFailure("disconnected", "no socket to the relay")));
+    expect(unsent.text).toBe("auto failed: lost the relay connection before the request went out");
+  });
+
   test("through the broker auto is refused outright — nothing goes to the broker or any machine", async () => {
     const sent: string[] = [];
     const fleet = selectFleet({
@@ -1059,6 +1068,49 @@ describe("get_queue", () => {
     }
     expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
     lazy.stop();
+  });
+});
+
+describe("cancel_task", () => {
+  async function callCancel(answer: () => unknown): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(autoMachines(), (op) => (op === "cancel" ? answer() : new Error(`unexpected ${op}`)));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "cancel_task", arguments: { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("sends the task id to the scheduler and reports the task as it now stands", async () => {
+    const { text, error, fake } = await callCancel(() => ({ task: { ...running, state: "cancelled" } }));
+    expect(error).toBe(false);
+    expect(text).toBe("task t-1: cancelled on Linux Box");
+    expect(fake.requests).toEqual([{ deviceId: SCHEDULER_ID, op: "cancel", payload: { taskId: "t-1" } }]);
+  });
+
+  test("a lost task cancelled with its machine away says its session may still be running there", async () => {
+    const lost = { ...running, state: "cancelled", leftRunning: true } satisfies Task;
+    const { text } = await callCancel(() => ({ task: lost }));
+    expect(text).toContain("nothing was stopped there — its session may still be running");
+  });
+
+  test("a task that finished first is said to have, and refusals and lost answers are worded", async () => {
+    expect((await callCancel(() => ({ task: { ...running, state: "done" } }))).text).toContain(
+      "It had already finished (done) before the cancel landed.",
+    );
+    const refused = await callCancel(() => ({ ok: false, code: "dispatching", message: "in flight" }));
+    expect(refused).toMatchObject({
+      error: true,
+      text: expect.stringContaining("cancel_task failed (dispatching): the task is starting"),
+    });
+    const lost = await callCancel(() => new RequestFailure("timeout", "no reply within 10000ms"));
+    expect(lost.text).toBe(
+      "cancel_task: no answer from the scheduler (no reply within 10000ms) — the cancel may have landed anyway — check get_queue",
+    );
   });
 });
 

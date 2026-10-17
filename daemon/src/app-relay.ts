@@ -4,6 +4,7 @@ import {
   REGISTRY_SETTLE_MS,
   type ErrorResponse,
   type QueueReply,
+  type TaskReply,
   type SchedulerEventHandler,
   type RelayState,
   type RequestOp,
@@ -36,6 +37,7 @@ export interface AppRelay {
   /** As `RelayClient.submit`: refused before sending unless a verified leader is nominated. */
   readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
   readonly queue: () => Promise<QueueReply | null>;
+  readonly cancel: (taskId: string) => Promise<TaskReply | null>;
 }
 
 /**
