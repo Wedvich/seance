@@ -1,5 +1,6 @@
 import {
   CAPABILITIES,
+  DEFAULT_MODEL,
   effectivePct,
   isQuotaTrimmed,
   isStatusStale,
@@ -18,7 +19,7 @@ import {
   type ScoreComponents,
 } from "@seance/shared";
 import { batchCap } from "./batch.ts";
-import type { SchedulerConfig } from "./config.ts";
+import type { SchedulerConfig, SeatProfile } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
@@ -55,6 +56,8 @@ interface QuotaWindow {
   /** Unix seconds. */
   readonly resetsAt: number | undefined;
   readonly lengthMs: number;
+  /** A per-model weekly's display name (`Fable`); absent on the all-models windows. */
+  readonly model?: string;
 }
 
 type AccountQuota =
@@ -126,8 +129,12 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
+  const seat = seatOf(config, exclave.seatTier);
+  const gated = gatedModel(task.spec.model ?? DEFAULT_MODEL, config);
+  if (gated !== null && !seat.includes.includes(gated)) rejected.push({ code: "model_not_included", model: gated });
   const sharing = exclave.accountId === null ? 0 : accountInFlight(pass, exclave.accountId);
-  const account = exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing);
+  const account =
+    exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
   if (sharing >= config.accountMax) {
     rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
@@ -192,15 +199,27 @@ function accountOfPlacement(machines: readonly Machine[], placement: Placement):
   );
 }
 
-/** Projected usage counts this task and every in-flight one on the same account (`sharing`). */
-function judgeAccount(pass: Pass, exclave: ExclaveInfo, accountId: string, sharing: number): AccountJudgement {
+/**
+ * Projected usage counts this task and every in-flight one on the same account
+ * (`sharing`), each at the estimate scaled to the seat's `capacity`.
+ */
+function judgeAccount(
+  pass: Pass,
+  exclave: ExclaveInfo,
+  accountId: string,
+  sharing: number,
+  capacity: number,
+): AccountJudgement {
   const account = pass.quotaOf(accountId);
   if (!account.known) return { reason: { code: "quota_unknown", why: account.why }, pressure: 0 };
+  const windows = account.windows.filter((w) => appliesTo(w, pass.task.spec.model ?? DEFAULT_MODEL));
+  // Only another model's weekly was read: nothing says how full this task's windows are.
+  if (windows.length === 0) return { reason: { code: "quota_unknown", why: "unobserved" }, pressure: 0 };
   const { observation, deviceId } = account.newest;
   const quota = { observedAt: observation.at, observer: deviceId, source: observation.s };
-  const added = pass.config.taskEstimatePct * (sharing + 1);
-  const pressure = pressureOf(account.windows, added, pass.now);
-  const over = overLine(account.windows, added, pass.now, pass.config);
+  const added = (pass.config.taskEstimatePct / capacity) * (sharing + 1);
+  const pressure = pressureOf(windows, added, pass.now);
+  const over = overLine(windows, added, pass.now, pass.config);
   if (over === null) return { quota, pressure };
   if (exclave.extraUsageEnabled === true) return { quota, spill: over, pressure };
   return { reason: { code: "quota_over_line", ...over }, quota, pressure };
@@ -264,7 +283,9 @@ function accountQuota(
 
 /**
  * When `accountId`'s quota next frees it, ms, by its newest reading: what a
- * `pause { until: "reset" }` lifts at. Over the line in any window (one more
+ * `pause { until: "reset" }` lifts at. All-models windows only: a full
+ * per-model weekly holds back that model's tasks, which routing still filters
+ * once the pause lifts, not the account. Over the line in any window (one more
  * task's estimate on top of every in-flight one, judged as routing does —
  * `overLine`), the latest reset among those, since
  * an earlier one would lift the hold into a window still full; otherwise the
@@ -290,14 +311,16 @@ export function accountResetAt(
     },
     accountId,
   );
-  const over = account.windows.filter(
-    (w) => overLine([w], config.taskEstimatePct * (sharing + 1), now, config) !== null,
+  const { capacity } = seatOf(config, seatTierOf(machines, accountId));
+  const windows = account.windows.filter((w) => w.model === undefined);
+  const over = windows.filter(
+    (w) => overLine([w], (config.taskEstimatePct / capacity) * (sharing + 1), now, config) !== null,
   );
   if (over.length > 0) {
     const resets = over.flatMap(resetMs);
     return resets.length === over.length ? Math.max(...resets) : null;
   }
-  const resets = account.windows.flatMap(resetMs);
+  const resets = windows.flatMap(resetMs);
   return resets.length === 0 ? null : Math.min(...resets);
 }
 
@@ -305,6 +328,40 @@ export function accountResetAt(
 export function windowResetOf(accountId: string, machines: readonly Machine[], window: string): number | undefined {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines));
   return account.known ? account.windows.find((w) => w.label === window)?.resetsAt : undefined;
+}
+
+/** `seatTier` is daemon-reported, so only the table's own keys answer — never one off its prototype. */
+function seatOf(config: SchedulerConfig, tier: string | undefined): SeatProfile {
+  return (
+    (tier !== undefined && Object.hasOwn(config.seats, tier) ? config.seats[tier] : undefined) ?? config.unknownSeat
+  );
+}
+
+/** The tier any exclave signed into `accountId` reports: one account, one seat. */
+function seatTierOf(machines: readonly Machine[], accountId: string): string | undefined {
+  for (const machine of machines) {
+    const tier = machine.exclaves?.find((x) => x.accountId === accountId && x.seatTier !== undefined)?.seatTier;
+    if (tier !== undefined) return tier;
+  }
+  return undefined;
+}
+
+/**
+ * All-models windows bind every task; a per-model weekly only a task on that
+ * model — a full Fable week leaves Opus work free. Matched on the display
+ * name's first word (`Fable` in `claude-fable-5-1[1m]`), since the cache
+ * holds no model id.
+ */
+function appliesTo(window: QuotaWindow, model: string): boolean {
+  if (window.model === undefined) return true;
+  const family = window.model.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return family !== "" && model.toLowerCase().includes(family);
+}
+
+/** The `gatedModels` family `model` names (an alias like `fable`, or an id like `claude-fable-5-1[1m]`), else null. */
+function gatedModel(model: string, config: SchedulerConfig): string | null {
+  const lower = model.toLowerCase();
+  return config.gatedModels.find((family) => lower.includes(family)) ?? null;
 }
 
 function hosts(machine: Machine, accountId: string): boolean {
@@ -315,12 +372,13 @@ function carries(machine: Machine, status: MachineStatus, accountId: string): bo
   return (status.quota ?? []).some((q) => machine.exclaves?.[q.x]?.accountId === accountId);
 }
 
-/** Readers take the max over `d` and the per-model weeklies (`QuotaObservation.w`), so all count. */
+/** Every window the reading has; which of them a task is judged on is `appliesTo`'s. */
 function windowsOf(o: QuotaObservation): QuotaWindow[] {
   const windows: QuotaWindow[] = [];
   if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, lengthMs: FIVE_HOURS_MS });
   if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, lengthMs: SEVEN_DAYS_MS });
-  for (const w of o.w ?? []) windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, lengthMs: SEVEN_DAYS_MS });
+  for (const w of o.w ?? [])
+    windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, lengthMs: SEVEN_DAYS_MS, model: w.m });
   return windows;
 }
 

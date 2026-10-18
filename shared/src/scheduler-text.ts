@@ -97,6 +97,8 @@ export function reasonText(reason: Reason): string {
         : "its account's quota has never been observed";
     case "quota_over_line":
       return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
+    case "model_not_included":
+      return `its seat bills ${reason.model} to credits`;
     case "cap_reached":
       if (reason.scope === "account")
         return `${reason.inFlight} of ${reason.max} auto tasks already in flight on its account`;

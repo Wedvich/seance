@@ -662,6 +662,12 @@ export interface ExclaveInfo {
   readonly email?: string;
   /** Whether the account may spill into credits; null when its `.claude.json` doesn't say. */
   readonly extraUsageEnabled: boolean | null;
+  /**
+   * `oauthAccount.seatTier` (`team_tier_1`, `team_standard`): what the scheduler
+   * reads a seat's size and included models from (`SchedulerConfig.seats`).
+   * Absent from older daemons and from accounts whose file doesn't carry one.
+   */
+  readonly seatTier?: string;
   /** The config dir holds a signed-in account. */
   readonly authOk: boolean;
   /**
@@ -1425,6 +1431,12 @@ export type Reason =
   | { readonly code: "auth_missing" }
   | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
   | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
+  /**
+   * The task's model is one its seat bills to credits (`model`, the gated
+   * family as `SchedulerConfig.gatedModels` names it). Never spilled past, as
+   * `quota_over_line` may be.
+   */
+  | { readonly code: "model_not_included"; readonly model: string }
   /**
    * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
    * per-account cap; `batch`, the task's batch at its strategy's bound

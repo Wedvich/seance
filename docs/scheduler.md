@@ -695,6 +695,19 @@ same PR, with the reason.
     never ran (cancelled or marked done while waiting, expired, a failed dependency, a spawn
     refused before launch) has none. Slugs derived from it (window, branch) stay as labels
     (DESIGN.md, Scheduler, "The library").
+17. **Seats differ, so a percentage does not compare across them** (owner, 2026-10-18). A Team
+    premium seat (`seatTier` `team_tier_1`) has 6.25× a standard seat's (`team_standard`)
+    limits, and only premium covers Fable from quota; on standard Fable is billed to credits.
+    So a Fable task never goes to a seat that doesn't include it — `model_not_included`, a hard
+    filter that extra usage does not spill past — and the per-task estimate (8) is scaled by
+    the seat's `capacity`: 5% on premium, 31.25% on standard, which keeps heavy work off the
+    small seat through the existing line and score, with no task-size field. Premium's own
+    Fable allowance is not modelled separately; its `7d Fable` window is what routing reads,
+    and only for Fable tasks — a full Fable week leaves other models' work free.
+    The table is `seats` in `scheduler/src/config.ts`, keyed by the tier string the daemon
+    reads from `.claude.json` — mapped, not set per account, so it needs no account records
+    (M4). A tier the table doesn't name, or none (an older daemon, a non-Team account), keeps
+    today's estimate but includes no gated model: an unknown seat may bill Fable to credits.
 
 ## Risks / unknowns
 

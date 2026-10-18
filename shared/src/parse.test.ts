@@ -115,6 +115,13 @@ describe("parseExclaveList", () => {
     expect(parseExclaveList([{ ...exclave, email: "" }])?.[0]).not.toHaveProperty("email");
   });
 
+  test("carries a seat tier when there is one; an old daemon's exclave has none", () => {
+    expect(parseExclaveList([{ ...exclave, seatTier: "team_standard" }])?.[0]?.seatTier).toBe("team_standard");
+    expect(parseExclaveList([exclave])?.[0]).not.toHaveProperty("seatTier");
+    expect(parseExclaveList([{ ...exclave, seatTier: "" }])?.[0]).not.toHaveProperty("seatTier");
+    expect(parseExclaveList([{ ...exclave, seatTier: 1 }])).toBeNull();
+  });
+
   test("one unreadable exclave invalidates the list — status indexes into it", () => {
     expect(parseExclaveList([exclave, { ...exclave, id: "" }])).toBeNull();
     expect(parseExclaveList([exclave, { ...exclave, skills: "dataviz" }])).toBeNull();
@@ -494,6 +501,16 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision(order))?.candidates[0]?.rejected).toEqual([order]);
     for (const index of [TASK_SPEC_LIMITS.batchIndex + 1, -1, 1.5, "3", undefined]) {
       expect(parseDecision(decision({ code: "batch_order", index }))?.candidates[0]?.rejected).toEqual([]);
+    }
+  });
+
+  test("a model not included names the gated model; an empty or oversized one drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const gated: Reason = { code: "model_not_included", model: "fable" };
+    expect(parseDecision(decision(gated))?.candidates[0]?.rejected).toEqual([gated]);
+    for (const model of ["", "x".repeat(TASK_REQUEST_LIMITS.model + 1), 7, undefined]) {
+      expect(parseDecision(decision({ code: "model_not_included", model }))?.candidates[0]?.rejected).toEqual([]);
     }
   });
 

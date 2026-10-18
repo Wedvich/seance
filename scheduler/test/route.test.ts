@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine } from "@seance/shared";
+import type { ExclaveInfo, Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -54,6 +54,30 @@ function twoAccounts(): Machine {
 /** When `org:a` resets, read from one machine reporting `quota`. */
 function resetOf(quota: ReturnType<typeof obs>): number | null {
   return accountResetAt("org:a", [machine("a", { status: status({ quota: [quota] }) })], [], NOW, DEFAULT_CONFIG);
+}
+
+/** Machine `a` with a premium exclave `main` and a standard one `alt`, both observed at `pct`, both holding a clone. */
+function seats(pct: number, extra: Partial<ExclaveInfo> = {}): Machine {
+  return machine("a", {
+    exclaves: [
+      exclave("main", "org:a", { seatTier: "team_tier_1", ...extra }),
+      exclave("alt", "org:b", { seatTier: "team_standard", ...extra }),
+    ],
+    repos: [clone("app", "main"), clone("app2", "alt")],
+    status: status({ quota: [obs(0, { h: pct }), obs(1, { h: pct })] }),
+  });
+}
+
+function byExclave(decision: Decision, id: string): Candidate | undefined {
+  return decision.candidates.find((c) => c.exclave === id);
+}
+
+/** `org:a` on one seat tier, at 60% in a 5h window resetting after its 7d one. */
+function seatReading(seatTier: string): Machine {
+  return machine("a", {
+    exclaves: [exclave("main", "org:a", { seatTier })],
+    status: status({ quota: [obs(0, { h: 60, hr: NOW_S + 7200, d: 10, dr: NOW_S + 3600 })] }),
+  });
 }
 
 describe("filter", () => {
@@ -219,9 +243,24 @@ describe("filter", () => {
       expect(only(decide(fleet)).rejected).toEqual([]);
     });
 
-    test("a per-model weekly counts like the all-models one", () => {
-      const fleet = [machine("a", { status: status({ quota: [obs(0, { w: [{ m: "Fable", p: 88 }] })] }) })];
-      expect(only(decide(fleet)).rejected).toEqual([{ code: "quota_over_line", window: "7d Fable", projectedPct: 93 }]);
+    test("a per-model weekly binds only that model's tasks", () => {
+      const premium = exclave("main", "org:a", { seatTier: "team_tier_1" });
+      const fleet = [
+        machine("a", { exclaves: [premium], status: status({ quota: [obs(0, { w: [{ m: "Fable", p: 88 }] })] }) }),
+      ];
+      const fable = decide(fleet, { task: task({ spec: spec({ model: "claude-fable-5-1[1m]" }) }) });
+      expect(only(fable).rejected).toEqual([{ code: "quota_over_line", window: "7d Fable", projectedPct: 93 }]);
+      // A full Fable week leaves Opus work free, and does not weigh on its score either.
+      const opus = only(decide(fleet));
+      expect(opus.rejected).toEqual([]);
+      const unread = only(decide([machine("a", { exclaves: [premium] })]));
+      expect(opus.score?.components.accountPressure).toBe(unread.score?.components.accountPressure);
+    });
+
+    test("only another model's weekly read is unknown, never 0%", () => {
+      const reading = obs(0, { h: undefined, d: undefined, w: [{ m: "Fable", p: 10 }] });
+      const fleet = [machine("a", { status: status({ quota: [reading] }) })];
+      expect(only(decide(fleet)).rejected).toEqual([{ code: "quota_unknown", why: "unobserved" }]);
     });
 
     test("a window resetting within 15 min counts as empty; one past its reset reads 0%", () => {
@@ -338,6 +377,27 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
     });
 
+    test("a standard seat's estimate is scaled, as routing scales it", () => {
+      // 60% plus one standard-seat task (31.25%) crosses the line in 5h; on premium it is under everywhere.
+      expect(accountResetAt("org:a", [seatReading("team_standard")], [], NOW, DEFAULT_CONFIG)).toBe(
+        (NOW_S + 7200) * 1000,
+      );
+      expect(accountResetAt("org:a", [seatReading("team_tier_1")], [], NOW, DEFAULT_CONFIG)).toBe(
+        (NOW_S + 3600) * 1000,
+      );
+    });
+
+    test("a full per-model weekly does not hold the account: its model's tasks are filtered on their own", () => {
+      const reading = obs(0, {
+        h: 10,
+        hr: NOW_S + 3600,
+        d: 10,
+        dr: NOW_S + 86_400,
+        w: [{ m: "Fable", p: 99, r: NOW_S + 7200 }],
+      });
+      expect(resetOf(reading)).toBe((NOW_S + 3600) * 1000);
+    });
+
     test("under the line: the earliest reset still ahead", () => {
       expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60, d: 10, dr: NOW_S + 86_400 }))).toBe((NOW_S + 86_400) * 1000);
     });
@@ -346,6 +406,57 @@ describe("filter", () => {
       expect(accountResetAt("org:zz", [machine("a")], [], NOW, DEFAULT_CONFIG)).toBeNull();
       expect(resetOf(obs(0, { h: 95, d: 10, dr: NOW_S + 86_400 }))).toBeNull();
       expect(resetOf(obs(0, { h: 10, hr: NOW_S - 60 }))).toBeNull();
+    });
+  });
+
+  describe("seats", () => {
+    test("a Fable task never lands on a standard seat, even one that may spill into credits", () => {
+      for (const model of ["fable", "Fable", "claude-fable-5-1[1m]"]) {
+        const decision = decide([seats(10, { extraUsageEnabled: true })], { task: task({ spec: spec({ model }) }) });
+        expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "model_not_included", model: "fable" }]);
+        expect(decision.chosen?.exclave).toBe("main");
+      }
+    });
+
+    test("an unknown seat — an older daemon's, or an unlisted tier — gets no Fable task, other models as before", () => {
+      const fleet = [
+        machine("a", {
+          exclaves: [exclave("main", "org:a"), exclave("alt", "org:b", { seatTier: "enterprise_whatever" })],
+          repos: [clone("app", "main"), clone("app2", "alt")],
+          status: status({ quota: [obs(0), obs(1)] }),
+        }),
+      ];
+      const fable = decide(fleet, { task: task({ spec: spec({ model: "fable" }) }) });
+      expect(fable.chosen).toBeNull();
+      expect(fable.candidates.map(codes)).toEqual([["model_not_included"], ["model_not_included"]]);
+      expect(decide(fleet).candidates.map(codes)).toEqual([[], []]);
+    });
+
+    test("a standard seat's estimate is 6.25× a premium one's, in the filter and the score", () => {
+      // 60% + 31.25% crosses the line on standard; 60% + 5% does not on premium.
+      const decision = decide([seats(60)]);
+      expect(byExclave(decision, "alt")?.rejected).toEqual([
+        { code: "quota_over_line", window: "5h", projectedPct: 91.25 },
+      ]);
+      expect(byExclave(decision, "main")?.rejected).toEqual([]);
+      // Both under the line at the same reading, the standard seat still costs more.
+      const level = decide([seats(10)]);
+      const premium = byExclave(level, "main")?.score?.components.accountPressure ?? 0;
+      const standard = byExclave(level, "alt")?.score?.components.accountPressure ?? 0;
+      expect(standard).toBeGreaterThan(premium);
+      expect(level.chosen?.exclave).toBe("main");
+    });
+
+    test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
+      const standard = machine("a", {
+        exclaves: [exclave("main", "org:a", { seatTier: "team_standard" })],
+        status: status({ quota: [obs(0, { h: 10 })] }),
+      });
+      // 10% + 2 × 31.25% is under; one more in flight makes it 103.75%.
+      expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
+      expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
+        { code: "quota_over_line", window: "5h", projectedPct: 103.75 },
+      ]);
     });
   });
 
