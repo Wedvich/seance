@@ -6,6 +6,7 @@ import {
   DEP_AFTER,
   DONE_SIGNALS,
   MAX_PAUSE_HOLDS,
+  MAX_TASKS,
   PAUSE_UNTIL,
   QUEUE_MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
@@ -19,6 +20,8 @@ import {
   type BatchMembership,
   type BatchStrategy,
   type BranchState,
+  type DiscardReply,
+  type DiscardRequest,
   type LeadProof,
   type LinearLink,
   type PauseHold,
@@ -39,6 +42,7 @@ import {
   type TaskRef,
   type TaskReply,
   type TaskSpec,
+  type UnreadableTaskRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -577,7 +581,7 @@ function parseLinear(value: unknown): LinearLink | null {
 export function parseTaskSpec(value: unknown): TaskSpec | null {
   const request = parseTaskRequest(value);
   if (request === null || !isRecord(value)) return null;
-  const { pin, lineage, base, batch, deps, linear } = value;
+  const { pin, lineage, base, batch, deps, linear, client } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
   const continues = lineage === undefined ? undefined : parsePlacement(lineage);
   const builds = base === undefined ? undefined : parsePlacement(base);
@@ -586,6 +590,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const issue = linear === undefined ? undefined : parseLinear(linear);
   if (pinned === null || continues === null || builds === null || member === null || issue === null) return null;
   if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
+  if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
   return {
     ...request,
     ...(pinned === undefined ? {} : { pin: pinned }),
@@ -594,6 +599,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(member === undefined ? {} : { batch: member }),
     ...(edges === undefined ? {} : { deps: edges }),
     ...(issue === undefined ? {} : { linear: issue }),
+    ...(client === undefined ? {} : { client }),
   };
 }
 
@@ -941,6 +947,12 @@ export function parseResumeRequest(value: unknown): ResumeRequest | null {
   return isAccountId(account) ? { account } : null;
 }
 
+/** `discard`, at the leader: the id and the version a `queue` reply listed the record under. */
+export function parseDiscardRequest(value: unknown): DiscardRequest | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"]) || !isVersion(value["version"])) return null;
+  return { taskId: value["taskId"], version: value["version"] };
+}
+
 /** A scheduler refusal, its code kept raw: a leader a version ahead still refuses, rather than answers nothing. */
 function parseSchedulerError(value: unknown): SchedulerError | null {
   if (!isRecord(value) || value["ok"] !== false || typeof value["message"] !== "string") return null;
@@ -958,7 +970,32 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   // Strict, unlike a task: an unread hold would show a paused queue as running.
   const holds = value["holds"] === undefined ? undefined : parseHolds(value["holds"]);
   if (holds === null) return null;
-  return { tasks, at: value["at"], ...(holds === undefined ? {} : { holds }) };
+  const listedUnreadable = value["unreadable"];
+  if (listedUnreadable !== undefined && (!Array.isArray(listedUnreadable) || listedUnreadable.length > MAX_TASKS)) {
+    return null;
+  }
+  // Lenient per entry, as tasks are: a bad one costs its own discard, not the queue.
+  const unreadable = listedUnreadable?.map(parseUnreadableTaskRef).filter((entry) => entry !== null);
+  return {
+    tasks,
+    at: value["at"],
+    ...(holds === undefined ? {} : { holds }),
+    ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
+  };
+}
+
+function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"]) || !isVersion(value["version"])) return null;
+  const { reason } = value;
+  return isName(reason, TASK_FAILURE_LIMITS.code)
+    ? { taskId: value["taskId"], version: value["version"], reason }
+    : null;
+}
+
+/** `discard` replies. */
+export function parseDiscardReply(value: unknown): DiscardReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
 /** `cancel` and `mark-done` replies. */

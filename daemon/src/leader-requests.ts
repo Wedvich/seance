@@ -10,6 +10,7 @@ import {
 import {
   APP_ID,
   MAX_PAUSE_HOLDS,
+  parseDiscardRequest,
   parsePauseRequest,
   parseQueueRequest,
   parseResumeRequest,
@@ -270,6 +271,10 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply: TaskResponse = { task: result.task };
       return reply;
     }
+    case "discard":
+      // Parsed so the shape is held to now; the library's `discard` lands with S2's leader half.
+      if (parseDiscardRequest(payload) === null) return schedulerError("invalid_request", "malformed discard request");
+      return schedulerError("invalid_request", "this leader cannot discard records yet");
   }
 }
 

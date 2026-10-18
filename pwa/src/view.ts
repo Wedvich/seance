@@ -230,6 +230,9 @@ export function failureBody(code: string, repo: string, machine: string): string
     case "task_running":
       // The app sends no taskId, so only a daemon answering someone else's request says this.
       return `That task is already running on ${machine}. Nothing new was started.`;
+    case "task_launched":
+      // Refused only to the scheduler's own spawns, which the app never sends.
+      return `That task already ran on ${machine}, so it was not started again.`;
     case "fetch_failed":
     case "timeout":
       return "Couldn't reach the git remote in time. Nothing is running.";
