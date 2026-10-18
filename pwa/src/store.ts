@@ -637,7 +637,7 @@ export class Store {
     return this.#state.queue || this.#state.wide;
   }
 
-  /** Stacked over settings, its own entry: back returns to settings, not the form. */
+  /** The phone's Machines screen, from the header menu: one entry, popped by back. */
   openMachines(): void {
     if (!this.#state.machines) this.#pushLayer();
     this.#patch({ machines: true });

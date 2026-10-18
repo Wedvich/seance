@@ -223,20 +223,20 @@ describe("layers and history", () => {
     expect(fake.index()).toBe(0);
   });
 
-  test("machines stacks over settings: back returns to settings and drops its chart", async () => {
+  test("machines is one layer over the form: back returns to the form and drops its chart", async () => {
     fake = fakeHistory();
     const store = new Store(idleClient());
 
-    store.openSettings();
     store.openMachines();
     // An idle client has no socket, so the chart settles on its failure line.
     await store.showHistory({ kind: "machine", deviceId: "dev-1" }, "24h");
     expect(store.getState().history?.result.kind).toBe("failed");
-    expect(fake.entries()).toMatchObject([null, { depth: 1 }, { depth: 2 }]);
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }]);
 
     store.dismissLayer();
     fake.settle(store);
-    expect(store.getState()).toMatchObject({ machines: false, settings: true, history: null });
+    expect(store.getState()).toMatchObject({ machines: false, settings: false, history: null });
+    expect(fake.index()).toBe(0);
   });
 
   test("a chart closed before its answer stays closed", async () => {

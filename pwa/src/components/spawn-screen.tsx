@@ -17,7 +17,7 @@ import {
 import { completeSkill, matchSkills, skillIndex, skillQuery, skillTokenLength } from "../skills.ts";
 import { abbreviatePaths, formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
-import { RelaySettings } from "./relay-dot.tsx";
+import { HeaderMenu } from "./header-menu.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
@@ -45,6 +45,7 @@ export interface SpawnActions {
   readonly undoClear: () => void;
   readonly openSettings: () => void;
   readonly openQueue: () => void;
+  readonly openMachines: () => void;
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
@@ -430,13 +431,13 @@ export function SpawnScreen(props: {
           <p className="header-meta">{view.meta}</p>
         </div>
         {!columns && (
-          <div className="header-actions">
-            <button type="button" className="queue-chip" onClick={actions.openQueue}>
-              Queue
-              {view.queueAttention && <span className="queue-chip-dot dot dot-err" role="img" aria-label="needs you" />}
-            </button>
-            <RelaySettings state={view.relayState} onClick={actions.openSettings} />
-          </div>
+          <HeaderMenu
+            state={view.relayState}
+            queueAttention={view.queueAttention}
+            onQueue={actions.openQueue}
+            onMachines={actions.openMachines}
+            onSettings={actions.openSettings}
+          />
         )}
       </header>
 

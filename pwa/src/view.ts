@@ -84,7 +84,7 @@ export interface ViewModel {
   readonly autoAvailability: AutoAvailability;
   /** Non-null while the form is on `auto`. */
   readonly auto: { readonly repo: AutoRepo | null; readonly repos: readonly AutoRepo[] } | null;
-  /** A task escalated for input is waiting: the header's Queue chip says so. */
+  /** A task escalated for input is waiting: the phone's header menu says so. */
   readonly queueAttention: boolean;
 }
 
