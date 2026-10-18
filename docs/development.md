@@ -104,7 +104,10 @@ a production change.
   state as its own. The leader leads on the real relay store: a test reads the queue with
   `stack.queue()` and puts a task where a previous term left it with `stack.seedTask`
   (written from the leader's own socket, so no `store-changed` — `restartDaemon` after it
-  makes the next term take it over).
+  makes the next term take it over). `startSecondDaemon({ env })` passes extra environment to the second daemon (its claude
+  stub, and `SEANCE_E2E_SPAWN_WAIT_MS`, its spawn registration budget), and `beforeBoot` runs
+  with its state dir before it boots (a pre-seeded launch ledger, say), so a test can hold a
+  spawn mid-flight and still have the ledger prove what the next term needs.
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,

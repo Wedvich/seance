@@ -1103,11 +1103,11 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
-- `submit` (a `TaskRequest`) → `{ task }`, the task as queued — **M2 only**. M2's queue is in
-  memory on the leader, so this op is the one way in; it ends in `Scheduler.submit`, refuses
-  `queue_full` past `MAX_ACTIVE_TASKS` unfinished tasks, and prunes all but the newest 50
-  finished ones first (the library also prunes after takeover and, near the store's cap, in a pass since M3 item 4a,
-  "The library", below). M3 replaces it with the
+- `submit` (a `TaskRequest`) → `{ task }`, the task as queued — **until M3 item 6**. Until
+  then this op is the one way in for MCP and the PWA's `auto`; the queue itself is the relay's
+  store since M3 item 3. It ends in `Scheduler.submit` and refuses `queue_full` past
+  `MAX_ACTIVE_TASKS` unfinished tasks. It does not prune: pruning is the library's ("Pruning",
+  "The library", below), and the leader's own per-submit prune was removed 2026-10-18. M3 replaces it with the
   app sealing the task and `store-put`ting it at `expect: 0`, which queues with no leader up, and
   removes the op (docs/scheduler.md, M3).
 - `cancel { taskId }` (`TaskRef`) → `{ task }` (`TaskResponse`), the task as it now stands:
@@ -1354,8 +1354,12 @@ enforces is what it can see: who is asking, the key, a version and a size.
   one 5,262,028-byte `store-listed` frame, intact (count, keys, lengths, content, versions), on the
   daemon leg (Bun relay client, 103–182 ms over 3 runs) and on the app leg from Bun (a raw `/app`
   socket, 214–241 ms over 3 runs, and `RelayClient.listTasks`, 174 ms). `wrangler tail` showed no
-  `store reply not sent` and no error-level line, and no socket closed. **Not checked:** a browser
-  or the iOS WKWebView app leg, so the PWA's own read of a full listing stays open. If an app leg
+  `store reply not sent` and no error-level line, and no socket closed. **Checked in a browser (2026-10-18):** the PWA's app client (`shared/src/index.ts` bundled for the
+  browser, native `WebSocket`) in headless Chromium 156 and Firefox 157, against a throwaway production
+  Worker (`seance-relay-sizecheck`, deleted afterwards) holding 128 `task:` records of 39,968-byte ct
+  each: a 5,134,668-byte `store-listed` frame arrived intact on 3 runs per browser (every record's ct
+  byte-identical, `listTasks` 128 tasks / 0 unreadable, ~320–355 ms, no close code). That is ~2.5% under
+  a listing at the full 40,960-byte ct cap. The iOS WKWebView app leg stays open. If an app leg
   refuses it, the fix is the reserved `after`/`next` paging; a listing the adapter cannot read is
   a failed, retried takeover, never a short queue. A refused send looks like a client timeout plus
   a `store reply not sent` line on the relay, or a closed socket.
@@ -1489,9 +1493,12 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   the app. The create is `queued` because the store refuses a version-1 record in any other
   state; one whose reply was lost is read back, since the leader's own write raises no
   `store-changed` and a later leader would otherwise run an orphan the caller then resubmits. Where
-  the read-back fails too, the error says the task may have been stored (MCP and the PWA word an
-  `internal_error` as "may have queued": check the queue before submitting again); a read-back
-  that answers and finds nothing says the task was not stored, as of that read. Once the create
+  the read-back fails too, the error says the task may have been stored (the PWA words an
+  `internal_error` as "may have queued"; MCP shows the leader's own message, which says whether the
+  task was stored, and points at `get_queue` when a message does not); a read-back
+  that answers and finds nothing says the task was not stored, as of that read. The leader no longer
+  prunes on every submit (removed 2026-10-18: it bypassed `pruneAt`, and every delete leaves a
+  tombstone). Once the create
   has landed `submit` never rejects: a failed admit goes to `onError` and the next pass admits the
   task, since a rejection would have the caller resubmit work that is already stored. Submits are admitted one at a time per term: the `MAX_ACTIVE_TASKS`
   count and the submit it admits sit either side of awaits, so two arriving together would
@@ -1563,7 +1570,9 @@ code=…`: the request id finds the app's side, and the task id joins the line t
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL, and then only with its `sessions` check
   unanswered and its machine not connected — and is never dispatched again on that evidence
-  alone (_The library_, below, "`lost`").
+  alone (_The library_, below, "`lost`"). Lost for `lostExpiryMs` (7 days) it is `failed`
+  `lost_expired`, and an `awaiting-merge` task past `mergeExpiryMs` (7 days) is `failed`
+  `merge_expired` (_The library_, "Expiry").
 
 ### The library (`scheduler/`) — landed 2026-10-16, M2 item 1; M3's states 2026-10-17, M3 item 4a; caps, pause and alerts 2026-10-17, M3 item 5
 
@@ -1756,10 +1765,12 @@ tasks reach it through the leader's `submit` op (Wire protocol, Layer 2).
   is settled by its PR ("Done detection"); a `lost` task as below. An unanswered machine
   changes nothing, with the TTL check's one exception: a reservation past its TTL on a
   machine no longer connected becomes `lost`. Then finished tasks are pruned ("Pruning").
+  Expiry ("Expiry") runs in the first pass, which the host ticks right after takeover.
 - **States** (`task.ts`; M2 item 1, M3's added in M3 item 4a, 2026-10-17): `queued →
 blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
   `failed`, `cancelled` and `lost` off-path, one transition table, an illegal move a thrown
-  bug. An app creates `queued`; only admission moves it ("Admission and dependencies").
+  bug. `awaiting-merge → failed` is merge expiry, and `lost → failed` covers `lost_expired` beside
+  `dispatch_unconfirmed` ("Expiry"). An app creates `queued`; only admission moves it ("Admission and dependencies").
   `reserved` also reaches `needs-input`, `awaiting-merge` and `done` directly. The
   alternative was a two-step through `running`. An event for a reserved task is one
   observed transition, so it costs one store write, and a `running` written first would
@@ -1780,7 +1791,8 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
   predecessor with a PR and a pushed branch fails `opened` too. A dependent already
   released has left `blocked` and is not judged again, so an outcome can depend on whether a
-  pass saw the predecessor fail before the release; accepted. A `lost` predecessor is waited on, since it may still finish. Three ways an edge
+  pass saw the predecessor fail before the release; accepted. A `lost` predecessor is waited on, since it may still finish — until it expires
+  (`lost_expired`), which fails its dependents `dependency_failed`. Three ways an edge
   never releases, each a
   `TaskFailureCode`: `dependency_failed`, a `failed` or `cancelled` predecessor — computed
   to a fixpoint in one call, so a chain fails in one pass rather than one link per pass;
@@ -1842,8 +1854,8 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   ignores `pushed` and `merged` altogether: its branch is the checkout's, often the
   default branch, pushed and trivially merged; its `opened` comes from its PR and its
   `merged` only at `done`: an `awaiting-merge` `here` task is left out of the sweep, since no
-  reply can change it, and reaches `done` only by mark-done (item 6), so its `after:
-"merged"` dependents wait for that. What `branch-state` carried while no leader
+  reply can change it, and reaches `done` only by mark-done (item 6) before it expires (`merge_expired`, below), so
+  its `after: "merged"` dependents wait for that until then. What `branch-state` carried while no leader
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
   task is connected again after a pass saw it away. In a reply the daemon trimmed
@@ -1861,7 +1873,11 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   (an update); accepted on the same ground. A daemon that sends no `progress` settles by
   the PR the record holds. The leader passes `prUrl`, `progress` and `branch-state` on since M3
   item 3: `sessionsOf` in `leader-adapters.ts` parses the machine's `progress` list at takeover
-  and on every check, and an unparsable one sets `progressTrimmed`.
+  and on every check, and an unparsable one sets `progressTrimmed`. `endedAt` (2026-10-18) is stamped by `#update`
+  on a task entering `awaiting-merge` — the one write path, as the needs-input clock is — and
+  never on a record already there, so one an older leader left has none and ages from
+  `createdAt`. An `awaiting-merge` task more than `mergeExpiryMs` (7 days) past it is `failed`
+  `merge_expired`, and its `after: "merged"` dependents fail with it ("Expiry").
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
   deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
@@ -1872,8 +1888,10 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   `dependency_missing`. `pruneAt` narrows that race, it does not close it. It
   writes only when something is over the keep; never a task an unfinished one names in
   `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
-  there. Equally old tasks go in id order, so two leaders prune the same ones. M2's `submit` also prunes
-  and retries once when its own create meets `store_full`. `MemoryQueueStore` refuses
+  there. Equally old tasks go in id order, so two leaders prune the same ones. `submit` itself prunes
+  and retries once when its own create meets `store_full`. M2's leader also pruned on every submit
+  until 2026-10-18, bypassing `pruneAt`, and no longer does. `lost` and `awaiting-merge` tasks are
+  never pruned, so they expire instead ("Expiry", below). `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
 - **`lost`: a task whose machine stopped answering for it** (M2 item 3's gap B, closed in item
@@ -1906,6 +1924,29 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   later event or `sessions` reply for it changes nothing. The earlier refusal (`unreachable`)
   left a task the owner had given up on holding its place indefinitely, to protect a session
   the cancel could not reach anyway. Takeover settles `lost` tasks with the running ones.
+- **Expiry** (`expiry.ts`, 2026-10-18). A `lost` task whose machine went away more than
+  `lostExpiryMs` ago (`absentSince`, else `createdAt`) fails `lost_expired`; an `awaiting-merge`
+  one more than `mergeExpiryMs` past `endedAt` (else `createdAt`) fails `merge_expired`. Both
+  are 7 days (docs/scheduler.md, Settled defaults 14 and 15), the owner's decision. Why: neither
+  is ever pruned, both count toward M2's `MAX_ACTIVE_TASKS` (every unfinished task does) and
+  both outlive every term, so a machine that never returns would pin queue room for good. Where:
+  `#expire`, in the pass after the `sessions` checks, so a machine back in time settles its task
+  first, and before admission, so dependents fail `dependency_failed` in the same pass, for
+  `merged` and `opened` edges alike; a dependent already released has left `blocked` and is not
+  judged again. A `lost` task whose machine is connected at that moment is skipped, left to its
+  own check next pass (it may have reconnected while this pass's check waited on a slower
+  peer); so a connected machine whose `sessions` never answers keeps its task `lost`, and only a
+  disconnected one expires it. The write goes through `#update`, serialized and CAS'd, so a racing
+  `cancel` answers `finished`. A machine that returns after expiry: its session keeps running
+  there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
+  `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
+  No alert and no audit line: nothing spawns or despawns, and the record is the trace.
+  Accepted: a `sequential` batch counts a `lost` member toward its bound because its session may
+  still run ("Batches"), so past 7 days the next member may run beside one still alive on a
+  machine that slept that long. Mixed versions: a leader older than this change reads `endedAt` as
+  an unknown field and drops it on its next write of that record, so the new leader ages that task
+  from `createdAt`, which is never later, so expiry only comes earlier; an older leader never
+  expires anything.
 
 ### Task records and the app's store leg — landed 2026-10-17, M3 item 2
 
@@ -2154,7 +2195,11 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - **Decided tails.**
   - A PR closed without merging keeps its repo fetched every five minutes until the ledger evicts the
     task (7 days or 128 launches): it has a PR URL, so the quiet-task cut-off above never applies,
-    and nothing the daemon sees tells a closed PR from one awaiting review.
+    and nothing the daemon sees tells a closed PR from one awaiting review. Merge expiry (7 days,
+    matched to the ledger's age because past it no merge can be reported; 128 launches can evict
+    sooner) now fails such a task `merge_expired`, and its `after: "merged"` dependents with it, so a
+    `here` task, or a PR merged after eviction, needs mark-done (item 6) before then. Owner's
+    decision 2026-10-18, made knowing this.
   - A task whose work landed without ever being pushed to `origin` (a fork remote, a cherry-pick by
     hand) never reads as merged and needs a manual mark-done. Without the gate a fresh branch reads
     as merged and settles `done` wrongly, which is far worse.
@@ -3506,9 +3551,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   which reads as a version mismatch) — except the origin a clone name resolves to, which
   only the fleet can say, so it is bounds-checked once `withFleet` has the registry; `no_leader`/`leader_unverified` read as "auto
   unavailable — name a machine"; every `SchedulerErrorCode` has its own wording; and a
-  lost reply (`timeout`, `dropped`, an unreadable answer, `too_large`,
-  `internal_error`) is "may have queued — check get_queue and get_sessions before
-  retrying", never a retry, since a second submit is a second task; `disconnected` never
+  lost reply (`timeout`, `dropped`, an unreadable answer) is "may have queued — check
+  get_queue and get_sessions before retrying", never a retry, since a second submit is a second
+  task. A transport code is not a lost reply (2026-10-18): `too_large` on `submit` always means the
+  task was stored (the leader's transport refused the successful reply), and MCP says so;
+  `internal_error` shows the leader's own message, which says whether the task was stored, and
+  points at `get_queue`/`get_sessions` when it does not; `disconnected` never
   left this process, so it is a plain failure. **`cancel_task`** (added 2026-10-17, with the
   leader's `cancel`) is the `cancel` op by the task id `get_queue` shows: it answers the task
   as it now stands, says so when it had already finished, and says a `lost` task cancelled

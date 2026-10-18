@@ -424,7 +424,8 @@ The gaps cited by label elsewhere (A and B were item 3's):
   says it may have queued and offers no retry. M3's app-minted ids make enqueue idempotent
   (M3 item 1).
 - **Gap 4** (closed, #127): a `lost` task waited for its own machine indefinitely, with no
-  way to give up on it; it can now be cancelled (DESIGN.md "`lost`").
+  way to give up on it; it can now be cancelled (DESIGN.md "`lost`"), and since 2026-10-18 it
+  fails `lost_expired` after 7 days lost (Settled defaults 14).
 
 ### M3 — durable queue
 
@@ -452,7 +453,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
     `store-refused` with a `STORE_ERROR_CODES` code.
   - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
-    `task:` prefix lists in one frame (checked in production 2026-10-18 on the daemon leg and the app leg from Bun, not yet in a browser or WKWebView; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
+    `task:` prefix lists in one frame (checked in production 2026-10-18 on the daemon leg and the app leg from Bun, and in headless Chromium and Firefox; the iOS WKWebView leg is open; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
     which an older relay ignores and answers whole, and `next` on the reply, which today's
     clients refuse rather than read a page as the whole queue.
   - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
@@ -487,7 +488,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     dependents, cascading (`dependency_failed`); one the store does not hold past
     `DEP_MISSING_GRACE_MS` fails them too (`dependency_missing`) — so pruning never deletes a task
     an unfinished one names; a cycle fails every member at admission (`dependency_cycle`); a
-    `lost` predecessor is waited on; `done` releases every edge, whatever settled it; a `here`
+    `lost` predecessor is waited on until it expires; `done` releases every edge, whatever settled it; a `here`
     predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
   - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
     `sequential` is 1 and also holds a member until every held lower `index` is over —
@@ -604,8 +605,10 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     **Landed 2026-10-18** (DESIGN.md _Scheduler_, "The queue store", "The leader"). The
     production check above passed on 2026-10-18 for the daemon leg and the app leg from Bun (128
     records at 40 KiB listed intact as one 5.26 MB frame, DESIGN.md "The store", _Send size_);
-    the browser and the iOS WKWebView app leg are still open, and paging stays the fallback. Not
-    done: the Exit bullet's "kill the leader between spawn and verdict" e2e. `submit`
+    checked in headless Chromium and Firefox on 2026-10-18; the iOS WKWebView app leg is still
+    open, and paging stays the fallback). Its follow-up (2026-10-18) added that e2e, removed the
+    leader's per-submit prune, added `lost`/`awaiting-merge` expiry (Settled defaults 14, 15) and
+    reworded MCP's transport-code answer to `submit`. `submit`
     admits inside its call rather than in the next pass, so its reply still carries `ready` for
     MCP's placement follow and the PWA's `auto` verdict.
   - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
@@ -624,7 +627,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   unreadable. **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
   `SubmitReply`, `MAX_ACTIVE_TASKS`, the `queue_full` code and its wording, `parseSubmitReply`,
   the `submit` methods on `RelayClient`, `AppRelay` and `daemon/src/fleet.ts`'s scheduler, the
-  leader's `submit` case with `KEEP_FINISHED`, and `Scheduler.submit` (with `newId` unless
+  leader's `submit` case, and `Scheduler.submit` (with `newId` unless
   something else mints ids). Moved here from item 1, where the plan
   first put it: the PWA's `auto` sends `submit` until this item gives it `store-put`, so dropping
   the op with the store would leave `auto` broken for every PR in between. **Also moves MCP's
@@ -643,7 +646,9 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   (`Task.escalated`) nor `QueueResponse.holds` (a hold reaches it only as a candidate's `paused`
   reason). MCP's `get_queue` (`daemon/src/mcp.ts`) has the same gap: it returns only `at` and the
   tasks, so `holds` is dropped and a pause shows only through `paused` reasons
-  (`reasonText`) — add the holds when this item moves `get_queue` to the store.
+  (`reasonText`) — add the holds when this item moves `get_queue` to the store. The queue view
+  also words `lost_expired` and `merge_expired` as the verdict already does (`failedBody`,
+  `taskHeadline`; item 3's follow-up, 2026-10-18).
 
 **Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
 `parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
@@ -664,7 +669,7 @@ as the widened types forced.
 
 - Enqueue with no leader, then start a daemon: it leads, reconciles, and runs the task (e2e).
 - Kill the leader between `spawn` and its verdict: the next leader finds the session by
-  `taskId` and does not spawn again (e2e).
+  `taskId` and does not spawn again (e2e, 2026-10-18).
 - Put an old sealed blob back at the current version: the reader rejects it on the inner
   version (scheduler + relay).
 - A put with a stale term is refused `not_leader`; a bearer-token-only client can list and
@@ -851,7 +856,7 @@ same PR, with the reason.
 11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
     (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 40 KiB (`STORE_MAX_CT_LENGTH`) and a
     create's 28 KiB (`STORE_CREATE_MAX_CT_LENGTH`), and `task:` holds 128 (`MAX_TASKS`), so the
-    whole queue lists in one frame with no paging (checked in production 2026-10-18, browser and WKWebView apart; DESIGN.md "The store"). A task names its work ("implement this
+    whole queue lists in one frame with no paging (checked in production 2026-10-18; DESIGN.md "The store"). **Checked in a browser (2026-10-18):** the PWA's app client (`shared/src/index.ts` bundled for the browser, native `WebSocket`) in headless Chromium 156 and Firefox 157, against a throwaway production Worker (`seance-relay-sizecheck`, deleted afterwards) holding 128 `task:` records of 39,968-byte ct each: a 5,134,668-byte `store-listed` frame arrived intact on 3 runs per browser (every record's ct byte-identical, `listTasks` 128 tasks / 0 unreadable, ~320–355 ms, no close code). That is ~2.5% under a listing at the full 40,960-byte ct cap. The iOS WKWebView leg stays open. A task names its work ("implement this
     Linear issue, and here are the details") and the session gathers the rest with tools; 8K
     characters is far more than that takes. A direct spawn is not bound by it. Measured: a
     create with every field at its bound and the prompt in two-byte characters fits the create
@@ -871,7 +876,18 @@ same PR, with the reason.
     history, and with M2's 64 unfinished at most still under `MAX_TASKS` (128). Pruned oldest
     first (ties by id), never one an unfinished task names. A pass or takeover prunes only at
     `pruneAt` (96) records, which narrows the window in which a finished task an app is about to
-    name in `deps` is gone before the leader hears of the create; it does not close it.
+    name in `deps` is gone before the leader hears of the create; it does not close it. M2's leader
+    also pruned on every submit, bypassing `pruneAt`, until 2026-10-18.
+14. **A task `lost` over 7 days fails `lost_expired`** (`lostExpiryMs`, set 2026-10-18, owner).
+    Why: never pruned, it counted toward `MAX_ACTIVE_TASKS` and persisted across terms. It ages
+    from `absentSince`, else `createdAt`. A task whose machine is connected is left to its own
+    `sessions` check. Cost: a machine asleep past it may still run the session, untracked
+    (DESIGN.md "Expiry").
+15. **A task `awaiting-merge` over 7 days fails `merge_expired`** (`mergeExpiryMs`, set
+    2026-10-18, owner). It ages from `endedAt`, or `createdAt` on older records. Its
+    `after: "merged"` dependents fail with it. Seven days is the launch ledger's own age bound:
+    past it no machine can report the merge, and a `here` task's merge is never read back, so
+    it needs mark-done (item 6) before then.
 
 ## Risks / unknowns
 
