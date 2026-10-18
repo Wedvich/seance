@@ -68,6 +68,14 @@ function seats(pct: number, extra: Partial<ExclaveInfo> = {}): Machine {
   });
 }
 
+/** Machine `a` with one standard-seat exclave `main`, observed at `quota`. */
+function standardSeat(quota: ReturnType<typeof obs>): Machine {
+  return machine("a", {
+    exclaves: [exclave("main", "org:a", { seatTier: "team_standard" })],
+    status: status({ quota: [quota] }),
+  });
+}
+
 function byExclave(decision: Decision, id: string): Candidate | undefined {
   return decision.candidates.find((c) => c.exclave === id);
 }
@@ -236,7 +244,8 @@ describe("filter", () => {
     });
 
     test("every in-flight task on the account adds an estimate", () => {
-      const fleet = [machine("a", { status: status({ quota: [obs(0, { d: 81 })] }) })];
+      // A weekly takes the 7d estimate, 1% each: 89 + 1 + 1.
+      const fleet = [machine("a", { status: status({ quota: [obs(0, { d: 89 })] }) })];
       expect(only(decide(fleet, { tasks: [held("x", "a")] })).rejected).toEqual([
         { code: "quota_over_line", window: "7d", projectedPct: 91 },
       ]);
@@ -246,7 +255,7 @@ describe("filter", () => {
     test("a per-model weekly binds only that model's tasks", () => {
       const premium = exclave("main", "org:a", { seatTier: "team_tier_1" });
       const fleet = [
-        machine("a", { exclaves: [premium], status: status({ quota: [obs(0, { w: [{ m: "Fable", p: 88 }] })] }) }),
+        machine("a", { exclaves: [premium], status: status({ quota: [obs(0, { w: [{ m: "Fable", p: 92 }] })] }) }),
       ];
       const fable = decide(fleet, { task: task({ spec: spec({ model: "claude-fable-5-1[1m]" }) }) });
       expect(only(fable).rejected).toEqual([{ code: "quota_over_line", window: "7d Fable", projectedPct: 93 }]);
@@ -445,6 +454,14 @@ describe("filter", () => {
       const standard = byExclave(level, "alt")?.score?.components.accountPressure ?? 0;
       expect(standard).toBeGreaterThan(premium);
       expect(level.chosen?.exclave).toBe("main");
+    });
+
+    test("a weekly takes the 7d estimate, not the 5h one, scaled alike", () => {
+      // 41% + 2 × 6.25% stays well under in 7d; the same reading in 5h is 2 × 31.25% over.
+      expect(only(decide([standardSeat(obs(0, { d: 41 }))], { tasks: [held("x", "a")] })).rejected).toEqual([]);
+      expect(only(decide([standardSeat(obs(0, { h: 41 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
+        { code: "quota_over_line", window: "5h", projectedPct: 103.5 },
+      ]);
     });
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {

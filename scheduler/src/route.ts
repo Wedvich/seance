@@ -19,7 +19,7 @@ import {
   type ScoreComponents,
 } from "@seance/shared";
 import { batchCap } from "./batch.ts";
-import type { SchedulerConfig, SeatProfile } from "./config.ts";
+import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
@@ -45,8 +45,7 @@ export interface RouteInput {
   readonly holds?: readonly PauseHold[];
 }
 
-const FIVE_HOURS_MS = 5 * 3600_000;
-const SEVEN_DAYS_MS = 7 * 86_400_000;
+const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
 /** The convex cost is unbounded at 100%; this keeps an over-full account finite and still worst. */
 const MAX_UTILISATION = 0.99;
 
@@ -55,7 +54,7 @@ interface QuotaWindow {
   readonly pct: number;
   /** Unix seconds. */
   readonly resetsAt: number | undefined;
-  readonly lengthMs: number;
+  readonly span: WindowSpan;
   /** A per-model weekly's display name (`Fable`); absent on the all-models windows. */
   readonly model?: string;
 }
@@ -217,7 +216,7 @@ function judgeAccount(
   if (windows.length === 0) return { reason: { code: "quota_unknown", why: "unobserved" }, pressure: 0 };
   const { observation, deviceId } = account.newest;
   const quota = { observedAt: observation.at, observer: deviceId, source: observation.s };
-  const added = (pass.config.taskEstimatePct / capacity) * (sharing + 1);
+  const added = estimate(pass.config, capacity, sharing + 1);
   const pressure = pressureOf(windows, added, pass.now);
   const over = overLine(windows, added, pass.now, pass.config);
   if (over === null) return { quota, pressure };
@@ -313,9 +312,7 @@ export function accountResetAt(
   );
   const { capacity } = seatOf(config, seatTierOf(machines, accountId));
   const windows = account.windows.filter((w) => w.model === undefined);
-  const over = windows.filter(
-    (w) => overLine([w], (config.taskEstimatePct / capacity) * (sharing + 1), now, config) !== null,
-  );
+  const over = windows.filter((w) => overLine([w], estimate(config, capacity, sharing + 1), now, config) !== null);
   if (over.length > 0) {
     const resets = over.flatMap(resetMs);
     return resets.length === over.length ? Math.max(...resets) : null;
@@ -375,24 +372,28 @@ function carries(machine: Machine, status: MachineStatus, accountId: string): bo
 /** Every window the reading has; which of them a task is judged on is `appliesTo`'s. */
 function windowsOf(o: QuotaObservation): QuotaWindow[] {
   const windows: QuotaWindow[] = [];
-  if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, lengthMs: FIVE_HOURS_MS });
-  if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, lengthMs: SEVEN_DAYS_MS });
-  for (const w of o.w ?? [])
-    windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, lengthMs: SEVEN_DAYS_MS, model: w.m });
+  if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, span: "5h" });
+  if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, span: "7d" });
+  for (const w of o.w ?? []) windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, span: "7d", model: w.m });
   return windows;
+}
+
+/** Percent `tasks` add to a window on a seat of `capacity`: the span's estimate, scaled to the seat. */
+function estimate(config: SchedulerConfig, capacity: number, tasks: number): (w: QuotaWindow) => number {
+  return (w) => (config.taskEstimatePct[w.span] / capacity) * tasks;
 }
 
 /** The worst window whose projected usage crosses the line; one resetting within the grace counts as empty. */
 function overLine(
   windows: readonly QuotaWindow[],
-  added: number,
+  added: (w: QuotaWindow) => number,
   now: number,
   config: SchedulerConfig,
 ): { readonly window: string; readonly projectedPct: number } | null {
   let worst: { readonly window: string; readonly projectedPct: number } | null = null;
   for (const w of windows) {
     const resetsSoon = w.resetsAt !== undefined && w.resetsAt * 1000 - now <= config.resetGraceMs;
-    const projectedPct = (resetsSoon ? 0 : w.pct) + added;
+    const projectedPct = (resetsSoon ? 0 : w.pct) + added(w);
     if (projectedPct > config.quotaLinePct && (worst === null || projectedPct > worst.projectedPct)) {
       worst = { window: w.label, projectedPct };
     }
@@ -405,11 +406,11 @@ function overLine(
  * by the share of the window still to run: a nearly-spent 5h window that
  * resets in ten minutes costs little, the same reading on a fresh one a lot.
  */
-function pressureOf(windows: readonly QuotaWindow[], added: number, now: number): number {
+function pressureOf(windows: readonly QuotaWindow[], added: (w: QuotaWindow) => number, now: number): number {
   let worst = 0;
   for (const w of windows) {
-    const u = Math.min((effectivePct(w.pct, w.resetsAt, now) + added) / 100, MAX_UTILISATION);
-    const remaining = w.resetsAt === undefined ? 1 : clamp((w.resetsAt * 1000 - now) / w.lengthMs);
+    const u = Math.min((effectivePct(w.pct, w.resetsAt, now) + added(w)) / 100, MAX_UTILISATION);
+    const remaining = w.resetsAt === undefined ? 1 : clamp((w.resetsAt * 1000 - now) / SPAN_MS[w.span]);
     worst = Math.max(worst, (u / (1 - u)) ** 2 * remaining);
   }
   return worst;

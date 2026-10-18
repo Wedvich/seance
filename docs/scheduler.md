@@ -615,8 +615,8 @@ same PR, with the reason.
    `reserve_pct: 10` and the knee of its convex cost, `(u/(1-u))²`: 16 at 80%, 81 at 90%,
    361 at 95% — the score already pushes work away before the line, the filter only adds the
    guarantee. Two sub-rules, so nobody reads them as bugs: the line applies to _projected_
-   usage (current + this task's estimate + reservations), so with a 5% v1 estimate a new task
-   is refused from ~85% current; and a window that resets within 15 min counts as empty for the
+   usage (current + this task's estimate + reservations), so with the v1 estimates (5% of a 5h
+   window, 1% of a week) a new task is refused from ~85% current in 5h and ~89% in 7d; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
 5. **`needs-input` escalation** after 30 min (`needsInputEscalateMs`, built with M3 item 5):
    re-alert once, keep the slot, never kill. Until M4's Web Push the re-alert is the record's
@@ -635,8 +635,12 @@ same PR, with the reason.
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
-   dependency 4, queue 1; sticky bonus 2; per-task estimate 5%; global max 8 in-flight
-   tasks. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
+   dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
+   weekly (all-models or per-model); global max 8 in-flight tasks. The estimate is per span
+   (owner, 2026-10-18): one number for both added a task's 5h share to every week, so a
+   standard seat (×6.25, item 17) at 41% weekly with one task in flight projected 104% and
+   scored ~8000× worse than any other account. 1% is a guess at a week's share; tune both
+   from observed deltas. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
    the scale of an account near 70%. First guesses, to tune from decision records; nothing
    observed yet argues for them. **Per-account max 4** in-flight tasks (`accountMax`, added
@@ -700,7 +704,7 @@ same PR, with the reason.
     limits, and only premium covers Fable from quota; on standard Fable is billed to credits.
     So a Fable task never goes to a seat that doesn't include it — `model_not_included`, a hard
     filter that extra usage does not spill past — and the per-task estimate (8) is scaled by
-    the seat's `capacity`: 5% on premium, 31.25% on standard, which keeps heavy work off the
+    the seat's `capacity`: 5% / 1% (5h / 7d) on premium, 31.25% / 6.25% on standard, which keeps heavy work off the
     small seat through the existing line and score, with no task-size field. Premium's own
     Fable allowance is not modelled separately; its `7d Fable` window is what routing reads,
     and only for Fable tasks — a full Fable week leaves other models' work free.
