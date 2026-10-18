@@ -9,8 +9,9 @@ import {
   type RelayState,
   type ReplayGuard,
   type RequestOp,
-  type SubmitReply,
-  type TaskRequest,
+  type StoreRefusal,
+  type Task,
+  type TaskCreated,
 } from "@seance/shared";
 import type { Config } from "./config.ts";
 
@@ -35,8 +36,8 @@ export interface AppRelay {
   readonly subscribe: (listener: () => void) => () => void;
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T | ErrorResponse>;
-  /** As `RelayClient.submit`: refused before sending unless a verified leader is nominated. */
-  readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
+  /** As `RelayClient.createTask`: a store-put the relay answers itself, so no leader is needed. */
+  readonly createTask: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
 }

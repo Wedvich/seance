@@ -4,11 +4,13 @@ import {
   isSchedulerOp,
   parseBranchState,
   parseSessionEvent,
+  QUEUE_MAX_TASKS,
   quote,
   STORE_PREFIXES,
   type BranchState,
   type Envelope,
   type Plain,
+  type QueueChanged,
   type SchedulerEventHandler,
   type SessionState,
 } from "@seance/shared";
@@ -53,6 +55,8 @@ const TICK_INTERVAL_MS = 30_000;
 export interface LeaderRelay extends AppRelay {
   /** A reply that the relay routed to this daemon's own socket, as every `to: "scheduler"` envelope is. */
   readonly deliver: (env: Envelope) => Promise<void>;
+  /** The coalesced nudge to every app that the queue changed (`RelayClient.queueChanged`); false when nothing was sent. */
+  readonly queueChanged: (change: QueueChanged) => Promise<boolean>;
 }
 
 /**
@@ -167,6 +171,30 @@ function report(err: unknown): void {
   log.warn(`scheduler: ${String(err)}`);
 }
 
+/**
+ * Every write the leader makes is a change an app would show, and the library
+ * has no hook for it, so the store is watched instead: `changed` hears the task
+ * id (null for the pause record) of every write that landed or may have
+ * (`indeterminate`). A refused one changed nothing.
+ */
+function watched(inner: QueueStore, changed: (id: string | null) => void): QueueStore {
+  const landed = <T extends { readonly ok: boolean }>(write: T, id: string | null): T => {
+    if (write.ok || ("code" in write && write.code === "indeterminate")) changed(id);
+    return write;
+  };
+  return {
+    list: () => inner.list(),
+    get: (id) => inner.get(id),
+    getPause: () => inner.getPause(),
+    put: async (id, expect, body) => landed(await inner.put(id, expect, body), id),
+    delete: async (id, expect) => landed(await inner.delete(id, expect), id),
+    putPause: async (expect, holds) => landed(await inner.putPause(expect, holds), null),
+  };
+}
+
+/** One nudge per this long, however many writes: an app re-fetches once, not per transition. */
+const NUDGE_COALESCE_MS = 500;
+
 function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) => void): TermRun {
   let live = true;
   let running = false;
@@ -182,6 +210,40 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }
     report(err);
   };
+  // Coalesced `queue-changed`: the task ids written or refreshed within one window, or the
+  // whole queue when too many changed or the holds did. Reads `relay` only when its timer
+  // fires, which is after the term built it.
+  const nudge = (() => {
+    const ids = new Set<string>();
+    let whole = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const send = (tasks?: readonly string[]): void => {
+      relay.queueChanged({ at: now(), ...(tasks === undefined ? {} : { tasks }) }).catch(report);
+    };
+    return {
+      note: (id: string | null): void => {
+        if (!live) return;
+        if (id === null) whole = true;
+        else ids.add(id);
+        timer ??= setTimeout(() => {
+          timer = null;
+          if (!live) return;
+          const tasks = whole || ids.size > QUEUE_MAX_TASKS ? undefined : [...ids];
+          ids.clear();
+          whole = false;
+          send(tasks);
+        }, NUDGE_COALESCE_MS);
+      },
+      // Takeover just ended: an app that was answered `not_ready` wants the queue now.
+      all: (): void => {
+        if (live) send();
+      },
+      stop: (): void => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+      },
+    };
+  })();
   // Declared before the leg that calls it; it reads `scheduler` only once a term is running.
   const onSession = async (
     taskId: string,
@@ -204,10 +266,13 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     changed.clear();
     return Promise.all(
       pending.map((id) =>
-        scheduler.refresh(id).catch((err: unknown) => {
-          changed.add(id);
-          fail(err);
-        }),
+        scheduler.refresh(id).then(
+          () => nudge.note(id),
+          (err: unknown) => {
+            changed.add(id);
+            fail(err);
+          },
+        ),
       ),
     );
   };
@@ -218,10 +283,17 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       changed.add(id);
       return;
     }
-    scheduler.refresh(id).then(tick, (err: unknown) => {
-      changed.add(id);
-      fail(err);
-    });
+    // An app's create is a change no leader write covers, so it is nudged from here.
+    scheduler.refresh(id).then(
+      () => {
+        nudge.note(id);
+        tick();
+      },
+      (err: unknown) => {
+        changed.add(id);
+        fail(err);
+      },
+    );
   };
   // Like `onSession`, built before the leg and reading `scheduler` and `tick` only once running.
   const onRequest = requestHandler({
@@ -239,6 +311,19 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   const onEvent: SchedulerEventHandler = (plain, from) => {
     if (isSchedulerOp(plain.op)) {
       onRequest(plain, plain.op, from).catch(fail);
+      return;
+    }
+    // An op this leader does not know, from an app that wants an answer (an older
+    // build's `submit`): a refusal beats a timeout. Acts on nothing.
+    if (from === APP_ID && plain.re === undefined && plain.op !== "branch-state" && plain.op !== "session-event") {
+      log.warn(`scheduler: refused op=${quote(plain.op)} from=${quote(from)} — not an op this leader handles`);
+      void opts.reply(from, {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: plain.op,
+        re: plain.id,
+        payload: { ok: false, code: "invalid_request", message: `this leader does not handle ${quote(plain.op)}` },
+      });
       return;
     }
     // Only a daemon observes branches: an app's would let any holder of the PSK settle a task done.
@@ -259,10 +344,13 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   const relay = opts.createRelay(term, onEvent);
   const isLive = (): boolean => live;
   const scheduler = new Scheduler({
-    store: fencedStore(
-      opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now }),
-      term,
-      isLive,
+    store: watched(
+      fencedStore(
+        opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now }),
+        term,
+        isLive,
+      ),
+      nudge.note,
     ),
     fleet: termFleet({
       relay,
@@ -349,6 +437,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }
     if (!live) return;
     running = true;
+    nudge.all();
     // Takeover's `load` replaced the held view, so only now can a nudge it buffered be applied.
     await refreshChanged();
     if (!live) return;
@@ -376,6 +465,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       retry?.wake();
       if (timer !== null) clearInterval(timer);
       timer = null;
+      nudge.stop();
       unsubscribe();
       // Fails whatever the term still had out as "disconnected" → `unreachable`,
       // and the fenced store refuses the writes those verdicts would make.

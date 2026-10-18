@@ -8,11 +8,10 @@ import {
   ENVELOPE_MAX_CT_LENGTH,
   appRelayUrl,
   importPsk,
-  MAX_ACTIVE_TASKS,
   MAX_PAUSE_HOLDS,
   open,
+  parseQueueChanged,
   parseQueueReply,
-  parseSubmitReply,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   RelayClient,
@@ -20,6 +19,7 @@ import {
   RequestFailure,
   SCHEDULER_ID,
   seal,
+  taskKey,
   toBase64,
   type Candidate,
   type Decision,
@@ -32,7 +32,6 @@ import {
   type QueueResponse,
   type RegistryView,
   type SessionsResponse,
-  type SubmitResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
@@ -42,7 +41,7 @@ import { boundedQueue } from "../src/leader-requests.ts";
 import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
 import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
-import { AsyncQueue, startTestRelay, type TestRelay } from "./harness.ts";
+import { AsyncQueue, nextRequest, queuedRequests, startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 const TOKEN = "leader-bearer";
@@ -132,10 +131,10 @@ function queueReply(payload: unknown): QueueResponse {
   return reply;
 }
 
-function submitReply(payload: unknown): SubmitResponse {
-  const reply = parseSubmitReply(payload);
-  if (reply === null || "ok" in reply) throw new Error(`not a submit reply: ${JSON.stringify(payload)}`);
-  return reply;
+/** An app's create plus the relay's `store-changed`: the record lands at version 0, then the leader is told. */
+async function enqueueQueued(store: QueueStore, leader: Leader, id: string, fields: Partial<Task> = {}): Promise<void> {
+  await store.put(id, 0, task(id, { state: "queued", ...fields }));
+  leader.onStoreChanged(taskKey(id), 1);
 }
 
 /**
@@ -231,6 +230,76 @@ async function sealedLength(response: Plain): Promise<number> {
   return (await seal(key, { to: APP_ID, from: "self" }, response)).ct.length;
 }
 
+/** The next `queue-changed` the leader sent apps, opened as an app opens one; requests to machines are skipped. */
+async function nextNudge(relay: TestRelay, timeoutMs = 3_000): Promise<{ change: unknown; term: number | undefined }> {
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- frames arrive one at a time
+    const frame = await relay.appFrames.next(timeoutMs);
+    if (frame.env.to !== APP_ID) continue;
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    const plain = await open(key, frame.env);
+    expect(frame.env.from).toBe(SCHEDULER_ID);
+    expect(plain.op).toBe("queue-changed");
+    return { change: plain.payload, term: frame.term };
+  }
+}
+
+describe("queue-changed", () => {
+  test("takeover ends with one whole-queue nudge on the term's leg; a created task is then named, writes within a window coalesce, a pause is whole again", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      const takeover = await nextNudge(relay);
+      expect(takeover.term).toBe(1);
+      expect(takeover.change).toEqual({ at: expect.any(Number) });
+
+      // An app's create: no leader write covers it, so the `store-changed` refresh names it. The admission
+      // writes that follow land inside the same 500ms window, so they add no second nudge.
+      await enqueueQueued(store, leader, "n1");
+      await enqueueQueued(store, leader, "n2");
+      const named = await nextNudge(relay);
+      expect(parseQueueChanged(named.change)?.tasks?.toSorted()).toEqual(["n1", "n2"]);
+
+      const pause = await appRequest("pause", { until: "resume" });
+      leader.deliver(pause);
+      await replies.next();
+      const held = await nextNudge(relay);
+      // The hold changes what every task shows: no ids, so apps re-fetch the whole queue.
+      expect(held.change).toEqual({ at: expect.any(Number) });
+
+      // Nothing else was sent: one nudge per window, however many writes.
+      await Bun.sleep(700);
+      expect(relay.appFrames.size).toBe(0);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("nothing is sent once the term ended, even for a write still waiting in its window", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await nextNudge(relay);
+      await enqueueQueued(store, leader, "late");
+      leader.follow("test");
+      await Bun.sleep(700);
+      expect(relay.appFrames.size).toBe(0);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
+
 describe("leader requests", () => {
   test("queue and route-preview are answered to the app; a malformed preview and a daemon's request are not acted on", async () => {
     const relay = startTestRelay(TOKEN);
@@ -278,93 +347,120 @@ describe("leader requests", () => {
     }
   });
 
-  test("submit queues a task under the scheduler's own id, which queue then shows with its decision; a full queue refuses", async () => {
+  test("queue answers only the tasks named, and a malformed filter is invalid_request, never the whole queue", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
+    for (const [i, id] of ["a", "b", "c"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- seeded before the term, in order
+      await store.put(id, 0, task(id, { createdAt: i + 1 }));
+    }
     const { leader, replies } = leaderOver(relay, store);
     try {
       leader.lead(1);
       await leader.settled();
-      const request = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it", taskId: "mine" };
-      leader.deliver(await appRequest("submit", request));
-      const submitted = (await replies.next()).response.payload;
-      // Checked raw: the app's parse rebuilds the spec, so it would hide a `taskId` the leader kept.
-      expect(submitted).not.toHaveProperty(["task", "spec", "taskId"]);
-      const { task: queuedTask } = submitReply(submitted);
-      // The app's `taskId` is not a field a task takes: the scheduler mints its own.
-      expect(queuedTask.id).not.toBe("mine");
-      expect(queuedTask).toMatchObject({ state: "ready", spec: { repo: "github.com/acme/app", prompt: "fix it" } });
-      expect((await store.get(queuedTask.id))?.body?.id).toBe(queuedTask.id);
-
-      leader.deliver(await appRequest("queue"));
-      const queued = queueReply((await replies.next()).response.payload).tasks;
-      // Placed on submit, so the decision is already there — with nobody in this registry to choose.
-      expect(queued).toMatchObject([{ id: queuedTask.id, decision: { chosen: null } }]);
-
-      leader.deliver(await appRequest("submit", { repo: "r" }));
-      expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      leader.deliver(await appRequest("queue", { tasks: ["b", "nobody"] }));
+      expect(queueReply((await replies.next()).response.payload).tasks.map((t) => t.id)).toEqual(["b"]);
+      leader.deliver(await appRequest("queue", { tasks: [] }));
+      expect(queueReply((await replies.next()).response.payload).tasks).toEqual([]);
+      leader.deliver(await appRequest("queue", {}));
+      expect(queueReply((await replies.next()).response.payload).tasks.map((t) => t.id)).toEqual(["c", "b", "a"]);
+      for (const malformed of [{ tasks: "b" }, { tasks: [1] }, { tasks: ["has:colon"] }, "b"]) {
+        leader.deliver(await appRequest("queue", malformed));
+        // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+        expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      }
     } finally {
       leader.stop();
       relay.stop();
     }
   });
 
-  test("submits landing together are admitted one at a time, so MAX_ACTIVE_TASKS holds", async () => {
-    const relay = startTestRelay(TOKEN);
-    const store = new MemoryQueueStore();
-    for (let i = 0; i < MAX_ACTIVE_TASKS - 1; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
-      await store.put(`t${i}`, 0, task(`t${i}`, {}));
-    }
-    const { leader, replies } = leaderOver(relay, store);
-    try {
-      leader.lead(1);
-      await leader.settled();
-      // One slot left, two submits at once: before, both counted the same 63 across their awaits.
-      const both = await Promise.all([
-        appRequest("submit", { repo: "r", mode: "here" }),
-        appRequest("submit", { repo: "r", mode: "here" }),
-      ]);
-      for (const env of both) leader.deliver(env);
-      const answers = [(await replies.next()).response.payload, (await replies.next()).response.payload];
-      expect(answers.filter((a) => typeof a === "object" && a !== null && "task" in a)).toHaveLength(1);
-      expect(answers).toContainEqual(expect.objectContaining({ ok: false, code: "queue_full" }));
-      expect(await store.list()).toHaveLength(MAX_ACTIVE_TASKS);
-    } finally {
-      leader.stop();
-      relay.stop();
-    }
+  test("the whole queue keeps what still needs someone: an escalated and an awaiting-merge task outlast newer finished ones", () => {
+    const tasks = [
+      task("merge", { state: "awaiting-merge", createdAt: 1 }),
+      task("stuck", { state: "needs-input", createdAt: 2, escalated: true, needsInputSince: 2 }),
+      ...Array.from({ length: QUEUE_MAX_TASKS + 5 }, (_, i) => task(`f${i}`, { state: "done", createdAt: 100 + i })),
+    ];
+    const view = boundedQueue(tasks, () => undefined, 0);
+    expect(view.tasks).toHaveLength(QUEUE_MAX_TASKS);
+    expect(view.tasks.slice(0, 2).map((t) => t.id)).toEqual(["stuck", "merge"]);
+    // Finished ones fill the rest, newest first.
+    expect(view.tasks[2]?.id).toBe(`f${QUEUE_MAX_TASKS + 4}`);
+    expect(view.tasks.slice(2).every((t) => t.state === "done")).toBe(true);
+    // A filtered ask is exactly the named ids that exist, whatever their rank.
+    const named = tasks.filter((t) => t.id === "f0" || t.id === "merge");
+    expect(boundedQueue(named, () => undefined, 0).tasks.map((t) => t.id)).toEqual(["merge", "f0"]);
   });
 
-  test("submit and cancel audit the request id with the task id, so an app's request joins the task's spawn", async () => {
+  test("cancel and mark-done audit the request id with the task id, so an app's request joins the task's record", async () => {
     const relay = startTestRelay(TOKEN);
-    const { leader, replies } = leaderOver(relay);
-    let submitId = "";
-    let taskId = "";
+    const store = new MemoryQueueStore();
+    await store.put("c1", 0, task("c1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" } }));
+    await store.put("m1", 0, task("m1", { state: "queued" }));
+    const { leader, replies } = leaderOver(relay, store);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
+      const request = await appRequest(op, payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
     const lines = await captureLog(async () => {
       try {
         leader.lead(1);
         await leader.settled();
-        const submit = await appRequest("submit", { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" });
-        submitId = (await open(key, submit)).id;
-        leader.deliver(submit);
-        taskId = submitReply((await replies.next()).response.payload).task.id;
-        leader.deliver(await appRequest("cancel", { taskId }));
-        expect((await replies.next()).response.payload).toMatchObject({ task: { id: taskId, state: "cancelled" } });
-        leader.deliver(await appRequest("cancel", { taskId }));
-        expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("cancel", "cancel", { taskId: "c1" })).toMatchObject({ task: { id: "c1", state: "cancelled" } });
+        expect(await ask("cancel2", "cancel", { taskId: "c1" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("done", "mark-done", { taskId: "m1" })).toMatchObject({
+          task: { id: "m1", state: "done", doneBy: "manual" },
+        });
+        expect(await ask("done2", "mark-done", { taskId: "m1" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("nobody", "mark-done", { taskId: "nobody" })).toMatchObject({
+          ok: false,
+          code: "task_not_found",
+        });
+        expect(await ask("malformed", "mark-done", { id: "m1" })).toMatchObject({ ok: false, code: "invalid_request" });
       } finally {
         leader.stop();
         relay.stop();
       }
     });
     const audits = lines.filter((line) => line.includes("audit queue"));
-    expect(audits[0]).toContain(`audit queue origin=relay op=submit id="${submitId}" task="${taskId}" ok`);
-    expect(audits[1]).toContain(`op=cancel id=`);
-    expect(audits[1]).toContain(`task="${taskId}" ok`);
-    expect(audits[2]).toContain(`task="${taskId}" refused code=finished`);
+    expect(audits).toContainEqual(expect.stringContaining(`op=cancel id="${ids["cancel"]}" task="c1" ok`));
+    expect(audits).toContainEqual(expect.stringContaining(`task="c1" refused code=finished`));
+    expect(audits).toContainEqual(expect.stringContaining(`op=mark-done id="${ids["done"]}" task="m1" ok`));
+    expect(audits).toContainEqual(expect.stringContaining(`op=mark-done id="${ids["done2"]}" task="m1" refused code=finished`));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=mark-done id="${ids["nobody"]}" task="nobody" refused code=not_found`),
+    );
     // The prompt is the spawn line's to fingerprint, never this one's to carry.
     expect(lines.some((line) => line.includes("secret"))).toBe(false);
+  });
+
+  test("an op this leader does not know, from an app, is refused invalid_request instead of left to time out", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { leader, replies } = leaderOver(relay);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      // An op no leader handles; an older PWA's `submit` reads the same way.
+      const old = await appRequest("metrics", {});
+      leader.deliver(old);
+      const answer = await replies.next();
+      expect(answer.to).toBe(APP_ID);
+      expect(answer.response).toMatchObject({ re: (await open(key, old)).id, op: "metrics" });
+      expect(answer.response.payload).toMatchObject({
+        ok: false,
+        code: "invalid_request",
+        message: expect.stringContaining("does not handle"),
+      });
+      // Acted on nothing: no task exists.
+      leader.deliver(await appRequest("queue"));
+      expect(queueReply((await replies.next()).response.payload).tasks).toEqual([]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
   });
 
   test("an app cancels a running task on another machine: despawned there as the scheduler, then cancelled in the queue", async () => {
@@ -376,7 +472,7 @@ describe("leader requests", () => {
     const { leader, replies } = leaderOver(relay, store);
     /** Answers the leg's next request as `b` would, after checking what it asked. */
     const answerAsB = async (op: OpName, payload: unknown): Promise<Plain> => {
-      const asked = await relay.appFrames.next(5_000);
+      const asked = await nextRequest(relay, 5_000);
       expect(asked.env).toMatchObject({ to: "b", from: SCHEDULER_ID });
       const request = await open(key, asked.env);
       expect(request.op).toBe(op);
@@ -423,22 +519,22 @@ describe("leader requests", () => {
   test("a spawn the relay could not deliver is routed afresh at once, never held as lost", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
-    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), 50);
+    const store = new MemoryQueueStore();
+    const { leader } = leaderOver(relay, store, 50);
     try {
       leader.lead(1);
       await leader.settled();
       relay.setRegistry([await routableEntry("b"), await routableEntry("c")]);
-      leader.deliver(await appRequest("submit", { repo: "github.com/acme/app", mode: "worktree" }));
-      const { task: submitted } = submitReply((await replies.next()).response.payload);
+      await enqueueQueued(store, leader, "sub", { spec: { repo: "github.com/acme/app", mode: "worktree" } });
 
-      const first = await relay.appFrames.next(5_000);
+      const first = await nextRequest(relay, 5_000);
       expect((await open(key, first.env)).op).toBe("spawn");
       // The machine's socket went away before the spawn reached it.
       relay.sendToApps({ t: "undeliverable", to: first.env.to, iv: first.env.iv, code: "offline" });
-      const second = await relay.appFrames.next(5_000);
+      const second = await nextRequest(relay, 5_000);
       const request = await open(key, second.env);
       expect(request.op).toBe("spawn");
-      expect(request.payload).toMatchObject({ taskId: submitted.id });
+      expect(request.payload).toMatchObject({ taskId: "sub" });
       expect(second.env.to).not.toBe(first.env.to);
     } finally {
       leader.stop();
@@ -477,14 +573,13 @@ describe("leader requests", () => {
           ok: false,
           code: "invalid_request",
         });
-        expect(await ask("mark", "mark-done", { taskId: "x" })).toMatchObject({ ok: false, code: "invalid_request" });
+        expect(await ask("mark", "mark-done", { taskId: "x" })).toMatchObject({ ok: false, code: "task_not_found" });
 
-        const { task: queued } = submitReply(
-          await ask("submit", "submit", { repo: "github.com/acme/app", mode: "worktree" }),
-        );
+        await enqueueQueued(store, leader, "held", { spec: { repo: "github.com/acme/app", mode: "worktree" } });
+        const queued = { id: "held" };
         // Ticks every 50ms: a hold that leaked would have dispatched by now.
         await Bun.sleep(300);
-        expect(relay.appFrames.size).toBe(0);
+        expect(await queuedRequests(relay)).toEqual([]);
         const shown = queueReply(await ask("queue", "queue", {}));
         expect(shown.holds).toEqual([{ until: "resume", at: expect.any(Number) }]);
         expect(shown.tasks).toMatchObject([{ id: queued.id, state: "ready" }]);
@@ -496,7 +591,7 @@ describe("leader requests", () => {
         expect((await store.getPause())?.holds).toHaveLength(1);
 
         expect(await ask("resume", "resume", {})).toEqual({ holds: [] });
-        const spawn = await relay.appFrames.next(5_000);
+        const spawn = await nextRequest(relay, 5_000);
         expect(spawn.env.to).toBe("b");
         expect((await open(key, spawn.env)).op).toBe("spawn");
       } finally {
@@ -553,48 +648,6 @@ describe("leader requests", () => {
     expect(audits).toContainEqual(
       expect.stringContaining(`op=pause id="${ids["full"]}" account="org:extra" refused code=full`),
     );
-  });
-
-  test("past MAX_ACTIVE_TASKS unfinished tasks, submit is queue_full", async () => {
-    const relay = startTestRelay(TOKEN);
-    const store = new MemoryQueueStore();
-    for (let i = 0; i < MAX_ACTIVE_TASKS; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
-      await store.put(`t${i}`, 0, task(`t${i}`, {}));
-    }
-    const { leader, replies } = leaderOver(relay, store);
-    try {
-      leader.lead(1);
-      await leader.settled();
-      leader.deliver(await appRequest("submit", { repo: "r", mode: "here" }));
-      expect((await replies.next()).response.payload).toMatchObject({ ok: false, code: "queue_full" });
-      expect(await store.list()).toHaveLength(MAX_ACTIVE_TASKS);
-    } finally {
-      leader.stop();
-      relay.stop();
-    }
-  });
-
-  test("a submit prunes nothing: finished tasks past keepFinished stay until the library's own gates", async () => {
-    const relay = startTestRelay(TOKEN);
-    const store = new MemoryQueueStore();
-    for (let i = 0; i < 60; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
-      await store.put(`f${i}`, 0, task(`f${i}`, { state: "done", createdAt: Date.now() - (60 - i) }));
-    }
-    const { leader, replies } = leaderOver(relay, store);
-    try {
-      leader.lead(1);
-      await leader.settled();
-      leader.deliver(await appRequest("submit", { repo: "r", mode: "here" }));
-      expect((await replies.next()).response.payload).toMatchObject({ task: { spec: { repo: "r" } } });
-      const ids = (await store.list()).map((entry) => entry.id);
-      expect(ids).toHaveLength(61);
-      for (let i = 0; i < 60; i += 1) expect(ids).toContain(`f${i}`);
-    } finally {
-      leader.stop();
-      relay.stop();
-    }
   });
 
   test("a request during takeover is answered not_ready, and none at all while following", async () => {
@@ -753,8 +806,8 @@ describe("boundedQueue", () => {
     expect(ids.length).toBeLessThan(QUEUE_MAX_TASKS);
     expect(ids).toContain("f0");
     expect(ids).toContain("f1");
-    // Newest first still, the gap at the old end of the finished ones.
-    expect(ids.slice(0, 3)).toEqual([`f${QUEUE_MAX_TASKS - 1}`, `f${QUEUE_MAX_TASKS - 2}`, `f${QUEUE_MAX_TASKS - 3}`]);
+    // The unfinished first, then the finished newest first, the gap at their old end.
+    expect(ids.slice(0, 3)).toEqual(["f1", "f0", `f${QUEUE_MAX_TASKS - 1}`]);
     expect(ids).not.toContain("f2");
   });
 });
@@ -780,7 +833,7 @@ describe("leader lifecycle", () => {
       const leg = legs[0];
       if (leg === undefined) throw new Error("no leg was built");
       const asked = leg.request("ghost", "sessions", {});
-      const sent = await relay.appFrames.next();
+      const sent = await nextRequest(relay);
       expect(sent.term).toBe(1);
       expect(sent.env.from).toBe(SCHEDULER_ID);
       relay.sendToApps({ t: "undeliverable", to: "ghost", iv: sent.env.iv, code: "offline" });
@@ -857,7 +910,7 @@ describe("leader lifecycle", () => {
       // The relay moved on to term 2 while this daemon still holds term 1.
       relay.schedulerTerm = 2;
       leader.lead(1);
-      const asked = await relay.appFrames.next();
+      const asked = await nextRequest(relay);
       expect(asked.term).toBe(1);
       await pollUntil(() => relay.openAppCount() === 0, "the term's leg closing");
       expect(leader.term()).toBeNull();
@@ -979,7 +1032,7 @@ describe("leader in the daemon", () => {
         await store.put("self-task", 0, task("self-task", { state: "running", assignment: { deviceId, ...assigned } }));
 
         relay.lead(deviceId, 4);
-        const asked = await relay.appFrames.next(5_000);
+        const asked = await nextRequest(relay, 5_000);
         expect(asked.term).toBe(4);
         expect(asked.env).toMatchObject({ to: "b", from: SCHEDULER_ID });
         const request = await open(key, asked.env);
@@ -1028,7 +1081,7 @@ describe("leader in the daemon", () => {
       const proofs: Record<string, unknown> = { b: Date.now() - 3_600_000, c: "yesterday" };
       for (let i = 0; i < 2; i++) {
         // oxlint-disable-next-line no-await-in-loop -- one request per machine, answered as it comes
-        const asked = await relay.appFrames.next(5_000);
+        const asked = await nextRequest(relay, 5_000);
         // oxlint-disable-next-line no-await-in-loop -- as above
         const request = await open(key, asked.env);
         const from = asked.env.to;
@@ -1064,7 +1117,7 @@ describe("leader in the daemon", () => {
       await store.put("t-b", 0, task("t-b", { state: "reserved", reservation }));
 
       relay.lead(deviceId, 2);
-      const asked = await relay.appFrames.next(5_000);
+      const asked = await nextRequest(relay, 5_000);
       const request = await open(key, asked.env);
       const none: SessionsResponse = { sessions: [], at: Date.now() };
       const answer = await seal(
@@ -1214,29 +1267,31 @@ describe("leader in the daemon", () => {
   });
 
   // The relay picks which term an envelope reaches. A guard per term let it
-  // redeliver an app's submit to the next one inside the replay window, and run
-  // the prompt once per term.
-  test("one replay guard outlives terms: an app's submit redelivered with no term, then to the next, runs once", async () => {
+  // redeliver an app's request to the next one inside the replay window, and act
+  // on it once per term.
+  test("one replay guard outlives terms: an app's cancel redelivered with no term, then to the next, acts once", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
+    await store.put("q", 0, task("q", { state: "queued" }));
     const lines: string[] = [];
     const realLog = console.log;
     console.log = (...args: unknown[]): void => void lines.push(args.map(String).join(" "));
     const { daemon, deviceId } = await startLeaderDaemon(relay, store);
     try {
+      const audited = (): number => lines.filter((l) => l.includes("audit queue") && l.includes("op=cancel") && l.includes(" ok")).length;
       const leading = async (term: number | null): Promise<void> => {
         await pollUntil(() => daemon.leader.term() === term, `term ${term ?? "none"}`);
         await daemon.leader.settled();
       };
-      // A repo no machine holds, so the task stays queued rather than spawning here.
-      const submit = await appRequest("submit", { repo: "github.com/acme/nowhere", mode: "worktree", prompt: "once" });
-      const redeliver = (): void => relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: submit }));
-      const replays = (): number => lines.filter((l) => l.includes(submit.iv) && l.includes("reason=replay")).length;
+      const cancel = await appRequest("cancel", { taskId: "q" });
+      const redeliver = (): void => relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: cancel }));
+      const replays = (): number => lines.filter((l) => l.includes(cancel.iv) && l.includes("reason=replay")).length;
 
       relay.lead(deviceId, 1);
       await leading(1);
       redeliver();
       expect((await open(key, await relay.messages.next(5_000))).payload).toHaveProperty("task");
+      expect(audited()).toBe(1);
 
       relay.follow(deviceId);
       await leading(null);
@@ -1251,6 +1306,8 @@ describe("leader in the daemon", () => {
 
       await Bun.sleep(100);
       expect(relay.messages.size).toBe(0);
+      // One `op=cancel … ok` line in all, and no second one from the redeliveries.
+      expect(audited()).toBe(1);
       expect(await store.list()).toHaveLength(1);
     } finally {
       console.log = realLog;

@@ -354,7 +354,7 @@ describe("markDone", () => {
 
   test("refuses a reserved task as dispatching, a finished one as finished, an unknown id as not_found", async () => {
     const { scheduler, put } = setup();
-    await put("res", { state: "reserved", reservation: { deviceId: "a", exclave: "main", clone: "app" }, reservedAt: NOW });
+    await put("res", { state: "reserved", reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 60_000 }, reservedAt: NOW });
     for (const state of ["done", "failed", "cancelled"] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one record per state
       await put(state, { state });
