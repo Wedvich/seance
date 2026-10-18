@@ -8,6 +8,8 @@ import {
   SCHEDULER_ID,
   signRegister,
   newestQuotaByAccount,
+  type QueueChanged,
+  type QueueReply,
   type RegistryView,
   type RelayToAppFrame,
   type SchedulerLeader,
@@ -137,8 +139,12 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(status.mem).toBeLessThanOrEqual(100);
       expect(status.sess?.length).toBeGreaterThan(0);
       // The machines screen renders pressure and the exclave rows from that push alone.
-      const card = deriveMachines(state.relay.machines, Date.now()).cards.find((c) => c.deviceId === stack.deviceId);
+      const card = deriveMachines(state.relay.machines, Date.now(), state.relay.scheduler).cards.find(
+        (c) => c.deviceId === stack.deviceId,
+      );
       expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
+      // The daemon runs from this checkout, so its register blob names the build. Needs a git checkout (readSource).
+      expect(card?.build).toMatch(/^[0-9a-f]{12} · committed /u);
       expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
@@ -174,7 +180,7 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(machine.status?.quota).toBeDefined();
       expect(liveStatus(machine)).toBeUndefined();
       expect(newestQuotaByAccount(asleep.relay.machines).get(E2E_ACCOUNT_ID)?.deviceId).toBe(stack.deviceId);
-      const view = deriveMachines(asleep.relay.machines, Date.now());
+      const view = deriveMachines(asleep.relay.machines, Date.now(), asleep.relay.scheduler);
       expect(view.cards.find((c) => c.deviceId === stack.deviceId)?.gauges).toEqual([]);
       const account = view.accounts.find((a) => a.accountId === E2E_ACCOUNT_ID);
       expect(account?.observed).toEndWith("on TestMac, asleep");
@@ -657,7 +663,7 @@ describe("two daemons ↔ relay ↔ app", () => {
       }
       expect(ownMachine(state, second.deviceId)?.exclaves?.map((exclave) => exclave.id)).toEqual(["default", "work"]);
 
-      const view = deriveMachines(state.relay.machines, Date.now());
+      const view = deriveMachines(state.relay.machines, Date.now(), state.relay.scheduler);
       for (const id of ids) {
         const card = view.cards.find((c) => c.deviceId === id);
         expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
@@ -947,6 +953,12 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
   }, 90_000);
 });
 
+async function heldBy(reply: Promise<QueueReply | null>): Promise<unknown> {
+  const read = await reply;
+  if (read === null || !("holds" in read)) throw new Error(`no queue: ${JSON.stringify(read)}`);
+  return read.holds;
+}
+
 describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // M2's first Exit bullet: two daemons up, an `auto` spawn from the app lands
   // where its decision record says, and the record says why the other lost.
@@ -966,7 +978,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
           return machine?.connected === true && machine.status !== undefined && machine.repos.length > 0;
         });
       await app.waitForApp(ready, "both machines live and the leader verified");
-      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({ available: true, reason: null });
+      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({
+        available: true,
+        reason: null,
+        note: null,
+      });
 
       // The preview first, as the form shows it: a dry run, nothing reserved.
       await app.store.refreshPreview();
@@ -983,6 +999,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         "the preview asked again after the reconnect",
       );
 
+      // The leader nudges apps when its queue changes; the PWA's own read-back rides on it.
+      const nudges: QueueChanged[] = [];
+      const stopNudges = app.client.onQueueChanged((change) => nudges.push(change));
       await app.store.spawn();
       const queued = await app.waitForApp(
         (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
@@ -1004,6 +1023,8 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       window = session?.window ?? null;
       // Nothing reached B: no spawn ever audited there.
       expect(await Bun.file(second.log).text()).not.toContain('op="spawn"');
+      await pollUntil(() => nudges.some((n) => n.tasks?.includes(task.id)), "a queue-changed naming the task");
+      stopNudges();
     } finally {
       if (window !== null) await killWindow(window);
       app.stop();
@@ -1029,9 +1050,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       { versionNegotiation: { mode: { pin: "2026-07-28" } } },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    serveStdio(() => buildMcpServer(relayFleet(lazy), null, { autoFollow: { intervalMs: 250, polls: 60 } }), {
-      transport: serverTransport,
-    });
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
     await client.connect(clientTransport);
     const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> => {
       const result = await client.callTool({ name, arguments: args });
@@ -1047,20 +1066,35 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       const spawned = await call("spawn_session", { machine: "auto", repo: "myrepo", prompt: "route me by mcp" });
       expect(spawned.error).toBe(false);
-      expect(spawned.text).toMatch(/^task \S+: running on TestMac \(exclave default, clone myrepo, window [^)]+\)/u);
-      expect(spawned.text).toContain("decision: chose TestMac/default");
-      window = /window ([^)]+)\)/u.exec(spawned.text)?.[1] ?? null;
-      if (window === null) throw new Error(`no window in: ${spawned.text}`);
-      expect(await listWindows()).toContain(window);
-
-      const queued = JSON.parse((await call("get_queue", {})).text) as {
-        tasks: { id: string; state: string; placement?: { machine: string } }[];
-      };
+      // The spawn is an enqueue: it answers queued, and the leader places it afterwards.
+      expect(spawned.text).toMatch(/^task (\S+): queued/u);
       const id = /^task (\S+):/u.exec(spawned.text)?.[1];
-      expect(queued.tasks.find((t) => t.id === id)).toMatchObject({
+      if (id === undefined) throw new Error(`no task id in: ${spawned.text}`);
+
+      type Queue = {
+        tasks: { id: string; state: string; placement?: { machine: string; window?: string } }[];
+        holds: unknown[];
+      };
+      const seen: { queue: Queue | null } = { queue: null };
+      await pollUntil(
+        async () => {
+          const queue = JSON.parse((await call("get_queue", {})).text) as Queue;
+          if (queue.tasks.find((t) => t.id === id)?.state !== "running") return false;
+          seen.queue = queue;
+          return true;
+        },
+        "the queued task to run",
+        20_000,
+      );
+      const seenRunning = seen.queue;
+      expect(seenRunning?.tasks.find((t) => t.id === id)).toMatchObject({
         state: "running",
         placement: { machine: "TestMac" },
       });
+      expect(seenRunning?.holds).toEqual([]);
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+      if (window === null) throw new Error("no window on the running task");
+      expect(await listWindows()).toContain(window);
 
       // The leader dispatched to its own machine in process; the request carried no `mcp`.
       const lines = audit.mock.calls.map((args) => args.join(" "));
@@ -1219,12 +1253,80 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // Mark done is the leader's, not the session's: the task finishes as `manual`,
+  // its session is ended first (a done task holds no slot, so a session left
+  // running would work past the caps), and the daemon audits the request as the
+  // scheduler's.
+  test("mark-done finishes a running task as manual and ends its session, audited", async () => {
+    const id = crypto.randomUUID();
+    const app = startApp(stack, { auto: true });
+    const audit = spyOn(console, "log");
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const up = await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the leader verified, with the repos listed",
+      );
+      const created = await app.client.createTask({
+        id,
+        spec: { repo: fixtureOrigin(up) ?? "", mode: "worktree", prompt: "mark me done" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the enqueued task to run",
+        20_000,
+      );
+      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+
+      const marked = await app.client.markDone(id);
+      expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });
+      expect(window).not.toBeNull();
+      await pollUntil(async () => !(await listWindows()).includes(window ?? ""), "the marked task's session to end");
+      const lines = audit.mock.calls.map((args) => args.join(" "));
+      expect(
+        lines.some((line) => line.includes("op=mark-done") && line.includes(`task="${id}"`) && line.endsWith("ok")),
+      ).toBe(true);
+    } finally {
+      audit.mockRestore();
+      if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  }, 60_000);
+
+  // Holds live in the relay's store, so a pause outlasts the daemon that took it
+  // and `queue` reports it back.
+  test("pause and resume show up as holds in the queue", async () => {
+    const app = startApp(stack, { auto: true });
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+
+      const paused = await app.client.pause({ until: "resume" });
+      expect(paused).toMatchObject({ holds: [{ until: "resume" }] });
+      expect(await heldBy(app.client.queue())).toMatchObject([{ until: "resume" }]);
+
+      const resumed = await app.client.resume();
+      expect(resumed).toMatchObject({ holds: [] });
+      expect(await heldBy(app.client.queue())).toEqual([]);
+    } finally {
+      await app.client.resume().catch(() => null);
+      app.stop();
+    }
+  }, 60_000);
+
   // The M3 gate's exit, with M2's reader check kept as its tripwire. A
   // bearer-token holder's daemon socket with signed roles and no PSK, connected
   // while the real leader is down, is never nominated: auto stays "no
   // scheduler". A listed machine's seed copied out without the PSK is
-  // nominated, and the app reads it as "leader unverified", greys auto, and
-  // sends it nothing. When it goes, the real daemon leads under a higher term.
+  // nominated, and the app reads it as "leader unverified", still enqueues (the
+  // queue is the relay's) and sends it nothing. When it goes, the real daemon
+  // leads under a higher term and runs what was queued.
   test("a squatter is never nominated; a stolen listed seed reads as leader unverified, and nothing is sent to either", async () => {
     const app = startApp(stack, { auto: true });
     const watch = watchLeader();
@@ -1232,6 +1334,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     let squatter: Awaited<ReturnType<typeof connectDaemon>> | null = null;
     let stolen: Awaited<ReturnType<typeof connectDaemon>> | null = null;
     let down = false;
+    let queuedId: string | null = null;
     try {
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the suite's daemon verified as leader");
       const before = app.client.getState().scheduler;
@@ -1249,10 +1352,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(watch.current()).toBeNull();
       await squatter.expectNo("lead", 500);
       expect(app.client.getState().scheduler).toEqual({ kind: "none" });
-      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({
-        available: false,
-        reason: "No scheduler is leading right now",
-      });
+      // Auto still enqueues with nobody leading; the note says it waits.
+      const unled = deriveView(app.store.getState(), Date.now()).autoAvailability;
+      expect(unled).toMatchObject({ available: true, reason: null });
+      expect(unled.note).toContain("No scheduler is leading right now");
 
       // Listed, so the relay nominates it; an info blob it cannot seal under the PSK.
       stolen = await connectDaemon(stack.relay);
@@ -1266,17 +1369,23 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
       expect(seen.relay.scheduler).toMatchObject({ kind: "unverified", deviceId: stolenSeedId });
       const view = deriveView(seen, Date.now());
-      expect(view.autoAvailability).toEqual({
-        available: false,
-        reason: "Leader unverified — it hasn't shown it holds this key",
-      });
-      expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
-      // The form can neither preview nor queue, and the client refuses at the source.
+      // The queue is the relay's, so auto still enqueues; only a preview needs a verified leader.
+      expect(view.autoAvailability).toMatchObject({ available: true, reason: null });
+      expect(view.autoAvailability.note).toContain("unverified");
       await app.store.refreshPreview();
-      expect(app.store.getState().preview).toBeNull();
+      expect(app.store.getState().preview).toMatchObject({
+        kind: "failed",
+        message: expect.stringContaining("nothing is sent"),
+      });
       await app.store.spawn();
-      expect(app.store.getState().verdict).toBeNull();
+      const verdict = app.store.getState().verdict;
+      expect(verdict?.kind).toBe("queued");
       await expect(app.client.queue()).rejects.toMatchObject({ reason: "leader_unverified" });
+      // The task sits in the store, queued; nothing is ever sent to the nominee.
+      const listing = await app.client.listTasks();
+      if (listing === null || !listing.ok) throw new Error("no listing");
+      queuedId = verdict?.kind === "queued" ? verdict.task.id : null;
+      expect(listing.tasks.find((t) => t.task.id === queuedId)?.task.state).toBe("queued");
       await stolen.expectNo("msg", 500);
 
       // The stolen seed's socket goes: the real daemon leads, verified, under a
@@ -1290,12 +1399,37 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(now.kind === "ready" ? now.term : 0).toBeGreaterThan(term);
       // The form asks the new leader at once, mid-takeover: `not_ready` is waited out, not shown.
       await app.waitForApp((state) => state.preview?.kind === "ok", "the preview from the new leader");
+      // The verified leader takes over the store and runs what was queued under the unverified one.
+      const queued = queuedId;
+      if (queued === null) throw new Error("no queued task");
+      await pollUntil(
+        async () => {
+          const body = (await stack.queue().get(queued))?.body;
+          return body !== undefined && body.state !== "queued" && body.assignment !== undefined;
+        },
+        "the verified leader to dispatch the task queued while unverified",
+        20_000,
+      );
       await squatter.expectNo("lead");
       await squatter.expectNo("msg");
     } finally {
       squatter?.close();
       stolen?.close();
       if (down) await stack.restartDaemon();
+      // The real leader runs what the squatter-era app queued; cancel ends that session too.
+      if (queuedId !== null) {
+        const id = queuedId;
+        // `dispatching` (spawn in flight) and a leader still taking over are asked again, never ignored: a task spawning after the test is a leak.
+        // A cleanup that gives up must not skip the teardown below, nor mask the test's own failure.
+        await pollUntil(
+          async () => {
+            const reply = await app.client.cancel(id).catch(() => null);
+            return reply !== null && ("task" in reply || reply.code === "finished" || reply.code === "task_not_found");
+          },
+          "the leftover task to be cancelled or finished",
+          20_000,
+        ).catch((err: unknown) => console.error(`leftover task ${id} not cleaned up: ${String(err)}`));
+      }
       app.stop();
       watch.close();
     }

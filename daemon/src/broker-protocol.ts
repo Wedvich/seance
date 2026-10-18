@@ -2,6 +2,8 @@ import {
   isRecord,
   OP_TIMEOUT_MS,
   parseRepoList,
+  parseSourceInfo,
+  parseUpdateReport,
   REGISTRY_SETTLE_MS,
   type FailureReason,
   type Machine,
@@ -187,7 +189,20 @@ export function parseMachines(data: unknown): readonly Machine[] | null {
     if (typeof deviceId !== "string" || typeof name !== "string" || typeof platform !== "string") return null;
     if (typeof scannedAt !== "number" || typeof lastSeen !== "number" || typeof connected !== "boolean") return null;
     if (repos === null) return null;
-    machines.push({ deviceId, name, platform, repos, scannedAt, lastSeen, connected });
+    // Optional and display-only, so a malformed one costs the field, never the list.
+    const source = parseSourceInfo(candidate["source"]);
+    const lastUpdate = parseUpdateReport(candidate["lastUpdate"]);
+    machines.push({
+      deviceId,
+      name,
+      platform,
+      repos,
+      scannedAt,
+      lastSeen,
+      connected,
+      ...(source === null ? {} : { source }),
+      ...(lastUpdate === null ? {} : { lastUpdate }),
+    });
   }
   return machines;
 }

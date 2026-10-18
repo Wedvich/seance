@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, sealAtRest, toBase64 } from "./crypto.ts";
-import { openTaskListing, openTaskRecord, sealTaskRecord, taskKey } from "./task-record.ts";
+import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
 import { APP_ID, SCHEDULER_ID, type Task, type TaskRecord } from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
@@ -79,5 +79,17 @@ describe("a task listing", () => {
       [taskKey(twice.id), "key_mismatch"],
       [`queue:${outside.id}`, "key_mismatch"],
     ]);
+  });
+});
+
+describe("queuedTask", () => {
+  test("is a version-1 queued task that binds, with a minted id unless one is given", async () => {
+    const spec = { repo: "git@github.com:m/seance.git", mode: "worktree" } as const;
+    const task = queuedTask(spec, NOW);
+    expect(task).toEqual({ id: task.id, spec, state: "queued", createdAt: NOW });
+    expect(queuedTask(spec, NOW).id).not.toBe(task.id);
+    const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+    expect(queuedTask(spec, NOW, "fixed").id).toBe("fixed");
   });
 });

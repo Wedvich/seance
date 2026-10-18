@@ -80,10 +80,12 @@ export interface RelayOptions {
   readonly captureLogs?: boolean;
   /** `STORE_TOMBSTONE_MS`: how long a deleted task's key refuses a put, so a test can watch one expire. */
   readonly tombstoneMs?: number;
+  /** `SCHEDULER_REPLY_WINDOW_MS`: how long a delivered scheduler request quiets its reply, so a test can watch one lapse. */
+  readonly schedulerReplyWindowMs?: number;
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
-  const { sweep, leaders, captureLogs, tombstoneMs } = opts;
+  const { sweep, leaders, captureLogs, tombstoneMs, schedulerReplyWindowMs } = opts;
   const logs: string[] = [];
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
@@ -106,6 +108,7 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
         BEARER_TOKEN: token,
         ...(leaders === undefined ? {} : { SCHEDULER_LEADERS: leaders.join(",") }),
         ...(tombstoneMs === undefined ? {} : { STORE_TOMBSTONE_MS: String(tombstoneMs) }),
+        ...(schedulerReplyWindowMs === undefined ? {} : { SCHEDULER_REPLY_WINDOW_MS: String(schedulerReplyWindowMs) }),
         ...(sweep === undefined
           ? {}
           : {

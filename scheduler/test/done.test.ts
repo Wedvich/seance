@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { BranchState, TaskProgress } from "@seance/shared";
+import type { BranchState, DespawnRequest, DespawnResponse, TaskProgress } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
+import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
  * Done detection (M3 item 4a): a session's end read against its PR, a branch's
@@ -15,13 +15,11 @@ const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as con
 function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const clock = { now: NOW };
   const store = new MemoryQueueStore({ now: () => clock.now });
-  let n = 0;
   const scheduler = new Scheduler({
     store: readerChecked(store, () => clock.now),
     fleet,
     config,
     now: () => clock.now,
-    newId: () => `t${++n}`,
   });
   async function put(id: string, fields: Partial<Task> = {}): Promise<void> {
     const write = await store.put(id, 0, { id, spec: spec(), state: "running", createdAt: clock.now, ...fields });
@@ -41,9 +39,12 @@ function progress(taskId: string, fields: Partial<TaskProgress> = {}): TaskProgr
 
 describe("a session that ends", () => {
   test("with a PR open is awaiting-merge, and frees its slot for the next task", async () => {
-    const { fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
-    const first = await scheduler.submit(spec());
-    const second = await scheduler.submit(spec());
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
+      ...DEFAULT_CONFIG,
+      globalMax: 1,
+    });
+    const first = await enqueue(store, scheduler, spec());
+    const second = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(scheduler.lastDecision(second.id)?.candidates[0]?.rejected).toContainEqual({
       code: "cap_reached",
@@ -58,8 +59,8 @@ describe("a session that ends", () => {
   });
 
   test("with no PR is done by its session", async () => {
-    const { scheduler } = setup();
-    const task = await scheduler.submit(spec());
+    const { scheduler, store } = setup();
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     await scheduler.onSession(task.id, "ended", FROM_A);
     expect(scheduler.task(task.id)).toMatchObject({ state: "done", doneBy: "session" });
@@ -67,7 +68,7 @@ describe("a session that ends", () => {
 
   test("a PR reported while it runs is recorded, and the end reads it", async () => {
     const { store, scheduler } = setup();
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     const before = (await store.get(task.id))?.version ?? 0;
     await scheduler.onSession(task.id, "busy", FROM_A, PR);
@@ -334,5 +335,110 @@ describe("a trimmed reply", () => {
     });
     await pass(scheduler);
     expect(scheduler.task("t")).toMatchObject({ state: "awaiting-merge", prUrl: PR });
+  });
+});
+
+describe("markDone", () => {
+  test("settles every unfinished, unreserved state as done by hand, ending the session of a running, needs-input or reachable lost one", async () => {
+    const { fleet, scheduler, put } = setup();
+    const states = ["queued", "blocked", "ready", "running", "needs-input", "lost", "awaiting-merge"] as const;
+    for (const state of states) {
+      // oxlint-disable-next-line no-await-in-loop -- one record per state
+      await put(state, { state, ...(["queued", "blocked", "ready"].includes(state) ? {} : { assignment: ON_A }) });
+    }
+    await scheduler.load();
+    for (const state of states) {
+      // oxlint-disable-next-line no-await-in-loop -- each settles in turn
+      const result = await scheduler.markDone(state);
+      expect(result).toMatchObject({ ok: true, task: { id: state, state: "done", doneBy: "manual" } });
+    }
+    // A done task holds no slot, so its session must not keep running past the caps.
+    expect(fleet.despawns).toEqual([
+      { deviceId: "a", id: "%1" },
+      { deviceId: "a", id: "%1" },
+      { deviceId: "a", id: "%1" },
+    ]);
+  });
+
+  test("a session whose ended event lands during the despawn is answered as it finished, or settled by hand when it went to awaiting-merge", async () => {
+    let scheduler: Scheduler | undefined;
+    let pr: string | undefined;
+    class EndsOnExit extends FakeFleet {
+      override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
+        const reply = await super.despawn(deviceId, request);
+        await scheduler?.onSession("t", "ended", FROM_A, pr);
+        return reply;
+      }
+    }
+    const first = setup(new EndsOnExit([machine("a")]));
+    scheduler = first.scheduler;
+    await first.put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toMatchObject({ ok: true, task: { state: "done" } });
+
+    pr = PR;
+    const second = setup(new EndsOnExit([machine("a")]));
+    scheduler = second.scheduler;
+    await second.put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
+  });
+
+  test("a running task whose machine refuses the despawn stays running: refused, never marked done over a live session", async () => {
+    class Refusing extends FakeFleet {
+      override async despawn(): Promise<DespawnResponse> {
+        return { ok: false, code: "internal_error", message: "refused" };
+      }
+    }
+    const { scheduler, put } = setup(new Refusing([machine("a")]));
+    await put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toEqual({ ok: false, code: "despawn_failed" });
+    expect(scheduler.task("t")?.state).toBe("running");
+  });
+
+  test("refuses a reserved task as dispatching, a finished one as finished, an unknown id as not_found", async () => {
+    const { scheduler, put } = setup();
+    await put("res", {
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 60_000 },
+      reservedAt: NOW,
+    });
+    for (const state of ["done", "failed", "cancelled"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one record per state
+      await put(state, { state });
+    }
+    await scheduler.load();
+    expect(await scheduler.markDone("res")).toEqual({ ok: false, code: "dispatching" });
+    for (const state of ["done", "failed", "cancelled"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one answer per state
+      expect(await scheduler.markDone(state)).toEqual({ ok: false, code: "finished" });
+    }
+    expect(await scheduler.markDone("nope")).toEqual({ ok: false, code: "not_found" });
+  });
+
+  test("conflicts that outlast the write attempts are conflict, and the task is unchanged", async () => {
+    const { store, scheduler, put } = setup();
+    await put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    for (let i = 0; i < 3; i += 1) store.failNext({ code: "version_conflict" });
+    expect(await scheduler.markDone("t")).toEqual({ ok: false, code: "conflict" });
+    expect(scheduler.task("t")?.state).toBe("running");
+  });
+
+  test("releases an after: merged dependent on the next pass, and a later ended event leaves the task done", async () => {
+    const { scheduler, put } = setup();
+    await put("pred", { state: "awaiting-merge", assignment: ON_A, prUrl: PR });
+    await put("next", { state: "queued", spec: spec({ deps: [{ task: "pred", after: "merged" }] }) });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("next")?.state).toBe("blocked");
+
+    expect(await scheduler.markDone("pred")).toMatchObject({ ok: true });
+    await pass(scheduler);
+    expect(scheduler.task("next")?.state).toBe("running");
+
+    await scheduler.onSession("pred", "ended", FROM_A);
+    expect(scheduler.task("pred")).toMatchObject({ state: "done", doneBy: "manual" });
   });
 });

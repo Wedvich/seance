@@ -7,7 +7,9 @@ import {
   type RelayState,
   type RequestOp,
   type SchedulerOp,
-  type SubmitReply,
+  type StoreRefusal,
+  type Task,
+  type TaskCreated,
   type TaskReply,
 } from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
@@ -35,6 +37,10 @@ export interface FakeRelay extends AppRelay {
   requests: { deviceId: string; op: RequestOp; payload: unknown }[];
   started: number;
   stopped: boolean;
+  /** Every task `createTask` was handed, in order — a retry shows up as the same task again. */
+  creates: Task[];
+  /** What a create answers; an Error rejects, null is a reply this build cannot read. Defaults to stored. */
+  onCreate: (task: Task) => Promise<TaskCreated | StoreRefusal | null> | TaskCreated | StoreRefusal | null | Error;
   setState: (next: Partial<RelayState>) => void;
 }
 
@@ -74,6 +80,8 @@ export function fakeRelay(
     requests: [],
     started: 0,
     stopped: false,
+    creates: [],
+    onCreate: () => ({ ok: true, landedEarlier: false }),
     setState: (next) => {
       state = { ...state, ...next };
       for (const listener of listeners) listener();
@@ -102,7 +110,13 @@ export function fakeRelay(
       // The fake's caller names T; this is the boundary that stands in for the wire.
       return reply as T;
     },
-    submit: (request) => schedule<SubmitReply | null>("submit", request),
+    // A store-put the relay answers itself: no leader gate, as in the real client.
+    createTask: async (task) => {
+      fake.creates.push(task);
+      const reply = await fake.onCreate(task);
+      if (reply instanceof Error) throw reply;
+      return reply;
+    },
     queue: () => schedule<QueueReply | null>("queue", {}),
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
   };

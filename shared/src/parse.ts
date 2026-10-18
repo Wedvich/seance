@@ -51,6 +51,7 @@ import {
   TASK_ID_PATTERN,
   TASK_REQUEST_LIMITS,
   TASK_STATES,
+  UPDATE_OUTCOMES,
   type Assignment,
   type Candidate,
   type Decision,
@@ -62,7 +63,6 @@ import {
   type SchedulerError,
   type SchedulerOp,
   type Score,
-  type SubmitReply,
   type Target,
   type Task,
   type TaskRequest,
@@ -81,6 +81,8 @@ import {
   type SessionEvent,
   type SessionState,
   type SpawnErrorCode,
+  type SourceInfo,
+  type UpdateReport,
 } from "./types.ts";
 
 /**
@@ -220,13 +222,39 @@ export function parseRepoList(value: unknown): readonly RepoEntry[] | null {
   return parseList(value, parseRepoEntry);
 }
 
+/** The largest instant a `Date` holds; past it `toISOString()` throws, which would fail a reader's whole reply. */
+const MAX_DATE_MS = 8.64e15;
+
+/** Raw git/bun stderr rides `detail`; the outcome code carries the meaning, so a long one is cut, not refused. */
+export const UPDATE_DETAIL_MAX = 200;
+
+function isDateMs(value: unknown): value is number {
+  return isUint(value) && value <= MAX_DATE_MS;
+}
+
+/** A daemon checkout's git identity, as `readSource` produces it. */
+export function parseSourceInfo(value: unknown): SourceInfo | null {
+  if (!isRecord(value)) return null;
+  const { sha, commitTs, branch } = value;
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/u.test(sha) || !isDateMs(commitTs)) return null;
+  if (branch !== null && typeof branch !== "string") return null;
+  return { sha, commitTs, branch };
+}
+
+export function parseUpdateReport(value: unknown): UpdateReport | null {
+  if (!isRecord(value)) return null;
+  const { at, outcome, detail } = value;
+  if (!isDateMs(at) || !isOptionalString(detail)) return null;
+  const known = UPDATE_OUTCOMES.find((candidate) => candidate === outcome);
+  if (known === undefined) return null;
+  return { at, outcome: known, ...(detail === undefined ? {} : { detail: detail.slice(0, UPDATE_DETAIL_MAX) }) };
+}
+
 /**
  * The decrypted register blob. Inside the PSK boundary, so this is skew
  * tolerance rather than defence: a daemon a version ahead or behind must cost
  * one machine tile, not the render — `machine.repos.map(…)` runs on every frame
- * of the spawn screen. A projection of the fields the app reads:
- * `source`/`lastUpdate` back the daemon's own doctor/status surfaces and no
- * app-role client renders them.
+ * of the spawn screen. A projection of the fields the app reads.
  */
 export function parseMachineInfo(value: unknown): MachineInfo | null {
   if (!isRecord(value)) return null;
@@ -234,12 +262,15 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
   if (typeof value["scannedAt"] !== "number") return null;
   const repos = parseRepoList(value["repos"]);
   if (repos === null) return null;
-  // Both optional and both skew-tolerant in the other direction from `repos`: a
+  // All optional and skew-tolerant in the other direction from `repos`: a
   // malformed exclave list costs the exclaves (the machine reads as an old
-  // daemon, ineligible for `auto`), never the tile. Unknown capability strings
-  // pass through — a reader asks for the ones it knows.
+  // daemon, ineligible for `auto`), never the tile; a malformed build or update
+  // report costs that line. Unknown capability strings pass through — a reader
+  // asks for the ones it knows.
   const exclaves = value["exclaves"] === undefined ? undefined : parseExclaveList(value["exclaves"]);
   const capabilities = value["capabilities"];
+  const source = parseSourceInfo(value["source"]);
+  const lastUpdate = parseUpdateReport(value["lastUpdate"]);
   return {
     name: value["name"],
     platform: value["platform"],
@@ -247,6 +278,8 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
     scannedAt: value["scannedAt"],
     ...(exclaves === undefined || exclaves === null ? {} : { exclaves }),
     ...(isStringArray(capabilities) ? { capabilities } : {}),
+    ...(source === null ? {} : { source }),
+    ...(lastUpdate === null ? {} : { lastUpdate }),
   };
 }
 
@@ -755,7 +788,7 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
 }
 
 /**
- * A task as `queue`, `cancel`, `mark-done` and `submit` carry it, and as its
+ * A task as `queue`, `cancel` and `mark-done` carry it, and as its
  * record holds it at rest. A state this build does not know nulls the task: it
  * cannot say what the task is doing, and guessing would be worse than leaving
  * it out.
@@ -1061,12 +1094,6 @@ export function parseRoutePreviewReply(value: unknown): RoutePreviewReply | null
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const decision = isRecord(value) ? parseDecision(value["decision"]) : null;
   return decision === null ? null : { decision };
-}
-
-export function parseSubmitReply(value: unknown): SubmitReply | null {
-  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
-  const task = isRecord(value) ? parseTask(value["task"]) : null;
-  return task === null ? null : { task };
 }
 
 export function isSchedulerOp(value: unknown): value is SchedulerOp {

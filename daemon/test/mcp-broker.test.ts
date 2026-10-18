@@ -20,7 +20,13 @@ import { fakeRelay, machine, type FakeRelay } from "./fake-app-relay.ts";
  */
 
 const LOCAL = machine();
-const REMOTE = machine({ deviceId: "device-2", name: "Linux Box" });
+// A build and an update report, so the parity check covers the broker carrying them.
+const REMOTE = machine({
+  deviceId: "device-2",
+  name: "Linux Box",
+  source: { sha: "c".repeat(40), commitTs: 1_700_000_000_000, branch: null },
+  lastUpdate: { at: 1_700_000_100_000, outcome: "fetch_failed" },
+});
 const ASLEEP = machine({ deviceId: "device-3", name: "Sleeper", connected: false });
 
 let failNextSpawn = false;
@@ -54,10 +60,11 @@ const local: LocalMachine = {
   reachable: () => Promise.resolve(true),
 };
 
-function relayDouble(): LazyRelay {
+function relayDouble(leader = false): LazyRelay {
   return new LazyRelay({
     create: () => {
       const fake = fakeRelay([LOCAL, REMOTE, ASLEEP], respond);
+      if (leader) fake.setState({ scheduler: { kind: "ready", deviceId: REMOTE.deviceId, term: 1 } });
       relays.push(fake);
       return fake;
     },
@@ -141,6 +148,37 @@ describe("the MCP tools, direct and brokered", () => {
       client: "mcp",
       plan: true,
     });
+  });
+
+  test("the broker never marks a scheduler leader, even when the relay behind it has a ready one", async () => {
+    // Its own broker and socket: both relay doubles here nominate REMOTE with a verified proof.
+    const leaderBroker = createBroker({ selfDeviceId: LOCAL.deviceId, relay: relayDouble(true), auditSink: () => {} });
+    const leaderSocket = await startLocalSocket({
+      path: join(base, "leader.sock"),
+      handle: () => Promise.reject(new Error("no Plain op belongs on this socket in these tests")),
+      broker: leaderBroker.handle,
+    });
+    try {
+      const path = leaderSocket.path;
+      if (path === null) throw new Error("the op socket did not bind");
+      const direct = await connect(relayFleet(relayDouble(true)));
+      const brokered = await connect(
+        selectFleet({
+          key: () => Promise.resolve(null),
+          direct: () => {
+            throw new Error("this process has no key");
+          },
+          broker: brokerFleet({ path }),
+        }),
+      );
+      const marked = JSON.parse(await direct("list_machines")) as { name: string; scheduler?: string }[];
+      expect(marked.find((entry) => entry.name === REMOTE.name)?.scheduler).toBe("leader");
+      const unmarked = JSON.parse(await brokered("list_machines")) as { scheduler?: string }[];
+      expect(unmarked.some((entry) => "scheduler" in entry)).toBe(false);
+    } finally {
+      leaderSocket.stop();
+      leaderBroker.stop();
+    }
   });
 
   test("a self-targeted call takes the local op path on both, with no relay and no broker", async () => {

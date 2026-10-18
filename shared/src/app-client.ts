@@ -22,22 +22,28 @@ import {
   type MetricsReply,
   type MetricsRequest,
   type Plain,
+  type PauseReply,
+  type PauseRequest,
+  type QueueChanged,
   type QueueReply,
+  type QueueRequest,
   type RegistryView,
   type RepoEntry,
   type RequestOp,
   type RescanResponse,
+  type ResumeRequest,
   type RoutePreviewReply,
   type SchedulerLeader,
   type SchedulerOp,
+  type SourceInfo,
   type StoreReplyFrame,
-  type SubmitReply,
   type Task,
   type TaskRecord,
   type TaskRef,
   type TaskReply,
   type TaskRequest,
   type UndeliverableCode,
+  type UpdateReport,
 } from "./types.ts";
 import {
   bindTaskRecord,
@@ -48,11 +54,12 @@ import {
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
+  parsePauseReply,
+  parseQueueChanged,
   parseQueueReply,
   parseRescanResponse,
   parseRoutePreviewReply,
   parseStoreReply,
-  parseSubmitReply,
   parseTaskReply,
 } from "./parse.ts";
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
@@ -88,10 +95,24 @@ export type FailureReason =
   | "no_leader"
   | "leader_unverified";
 
+/**
+ * The refusal a scheduler request gets, unsent, while no verified leader is
+ * nominated; null when one is. Shared with surfaces that gate without sending.
+ */
+export function schedulerRefusal(scheduler: SchedulerAvailability): RequestFailure | null {
+  if (scheduler.kind === "none") return new RequestFailure("no_leader", "no scheduler is leading");
+  if (scheduler.kind === "unverified") {
+    return new RequestFailure("leader_unverified", `the scheduler nominee ${quote(scheduler.deviceId)} is unverified`);
+  }
+  return null;
+}
+
 export class RequestFailure extends Error {
   constructor(
     readonly reason: FailureReason,
     message: string,
+    /** What did not answer: a store frame's timeout blames the relay, not a machine. */
+    readonly target: "machine" | "relay" = "machine",
   ) {
     super(message);
     this.name = "RequestFailure";
@@ -128,7 +149,9 @@ export function failureReasonText(failure: RequestFailure): string {
     // answer came back, so it may have landed anyway. Saying "failed" flatly
     // would be a lie — and an invitation to fire a duplicate.
     case "timeout":
-      return `${failure.message} — the machine may be asleep, or the request may have landed anyway`;
+      return failure.target === "relay"
+        ? `${failure.message} — the relay did not answer; the request may have landed anyway`
+        : `${failure.message} — the machine may be asleep, or the request may have landed anyway`;
   }
 }
 
@@ -185,6 +208,10 @@ export interface Machine {
   readonly capabilities?: readonly string[];
   /** The register blob's `exclaves`, which `status` indexes; absent from a daemon that predates them. */
   readonly exclaves?: readonly ExclaveInfo[];
+  /** The build the daemon is running (read once per process, not the checkout on disk); absent from an old daemon or one outside git. */
+  readonly source?: SourceInfo;
+  /** Its last self-update attempt that did something other than find itself current. */
+  readonly lastUpdate?: UpdateReport;
 }
 
 /**
@@ -201,6 +228,15 @@ export type SchedulerAvailability =
   | { readonly kind: "ready"; readonly deviceId: string; readonly term: number };
 
 const NO_SCHEDULER: SchedulerAvailability = { kind: "none" };
+
+/** Where one machine stands with the scheduler, for display: only a `ready` nominee is ever shown as leading. */
+export type SchedulerRole = "leader" | "unverified";
+
+/** Null for every machine but the relay's nominee. */
+export function schedulerRole(deviceId: string, scheduler: SchedulerAvailability): SchedulerRole | null {
+  if (scheduler.kind === "none" || scheduler.deviceId !== deviceId) return null;
+  return scheduler.kind === "ready" ? "leader" : "unverified";
+}
 
 export interface RelayState {
   readonly status: RelayStatus;
@@ -433,7 +469,9 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.connected === b.connected &&
     a.status === b.status &&
     a.capabilities === b.capabilities &&
-    a.exclaves === b.exclaves
+    a.exclaves === b.exclaves &&
+    a.source === b.source &&
+    a.lastUpdate === b.lastUpdate
   );
 }
 
@@ -472,6 +510,7 @@ export class RelayClient {
   readonly #token: string;
   readonly #key: CryptoKey;
   readonly #listeners = new Set<() => void>();
+  readonly #queueListeners = new Set<(change: QueueChanged) => void>();
   readonly #pending = new Map<string, Pending>();
   /** Store frames are Layer 1 plaintext the relay answers, correlated on the frame's own `id`, not a sealed one. */
   readonly #storePending = new Map<string, StorePending>();
@@ -713,7 +752,7 @@ export class RelayClient {
     // Sealed replies fan out to every app socket and may still arrive on the new one; a store
     // reply goes only to its sender, so these would otherwise ride out STORE_TIMEOUT_MS.
     if (previous !== null) {
-      this.#failStoreSentOn(previous, new RequestFailure("dropped", "the relay socket was replaced"));
+      this.#failStoreSentOn(previous, new RequestFailure("dropped", "the relay socket was replaced", "relay"));
     }
     previous?.close();
     this.#stopped = false;
@@ -1054,6 +1093,11 @@ export class RelayClient {
     // Not a reply: on the leader's leg, an event a daemon sent the scheduler.
     if (plain.re === undefined) {
       if (env.to === SCHEDULER_ID) this.#onEvent?.(plain, env.from);
+      // The scheduler's push to apps, authenticated by the AAD-bound `from`.
+      if (this.#term === null && env.to === APP_ID && env.from === SCHEDULER_ID && plain.op === "queue-changed") {
+        const change = parseQueueChanged(plain.payload);
+        if (change !== null) for (const listener of this.#queueListeners) listener(change);
+      }
       return;
     }
     // Replies fan out to every open app socket, so another tab's are expected here.
@@ -1256,6 +1300,8 @@ export class RelayClient {
         ...(status === null ? {} : { status }),
         ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
         ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
+        ...(info.source !== undefined && info.source !== null ? { source: info.source } : {}),
+        ...(info.lastUpdate !== undefined && info.lastUpdate !== null ? { lastUpdate: info.lastUpdate } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {
@@ -1314,11 +1360,8 @@ export class RelayClient {
    * this build cannot read.
    */
   async #schedule<T>(op: SchedulerOp, payload: unknown, parse: (value: unknown) => T | null): Promise<T | null> {
-    const scheduler = this.#state.scheduler;
-    if (scheduler.kind === "none") throw new RequestFailure("no_leader", "no scheduler is leading");
-    if (scheduler.kind === "unverified") {
-      throw new RequestFailure("leader_unverified", `the scheduler nominee ${quote(scheduler.deviceId)} is unverified`);
-    }
+    const refusal = schedulerRefusal(this.#state.scheduler);
+    if (refusal !== null) throw refusal;
     let reply: unknown;
     try {
       reply = await this.request<unknown>(SCHEDULER_ID, op, payload);
@@ -1339,19 +1382,57 @@ export class RelayClient {
     return this.#schedule("route-preview", request, parseRoutePreviewReply);
   }
 
-  /** M2 only — M3 enqueues through the store instead (`SubmitResponse`). */
-  submit(request: TaskRequest): Promise<SubmitReply | null> {
-    return this.#schedule("submit", request, parseSubmitReply);
-  }
-
-  queue(): Promise<QueueReply | null> {
-    return this.#schedule("queue", {}, parseQueueReply);
+  /** `request.tasks` narrows the reply to those ids; a leader that predates the filter answers its newest, so the caller filters again. */
+  queue(request: QueueRequest = {}): Promise<QueueReply | null> {
+    return this.#schedule("queue", request, parseQueueReply);
   }
 
   /** Ends the task's session if it has one, then marks it `cancelled`; the reply is the task as it now stands. */
   cancel(taskId: string): Promise<TaskReply | null> {
     const ref: TaskRef = { taskId };
     return this.#schedule("cancel", ref, parseTaskReply);
+  }
+
+  /** Marks the task `done` without ending its session; the reply is the task as it now stands. */
+  markDone(taskId: string): Promise<TaskReply | null> {
+    const ref: TaskRef = { taskId };
+    return this.#schedule("mark-done", ref, parseTaskReply);
+  }
+
+  pause(request: PauseRequest): Promise<PauseReply | null> {
+    return this.#schedule("pause", request, parsePauseReply);
+  }
+
+  resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
+    return this.#schedule("resume", request, parsePauseReply);
+  }
+
+  /**
+   * The leader's nudge to every app: something in the queue changed, re-fetch.
+   * Fire-and-forget on the term's leg (`from: SCHEDULER_ID`, fenced by the
+   * relay), so a demoted leader's is dropped there. False when there is no
+   * term or no open socket: nothing was sent.
+   */
+  async queueChanged(change: QueueChanged): Promise<boolean> {
+    const term = this.#term;
+    const socket = this.#socket;
+    if (term === null || socket === null || socket.readyState !== WebSocket.OPEN) return false;
+    const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "queue-changed", payload: change };
+    const env = await seal(this.#key, { to: APP_ID, from: SCHEDULER_ID }, plain);
+    // Sealing is async: the socket can have died or been replaced in the gap.
+    if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return false;
+    const frame: AppFrame = { t: "msg", env, term };
+    socket.send(JSON.stringify(frame));
+    return true;
+  }
+
+  /**
+   * Called when the leader says the queue changed. Only an app's client hears
+   * it: a leader's own leg ignores the fan-out of its own nudge.
+   */
+  onQueueChanged(listener: (change: QueueChanged) => void): () => void {
+    this.#queueListeners.add(listener);
+    return () => this.#queueListeners.delete(listener);
   }
 
   /**
@@ -1362,14 +1443,14 @@ export class RelayClient {
   #store(frame: AppStoreRequestFrame): Promise<StoreReplyFrame | null> {
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new RequestFailure("disconnected", "no socket to the relay"));
+      return Promise.reject(new RequestFailure("disconnected", "no socket to the relay", "relay"));
     }
     return new Promise<StoreReplyFrame | null>((resolve, reject) => {
       const limit = this.#storeTimeoutMs ?? (frame.t === "store-list" ? STORE_LIST_TIMEOUT_MS : STORE_TIMEOUT_MS);
       const timer = setTimeout(() => {
         this.#wireLog("timeout", `id=${quote(frame.id)} t=${frame.t} after=${limit}ms`);
         this.#storePending.delete(frame.id);
-        reject(new RequestFailure("timeout", `${frame.t} timed out after ${limit}ms`));
+        reject(new RequestFailure("timeout", `${frame.t} timed out after ${limit}ms`, "relay"));
       }, limit);
       this.#storePending.set(frame.id, {
         socket,
@@ -1387,7 +1468,7 @@ export class RelayClient {
         // A frame never sent gets no reply, so its timer would only report a spurious timeout.
         clearTimeout(timer);
         this.#storePending.delete(frame.id);
-        reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`));
+        reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`, "relay"));
         return;
       }
       this.#wireLog("send", `id=${quote(frame.id)} t=${frame.t}`);
@@ -1433,7 +1514,8 @@ export class RelayClient {
    * Enqueues `task` (its id minted by the caller) as a create: version 1 at
    * `expect: 0`, sealed from APP_ID — also on a leader's leg, whose writes go
    * through its daemon socket instead. A record every reader would skip, or
-   * one past the create cap, is refused here and never sent. A retry after a
+   * one past the create cap, is refused here and never sent — a batch index past
+   * `TASK_SPEC_LIMITS.batchIndex` among them. A retry after a
    * lost reply re-sends the same task, and its `version_conflict` is queued.
    *
    * Precondition: `task.id` is freshly minted by the app, never reused and

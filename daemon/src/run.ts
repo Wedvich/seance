@@ -131,7 +131,7 @@ const endedTasksByLedger = new Map<string, Promise<EndedTasks>>();
  * Every envelope `to: "scheduler"` this process opens — each term's leg and the
  * `not_leader` answer — goes through this one guard. The relay chooses which
  * term an envelope reaches, so a guard per term, or per reload, would let it
- * hand an app's `submit` to each in turn and run the one prompt once each.
+ * hand an app's request to each in turn and run the one prompt once each.
  */
 const schedulerGuard = new ReplayGuard();
 
@@ -429,6 +429,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ...(su.debounceMs !== undefined ? { debounceMs: su.debounceMs } : {}),
       ...(su.effects !== undefined ? { effects: su.effects } : {}),
       sink: daemonSink,
+      last: state.lastUpdate ?? null,
       report: async (report) => {
         state = { ...state, lastUpdate: report };
         await saveState(state);

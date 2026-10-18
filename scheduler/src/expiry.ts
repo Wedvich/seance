@@ -27,8 +27,8 @@ function fail(task: Task, code: TaskFailureCode, message: string): Task {
 }
 
 /**
- * `lost` and `awaiting-merge` are never pruned and hold no slot, but count
- * toward `MAX_ACTIVE_TASKS` and outlive every term: past their bound they fail,
+ * `lost` and `awaiting-merge` are never pruned and hold no slot, but outlive
+ * every term: past their bound they fail,
  * which also fails their waiting dependents. `lost` ages from when its machine
  * went away, `awaiting-merge` from `endedAt` (an older leader's record has none:
  * `createdAt`, which is never later). Null when nothing is due.

@@ -31,7 +31,7 @@ import {
 } from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
 import { makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
-import { startTestRelay, type TestRelay } from "./harness.ts";
+import { nextRequest, startTestRelay, type TestRelay } from "./harness.ts";
 
 // The leader's term lifecycle on the store seam (scheduler M3 item 3): what a
 // `store-changed` does, what ends a term, and what reaches the library. A new
@@ -323,22 +323,25 @@ describe("a revoked term, from the paths that write on an event", () => {
   });
 
   test("an app's request is answered not_leader, not internal_error", async () => {
-    class RevokedCreate extends MemoryQueueStore {
+    // Seeded at version 0 before the term, so only the request's own update (version 1) is revoked.
+    class RevokedUpdate extends MemoryQueueStore {
       override put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
-        if (version === 0) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
+        if (version !== 0) return Promise.reject(new StoreRevoked("the relay refused store-put as not_leader"));
         return super.put(id, version, body);
       }
     }
+    const store = new RevokedUpdate();
+    // `ready` with no machine to take it: a queued task would be admitted on takeover's first tick, and that write is the revoked one.
+    await store.put("t", 0, task("t", { state: "ready" }));
     await withLeader(async ({ leader, replies, resigned }) => {
       leader.lead(1);
       await leader.settled();
-      const submit = { repo: "github.com/acme/app", mode: "worktree" };
-      leader.deliver(await sealedTo("submit", submit, APP_ID));
+      leader.deliver(await sealedTo("cancel", { taskId: "t" }, APP_ID));
       await pollUntil(() => leader.term() === null, "the revoked request to end the term");
       await pollUntil(() => replies.length === 1, "the app to be answered");
       expect(replies[0]?.response.payload).toMatchObject({ ok: false, code: "not_leader" });
       expect(resigned()).toBe(0);
-    }, new RevokedCreate());
+    }, store);
   });
 });
 
@@ -556,14 +559,14 @@ describe("leader in the daemon", () => {
   });
 
   /** Takeover of one task running on `b`, whose `sessions` answer is `payload`. */
-  async function takeOver(payload: object): Promise<string | undefined> {
+  async function takeOver(payload: object): Promise<Task | undefined> {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
     await store.put("p", 0, task("p", { state: "running", assignment: placedOnB }));
     const { daemon, deviceId } = await startLeaderDaemon(relay, store);
     try {
       relay.lead(deviceId, 4);
-      const asked = await relay.appFrames.next(5_000);
+      const asked = await nextRequest(relay, 5_000);
       const request = await open(key, asked.env);
       expect(request.op).toBe("sessions");
       const reply = await seal(
@@ -573,7 +576,7 @@ describe("leader in the daemon", () => {
       );
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: reply }));
       await daemon.leader.settled();
-      return await stateOf(store, "p");
+      return (await store.get("p"))?.body;
     } finally {
       daemon.stop();
       relay.stop();
@@ -582,16 +585,26 @@ describe("leader in the daemon", () => {
 
   test("a sessions reply's progress reaches takeover: a gone session with a PR is awaiting-merge", async () => {
     const progress = [{ taskId: "p", prUrl: "https://github.com/acme/app/pull/9", branch: "x", pushed: true, at: 1 }];
-    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toBe("awaiting-merge");
+    expect((await takeOver({ sessions: [], at: Date.now(), progress }))?.state).toBe("awaiting-merge");
   });
 
   test("a progress list that does not parse leaves the task unsettled rather than done", async () => {
     // A malformed entry makes the list one nobody can read: every task's progress is unknown.
     const progress = [{ taskId: 5 }];
-    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toBe("running");
+    expect((await takeOver({ sessions: [], at: Date.now(), progress }))?.state).toBe("running");
   });
 
   test("with no progress at all, the same gone session is done", async () => {
-    expect(await takeOver({ sessions: [], at: Date.now() })).toBe("done");
+    expect(await takeOver({ sessions: [], at: Date.now() })).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("a branch that merged during the gap settles the gone session as done by merge", async () => {
+    const progress = [
+      { taskId: "p", prUrl: "https://github.com/acme/app/pull/9", branch: "x", pushed: true, merged: true, at: 1 },
+    ];
+    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toMatchObject({
+      state: "done",
+      doneBy: "merged",
+    });
   });
 });

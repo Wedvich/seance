@@ -276,6 +276,13 @@ describe("the broker protocol", () => {
     expect(parseMachines([{ ...REMOTE, connected: "yes" }])).toBeNull();
     expect(parseMachines([REMOTE])).toEqual([REMOTE]);
   });
+
+  test("a machine's build and update report ride the list; a malformed one is dropped, not the machine", () => {
+    const source = { sha: "b".repeat(40), commitTs: 1_700_000_000_000, branch: "main" };
+    const lastUpdate = { at: 1_700_000_100_000, outcome: "fetch_failed" as const };
+    expect(parseMachines([{ ...REMOTE, source, lastUpdate }])).toEqual([{ ...REMOTE, source, lastUpdate }]);
+    expect(parseMachines([{ ...REMOTE, source: { sha: 1 }, lastUpdate: "ok" }])).toEqual([REMOTE]);
+  });
 });
 
 describe("key handling", () => {

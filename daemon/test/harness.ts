@@ -1,4 +1,5 @@
 import {
+  APP_ID,
   isStoreKey,
   SCHEDULER_ID,
   STORE_PREFIXES,
@@ -85,6 +86,29 @@ export class AsyncQueue<T> {
 type RegisterFrame = Extract<DaemonFrame, { t: "register" }>;
 type AppMsg = Extract<AppFrame, { t: "msg" }>;
 type Role = "daemon" | "app";
+
+/**
+ * The next frame the leader sent a machine. Its `queue-changed` nudges ride the
+ * same queue but are addressed to apps, so a test waiting on a request skips them.
+ */
+export async function nextRequest(relay: TestRelay, timeoutMs = 2_000): Promise<AppMsg> {
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- frames arrive one at a time
+    const frame = await relay.appFrames.next(timeoutMs);
+    if (frame.env.to !== APP_ID) return frame;
+  }
+}
+
+/** Every request frame already queued, nudges skipped: what a test asserting "nothing was sent" reads. */
+export async function queuedRequests(relay: TestRelay): Promise<AppMsg[]> {
+  const found: AppMsg[] = [];
+  while (relay.appFrames.size > 0) {
+    // oxlint-disable-next-line no-await-in-loop -- drains what is already there
+    const frame = await relay.appFrames.next();
+    if (frame.env.to !== APP_ID) found.push(frame);
+  }
+  return found;
+}
 
 export interface TestRelay {
   readonly url: string;

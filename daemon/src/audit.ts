@@ -232,13 +232,13 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 }
 
 export interface QueueAudit {
-  readonly submitted: (id: string, taskId: string) => Promise<void>;
+  readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   readonly refused: (
-    op: "submit" | "cancel" | "pause" | "resume",
+    op: "cancel" | "mark-done" | "pause" | "resume",
     id: string,
     code: string,
-    /** What the request named: a `cancel`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    /** What the request named: a `cancel` or `mark-done`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
     subject?: { readonly taskId?: string; readonly account?: string },
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
@@ -257,7 +257,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     await sink(`audit queue origin=relay ${rest}`);
   };
   return {
-    submitted: (id, taskId) => emit(`op=submit id=${quote(id)} task=${quote(taskId)} ok`),
+    markedDone: (id, task) => emit(`op=mark-done id=${quote(id)} task=${quote(task.id)} ok`),
     cancelled: (id, task) =>
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
