@@ -219,9 +219,8 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 `route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
 answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
 term, `not_ready` during takeover. M2 added a temporary `submit` (a `TaskRequest` →
-`Scheduler.submit`), because there was no store to `store-put` into; it stays, creating the task
-`queued` and admitting it in the same call, until M3 item 6 removes it with the PWA's move to
-`store-put`. `enqueue` is _not_ a
+`Scheduler.submit`), because there was no store to `store-put` into; M3 item 6 removed it
+(landed 2026-10-18) with the PWA's and MCP's move to `store-put`. `enqueue` is _not_ a
 leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
 no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
 (broadcast, apps re-fetch) — no polling. It names the tasks that changed (`tasks`, absent when
@@ -296,7 +295,7 @@ body, and skip and report one that does not decrypt or whose version or id disag
 key — as the PWA skips registry entries, never fatal — before the reconcile runs.
 
 **Routing, ahead.** Today's cadence, for reference: the leader runs a pass on every change to
-its leg's machine list, after each `submit`, and on a 30s timer that runs for the whole term
+its leg's machine list, after each app's create (`store-changed`), and on a 30s timer that runs for the whole term
 whether or not anything is ready; reservation TTLs and `lost` are checked only inside a pass. A
 task's decision is written with its reservation (one store write) — never after the spawn —
 and an unplaced task's stays in memory. M3 and M4 add:
@@ -399,10 +398,9 @@ surviving `follow` (daemon); and every filter reason, score component, stickines
 
 **Gaps, until later milestones close them.** (The queue was in memory on the leader — a
 leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the queue is the
-relay's and the next leader takes it over; `submit` is still the only way in for the PWA and MCP
-until item 6 moves them to `store-put`.) Deps, batches, caps, `pause` and the escalation and
-spill alerts have landed (items 4a and 5); the PWA polls `queue` for a task's progress
-instead of hearing `queue-changed`. An account nothing has observed yet is `quota unknown` and
+relay's and the next leader takes it over; item 6 moved the PWA and MCP onto `store-put`.)
+Deps, batches, caps, `pause` and the escalation and spill alerts have landed (items 4a and 5);
+the PWA hears `queue-changed` and keeps a bounded poll as its fallback (item 6). An account nothing has observed yet is `quota unknown` and
 gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
@@ -420,9 +418,9 @@ The gaps cited by label elsewhere (A and B were item 3's):
   machine's launch-ledger proof (same bullet, and _Local op socket_, "Session events").
 - **Gap 2** (looked at, open as a watch): terms climbing fast — deploy churn, not a nomination
   bug (Risks, _Leader churn_).
-- **Gap 3** (open until M3): a `submit` whose reply is lost cannot be reconciled — the verdict
-  says it may have queued and offers no retry. M3's app-minted ids make enqueue idempotent
-  (M3 item 1).
+- **Gap 3** (closed, M3 item 6): a `submit` whose reply was lost could not be reconciled — the
+  verdict said it may have queued and offered no retry. Enqueue is now a `store-put` of an
+  app-minted id, so the retry re-sends the same task and a `version_conflict` reads as queued.
 - **Gap 4** (closed, #127): a `lost` task waited for its own machine indefinitely, with no
   way to give up on it; it can now be cancelled (DESIGN.md "`lost`"), and since 2026-10-18 it
   fails `lost_expired` after 7 days lost (Settled defaults 14).
@@ -534,7 +532,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
     `version_conflict` there means the first put landed — the client reads it as queued, never as
     a failure, and never mints a second id for the same submission. That is why M2's `submit`
-    got no interim fix; until item 6 a lost `submit` reply stays "may have queued", with no retry.
+    got no interim fix; item 6 landed the retry ("Try again" in the PWA, three tries in MCP).
   - **2. The at-rest `task` op and version binding** — sealing in `shared/src/crypto.ts`, the
     app-client's store methods in `shared/src/app-client.ts`; readers open without the
     `ReplayGuard` and keep a record only through `bindTaskRecord`. A create checks its sealed
@@ -547,8 +545,8 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
     `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
     into the library (`keepFinished`, Settled defaults 13). It runs after takeover and at the end
-    of a pass, but only once the store holds `pruneAt` records, and unconditionally on `submit`'s
-    own `store_full`. Per pass, because an app's `store_full` never reaches the leader; gated,
+    of a pass, but only once the store holds `pruneAt` records, (and, until item 6, unconditionally on `submit`'s
+    own `store_full`). Per pass, because an app's `store_full` never reaches the leader; gated,
     because a prune can race a create naming the finished task it deletes, and leader changes
     are routine (a deviation from "after takeover"; the gate narrows that race, it does not close
     it). Its schema follow-up landed beside it: `queue_expired` fails a task `queued` past
@@ -649,6 +647,23 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
   (`reasonText`) — add the holds when this item moves `get_queue` to the store. The queue view
   also words `lost_expired` and `merge_expired` as the verdict already does (`failedBody`,
   `taskHeadline`; item 3's follow-up, 2026-10-18).
+  **Landed 2026-10-18** (DESIGN.md _Wire protocol_, Layer 2's scheduler ops; _Scheduler_, "The
+  leader"; _PWA_, "The Queue screen"; _MCP server_). `submit` and everything listed above is gone;
+  the PWA's `auto` and MCP's enqueue through `createTask`; the leader answers `mark-done` and the
+  `queue {tasks}` filter and sends the coalesced `queue-changed`; the PWA has a Queue screen
+  (cancel, mark done, pause, resume, holds, escalation) and follows a verdict on the nudge with a
+  poll as fallback. Owner's decisions made on the way:
+  - **Auto needs only an open relay socket.** Queue on auto (and MCP's `auto`) enqueue with no
+    leader or an unverified one and say the task waits; only `route-preview` still needs a
+    verified leader. `deriveAutoAvailability` gains a `note` for that.
+  - **The Queue screen reads `queue` from the leader, with no store-listing fallback.** With no
+    leader it says so and keeps a list it had already read.
+  - **A pending enqueue is not persisted across a reload**; the task is in the store and shows on
+    the Queue screen.
+  - **Batch creation has no UI.** The `batch.index` bound is enforced in `createTask`, the only
+    place an app could set it. Authoring batches and hand-declared deps from a surface (PWA, MCP)
+    is still open: the library, the record and the leader support them, nothing writes them.
+  - The `hub.ts` log change above.
 
 **Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
 `parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
@@ -660,7 +675,10 @@ are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adap
 3 at `Scheduler.submit` (its precondition), item 5 at `startTerm`'s `Scheduler` options and
 `run.ts`'s `config` (item 5's bullet). `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
 `daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
-harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. PR 0 touched
+harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. Item 6
+also touched `relay/src/hub.ts`, item 1's alone until then: one line in `#route`, so an accepted
+`from: "scheduler"` → `"app"` envelope logs no `wire fanout` line (DESIGN.md _Threat model_,
+item 3). It is the only relay change in item 6. PR 0 touched
 `leader.ts` (a `not supported yet` answer for the four new ops, so they are refused rather than
 met with silence), `task.ts` (the three states with no edges) and the PWA's state wording, only
 as the widened types forced.
@@ -685,6 +703,11 @@ as the widened types forced.
 - A create past the create cap is `too_large`; a leader write that would not fit cuts the
   decision and lands (relay + scheduler).
 - `relay/test/layering.test.ts` still passes with the store in place (relay).
+- An app enqueues by `store-put` with the leader unverified or absent, and the task shows
+  `queued` and is run by the next verified leader; the leader's `queue-changed` reaches an app
+  and one an app seals does not (e2e, pwa + relay).
+- `mark-done` finishes a running task as `manual` and leaves its session; `pause` and `resume`
+  show as `holds` in `queue` (e2e). A leader's nudge logs no `wire fanout` line (relay).
 
 **Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until
 M4's Web Push. Linear is not consulted; done comes from local merge detection, the session
@@ -776,7 +799,7 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   clears after `/login`; an expired access token alone never reads as `expired` (daemon).
 
 - **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
-  exists already (DESIGN.md "MCP server"; M3 item 6 moves it to the store). What remains:
+  exists already (DESIGN.md "MCP server"; item 6 moved it to the store). What remains:
   - `seanced spawn --auto` (spelling open), enqueueing through the store as the PWA does:
     seal the task, `store-put` it at `expect: 0`, so it queues with no leader up; the
     verdict is "queued" plus the task id, and `get_sessions` finds the session by
@@ -888,7 +911,7 @@ same PR, with the reason.
     2026-10-18, owner). It ages from `endedAt`, or `createdAt` on older records. Its
     `after: "merged"` dependents fail with it. Seven days is the launch ledger's own age bound:
     past it no machine can report the merge, and a `here` task's merge is never read back, so
-    it needs mark-done (item 6) before then.
+    it needs mark-done before then.
 
 ## Risks / unknowns
 

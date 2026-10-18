@@ -59,7 +59,7 @@ secret is neither. Unset or empty, nobody is nominated (fail closed — DESIGN.m
 id is the `deviceId` line `seanced doctor` prints under `state`. `bun run wrangler
 secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a new
 version, so every socket drops and re-registers. Set it before deploying a relay that
-first reads it (October 2026): until it is set, `auto` is unavailable. Nothing gates Durable Object migrations: a change to
+first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues. Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
 a production change.
 
