@@ -1,19 +1,23 @@
-import { open } from "node:fs/promises";
+import { readFile, open } from "node:fs/promises";
+import { join } from "node:path";
 import { exec, type ExecResult } from "./exec.ts";
+import { resolveCommonDir } from "./gitdir.ts";
 
 /**
  * Git for code that runs in every scanned repo, or fetches before a spawn —
- * `seanced reap` and `base-fetch.ts`. Repo-local config executes: `core.fsmonitor`
- * would start a hook (or a daemon) per worktree and hooks run on ref updates, so
- * both are off for every call. `GIT_OPTIONAL_LOCKS=0` keeps `status` from
+ * `seanced reap` and `base-fetch.ts`. Repo-local config executes, and a session can
+ * write it (`git config` in a worktree writes the clone's shared `.git/config`):
+ * `core.fsmonitor` would start a hook (or a daemon) per worktree and hooks run on
+ * ref updates, so both are off for every call, as is the `ext::` transport, which
+ * runs its URL as a command. The rest of what a call could run (`core.sshCommand`,
+ * a credential helper, a merge driver) is refused per repo before the calls that
+ * would run it: `networkGit` and `classifyTip`'s `merge-tree`, through
+ * `repoConfigRefusal`. `GIT_OPTIONAL_LOCKS=0` keeps `status` from
  * refreshing the index — whose mtime is one of reap's age signals, and reap must
  * not reset the age it is measuring. `GIT_TERMINAL_PROMPT=0`,
  * `credential.interactive=false`, exec's ignored stdin and a timeout keep a fetch
  * that wants credentials from hanging, as Claude Code does; `stdin` is for the
  * plumbing that reads it (`patch-id`, `diff-tree --stdin`), never a fetch.
- * ssh ignores all of those, so the network calls opt into `networkEnv` too,
- * which adds BatchMode where a terminal could be prompted.
- * What still runs is what a fetch needs — credential helpers, `core.sshCommand`.
  * The branch-state emitter (`branch-state.ts`) makes its calls through it too.
  */
 export async function hardenedGit(
@@ -32,6 +36,9 @@ export async function hardenedGit(
       "core.hooksPath=/dev/null",
       "-c",
       "credential.interactive=false",
+      // Outranks any `protocol.allow` / `protocol.ext.allow` a repo sets.
+      "-c",
+      "protocol.ext.allow=never",
       ...args,
     ],
     {
@@ -122,11 +129,106 @@ export async function sshBatchEnv(
   return settled ? { GIT_SSH_COMMAND: BATCH_SSH } : {};
 }
 
-/** The env for a `hardenedGit` call that goes to the network: the caller's, plus `sshBatchEnv`'s. */
-export async function networkEnv(
+/**
+ * Repo-local (and worktree) config families that make one of the daemon's own git calls run a program the
+ * session chose, or fetch from somewhere it chose: an ssh or proxy command, an askpass, a credential helper, an
+ * upload-pack, a protocol or URL rewrite (`ext::` runs its URL), an include that could hold any of them, a merge
+ * driver or filter (`merge-tree`), an attributes file naming one. `*` stands for any subsection. The same keys in
+ * global or system config are the owner's and still apply. Labels, not the keys themselves, are what is reported:
+ * a subsection can be a URL that carries credentials.
+ */
+const REFUSED_FAMILIES = [
+  "core.sshcommand",
+  "core.gitproxy",
+  "core.askpass",
+  "core.attributesfile",
+  // A clone with its own credential helper stops being fetched by the daemon (owner decision R8 #2).
+  "credential.*",
+  "remote.*.uploadpack",
+  "remote.*.receivepack",
+  "protocol.allow",
+  "protocol.*.allow",
+  "url.*.insteadof",
+  "include.*",
+  "includeif.*",
+  "merge.*.driver",
+  "filter.*",
+] as const;
+
+const FAMILY_PATTERNS = REFUSED_FAMILIES.map(
+  (family) => [family, new RegExp(`^${family.replaceAll(".", String.raw`\.`).replaceAll("*", ".+")}$`, "u")] as const,
+);
+
+/** The first refused family among config names (any case: git lowercases all but subsections); null when none. */
+export function refusedFamily(names: readonly string[]): string | null {
+  for (const name of names) {
+    const lower = name.toLowerCase();
+    const hit = FAMILY_PATTERNS.find(([, pattern]) => pattern.test(lower));
+    if (hit !== undefined) return hit[0];
+  }
+  return null;
+}
+
+const ATTRIBUTES_REFUSAL = "merge= in info/attributes";
+
+/**
+ * What makes a repo's own config unsafe for the calls the daemon runs there unprompted, or null. One
+ * `git config --list` (includes followed, scope shown) and a read of `info/attributes`, which a session can also
+ * write and where a `merge=` line names a driver for `merge-tree`. Fails closed: config git cannot list, or
+ * attributes that exist but cannot be read, refuse.
+ */
+export async function repoConfigRefusal(repoPath: string): Promise<string | null> {
+  const listed = await hardenedGit(repoPath, ["config", "--list", "--show-scope", "--name-only", "-z"]);
+  if (listed.exitCode !== 0) return "unreadable config";
+  // `-z` with `--show-scope`: scope and name alternate, each NUL-terminated.
+  const fields = listed.stdout.split("\0");
+  const names: string[] = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    if (fields[i] === "local" || fields[i] === "worktree") names.push(fields[i + 1] ?? "");
+  }
+  const family = refusedFamily(names);
+  if (family !== null) return family;
+  const commonDir = await resolveCommonDir(repoPath);
+  if (commonDir === null) return null;
+  let attributes: string;
+  try {
+    attributes = await readFile(join(commonDir, "info", "attributes"), "utf8");
+  } catch (err) {
+    const code = err instanceof Error && "code" in err ? err.code : undefined;
+    return code === "ENOENT" || code === "ENOTDIR" ? null : ATTRIBUTES_REFUSAL;
+  }
+  const namesDriver = attributes
+    .split("\n")
+    .some((line) => !line.trimStart().startsWith("#") && /(?:^|\s)merge=/u.test(line));
+  return namesDriver ? ATTRIBUTES_REFUSAL : null;
+}
+
+/** A network call `networkGit` did not make; `family` is safe to log. */
+export interface Refused {
+  readonly refused: string;
+}
+
+export function refusalDetail(refused: Refused): string {
+  return `refused: repo-local ${refused.refused}`;
+}
+
+/**
+ * Every git call that goes to the network goes through here, so all of them get one environment: refused when
+ * `repoConfigRefusal` says so, `hardenedGit`'s overrides and group kill, `GCM_INTERACTIVE=never` (Git Credential
+ * Manager ignores `GIT_TERMINAL_PROMPT` and may raise a GUI on WSL/Windows) unless the user set their own, and
+ * `sshBatchEnv`'s BatchMode. `env` is the caller's, layered under those.
+ */
+export async function networkGit(
   repoPath: string,
+  args: readonly string[],
+  timeoutMs: number,
   env: Readonly<Record<string, string | undefined>> = {},
   terminal?: TerminalProbe,
-): Promise<Readonly<Record<string, string | undefined>>> {
-  return { ...env, ...(await sshBatchEnv(repoPath, env, terminal)) };
+): Promise<ExecResult | Refused> {
+  const refused = await repoConfigRefusal(repoPath);
+  if (refused !== null) return { refused };
+  const gcm = process.env["GCM_INTERACTIVE"] === undefined ? { GCM_INTERACTIVE: "never" } : {};
+  const callerEnv = { ...gcm, ...env };
+  const ssh = await sshBatchEnv(repoPath, callerEnv, terminal);
+  return hardenedGit(repoPath, args, timeoutMs, undefined, { ...callerEnv, ...ssh });
 }

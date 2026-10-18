@@ -7,6 +7,7 @@
 import type { UpdateOutcome, UpdateReport } from "@seance/shared";
 import { updateAudit, type AuditSink, type UpdateAudit, type UpdateOrigin } from "./audit.ts";
 import { exec, execFailure, git } from "./exec.ts";
+import { networkGit, refusalDetail } from "./git-hardened.ts";
 import { log } from "./log.ts";
 import { readDefaultBranch } from "./scan.ts";
 import { checkoutRoot, readSource } from "./selfsource.ts";
@@ -63,6 +64,8 @@ export interface Updater {
 }
 
 const DEBOUNCE_MS = 30_000;
+/** A whole branch, over whatever link the machine has: longer than reap's 30s. */
+const NETWORK_TIMEOUT_MS = 60_000;
 
 /**
  * Whether a later `current` proves the report's problem gone. Not for an
@@ -91,7 +94,8 @@ async function pipeline(root: string, effects: UpdateEffects, audit: UpdateAudit
 
   let branch = await readDefaultBranch(root);
   if (branch === null) {
-    await git(root, ["remote", "set-head", "origin", "-a"]);
+    const head = await networkGit(root, ["remote", "set-head", "origin", "-a"], NETWORK_TIMEOUT_MS);
+    if ("refused" in head) return { outcome: "fetch_failed", detail: refusalDetail(head) };
     branch = await readDefaultBranch(root);
   }
   if (branch === null) return { outcome: "skipped_branch", detail: "no default branch resolvable" };
@@ -105,7 +109,9 @@ async function pipeline(root: string, effects: UpdateEffects, audit: UpdateAudit
     return { outcome: "skipped_dirty", detail: "working tree has uncommitted changes" };
   }
 
-  const fetch = await git(root, ["fetch", "origin", branch]);
+  // The checkout is a clone sessions work in too, so its own config is refused like any other repo's.
+  const fetch = await networkGit(root, ["fetch", "--no-recurse-submodules", "origin", branch], NETWORK_TIMEOUT_MS);
+  if ("refused" in fetch) return { outcome: "fetch_failed", detail: refusalDetail(fetch) };
   if (fetch.timedOut || fetch.exitCode !== 0) return { outcome: "fetch_failed", detail: execFailure(fetch) };
 
   const counts = await git(root, ["rev-list", "--left-right", "--count", `origin/${branch}...HEAD`]);
