@@ -27,7 +27,7 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   task_not_found: "the scheduler holds no such task",
   dispatching: "the task is starting on a machine right now; try again in a moment",
   finished: "the task has already finished",
-  despawn_failed: "its machine refused to end the session; nothing changed",
+  despawn_failed: "its session could not be ended — its machine refused or is offline; nothing changed",
   conflict: "the task changed while this was on its way; try again",
   reset_unknown: "no quota reading says when that account resets, so it can't be paused until then",
   internal_error: "the scheduler hit an error",

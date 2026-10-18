@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { BranchState, DespawnResponse, TaskProgress } from "@seance/shared";
+import type { BranchState, DespawnRequest, DespawnResponse, TaskProgress } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -339,7 +339,7 @@ describe("a trimmed reply", () => {
 });
 
 describe("markDone", () => {
-  test("settles every unfinished, unreserved state as done by hand, ending the session only of a running or needs-input one", async () => {
+  test("settles every unfinished, unreserved state as done by hand, ending the session of a running, needs-input or reachable lost one", async () => {
     const { fleet, scheduler, put } = setup();
     const states = ["queued", "blocked", "ready", "running", "needs-input", "lost", "awaiting-merge"] as const;
     for (const state of states) {
@@ -356,7 +356,32 @@ describe("markDone", () => {
     expect(fleet.despawns).toEqual([
       { deviceId: "a", id: "%1" },
       { deviceId: "a", id: "%1" },
+      { deviceId: "a", id: "%1" },
     ]);
+  });
+
+  test("a session whose ended event lands during the despawn is answered as it finished, or settled by hand when it went to awaiting-merge", async () => {
+    let scheduler: Scheduler | undefined;
+    let pr: string | undefined;
+    class EndsOnExit extends FakeFleet {
+      override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
+        const reply = await super.despawn(deviceId, request);
+        await scheduler?.onSession("t", "ended", FROM_A, pr);
+        return reply;
+      }
+    }
+    const first = setup(new EndsOnExit([machine("a")]));
+    scheduler = first.scheduler;
+    await first.put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toMatchObject({ ok: true, task: { state: "done" } });
+
+    pr = PR;
+    const second = setup(new EndsOnExit([machine("a")]));
+    scheduler = second.scheduler;
+    await second.put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
   });
 
   test("a running task whose machine refuses the despawn stays running: refused, never marked done over a live session", async () => {

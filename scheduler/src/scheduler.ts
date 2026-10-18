@@ -430,8 +430,8 @@ export class Scheduler {
   /**
    * Settles an unfinished task `done` (`doneBy: "manual"`) as it stands: the
    * human says its work is over, so it wins over whatever else the task was
-   * waiting for. A `running` or `needs-input` task has its session ended first,
-   * as `cancel` does, since a `done` task holds no slot and a session left
+   * waiting for. A `running` or `needs-input` task, or a `lost` one whose machine
+   * is connected, has its session ended first, as `cancel` does, since a `done` task holds no slot and a session left
    * running would keep working beyond the caps. `lost`, `awaiting-merge` and the
    * waiting states are settled as they stand (their session is gone, or
    * unreachable, or never was). A later event for a `done` task is ignored
@@ -445,19 +445,23 @@ export class Scheduler {
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
     if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
     const { assignment } = task;
-    const live = task.state === "running" || task.state === "needs-input";
+    const lostReachable = task.state === "lost" && assignment !== undefined && this.#connected(assignment.deviceId);
+    const live = task.state === "running" || task.state === "needs-input" || lostReachable;
     const ended = live ? await this.#endSession(task) : { ok: true as const, despawned: false };
     if (!ended.ok) return ended;
     let outcome: MarkDoneResult = { ok: false, code: "conflict" };
     const next = await this.#update(taskId, (current) => {
       if (FINISHED.includes(current.state)) {
-        outcome = { ok: false, code: "finished" };
+        // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
+        outcome = ended.despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
         return null;
       }
       if (current.state === "reserved") {
         outcome = { ok: false, code: "dispatching" };
         return null;
       }
+      // No despawn ran, yet a session is live now: it would outlive a `done` write.
+      if (!live && (current.state === "running" || current.state === "needs-input")) return null;
       // What was despawned must still be what is settled.
       if (live && current.assignment?.deviceId !== assignment?.deviceId) return null;
       return advance(current, "done", { doneBy: "manual" });

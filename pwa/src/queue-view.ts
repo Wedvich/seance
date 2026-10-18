@@ -24,7 +24,7 @@ export interface QueueRow {
   readonly canMarkDone: boolean;
   /** Cancelling despawns a session: the button asks twice. */
   readonly cancelEndsSession: boolean;
-  /** Mark done despawns only a live session (`running`, `needs-input`), never a `lost` one's: then it asks twice too. */
+  /** Mark done may despawn a session (live, or `lost` with its machine back; the PWA can't tell which): asks twice. */
   readonly markDoneEndsSession: boolean;
   readonly busy: boolean;
 }
@@ -132,7 +132,7 @@ function rowOf(task: Task, state: AppState, now: number): QueueRow {
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
-    markDoneEndsSession: task.state === "running" || task.state === "needs-input",
+    markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     busy: state.taskAction?.taskId === task.id,
   };
 }

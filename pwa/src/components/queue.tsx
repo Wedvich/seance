@@ -132,7 +132,7 @@ export function QueueScreen(props: {
                         disabled={!view.available || row.busy}
                         onClick={() => act(row, "mark-done")}
                       >
-                        {armed === `mark-done:${row.id}` ? "Tap again to end it" : "Mark done"}
+                        {armed === `mark-done:${row.id}` ? "Tap again to mark done" : "Mark done"}
                       </button>
                     )}
                     {row.canCancel && (

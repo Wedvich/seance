@@ -1132,10 +1132,11 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   `Scheduler.cancel`, so a running one is despawned on its machine first (Scheduler, "The
   leader").
 - `mark-done { taskId }` (`TaskRef`) → `{ task }`, `done` with `doneBy: "manual"`:
-  `Scheduler.markDone`. A `running` or `needs-input` task has its session ended first, exactly
-  as `cancel` does: caps count task states only, so a `done` task frees its slot, and a session
-  left running past that would work beyond them. `lost`, `awaiting-merge` and the waiting
-  states settle as they stand (nothing to end, or nothing reachable). It is how a `here` task,
+  `Scheduler.markDone`. A `running` or `needs-input` task, or a `lost` one whose machine is
+  connected, has its session ended first, exactly as `cancel` does: caps count task states only, so a `done` task frees its slot, and a session
+  left running past that would work beyond them. A `lost` one whose machine is gone,
+  `awaiting-merge` and the waiting states settle as they stand (nothing to end, or nothing
+  reachable). It is how a `here` task,
   or a PR merged after its session was evicted, leaves `awaiting-merge`, and it releases an
   `after: "merged"` dependent. Refused `task_not_found`, `dispatching` (`reserved`: its spawn
   is in flight), `finished`, `conflict`, and, for a live session, `despawn_failed` (its

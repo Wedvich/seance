@@ -318,8 +318,8 @@ outlive a leader change (today it is in memory) is M4's call.
 
 **Done detection, ahead.** `branch-state merged` → `done`, a session ending with a PR open →
 `awaiting-merge`, and the read-back from `progress` landed with M3 item 4a (DESIGN.md "Done
-detection"); the leader passes them on since item 3. Still ahead: Linear Done (M4, if linked,
-poll); the `mark-done` op, which always wins; and `failed` for a session that ends with no
+detection"); the leader passes them on since item 3. `mark-done` (always wins) landed with item 6. Still ahead: Linear Done (M4, if linked,
+poll); and `failed` for a session that ends with no
 PR and a nonzero exit, which needs an exit status no event carries — until then a PR-less end
 is `done` by `session`.
 
