@@ -132,7 +132,8 @@ green:
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
   so only the AAD-bound `from` says which machine an entry describes), every blob opened outside
-  the replay guard (`machine-info`, `status`, `lead-proof`) goes through `openAtRest` in
+  the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task` and
+  `pause-state` records) goes through `openAtRest` in
   `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say
   which blob it is — and an app believes a scheduler nominee only with a `lead-proof` sealed `from`
   the nominee for the pushed term, never because its registry entry opens (its `info` blob is
@@ -143,17 +144,28 @@ green:
   message), never trusted as plaintext, and the relay nominates only ids on its
   `SCHEDULER_LEADERS` secret — unset nominates nobody, and no wildcard exists, in product code or
   as a test escape hatch, and the leader honours a scheduler request only when it was sealed
-  `from: "app"`, parsed by `parseTaskRequest`, and checked against the one replay guard per daemon
+  `from: "app"`, parsed into a fresh value by that op's own parser (`parseQueueRequest`,
+  `parseTaskRequest`, `parseTaskRef`, …), and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
-  `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `submit` into
+  `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
   moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed, and the
   relay's store: a `term` on an app-leg store frame authorizes nothing, a daemon-leg write is
   fenced on the term and the socket it was issued to (`holdsTerm` in `relay/src/leadership.ts`),
   store records live under their own storage namespaces so no key aliases `device:` or
-  `scheduler:term`, `queue:` deletes are refused, and the relay logs no store `env`/`ct` and no
-  line per accepted store read or write. Don't let changes drift from them.
+  `scheduler:term`, `queue:` deletes are refused, the app leg can only create, and only under
+  `task:`, and the relay logs no store `env`/`ct` and no
+  line per accepted store read or write — nor one per delivered scheduler envelope, `queue-changed`
+  nudge or credited reply, only their failures (DESIGN.md threat model, "Bearer token
+  disclosure"), and a task record is read only through `openTaskRecord` then `bindTaskRecord`
+  (`shared/src/task-record.ts`), and no reader deletes a record it cannot read on its own — after
+  a PSK rotation every record reads that way — and a tombstone lives exactly as long as
+  admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
+  `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
+  lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an
+  event — a session event or a branch state — moves only a task placed on the machine that
+  sealed it. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
