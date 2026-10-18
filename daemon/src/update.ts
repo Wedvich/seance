@@ -30,8 +30,10 @@ export function defaultUpdateEffects(): UpdateEffects {
 }
 
 export interface UpdaterOpts {
-  /** Persist the report and push it to the registry; `current` is never reported. */
+  /** Persist the report and push it to the registry; `current` only to replace a stale skip or failure. */
   readonly report: (report: UpdateReport) => Promise<void>;
+  /** The report on disk at startup — decides whether the first `current` must replace it. */
+  readonly last?: UpdateReport | null;
   readonly sink: AuditSink;
   /** Checkout to update; defaults to this one. Tests point it at a fixture. */
   readonly root?: string;
@@ -61,6 +63,19 @@ export interface Updater {
 }
 
 const DEBOUNCE_MS = 30_000;
+
+/**
+ * Whether a later `current` proves the report's problem gone. Not for an
+ * install or restart failure this process recorded: HEAD already sits at
+ * target, so `current` follows while old code still serves. A newer process
+ * has restarted onto that HEAD, so for it `current` is the truth.
+ */
+function clearedByCurrent(report: UpdateReport | null | undefined): boolean {
+  if (report === null || report === undefined) return false;
+  if (report.outcome === "ok" || report.outcome === "current") return false;
+  const inProcess = report.at >= performance.timeOrigin;
+  return !(inProcess && (report.outcome === "install_failed" || report.outcome === "restart_failed"));
+}
 
 interface Verdict {
   readonly outcome: UpdateOutcome;
@@ -125,6 +140,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
   let inflight: Promise<void> | null = null;
   let lastStart = 0;
   let stopped = false;
+  let stale = clearedByCurrent(opts.last);
 
   const run = async (origin: UpdateOrigin): Promise<void> => {
     const audit = updateAudit(origin, opts.sink);
@@ -132,12 +148,16 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     await audit.outcome(verdict.outcome, verdict.detail);
     // `current` is the steady state — reporting it would rewrite state.json and
     // push a registry update on every reconnect, for information nobody reads.
-    if (verdict.outcome === "current" || stopped) return;
-    await opts.report({
+    // Once, though, it replaces a skip or failure it proves fixed, which would
+    // otherwise linger in the app as if the machine were still stuck.
+    if (stopped || (verdict.outcome === "current" && !stale)) return;
+    const report: UpdateReport = {
       at: Date.now(),
       outcome: verdict.outcome,
       ...(verdict.detail !== undefined ? { detail: verdict.detail } : {}),
-    });
+    };
+    stale = clearedByCurrent(report);
+    await opts.report(report);
     // After the report: the restart ends this process, and the post-restart
     // register must already carry the ok.
     if (verdict.outcome !== "ok") return;
@@ -149,6 +169,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
       // `current` and this machine serves old code forever, claiming success.
       const detail = err instanceof Error ? err.message : String(err);
       await audit.outcome("restart_failed", detail);
+      stale = false;
       if (!stopped) await opts.report({ at: Date.now(), outcome: "restart_failed", detail });
     }
   };

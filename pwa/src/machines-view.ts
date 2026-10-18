@@ -46,7 +46,7 @@ export interface MachineCard {
   readonly role: SchedulerRole | null;
   /** The build its daemon runs — short sha, commit age, branch; null from a daemon that doesn't say. */
   readonly build: string | null;
-  /** Set only when its last update attempt was a skip or a failure; it may predate a later fix, so it carries its age. */
+  /** Set only when its last reported update attempt was a skip or a failure; carries its age, since the next check may not have run yet. */
   readonly updateNote: string | null;
   /**
    * CPU and memory only. Disk is collected and stored but not shown: a fill

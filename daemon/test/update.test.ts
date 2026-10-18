@@ -166,6 +166,43 @@ describe("self-update over the relay", () => {
     }
   });
 
+  test("the first `current` replaces a stale skip once, and later ones report nothing", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { checkout } = await makePair("stale");
+    const head = await runGit(checkout, ["rev-parse", "HEAD"]);
+    process.env["SEANCE_STATE_DIR"] = join(base, "stale", "state");
+    await saveState({
+      deviceId: crypto.randomUUID(),
+      repos: [],
+      scannedAt: null,
+      lastRunSha: head,
+      lastUpdate: {
+        at: Date.now() - 3_600_000,
+        outcome: "skipped_dirty",
+        detail: "working tree has uncommitted changes",
+      },
+    });
+
+    const { daemon } = await startTestDaemon(relay, "stale", { root: checkout });
+    try {
+      const first = await relay.registers.next(3_000);
+      expect(((await open(appKey, first.info)).payload as MachineInfo).lastUpdate?.outcome).toBe("skipped_dirty");
+
+      const cleared = await relay.registers.next(3_000);
+      expect(((await open(appKey, cleared.info)).payload as MachineInfo).lastUpdate?.outcome).toBe("current");
+
+      // A second check, again current: the steady state must not report.
+      await daemon.updater?.settled();
+      await sendBroadcast(relay, first.deviceId, { sha: "f".repeat(40), commitTs: Date.now() });
+      await Bun.sleep(300);
+      await daemon.updater?.settled();
+      await expect(relay.registers.next(300)).rejects.toThrow();
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("an announce carrying the sha we already run is the wave stopping", async () => {
     const relay = startTestRelay(TOKEN);
     const { upstream, checkout } = await makePair("own-sha");

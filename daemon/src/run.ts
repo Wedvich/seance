@@ -429,6 +429,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ...(su.debounceMs !== undefined ? { debounceMs: su.debounceMs } : {}),
       ...(su.effects !== undefined ? { effects: su.effects } : {}),
       sink: daemonSink,
+      last: state.lastUpdate ?? null,
       report: async (report) => {
         state = { ...state, lastUpdate: report };
         await saveState(state);
