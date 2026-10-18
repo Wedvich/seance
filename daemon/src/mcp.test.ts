@@ -237,7 +237,6 @@ describe("mcp tools", () => {
       expect(listed[0]?.["lastUpdate"]).toEqual({
         at: new Date(lastUpdate.at).toISOString(),
         outcome: "skipped_dirty",
-        detail: "1 file",
       });
       expect(listed[1]).not.toHaveProperty("source");
       expect(listed[1]).not.toHaveProperty("lastUpdate");

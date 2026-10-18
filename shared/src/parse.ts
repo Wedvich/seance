@@ -222,11 +222,21 @@ export function parseRepoList(value: unknown): readonly RepoEntry[] | null {
   return parseList(value, parseRepoEntry);
 }
 
+/** The largest instant a `Date` holds; past it `toISOString()` throws, which would fail a reader's whole reply. */
+const MAX_DATE_MS = 8.64e15;
+
+/** Raw git/bun stderr rides `detail`; the outcome code carries the meaning, so a long one is cut, not refused. */
+export const UPDATE_DETAIL_MAX = 200;
+
+function isDateMs(value: unknown): value is number {
+  return isUint(value) && value <= MAX_DATE_MS;
+}
+
 /** A daemon checkout's git identity, as `readSource` produces it. */
 export function parseSourceInfo(value: unknown): SourceInfo | null {
   if (!isRecord(value)) return null;
   const { sha, commitTs, branch } = value;
-  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/u.test(sha) || !isUint(commitTs)) return null;
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/u.test(sha) || !isDateMs(commitTs)) return null;
   if (branch !== null && typeof branch !== "string") return null;
   return { sha, commitTs, branch };
 }
@@ -234,10 +244,10 @@ export function parseSourceInfo(value: unknown): SourceInfo | null {
 export function parseUpdateReport(value: unknown): UpdateReport | null {
   if (!isRecord(value)) return null;
   const { at, outcome, detail } = value;
-  if (!isUint(at) || !isOptionalString(detail)) return null;
+  if (!isDateMs(at) || !isOptionalString(detail)) return null;
   const known = UPDATE_OUTCOMES.find((candidate) => candidate === outcome);
   if (known === undefined) return null;
-  return { at, outcome: known, ...(detail === undefined ? {} : { detail }) };
+  return { at, outcome: known, ...(detail === undefined ? {} : { detail: detail.slice(0, UPDATE_DETAIL_MAX) }) };
 }
 
 /**

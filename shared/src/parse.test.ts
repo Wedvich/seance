@@ -28,6 +28,7 @@ import {
   parseTaskProgressList,
   parseTaskRef,
   parseTaskReply,
+  UPDATE_DETAIL_MAX,
   parseTaskRequest,
   parseTaskSpec,
 } from "./parse.ts";
@@ -151,8 +152,19 @@ describe("parseMachineInfo", () => {
       { source: { ...source, branch: 3 } },
       { lastUpdate: { ...lastUpdate, outcome: "exploded" } },
       { lastUpdate: { ...lastUpdate, at: -1 } },
+      // Past Date's range, where toISOString() throws in list_machines.
+      { source: { ...source, commitTs: 9e15 } },
+      { lastUpdate: { ...lastUpdate, at: 9e15 } },
+      { source: { ...source, commitTs: Number.NaN } },
+      { lastUpdate: { ...lastUpdate, at: Number.NaN } },
+      { lastUpdate: { ...lastUpdate, detail: 7 } },
     ];
     for (const fields of bad) expect(parseMachineInfo({ ...info, ...fields })).toEqual(info);
+
+    // An oversized detail is cut, not refused: the outcome still says what happened.
+    const cut = parseMachineInfo({ ...info, lastUpdate: { ...lastUpdate, detail: "x".repeat(5_000) } });
+    expect(cut?.lastUpdate?.detail).toHaveLength(UPDATE_DETAIL_MAX);
+    expect(cut?.lastUpdate?.outcome).toBe("skipped_dirty");
   });
 });
 

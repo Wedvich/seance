@@ -176,12 +176,12 @@ describe("deriveMachines", () => {
     expect(none.cards.map((card) => card.role)).toEqual([null, null]);
   });
 
-  test("a card shows the build its daemon runs, and a note only when its last self-update left it behind", () => {
+  test("a card shows the build its daemon runs, and a note only when its last update attempt was a skip or a failure", () => {
     const source = { sha: "0123456789abcdef0123456789abcdef01234567", commitTs: NOW - 3 * 86_400_000, branch: "main" };
     const behind = machine({ source, lastUpdate: { at: NOW - 2 * 3_600_000, outcome: "skipped_dirty" } });
     const [card] = deriveMachines([behind], NOW, NO_LEADER).cards;
     expect(card?.build).toBe("0123456789ab · committed 3d ago · main");
-    expect(card?.updateNote).toBe("Last self-update (2h ago) skipped: the checkout has local changes.");
+    expect(card?.updateNote).toBe("Last update attempt 2h ago: skipped, working tree had uncommitted changes.");
 
     const detached = machine({ source: { ...source, branch: null }, lastUpdate: { at: NOW, outcome: "ok" } });
     const [fine] = deriveMachines([detached], NOW, NO_LEADER).cards;

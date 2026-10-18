@@ -1197,6 +1197,11 @@
   color: var(--fg2);
 }
 
+/* A branch name has no spaces to wrap at. */
+.fleet-build {
+  overflow-wrap: anywhere;
+}
+
 .fleet-toggle {
   flex: none;
   animation: none;

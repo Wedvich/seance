@@ -46,7 +46,7 @@ export interface MachineCard {
   readonly role: SchedulerRole | null;
   /** The build its daemon runs — short sha, commit age, branch; null from a daemon that doesn't say. */
   readonly build: string | null;
-  /** Set only when its last self-update was a skip or a failure, which leaves it on an old build. */
+  /** Set only when its last update attempt was a skip or a failure; it may predate a later fix, so it carries its age. */
   readonly updateNote: string | null;
   /**
    * CPU and memory only. Disk is collected and stored but not shown: a fill
@@ -144,19 +144,19 @@ function machineNote(machine: Machine): string | null {
 const UPDATE_TROUBLE: Record<UpdateOutcome, string | null> = {
   ok: null,
   current: null,
-  skipped_dirty: "skipped: the checkout has local changes",
-  skipped_branch: "skipped: the checkout is off its default branch",
-  skipped_diverged: "skipped: the checkout has diverged from its upstream",
-  fetch_failed: "failed: it could not fetch",
-  install_failed: "failed: installing dependencies failed",
-  restart_failed: "failed: updated on disk, but the restart failed, so the old build still runs",
+  skipped_dirty: "skipped, working tree had uncommitted changes",
+  skipped_branch: "skipped, checkout was off its default branch",
+  skipped_diverged: "skipped, checkout had diverged from its upstream",
+  fetch_failed: "failed, could not fetch",
+  install_failed: "failed, installing dependencies failed",
+  restart_failed: "failed, updated on disk but the restart failed",
 };
 
 function updateNote(machine: Machine, now: number): string | null {
   const report = machine.lastUpdate;
   if (report === undefined) return null;
   const trouble = UPDATE_TROUBLE[report.outcome];
-  return trouble === null ? null : `Last self-update (${formatSeen(report.at, now)}) ${trouble}.`;
+  return trouble === null ? null : `Last update attempt ${formatSeen(report.at, now)}: ${trouble}.`;
 }
 
 function buildLine(machine: Machine, now: number): string | null {

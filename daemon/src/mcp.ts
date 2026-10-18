@@ -158,8 +158,8 @@ function describeMachine(
       : {
           lastUpdate: {
             at: new Date(lastUpdate.at).toISOString(),
+            // No `detail`: raw git/bun stderr, and the outcome code carries the meaning.
             outcome: lastUpdate.outcome,
-            ...(lastUpdate.detail === undefined ? {} : { detail: lastUpdate.detail }),
           },
         }),
   };
@@ -572,7 +572,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
     {
       title: "List machines",
       description:
-        'List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time. `source` is the build a machine\'s daemon runs (sha, commit time, branch) and `lastUpdate` its last self-update that did more than find itself current (a skipped_* or *_failed outcome means it is stuck on that build). `scheduler: "leader"` marks the verified scheduler leader that `auto` tasks go through; `"unverified"` marks a nominee that has not proven it holds this fleet\'s key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.',
+        'List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time. `source` is the build a machine\'s daemon runs (sha, commit time, branch) and `lastUpdate` its last self-update attempt that did more than find itself current, with when it ran (a skipped_* or *_failed outcome may be old: check `at` before assuming the machine is still behind). `scheduler: "leader"` marks the verified scheduler leader that `auto` tasks go through; `"unverified"` marks a nominee that has not proven it holds this fleet\'s key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.',
       annotations: { readOnlyHint: true },
     },
     async () => {

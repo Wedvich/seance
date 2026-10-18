@@ -54,8 +54,8 @@ export function MachinesScreen(props: {
       </header>
 
       <div className="fleet">
-        <p className="fleet-scheduler">{view.scheduler}</p>
-        {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
+        {/* Unsettled, the scheduler is still its initial "none" and an empty list means "no push yet", not "no machines" — the store's rule too. */}
+        {settled && <p className="fleet-scheduler">{view.scheduler}</p>}
         {view.cards.length === 0 && (
           <p className="fleet-empty">{settled ? "No machines to show." : "Waiting for the relay…"}</p>
         )}
@@ -109,7 +109,7 @@ function MachineCardView(props: {
             )}
           </div>
           <p className="fleet-meta">{card.meta}</p>
-          {card.build !== null && <p className="fleet-meta">{card.build}</p>}
+          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
         </div>
         <HistoryToggle
           available={card.charts}

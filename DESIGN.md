@@ -584,7 +584,9 @@ The Durable Object persists a machine registry:
   blobs lack them. `source` is read once per daemon process, so it names the
   build running, not the checkout on disk. Rendered on the Machines screen and
   in MCP `list_machines` since 2026-10-18 (each card's build, plus a note when
-  the last self-update was a skip or failure), reversing an earlier "not
+  the last update attempt was a skip or failure, with its age — `lastUpdate` is
+  never cleared, so it can predate a later fix; `list_machines` omits its raw
+  `detail`, and the parser caps it), reversing an earlier "not
   rendered — converged is the steady state" decision: a dev check found a
   scheduler leader still on an older build, and nothing an app could see said
   so. `seanced doctor`/`status` print both too. No wire change was needed.
@@ -3398,7 +3400,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   unverified nominee's an UNVERIFIED one — read through `schedulerRole` in
   `shared/src/app-client.ts`, the rule `list_machines` uses too, so an unproven nominee is
   never drawn as leading. Each card shows its daemon's build (short sha, commit age, branch)
-  and, when its last self-update was a skip or failure, a note saying which and when.
+  and, when its last update attempt was a skip or failure, a note saying which and how long ago.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
