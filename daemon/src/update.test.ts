@@ -165,6 +165,26 @@ describe("self-update pipeline", () => {
     expect(h.reports.map((r) => r.outcome)).toEqual(["fetch_failed"]);
   });
 
+  test("a checkout whose own config names a command is never fetched, and the report says why", async () => {
+    const { upstream, checkout } = await makePair();
+    await publish(upstream);
+    // A session working in the daemon's own checkout can write this.
+    const marker = join(checkout, "..", "ran");
+    await runGit(checkout, ["config", "remote.origin.uploadpack", `touch '${marker}'; false`]);
+    const before = await runGit(checkout, ["rev-parse", "HEAD"]);
+    const h = harness();
+
+    const updater = h.make(checkout);
+    updater.check("announce");
+    await updater.settled();
+
+    expect(h.reports).toEqual([
+      expect.objectContaining({ outcome: "fetch_failed", detail: "refused: repo-local remote.*.uploadpack" }),
+    ]);
+    expect(await Bun.file(marker).exists()).toBe(false);
+    expect(await runGit(checkout, ["rev-parse", "HEAD"])).toBe(before);
+  });
+
   test("a failed install reports install_failed, keeps running, and leaves the ff in place", async () => {
     const { upstream, checkout } = await makePair();
     const target = await publish(upstream);

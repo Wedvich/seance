@@ -524,18 +524,17 @@ Séance's noise is cover for a real intruder.
    itself, bound to its own pane (Local op socket, "Session events"). The
    scheduler routes on the quota figures, so a session that lies about its
    account's usage steers where the next task lands. It cannot reach past what
-   that one account's reading decides. **It can also plant git config the daemon
-   runs** (open, M3 review S3, 2026-10-18). `git config` in a worktree writes the
-   clone's shared `.git/config`, and the session can write `.git/info/attributes`
-   too. The daemon runs git in that clone on its own: the base fetch before every
-   worktree spawn into it (`base-fetch.ts`), and branch-state's fetch and
-   `merge-tree` on its passes (Scheduler, "Branch state"). `hardenedGit` turns
-   off only `core.fsmonitor` and hooks, so a `core.sshCommand`,
-   `credential.helper`, `remote.origin.uploadpack`, an `ext::` URL, or a merge
-   driver with a `merge=` attribute runs inside the daemon — outliving the
-   session, outside any transcript and outside the permission mode. Reap's "these
-   are the owner's own clones" (Reap, "Repo-local config executes") predates a
-   daemon running git on its own in repos its sessions write to.
+   that one account's reading decides.
+   It can also write its clone's shared `.git/config` (`git config` in a
+   worktree) and `.git/info/attributes`, where the daemon runs git on its own:
+   reap, the base fetch before every later spawn, the branch-state emitter's
+   fetch and `merge-tree` every minute, self-update in its own checkout. A
+   `core.sshCommand`, credential helper, `uploadpack`, URL rewrite or merge
+   driver there would run in the daemon, outliving the session, outside any
+   transcript and any permission mode. So those calls refuse a repo whose local
+   or worktree config sets such a family, or whose `info/attributes` names a
+   merge driver, and name the family in their failure (Reap, "Repo-local
+   config"). The owner's global and system config still apply.
 
 **What "structured payloads only" does and does not mean.** It stops wire input
 being interpolated into the daemon's own shell construction. It is not a
@@ -3365,17 +3364,36 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   emitter (Scheduler, "Branch state") is the other fetcher, through the same guarded
   `fetchIfStale` with a 5-minute window, its own in-memory record of its
   last prune, and `GCM_INTERACTIVE=never`, BatchMode included.
-- **Repo-local config executes.** Reap is the first thing to run git in every
-  scanned repo, and git runs what a repo's config says. `core.fsmonitor` (a hook,
-  or a daemon per worktree) and hooks (`reference-transaction` fires on the
-  ref updates reap makes) are off for every call (`-c core.fsmonitor=false -c
-core.hooksPath=/dev/null`). What still runs is what a fetch needs —
-  credential helpers, `core.sshCommand`, `remote.*.uploadpack` — and more: a
-  merge driver set in repo-local config runs under `merge-tree`, which no fetch
-  needs. "These are the owner's own clones, so the residual risk is low" held
-  while reap was the only thing to run git there unasked. It no longer does: the
-  daemon fetches and runs `merge-tree` on its own in clones its sessions can write
-  config into (Threat model, item 6; open, M3 review S3).
+- **Repo-local config executes, and sessions write it.** Reap is the first thing to run git in every
+  scanned repo, and git runs what a repo's config says; a session in any of its
+  worktrees can set that config with `git config`. `core.fsmonitor` (a hook,
+  or a daemon per worktree), hooks (`reference-transaction` fires on the
+  ref updates reap makes) and the `ext::` transport (it runs its URL) are off for every call (`-c core.fsmonitor=false -c
+core.hooksPath=/dev/null -c protocol.ext.allow=never`). Every network call —
+  reap's fetch and `set-head`, the base fetch, the emitter's fetch, self-update's
+  `set-head` and fetch — goes through `networkGit` (`git-hardened.ts`), and
+  `classifyTip`'s `merge-tree` checks the same thing first: `repoConfigRefusal`
+  reads `git config --list --show-scope` and `info/attributes`, and refuses the
+  call when local or worktree config sets `core.sshCommand`, `core.gitProxy`,
+  `core.askPass`, `core.attributesFile`, `credential.*`, `remote.*.uploadpack` or
+  `receivepack`, `protocol.allow` or `protocol.*.allow`, `url.*.insteadOf`,
+  `include.*` / `includeIf.*`, `merge.*.driver` or `filter.*`, or
+  `info/attributes` has a `merge=` line. Config it cannot read refuses too. The
+  failure names the family, never the key, whose subsection can be a URL with
+  credentials in it: reap reports it, the base fetch's note carries it to the
+  phone, the emitter warns once per run of failures, self-update reports
+  `fetch_failed`. A refused `merge-tree` reads as a conflict, the safe side. The
+  same keys in global or system config are the owner's and still apply. A clone
+  that sets its own `credential.helper` is no longer fetched by the daemon (owner
+  decision R8 #2 is still open; dropping `credential.*` from `REFUSED_FAMILIES`
+  is one line). `networkGit` is also the one environment for the network:
+  `hardenedGit`'s process-group kill and overrides, `GCM_INTERACTIVE=never`
+  unless the user set their own (Git Credential Manager ignores
+  `GIT_TERMINAL_PROMPT` and may raise a GUI on WSL/Windows) and `sshBatchEnv`'s
+  BatchMode. Not covered: a submodule's own config (reap's fetch no longer
+  recurses), and claude's own `--worktree` fetch, which runs in the session it
+  starts. Its `FETCH_HEAD` goes stale once the base fetch is refused, so claude
+  fetches with that config itself.
 - **Bounded**: four repos at a time (`mapLimit`, shared with the scan in
   `concurrency.ts`), four panes at a time for the screen captures; nothing
   here is on the session list's path.

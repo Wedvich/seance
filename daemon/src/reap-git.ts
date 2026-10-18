@@ -2,7 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFailure, type ExecResult } from "./exec.ts";
-import { hardenedGit, networkEnv, type TerminalProbe } from "./git-hardened.ts";
+import { hardenedGit, networkGit, refusalDetail, repoConfigRefusal, type TerminalProbe } from "./git-hardened.ts";
 
 /** At most one `fetch --prune` per clone per day. */
 export const FETCH_STALE_MS = 24 * 60 * 60 * 1000;
@@ -38,23 +38,26 @@ export async function readPruneLog(path: string): Promise<PruneLog> {
   );
 }
 
-/** `staleMs` and `env` are the emitter's: a shorter window, and `GCM_INTERACTIVE=never` against a credential GUI. */
+/**
+ * `staleMs` is the emitter's shorter window. No submodule recursion: nothing here reads a submodule's refs, and
+ * each submodule's own config is one `repoConfigRefusal` never read.
+ */
 export async function fetchIfStale(
   repoPath: string,
   lastPrunedAt: number,
   now: number,
   staleMs = FETCH_STALE_MS,
-  env?: Readonly<Record<string, string | undefined>>,
   terminal?: TerminalProbe,
 ): Promise<FetchOutcome> {
   if (now - lastPrunedAt < staleMs) return { kind: "fresh" };
-  const result = await hardenedGit(
+  const result = await networkGit(
     repoPath,
-    ["fetch", "--prune", "--quiet", "origin"],
+    ["fetch", "--prune", "--quiet", "--no-recurse-submodules", "origin"],
     FETCH_TIMEOUT_MS,
-    undefined,
-    await networkEnv(repoPath, env, terminal),
+    {},
+    terminal,
   );
+  if ("refused" in result) return { kind: "failed", detail: refusalDetail(result), brief: refusalDetail(result) };
   return result.exitCode === 0
     ? { kind: "fetched" }
     : {
@@ -69,14 +72,8 @@ export async function fetchIfStale(
  * clones — which reap needs to know what "merged" is measured against.
  */
 export async function resolveRemoteHead(repoPath: string, terminal?: TerminalProbe): Promise<boolean> {
-  const result = await hardenedGit(
-    repoPath,
-    ["remote", "set-head", "origin", "--auto"],
-    FETCH_TIMEOUT_MS,
-    undefined,
-    await networkEnv(repoPath, {}, terminal),
-  );
-  return result.exitCode === 0;
+  const result = await networkGit(repoPath, ["remote", "set-head", "origin", "--auto"], FETCH_TIMEOUT_MS, {}, terminal);
+  return "exitCode" in result && result.exitCode === 0;
 }
 
 export interface WorktreeRecord {
@@ -250,8 +247,11 @@ export async function classifyTip(
   if (ancestor.exitCode === 0) return "ancestor";
   // A conflict (exit 1) or a git without --write-tree (exit 129) reads as not
   // merged: the safe direction. Writes a few loose objects, which gc collects.
-  const merged = await hardenedGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
-  if (merged.exitCode === 0 && merged.stdout.split("\n")[0]?.trim() === baseTree) return "squash";
+  // Skipped, the same safe direction, where the repo's own config could name a merge driver or filter: it runs them.
+  if ((await repoConfigRefusal(repoPath)) === null) {
+    const merged = await hardenedGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
+    if (merged.exitCode === 0 && merged.stdout.split("\n")[0]?.trim() === baseTree) return "squash";
+  }
   if (!upstreamGone) return "active";
   const cherry = await hardenedGit(repoPath, ["cherry", base, tip]);
   if (cherry.exitCode !== 0) return "unmerged-gone";

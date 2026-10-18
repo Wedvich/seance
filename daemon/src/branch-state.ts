@@ -227,9 +227,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
   const fetchFor = async (repo: RepoEntry, commonDir: string): Promise<void> => {
     const backoff = fetchBackoff.get(repo.path);
     if (backoff !== undefined && now() < backoff.nextAt) return;
-    // Git Credential Manager ignores GIT_TERMINAL_PROMPT and may raise a GUI on WSL/Windows.
-    const env = process.env["GCM_INTERACTIVE"] === undefined ? { GCM_INTERACTIVE: "never" } : undefined;
-    const outcome: FetchOutcome = await fetchRepo(repo.path, lastPruned.get(commonDir) ?? 0, now(), fetchStaleMs, env);
+    const outcome: FetchOutcome = await fetchRepo(repo.path, lastPruned.get(commonDir) ?? 0, now(), fetchStaleMs);
     if (outcome.kind === "fetched") lastPruned.set(commonDir, now());
     if (outcome.kind !== "failed") {
       fetchBackoff.delete(repo.path);

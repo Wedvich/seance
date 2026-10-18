@@ -2,7 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { RepoEntry, SpawnMode } from "@seance/shared";
 import { execFailure } from "./exec.ts";
-import { hardenedGit, networkEnv, type TerminalProbe } from "./git-hardened.ts";
+import { hardenedGit, networkGit, refusalDetail, type TerminalProbe } from "./git-hardened.ts";
 import { resolveCommonDir } from "./gitdir.ts";
 import { readDefaultBranch } from "./scan.ts";
 
@@ -28,7 +28,8 @@ const inFlight = new Map<string, Promise<FetchResult>>();
  * option. `FETCH_HEAD` is written on purpose — it is what tells claude its own
  * fetch is unneeded. No submodule recursion: on-demand recursion can outlast the
  * timeout after the tracking ref already moved, reporting a landed fetch as failed.
- * `networkEnv` keeps ssh from prompting a foreground `seanced run`'s terminal, as reap's fetch does.
+ * `networkGit` refuses a repo whose own config would run a command, and keeps ssh from prompting a foreground
+ * `seanced run`'s terminal, as reap's fetch does.
  */
 function fetchDefault(
   repoPath: string,
@@ -39,14 +40,15 @@ function fetchDefault(
   const running = inFlight.get(commonDir);
   if (running !== undefined) return running;
   const run = (async (): Promise<FetchResult> => {
-    const [before, env] = await Promise.all([lastFetchedAt(commonDir), networkEnv(repoPath, {}, terminal)]);
-    const result = await hardenedGit(
+    const before = await lastFetchedAt(commonDir);
+    const result = await networkGit(
       repoPath,
       ["fetch", "--quiet", "--no-recurse-submodules", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
       FETCH_TIMEOUT_MS,
-      undefined,
-      env,
+      {},
+      terminal,
     );
+    if ("refused" in result) return { ok: false, detail: refusalDetail(result), before };
     return result.exitCode === 0 ? { ok: true } : { ok: false, detail: execFailure(result), before };
   })().finally(() => inFlight.delete(commonDir));
   inFlight.set(commonDir, run);

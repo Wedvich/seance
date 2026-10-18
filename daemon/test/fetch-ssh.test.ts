@@ -97,7 +97,7 @@ describe("guarded network calls never let ssh prompt", () => {
   test("with no ssh configured, the fetch's ssh runs with BatchMode", async () => {
     const repo = await sshRepo();
     const outcome = await withEnv({ PATH: `${stubDir}:${savedPath ?? ""}` }, () =>
-      fetchIfStale(repo, 0, Date.now(), 0, undefined, tty),
+      fetchIfStale(repo, 0, Date.now(), 0, tty),
     );
     expect(outcome.kind).toBe("failed");
     const calls = await sshCalls();
@@ -108,7 +108,7 @@ describe("guarded network calls never let ssh prompt", () => {
   test("the emitter's env (GCM_INTERACTIVE) and reap's set-head get BatchMode too", async () => {
     const repo = await sshRepo();
     await withEnv({ PATH: `${stubDir}:${savedPath ?? ""}` }, async () => {
-      await fetchIfStale(repo, 0, Date.now(), 0, { GCM_INTERACTIVE: "never" }, tty);
+      await fetchIfStale(repo, 0, Date.now(), 0, tty);
       expect(await resolveRemoteHead(repo, tty)).toBe(false);
     });
     const calls = await sshCalls();
@@ -133,9 +133,7 @@ describe("guarded network calls never let ssh prompt", () => {
 
   test("with no terminal (a service) ssh is left as it is, and no config probe runs", async () => {
     const repo = await sshRepo();
-    await withEnv({ PATH: `${stubDir}:${savedPath ?? ""}` }, () =>
-      fetchIfStale(repo, 0, Date.now(), 0, undefined, noTty),
-    );
+    await withEnv({ PATH: `${stubDir}:${savedPath ?? ""}` }, () => fetchIfStale(repo, 0, Date.now(), 0, noTty));
     const calls = await sshCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((argv) => argv.includes("BatchMode"))).toBe(false);
@@ -143,21 +141,26 @@ describe("guarded network calls never let ssh prompt", () => {
     expect(await sshBatchEnv(join(base, "no-such-dir"), {}, noTty)).toEqual({});
   });
 
-  test("a repo's core.sshCommand is used as it is", async () => {
+  // A repo's own core.sshCommand is refused before any of this (git-config-guard.test.ts): only the owner's applies.
+  test("the owner's core.sshCommand is used as it is", async () => {
     const repo = await sshRepo();
-    expect((await exec(["git", "config", "core.sshCommand", stub], { cwd: repo })).exitCode).toBe(0);
-    expect((await fetchIfStale(repo, 0, Date.now(), 0, undefined, tty)).kind).toBe("failed");
+    const owner = join(base, `gitconfig-${seq}`);
+    await writeFile(owner, `[core]\n\tsshCommand = ${stub}\n`);
+    expect((await withEnv({ GIT_CONFIG_GLOBAL: owner }, () => fetchIfStale(repo, 0, Date.now(), 0, tty))).kind).toBe(
+      "failed",
+    );
     const calls = await sshCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((argv) => argv.includes("BatchMode"))).toBe(false);
   });
 
-  test("core.sshCommand reached through an include is honoured too", async () => {
+  test("the owner's core.sshCommand reached through an include is honoured too", async () => {
     const repo = await sshRepo();
     const included = join(base, `include-${seq}`);
     await writeFile(included, `[core]\n\tsshCommand = ${stub}\n`);
-    expect((await exec(["git", "config", "include.path", included], { cwd: repo })).exitCode).toBe(0);
-    await fetchIfStale(repo, 0, Date.now(), 0, undefined, tty);
+    const owner = join(base, `gitconfig-${seq}`);
+    await writeFile(owner, `[include]\n\tpath = ${included}\n`);
+    await withEnv({ GIT_CONFIG_GLOBAL: owner }, () => fetchIfStale(repo, 0, Date.now(), 0, tty));
     const calls = await sshCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((argv) => argv.includes("BatchMode"))).toBe(false);
@@ -165,7 +168,7 @@ describe("guarded network calls never let ssh prompt", () => {
 
   test("a GIT_SSH_COMMAND in the environment is used as it is", async () => {
     const repo = await sshRepo();
-    await withEnv({ GIT_SSH_COMMAND: stub }, () => fetchIfStale(repo, 0, Date.now(), 0, undefined, tty));
+    await withEnv({ GIT_SSH_COMMAND: stub }, () => fetchIfStale(repo, 0, Date.now(), 0, tty));
     const calls = await sshCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((argv) => argv.includes("BatchMode"))).toBe(false);
@@ -173,7 +176,7 @@ describe("guarded network calls never let ssh prompt", () => {
 
   test("a GIT_SSH in the environment is not overridden by our GIT_SSH_COMMAND", async () => {
     const repo = await sshRepo();
-    await withEnv({ GIT_SSH: stub }, () => fetchIfStale(repo, 0, Date.now(), 0, undefined, tty));
+    await withEnv({ GIT_SSH: stub }, () => fetchIfStale(repo, 0, Date.now(), 0, tty));
     const calls = await sshCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((argv) => argv.includes("BatchMode"))).toBe(false);
