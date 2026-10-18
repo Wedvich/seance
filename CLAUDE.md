@@ -150,7 +150,13 @@ green:
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
-  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed, and the
+  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and a
+  scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
+  never run again, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
+  process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
+  pause write alone may set it lower): a task record below it is `version_regressed`, a pause
+  below it or missing holds the whole queue, and a task record that vanishes without the
+  leader's delete is never read as gone, and the
   relay's store: a `term` on an app-leg store frame authorizes nothing, a daemon-leg write is
   fenced on the term and the socket it was issued to (`holdsTerm` in `relay/src/leadership.ts`),
   store records live under their own storage namespaces so no key aliases `device:` or

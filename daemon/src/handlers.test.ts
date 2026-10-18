@@ -3,6 +3,7 @@ import {
   APP_ID,
   METRIC_NAMES,
   parseMetricsReply,
+  SCHEDULER_CLIENT,
   SCHEDULER_ID,
   type DespawnResponse,
   type MetricsReply,
@@ -371,6 +372,7 @@ describe("a task's launch is recorded before it runs", () => {
     });
     const tasks: TaskLaunches = {
       launch: () => Promise.reject(new Error("disk full")),
+      launched: () => false,
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => [],
@@ -379,6 +381,63 @@ describe("a task's launch is recorded before it runs", () => {
     expect(reply?.payload).toMatchObject({ ok: false, code: "launch_error" });
     expect(spawned).toBe(false);
     expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
+  });
+
+  describe("a scheduler spawn for a task the ledger holds as launched", () => {
+    const dispatch = (taskId: string, client: string = SCHEDULER_CLIENT): Plain =>
+      request("spawn", { repo: "myrepo", mode: "here", taskId, client });
+
+    test("is refused task_launched and audited once its session has ended — a rolled-back record runs nothing", async () => {
+      const ledger = LaunchLedger.memory();
+      const tasks = new EndedTasks(ledger);
+      let spawns = 0;
+      const { backend, live } = taskBackend(() => {
+        spawns += 1;
+        return Promise.resolve();
+      });
+      const handle = createHandler({ ...ctx, backend, tasks });
+      expect((await handle(dispatch("t-1")))?.payload).toMatchObject({ ok: true });
+      live.length = 0;
+      const again = await handle(dispatch("t-1"));
+      expect(again?.payload).toMatchObject({ ok: false, code: "task_launched" });
+      expect(spawns).toBe(1);
+      expect(ledger.ids()).toEqual(["t-1"]);
+      expect(logged()).toContain("audit spawn origin=relay failed code=task_launched");
+      // The leader's own machine refuses the same, under its own origin.
+      const local = await createLocalOps({ ...ctx, backend, tasks }, "leader").spawn({
+        repo: "myrepo",
+        mode: "here",
+        taskId: "t-1",
+        client: SCHEDULER_CLIENT,
+      });
+      expect(local).toMatchObject({ ok: false, code: "task_launched" });
+      expect(logged()).toContain("audit spawn origin=leader failed code=task_launched");
+      expect(spawns).toBe(1);
+    });
+
+    test("is task_running while its session still runs, naming the pane, so the leader records where it runs", async () => {
+      const tasks = new EndedTasks(LaunchLedger.memory());
+      let spawns = 0;
+      const { backend } = taskBackend(() => {
+        spawns += 1;
+        return Promise.resolve();
+      });
+      const handle = createHandler({ ...ctx, backend, tasks });
+      await handle(dispatch("t-1"));
+      expect((await handle(dispatch("t-1")))?.payload).toMatchObject({ ok: false, code: "task_running", id: "%1" });
+      expect(spawns).toBe(1);
+    });
+
+    test("runs when its launch was retracted, and is not the refusal's business from any other client", async () => {
+      const tasks = new EndedTasks(LaunchLedger.memory());
+      const refusing = createHandler({ ...ctx, backend: failing(new SpawnFailure("repo_not_found", "gone")), tasks });
+      await refusing(dispatch("t-1"));
+      const { backend, live } = taskBackend(() => Promise.resolve());
+      const handle = createHandler({ ...ctx, backend, tasks });
+      expect((await handle(dispatch("t-1")))?.payload).toMatchObject({ ok: true });
+      live.length = 0;
+      expect((await handle(dispatch("t-1", "mcp")))?.payload).toMatchObject({ ok: true });
+    });
   });
 
   test("a daemon keeping no launches sends neither field", async () => {

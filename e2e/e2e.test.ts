@@ -1284,6 +1284,12 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const running = (await stack.queue().get(id))?.body;
       window = running?.assignment?.window ?? null;
       expect(running?.spec.prompt).toBe("mark me done");
+      // The store reads `running` once the write lands; the leader holds it `reserved`
+      // (and refuses `dispatching`) until it has taken the ack, so wait for its own view.
+      await pollUntil(async () => {
+        const queue = await app.client.queue();
+        return queue !== null && "tasks" in queue && queue.tasks.some((t) => t.id === id && t.state === "running");
+      }, "the leader to hold the task running");
 
       const marked = await app.client.markDone(id);
       expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });

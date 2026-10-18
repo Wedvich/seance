@@ -19,7 +19,8 @@ import type { LocalOps } from "./handlers.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
-import { createQueueStore, type StoreLeg } from "./queue-store.ts";
+import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
+import type { VersionFloor } from "./version-floor.ts";
 
 /**
  * The scheduler role (docs/scheduler.md, "`leader.ts`"; DESIGN.md, Scheduler):
@@ -95,6 +96,12 @@ export interface LeaderBaseOpts {
    * own — the relay hears nothing else of it (`RelayClient.resign`).
    */
   readonly resign: () => void;
+  /**
+   * The process's version floor (`version-floor.ts`), shared by every term so
+   * the relay cannot roll a record back under the next one. The daemon always
+   * passes it; a test may leave it out to read its store unfloored.
+   */
+  readonly floor?: VersionFloor;
   readonly config?: SchedulerConfig;
   readonly tickIntervalMs?: number;
   /** The wait before a failed takeover is tried again; defaults to the tick interval. */
@@ -351,13 +358,11 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   };
   const relay = opts.createRelay(term, onEvent);
   const isLive = (): boolean => live;
+  const store =
+    opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now });
   const scheduler = new Scheduler({
     store: watched(
-      fencedStore(
-        opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now }),
-        term,
-        isLive,
-      ),
+      fencedStore(opts.floor === undefined ? store : flooredStore(store, opts.floor), term, isLive),
       nudge.note,
     ),
     fleet: termFleet({

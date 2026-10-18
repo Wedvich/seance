@@ -9,6 +9,8 @@ import {
   appRelayUrl,
   importPsk,
   MAX_PAUSE_HOLDS,
+  MAX_TASKS,
+  ROUTING_ID_MAX_LENGTH,
   open,
   parseQueueChanged,
   parseQueueReply,
@@ -30,6 +32,7 @@ import {
   type PauseHold,
   type Plain,
   type QueueResponse,
+  type UnreadableTaskRef,
   type RegistryView,
   type SessionsResponse,
 } from "@seance/shared";
@@ -741,8 +744,12 @@ describe("leader requests", () => {
 });
 
 /** `boundedQueue` over the decisions the tasks carry, as the transport would send it. */
-function boundedReply(tasks: readonly Task[], holds: readonly PauseHold[] = []): Plain {
-  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0, holds);
+function boundedReply(
+  tasks: readonly Task[],
+  holds: readonly PauseHold[] = [],
+  unreadable: readonly UnreadableTaskRef[] = [],
+): Plain {
+  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0, holds, unreadable);
   return { id: crypto.randomUUID(), ts: 0, op: "queue", re: crypto.randomUUID(), payload };
 }
 
@@ -810,9 +817,16 @@ describe("boundedQueue", () => {
       at: Number.MAX_SAFE_INTEGER,
       resumeAt: Number.MAX_SAFE_INTEGER,
     }));
-    const answered = boundedReply(tasks, holds);
+    // And every unreadable record the store can hold, each at its bounds: a person discards from this list.
+    const unreadable = Array.from({ length: MAX_TASKS }, (_, i) => ({
+      taskId: `${i}`.padStart(ROUTING_ID_MAX_LENGTH, "u"),
+      version: Number.MAX_SAFE_INTEGER,
+      reason: "version_regressed",
+    }));
+    const answered = boundedReply(tasks, holds, unreadable);
     expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
     expect(queueReply(answered.payload).holds).toHaveLength(MAX_PAUSE_HOLDS);
+    expect(queueReply(answered.payload).unreadable).toEqual(unreadable);
     const ids = queueReply(answered.payload).tasks.map((t) => t.id);
     expect(ids.length).toBeLessThan(QUEUE_MAX_TASKS);
     expect(ids).toContain("f0");

@@ -15,7 +15,7 @@ import type {
   TaskProgress,
   UpdateAvailable,
 } from "@seance/shared";
-import { isMetricsRequest, isRecord, isTaskId, quote, SCHEDULER_ID } from "@seance/shared";
+import { isMetricsRequest, isRecord, isTaskId, quote, SCHEDULER_CLIENT, SCHEDULER_ID } from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -57,6 +57,8 @@ export interface HandlerContext {
 export interface TaskLaunches {
   /** Write-ahead: throws when the task cannot be recorded, and the spawn then must not run. */
   readonly launch: (taskId: string) => Promise<SettleLaunch>;
+  /** The ledger holds the task as launched here, and no launch of it is in flight. */
+  readonly launched: (taskId: string) => boolean;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
@@ -126,12 +128,43 @@ async function sessionsAfter(ctx: HandlerContext, op: string): Promise<readonly 
   }
 }
 
+/**
+ * A scheduler spawn for a task the ledger holds as launched here (DESIGN.md,
+ * threat model, "Relay compromise"). A leader re-dispatches a task only on this
+ * machine's proof that it never landed, so a second spawn is a dispatch made
+ * from a record a relay rolled back, and nothing runs. A session still carrying
+ * the id is answered `task_running` as the spawn itself would, so the leader
+ * records where it runs rather than failing it.
+ */
+async function relaunchRefusal(
+  ctx: HandlerContext,
+  request: SpawnRequest,
+): Promise<Extract<SpawnResponse, { readonly ok: false }> | null> {
+  const { taskId } = request;
+  if (request.client !== SCHEDULER_CLIENT || taskId === undefined || ctx.tasks?.launched(taskId) !== true) return null;
+  const running = (await ctx.backend.sessions(ctx.getRepos())).find((s) => s.taskId === taskId);
+  if (running !== undefined) {
+    return { ok: false, code: "task_running", message: `task ${taskId} is already running`, id: running.id };
+  }
+  log.warn(`spawn refused: task ${quote(taskId)} already launched here — not run again`);
+  return {
+    ok: false,
+    code: "task_launched",
+    message: `task ${taskId} already ran on this machine, so it was not started again`,
+  };
+}
+
 async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unknown): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
   await audit.request(payload);
+  const refused = await relaunchRefusal(ctx, payload);
+  if (refused !== null) {
+    await audit.failed(refused.code, refused.id);
+    return refused;
+  }
   let settle: SettleLaunch | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
     try {
