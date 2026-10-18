@@ -3474,6 +3474,14 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   is folded into the screen's single bottom action, which reads "Reconnect"
   while the relay is down, saves-then-reconnects when credentials were edited,
   and otherwise just returns.
+- **Settings is a native modal `<dialog>`, shaped by width.** Below the 1200px desktop
+  breakpoint it fills the screen and slides in exactly as a pushed screen does — the form
+  still gives way and dims beneath it — with a back chevron; at and above it, it is a
+  centred modal over the untouched form, closed by an × at the header's right, Escape or a
+  backdrop click. The top layer makes the page behind it inert for free, and Chrome on
+  Android routes back to an open modal's `cancel` before history; that event is
+  cancelled and sent through the store as a history pop, so every way out takes the
+  one path and the layer's history entry never strands.
 - **Machines is a layer over Settings, not a route** (scheduler M1). Until the app's
   redesign it is reached from a row at the top of Settings, pushed as a second layer, so back
   returns to Settings; the stage animates between any two depths. Rejected for now: URL routes
@@ -3637,8 +3645,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   three phone-width columns, the one breakpoint, in `app.tsx` — the form, the Machines screen and
   the Queue screen sit side by side, each scrolling on its own; below it the app is the phone stack
   unchanged. The queue is the rightmost column, so the settings pill moves to its header, and the
-  form header loses its queue chip (nothing left to open). Settings stays a layer, over the form
-  column. The queue's pause button drops to an outline: spawn stays the one filled call to action
+  form header loses its queue chip (nothing left to open). Settings stays a layer, a centred
+  modal over the columns. The queue's pause button drops to an outline: spawn stays the one filled call to action
   on screen. Columns are not layers, so they carry no back button and push no history entry. The
   store keeps the queue read while it is on screen without its layer (`AppState.wide`), since the
   column is never opened.

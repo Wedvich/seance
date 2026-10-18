@@ -1,4 +1,4 @@
-import type { JSX } from "preact";
+import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { MachinesScreen } from "./components/machines.tsx";
 import { QueueScreen } from "./components/queue.tsx";
@@ -96,17 +96,22 @@ export function App(props: { store: Store }): JSX.Element {
       onOpenSettings={onOpenSettings}
     />
   );
-  const settings = (onOpenMachines?: () => void): JSX.Element => (
-    <Settings
-      relayUrl={readRelayUrl()}
-      relayLine={view.relayLine}
-      relayState={view.relayState}
-      connected={state.relay.status === "open"}
-      machinesLine={view.meta}
-      onDismiss={actions.dismissLayer}
-      onReconnect={() => store.reconnect()}
-      onOpenMachines={onOpenMachines}
-    />
+  // A modal dialog rather than a screen: full-screen on a phone, centred over
+  // the columns on a desk.
+  const settings = shown(1) && depthOne === "settings" && (
+    <SettingsDialog key="settings" wide={wide} anim={anim} onDismiss={actions.dismissLayer}>
+      <main className={wide ? "screen stage-panel" : panelClass(anim, 1)}>
+        <Settings
+          relayUrl={readRelayUrl()}
+          relayLine={view.relayLine}
+          relayState={view.relayState}
+          connected={state.relay.status === "open"}
+          closeStyle={wide ? "close" : "back"}
+          onDismiss={actions.dismissLayer}
+          onReconnect={() => store.reconnect()}
+        />
+      </main>
+    </SettingsDialog>
   );
   const machines = (onDismiss?: () => void): JSX.Element => (
     <MachinesScreen
@@ -121,13 +126,18 @@ export function App(props: { store: Store }): JSX.Element {
     />
   );
 
-  // Settings stays a layer, over the first column; queue and machines no
+  // Settings stays a layer, a dialog over the columns; queue and machines no
   // longer need to be one.
   if (wide) {
     return (
-      <div className="desk">
+      <div
+        className="desk"
+        onAnimationEnd={(event) => {
+          if (event.animationName.startsWith("screen-")) clearAnim();
+        }}
+      >
         <main key="form" className={`screen desk-col${exit.entering ? " form-enter" : ""}`}>
-          {state.settings ? settings() : formOrVerdict}
+          {formOrVerdict}
         </main>
         <main key="machines" className="screen desk-col">
           {machines()}
@@ -135,6 +145,7 @@ export function App(props: { store: Store }): JSX.Element {
         <main key="queue" className="screen desk-col">
           {queue(undefined, actions.openSettings)}
         </main>
+        {settings}
       </div>
     );
   }
@@ -158,13 +169,7 @@ export function App(props: { store: Store }): JSX.Element {
           {queue(actions.dismissLayer)}
         </main>
       )}
-      {/* Kept mounted, hidden, under machines: its credential fields hold
-          unsaved drafts that a remount would drop on the way back. */}
-      {((shown(1) && depthOne === "settings") || depth === 2) && (
-        <main key="settings" className={panelClass(anim, 1)} hidden={!shown(1) || depthOne !== "settings"}>
-          {settings(() => store.openMachines())}
-        </main>
-      )}
+      {settings}
       {shown(2) && (
         <main key="machines" className={panelClass(anim, 2)}>
           {machines(actions.dismissLayer)}
@@ -189,6 +194,50 @@ function useWide(store: Store): boolean {
   }, []);
   useEffect(() => store.setWide(wide), [store, wide]);
   return wide;
+}
+
+/**
+ * Settings' layer in a native modal dialog: the top layer makes the page behind
+ * it inert and turns Escape — and Android's back, which Chrome routes to an open
+ * modal before history — into `cancel`. That is cancelled and sent through the
+ * store as a history pop, so every way out takes the same path. Stays open while
+ * its panel is still on stage, so the close animation plays in it.
+ */
+function SettingsDialog(props: {
+  wide: boolean;
+  anim: ScreenAnim | null;
+  onDismiss: () => void;
+  children: ComponentChildren;
+}): JSX.Element {
+  const { wide, anim, onDismiss, children } = props;
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    if (node === null) return;
+    node.showModal();
+    // Before removal, so focus goes back to the cog that opened it.
+    return () => node.close();
+  }, []);
+
+  const motion = wide && anim !== null ? (anim.to === 0 ? " layer-modal-out" : " layer-modal-in") : "";
+  return (
+    <dialog
+      ref={dialog}
+      className={`layer-dialog ${wide ? "layer-modal" : "layer-full"}${motion}`}
+      aria-label="Settings"
+      onCancel={(event) => {
+        event.preventDefault();
+        onDismiss();
+      }}
+      onClick={(event) => {
+        // The panel fills the dialog, so only a backdrop click lands on it.
+        if (wide && event.target === event.currentTarget) onDismiss();
+      }}
+    >
+      {children}
+    </dialog>
+  );
 }
 
 /**

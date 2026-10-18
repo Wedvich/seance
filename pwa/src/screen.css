@@ -1111,34 +1111,6 @@
   flex: none;
 }
 
-/* ---- settings → machines row ---- */
-
-.nav-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  padding: 14px 16px;
-  border-radius: 14px;
-  color: var(--fg);
-  text-align: left;
-}
-
-.nav-card-meta {
-  display: block;
-  margin-top: 2px;
-  font-family: var(--mono);
-  font-variant-ligatures: none;
-  font-size: 12.5px;
-  color: var(--fg2);
-}
-
-.nav-card-chevron {
-  color: var(--fg2);
-  font-size: 20px;
-}
-
 /* ---- machines screen ---- */
 
 .fleet {
@@ -1567,6 +1539,101 @@
   from {
     opacity: 0.18;
   }
+  to {
+    opacity: 0;
+  }
+}
+
+/* ---- settings dialog ---- */
+
+/* Reset the UA box: the panels inside are the surface, the dialog only places them. */
+.layer-dialog {
+  padding: 0;
+  border: 0;
+  max-width: none;
+  max-height: none;
+  background: transparent;
+  color: inherit;
+  overflow: hidden;
+}
+
+/* A stage of its own over the real one, so the slide reads exactly as a push did:
+   the form underneath still gives way and dims, and nothing backs the dialog. */
+.layer-full {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.layer-full::backdrop {
+  background: transparent;
+}
+
+.layer-modal {
+  width: min(480px, calc(100vw - 48px));
+  height: min(760px, calc(100dvh - 48px));
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+.layer-modal::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* Named screen-* so app.tsx's transition clear sees them end; the backdrop's
+   are not, being the same clock on a pseudo-element. */
+.layer-modal-in {
+  animation: screen-modal-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.layer-modal-out {
+  animation: screen-modal-out 0.16s ease-in both;
+}
+
+.layer-modal-in::backdrop {
+  animation: modal-backdrop-in 0.22s ease-out both;
+}
+
+.layer-modal-out::backdrop {
+  animation: modal-backdrop-out 0.16s ease-in both;
+}
+
+.header-close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--sur2);
+  color: var(--fg);
+  flex: none;
+}
+
+@keyframes screen-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes screen-modal-out {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes modal-backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes modal-backdrop-out {
   to {
     opacity: 0;
   }
