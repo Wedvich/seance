@@ -94,8 +94,31 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
 
-/** Shown after a queue action whose answer never came: the leader may have acted. */
-const MAY_HAVE_LANDED_HINT = " — refresh to see whether it landed";
+/** Closes the notice of a queue action whose answer never came: the leader may have acted. */
+const REFRESH_HINT = "Refresh to see whether it did.";
+const MAY_HAVE_LANDED = `It may have landed anyway. ${REFRESH_HINT}`;
+
+/**
+ * A scheduler read's failure, shown alone. A read has nothing to land, so the
+ * shared line's "may have landed" for a timeout or a drop would mislead.
+ */
+function readFailureText(err: unknown, fallback: string): string {
+  if (!(err instanceof RequestFailure)) return sentence(fallback);
+  if (err.reason === "timeout") return "The scheduler did not answer in time.";
+  if (err.reason === "dropped") return "Lost the relay connection before the answer came.";
+  return sentence(failureReasonText(err));
+}
+
+/**
+ * Why a create's answer never came, without the shared line's "may have
+ * landed anyway" (the verdict says that once, in its own words) and without
+ * the store frame a timeout's message names.
+ */
+function enqueueFailureText(failure: RequestFailure): string {
+  if (failure.reason === "timeout") return "The relay did not answer in time.";
+  if (failure.reason === "dropped") return "Lost the relay connection after the task was sent.";
+  return sentence(failureReasonText(failure));
+}
 
 /**
  * A queued task is followed while it is still on its way to a machine: the
@@ -122,10 +145,18 @@ function capNamed(tasks: readonly string[]): readonly string[] | null {
   return tasks.length > QUEUE_MAX_TASKS ? null : tasks;
 }
 
-/** How a followed task's last poll ends the verdict's follow: a refusal as it was worded, else by whether it was answered. */
-function followEnd(read: { readonly task: Task } | FollowEnd | "missed" | "waiting"): FollowEnd {
+/**
+ * One read of a followed task: the task itself, an end (a refusal, or the
+ * store saying it is gone), `missed` (no answer), `unlisted` (answered without
+ * it while the store still holds it) or `waiting` (no leader to ask).
+ */
+type FollowRead = { readonly task: Task } | FollowEnd | "missed" | "unlisted" | "waiting";
+
+/** How a followed task's last poll ends the verdict's follow: an end as it was, else by what the poll heard. */
+function followEnd(read: FollowRead): FollowEnd {
   if (typeof read === "object" && !("task" in read)) return read;
-  return { kind: read === "missed" ? "unanswered" : "stopped" };
+  if (read === "missed") return { kind: "unanswered" };
+  return { kind: read === "unlisted" ? "unlisted" : "stopped" };
 }
 
 function schedulerKey(scheduler: SchedulerAvailability): string {
@@ -310,6 +341,8 @@ export class Store {
   }
 
   #onQueueChanged(change: QueueChanged): void {
+    // Showing the tab again re-dials (`attach`), and the reopen reads the whole queue and the followed task.
+    if (document.visibilityState !== "visible") return;
     const read = this.#watchesQueue() ? this.refreshQueue(change.tasks, true) : null;
     const verdict = this.#state.verdict;
     if (
@@ -541,8 +574,7 @@ export class Store {
         result = { kind: "failed", repo: repo.origin, message: sentence(schedulerErrorText(reply.code)) };
       } else result = { kind: "ok", repo: repo.origin, decision: reply.decision };
     } catch (err) {
-      const text = err instanceof RequestFailure ? failureReasonText(err) : "the preview failed";
-      result = { kind: "failed", repo: repo.origin, message: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
+      result = { kind: "failed", repo: repo.origin, message: readFailureText(err, "the preview failed") };
     }
     if (this.#state.preview !== asked) return;
     this.#patch({ preview: result });
@@ -723,20 +755,23 @@ export class Store {
       else {
         // An older leader ignores the filter and answers its newest: only the named ids are taken.
         const fresh = reply.tasks.filter((t) => named.includes(t.id));
+        const listed = this.#state.queueView;
+        const absent = named.filter(
+          (id) => !fresh.some((f) => f.id === id) && listed?.kind === "ok" && listed.tasks.some((t) => t.id === id),
+        );
+        const gone = await this.#goneFromStore(absent);
         const shown = this.#state.queueView;
         const base = shown?.kind === "ok" ? shown.tasks : [];
-        // A named id the reply lacks is gone (pruned, deleted), not unchanged.
         const merged = base.flatMap((t) => {
           const now = fresh.find((f) => f.id === t.id);
           if (now !== undefined) return [now];
-          return named.includes(t.id) ? [] : [t];
+          return gone.has(t.id) ? [] : [t];
         });
         const added = fresh.filter((f) => !base.some((t) => t.id === f.id));
         next = { kind: "ok", tasks: [...added, ...merged], holds: reply.holds ?? [], at: reply.at };
       }
     } catch (err) {
-      const text = err instanceof RequestFailure ? failureReasonText(err) : "the queue could not be read";
-      next = { notice: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
+      next = { notice: readFailureText(err, "the queue could not be read") };
     }
     if (next !== null && !("notice" in next)) {
       this.#patch({ queueView: next, ...(nudged ? {} : { queueNotice: null }) });
@@ -751,6 +786,28 @@ export class Store {
     // Keeps a list that was read: the status line says whether anyone is leading.
     if (view?.kind === "ok") this.#patch({ queueNotice: next.notice });
     else this.#patch({ queueView: { kind: "failed", message: next.notice } });
+  }
+
+  /**
+   * Whether the relay's store still holds a task the leader answered without.
+   * A `queue` reply can leave out a task it was asked for — its byte budget
+   * drops records, and a leader lists a create only once it has read it — so
+   * an answer without it says nothing either way; the store does. Null when
+   * the store could not say.
+   */
+  async #inStore(taskId: string): Promise<boolean | null> {
+    try {
+      const reply = await this.#client.getTask(taskId);
+      return reply === null || !reply.ok ? null : reply.task !== null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The ids among `taskIds` the store holds no record of; one it could not answer for is kept. */
+  async #goneFromStore(taskIds: readonly string[]): Promise<ReadonlySet<string>> {
+    const held = await Promise.all(taskIds.map((id) => this.#inStore(id)));
+    return new Set(taskIds.filter((_, i) => held[i] === false));
   }
 
   cancelTask(taskId: string): Promise<void> {
@@ -768,10 +825,10 @@ export class Store {
     try {
       const reply =
         action.op === "cancel" ? await this.#client.cancel(action.taskId) : await this.#client.markDone(action.taskId);
-      if (reply === null) notice = `${SCHEDULER_UNREADABLE}${MAY_HAVE_LANDED_HINT}`;
+      if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
       else if ("ok" in reply) {
-        const landed = isTransportError(reply.code) ? MAY_HAVE_LANDED_HINT : "";
-        notice = `${sentence(schedulerErrorText(reply.code))}${landed}`;
+        const text = sentence(schedulerErrorText(reply.code));
+        notice = isTransportError(reply.code) ? `${text} ${MAY_HAVE_LANDED}` : text;
       } else this.#mergeTask(reply.task);
     } catch (err) {
       notice = this.#actionFailure(err);
@@ -790,9 +847,9 @@ export class Store {
 
   #actionFailure(err: unknown): string {
     const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
-    const text = failureReasonText(failure);
-    const landed = failure.reason === "timeout" || failure.reason === "dropped" ? MAY_HAVE_LANDED_HINT : "";
-    return `${text.charAt(0).toUpperCase()}${text.slice(1)}${landed}`;
+    const text = sentence(failureReasonText(failure));
+    // The shared line for these two already says the request may have landed.
+    return failure.reason === "timeout" || failure.reason === "dropped" ? `${text} ${REFRESH_HINT}` : text;
   }
 
   pauseQueue(): Promise<void> {
@@ -813,7 +870,7 @@ export class Store {
     let notice: string | null = null;
     try {
       const reply = await send();
-      if (reply === null) notice = `${SCHEDULER_UNREADABLE}${MAY_HAVE_LANDED_HINT}`;
+      if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
       else if ("ok" in reply) notice = sentence(schedulerErrorText(reply.code));
       else {
         const view = this.#state.queueView;
@@ -863,8 +920,7 @@ export class Store {
       // A read has nothing to land, so the timeout line's "may have landed" would mislead.
       if (err.reason === "timeout") return { kind: "failed", message: "No answer — the machine may be asleep." };
       // The shared line is a clause meant to follow a prefix; the chart shows it alone.
-      const text = failureReasonText(err);
-      return { kind: "failed", message: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
+      return { kind: "failed", message: sentence(failureReasonText(err)) };
     }
     if (reply === null) return { kind: "failed", message: HISTORY_UNREADABLE };
     if ("ok" in reply) return { kind: "failed", message: HISTORY_ERRORS[reply.code] };
@@ -1035,13 +1091,7 @@ export class Store {
       const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
       // A timeout or a socket closing after the send may have come after the relay stored it.
       const mayHaveLanded = failure.reason === "timeout" || failure.reason === "dropped";
-      const text = failureReasonText(failure);
-      this.#showVerdict({
-        kind: "unqueued",
-        message: `${text.charAt(0).toUpperCase()}${text.slice(1)}`,
-        mayHaveLanded,
-        retry: task,
-      });
+      this.#showVerdict({ kind: "unqueued", message: enqueueFailureText(failure), mayHaveLanded, retry: task });
     } finally {
       this.#patch({ spawning: false });
     }
@@ -1069,7 +1119,7 @@ export class Store {
     };
     if (showing() === null) return;
     const seq = ++this.#taskReadSeq;
-    let read: { readonly task: Task } | FollowEnd | "missed" | "waiting";
+    let read: FollowRead;
     try {
       const reply = await this.#client.queue({ tasks: [taskId] });
       if (reply === null) read = { kind: "refused", message: SCHEDULER_UNREADABLE };
@@ -1080,10 +1130,14 @@ export class Store {
             ? "missed"
             : { kind: "refused", message: sentence(schedulerErrorText(reply.code)) };
       } else {
-        // An older leader ignores the filter, so the reply is searched; a task it lacks is a poll lost, never a verdict:
-        // the store holds it, and the leader that takes it up next lists it.
+        // An older leader ignores the filter, so the reply is searched. One that lacks the task was answered
+        // all the same; only the store says whether the task is gone, and the Queue screen asks it the same way.
         const task = reply.tasks.find((t) => t.id === taskId);
-        read = task !== undefined ? { task } : "missed";
+        if (task !== undefined) read = { task };
+        else {
+          const stored = await this.#inStore(taskId);
+          read = stored === false ? { kind: "gone" } : stored === true ? "unlisted" : "missed";
+        }
       }
     } catch (err) {
       // No leader to ask is no poll spent: the task waits in the relay's queue, and so does this.
@@ -1107,7 +1161,9 @@ export class Store {
     if (typeof read === "object" && "task" in read) this.#taskReadApplied = seq;
     const task = typeof read === "object" && "task" in read ? read.task : shown;
     if (typeof read === "object" && !("task" in read)) {
-      if (left === null) return;
+      // A nudge's refused read leaves the poll chain to ask again; a task gone from the store is final.
+      if (left === null && read.kind !== "gone") return;
+      this.#stopFollowing();
       this.#patch({ verdict: { kind: "queued", task, follow: read } });
       return;
     }

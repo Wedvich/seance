@@ -94,12 +94,16 @@ export type Verdict =
 /**
  * Why a queued verdict stopped following its task before it settled.
  * `refused`: the leader answered the read with a refusal (`message`).
+ * `gone`: the leader answered without it and the store holds no such task.
  * `unanswered`: the polls ran out with the last one unanswered, so what shows
- * may be stale. `stopped`: the polls ran out while the task still waited.
+ * may be stale. `unlisted`: they ran out with the last answer leaving out a
+ * task the store still holds. `stopped`: they ran out while the task still waited.
  */
 export type FollowEnd =
   | { readonly kind: "refused"; readonly message: string }
+  | { readonly kind: "gone" }
   | { readonly kind: "unanswered" }
+  | { readonly kind: "unlisted" }
   | { readonly kind: "stopped" };
 
 /** What survives a reload; transient fields are deliberately absent. */
