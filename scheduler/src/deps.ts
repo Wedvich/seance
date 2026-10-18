@@ -36,13 +36,22 @@ export function released(pred: Task, after: DepAfter): boolean {
 }
 
 /**
- * A `queued` task past this age is never admitted: its key's tombstone may be
- * gone, so it may be a pruned task's authentic version-1 blob put back
- * (`TaskRecord`). `admission` fails it `queue_expired`, so its dependents fail
- * with it and pruning can take it.
+ * The oldest a `queued` task may be and still be admitted. A day short of the
+ * tombstone's life: the tombstone runs from the delete on the relay's clock,
+ * this from `createdAt` on the creator's, which may be `REPLAY_WINDOW_MS`
+ * ahead — so a task pruned soon after its create could otherwise be put back
+ * the moment its tombstone lapses and still read young enough.
+ */
+export const ADMIT_MAX_AGE_MS = STORE_TOMBSTONE_MS - 24 * 60 * 60 * 1000;
+
+/**
+ * A `queued` task past `ADMIT_MAX_AGE_MS` is never admitted: its key's
+ * tombstone may be gone, so it may be a pruned task's authentic version-1 blob
+ * put back (`TaskRecord`). `admission` fails it `queue_expired`, so its
+ * dependents fail with it and pruning can take it.
  */
 export function isExpired(task: Task, now: number): boolean {
-  return task.state === "queued" && now - task.createdAt > STORE_TOMBSTONE_MS;
+  return task.state === "queued" && now - task.createdAt > ADMIT_MAX_AGE_MS;
 }
 
 /**

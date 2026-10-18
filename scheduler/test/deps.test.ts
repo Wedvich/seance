@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { DEP_MISSING_GRACE_MS, STORE_TOMBSTONE_MS, type TaskDep } from "@seance/shared";
+import { DEP_MISSING_GRACE_MS, REPLAY_WINDOW_MS, STORE_TOMBSTONE_MS, type TaskDep } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import { ADMIT_MAX_AGE_MS } from "../src/deps.ts";
 import { prunable } from "../src/prune.ts";
 import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -51,10 +52,12 @@ describe("admission", () => {
     expect(scheduler.task("q")?.state).toBe("running");
   });
 
-  test("a queued task older than the tombstone window fails, and its dependents with it: an authentic blob may have been put back", async () => {
+  test("a queued task older than the admit window fails, and its dependents with it: an authentic blob may have been put back", async () => {
     const { clock, fleet, scheduler, put } = setup();
-    await put("old", { createdAt: clock.now - STORE_TOMBSTONE_MS - 1 });
-    await put("edge", { createdAt: clock.now - STORE_TOMBSTONE_MS });
+    // Admission stops short of the tombstone's life: a creator's clock may run ahead of the relay's.
+    expect(ADMIT_MAX_AGE_MS).toBeLessThanOrEqual(STORE_TOMBSTONE_MS - 2 * REPLAY_WINDOW_MS);
+    await put("old", { createdAt: clock.now - ADMIT_MAX_AGE_MS - 1 });
+    await put("edge", { createdAt: clock.now - ADMIT_MAX_AGE_MS });
     await put("dependent", after("old", "merged"));
     await scheduler.load();
     await pass(scheduler);
@@ -76,7 +79,7 @@ describe("admission", () => {
 
   test("an expired task on a loop gives its loop-mate dependency_failed, not dependency_cycle", async () => {
     const { clock, scheduler, put } = setup();
-    await put("x", { createdAt: clock.now - STORE_TOMBSTONE_MS - 1, ...after("y", "merged") });
+    await put("x", { createdAt: clock.now - ADMIT_MAX_AGE_MS - 1, ...after("y", "merged") });
     await put("y", { state: "blocked", ...after("x", "merged") });
     await scheduler.load();
     await pass(scheduler);

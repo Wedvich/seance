@@ -231,6 +231,34 @@ describe("reservation TTL", () => {
     expect(scheduler.task(task.id)?.state).toBe("lost");
     expect(fleet.spawns).toHaveLength(1);
   });
+
+  test("a connected machine that answers only errors: lost after lostAfterMs past the TTL, freeing its slot without a twin", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    const { clock, scheduler, store } = setup(fleet, { ...DEFAULT_CONFIG, globalMax: 1 });
+    fleet.scripts.set("a", () => ({ ok: false, code: "internal_error", message: "crashed after launch?" }));
+    fleet.sessionsReply = () => ({ ok: false, code: "internal_error", message: "tmux failing" });
+    const t1 = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const expiresAt = scheduler.task(t1.id)?.reservation?.expiresAt ?? 0;
+
+    // The first check is at the TTL; failing ones keep it reserved until the bound.
+    clock.now = expiresAt;
+    await pass(scheduler);
+    expect(scheduler.task(t1.id)?.state).toBe("reserved");
+    clock.now = expiresAt + DEFAULT_CONFIG.lostAfterMs - 1;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(scheduler.task(t1.id)?.state).toBe("reserved");
+
+    clock.now = expiresAt + DEFAULT_CONFIG.lostAfterMs;
+    fleet.beat(clock.now);
+    const t2 = await enqueue(store, scheduler, spec());
+    fleet.scripts.delete("a");
+    await pass(scheduler);
+    expect(scheduler.task(t1.id)).toMatchObject({ state: "lost", reservedAt: NOW, absentSince: expiresAt });
+    expect(scheduler.task(t2.id)?.state).toBe("running");
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual([t1.id, t2.id]);
+  });
 });
 
 /**
@@ -668,6 +696,51 @@ describe("prune", () => {
     await scheduler.load();
     await scheduler.prune(1);
     expect((await store.list()).map((s) => s.id)).toEqual(["c"]);
+  });
+
+  test("a delete whose reply was lost is read back: a committed one leaves no ghost, so later prunes reach the real excess", async () => {
+    const errors: unknown[] = [];
+    const store = new MemoryQueueStore();
+    const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 2 };
+    const scheduler = new Scheduler({
+      store,
+      fleet: new FakeFleet([]),
+      config,
+      now: () => NOW,
+      onError: (e) => errors.push(e),
+    });
+    for (const [i, id] of ["old", "mid", "new"].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
+      await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: NOW - 10 + i });
+    }
+    await scheduler.load();
+    store.failNext({ code: "indeterminate", commit: true });
+    await scheduler.prune();
+    expect(scheduler.task("old")).toBeUndefined();
+    expect(scheduler.tasks().map((t) => t.id)).toEqual(["new"]);
+    expect((await store.list()).map((e) => e.id)).toEqual(["new"]);
+    await scheduler.prune();
+    expect(errors).toEqual([]);
+  });
+
+  test("a delete that met another write keeps the record as the store now holds it", async () => {
+    const errors: unknown[] = [];
+    const store = new MemoryQueueStore();
+    const scheduler = new Scheduler({
+      store,
+      fleet: new FakeFleet([]),
+      now: () => NOW,
+      onError: (e) => errors.push(e),
+    });
+    await store.put("old", 0, { id: "old", spec: spec(), state: "done", createdAt: NOW });
+    await scheduler.load();
+    await store.put("old", 1, { id: "old", spec: spec(), state: "done", createdAt: NOW, doneBy: "manual" });
+    await scheduler.prune(0);
+    expect(scheduler.task("old")).toMatchObject({ doneBy: "manual" });
+    await scheduler.prune(0);
+    expect(scheduler.task("old")).toBeUndefined();
+    expect(await store.list()).toEqual([]);
+    expect(errors).toEqual([]);
   });
 
   test("the default pruneAt leaves room under the store's cap for apps' creates", () => {

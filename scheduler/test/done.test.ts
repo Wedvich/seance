@@ -360,6 +360,22 @@ describe("markDone", () => {
     ]);
   });
 
+  test("a lost task whose machine is away is done with nothing despawned, and marked leftRunning as a cancel marks it", async () => {
+    const { fleet, scheduler, put } = setup(new FakeFleet([machine("a", { connected: false })]));
+    await put("away", { state: "lost", assignment: ON_A, absentSince: NOW });
+    await put("ran", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("away")).toMatchObject({
+      ok: true,
+      task: { state: "done", doneBy: "manual", leftRunning: true },
+    });
+    expect(fleet.despawns).toEqual([]);
+    // Only a lost task: one settled with its session ended is not left running.
+    fleet.fleet = [machine("a")];
+    const ran = await scheduler.markDone("ran");
+    expect(ran.ok ? ran.task.leftRunning : "refused").toBeUndefined();
+  });
+
   test("a session whose ended event lands during the despawn is answered as it finished, or settled by hand when it went to awaiting-merge", async () => {
     let scheduler: Scheduler | undefined;
     let pr: string | undefined;
