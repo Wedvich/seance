@@ -1281,10 +1281,16 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         "the enqueued task to run",
         20_000,
       );
-      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+      const running = (await stack.queue().get(id))?.body;
+      window = running?.assignment?.window ?? null;
+      expect(running?.spec.prompt).toBe("mark me done");
 
       const marked = await app.client.markDone(id);
       expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });
+      // The finishing write dropped the prompt: through the real relay, adapter and seal.
+      const finished = (await stack.queue().get(id))?.body;
+      expect(finished?.spec.prompt).toBeUndefined();
+      expect(finished?.spec.repo).toBe(fixtureOrigin(up) ?? "");
       expect(window).not.toBeNull();
       await pollUntil(async () => !(await listWindows()).includes(window ?? ""), "the marked task's session to end");
       const lines = audit.mock.calls.map((args) => args.join(" "));

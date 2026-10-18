@@ -1511,6 +1511,7 @@ export interface Decision {
 
 export interface Task {
   readonly id: string;
+  /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
   readonly spec: TaskSpec;
   readonly state: TaskState;
   readonly createdAt: number;
@@ -1744,7 +1745,7 @@ export interface QueueRequest {
 }
 
 export interface QueueResponse {
-  /** `spec.prompt` is cut to `QUEUE_PROMPT_PREVIEW`; a ready task's `decision` is its latest, placed or not. */
+  /** `spec.prompt` is cut to `QUEUE_PROMPT_PREVIEW`; absent on a finished task from a leader on this build once its sweep has run (an older leader still returns the preview); a ready task's `decision` is its latest, placed or not. */
   readonly tasks: readonly Task[];
   readonly at: number;
   /** What holds dispatch now (M3). Absent from M2's leaders, which have no pause. */

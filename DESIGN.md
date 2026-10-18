@@ -117,17 +117,31 @@ on four dev machines; prompts and repo names; presence and telemetry metadata �
 each machine's pressure, sessions per exclave and quota (the `status` beat), the
 hourly history in `metrics.sqlite` kept forever, account ids, skill names and
 repo origins, sealed in transit and plaintext at rest on the machine. Since M3,
-prompts and repo names also sit at rest in the relay's Durable Object, sealed in
-each `task:` record. No clock bounds that: a record stays until the leader
-deletes it, and the leader deletes only a finished task, and only once the store
-holds `pruneAt` (96) records, then down to `keepFinished` (50). Below `pruneAt`
-nothing is pruned, so every finished task's prompt stays in the DO indefinitely
-— the normal state for a small fleet. An unfinished task is kept until expiry
-settles it as failed (`queue_expired` after `STORE_TOMBSTONE_MS`, `lost_expired`
-and `merge_expired` after 7 days), and from then it is prunable like any other;
-a finished task an unfinished one still names is kept too. A deleted record's
-tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days) but no
-envelope. The bearer
+repo names and prompts also sit at rest in the relay's Durable Object, sealed in
+each `task:` record. A repo name stays for as long as the record does: the
+leader deletes only a finished task, and only once the store holds `pruneAt`
+(96) records, then down to `keepFinished` (50), so below `pruneAt` a finished
+record stays indefinitely. A prompt stays only while its task is unfinished
+(2026-10-18, owner): the leader drops it on the write that finishes the task
+(done, failed or cancelled), and the first passes of a leader on this build strip
+any finished record that still holds one, so a record finished earlier, or by an
+older leader, does not keep it. No clock bounds an unfinished task's prompt as a
+whole. `queued` is bounded by `queue_expired` (`STORE_TOMBSTONE_MS`), and `lost`
+and `awaiting-merge` by 7-day expiry (`lost_expired`, `merge_expired`). `ready`,
+`blocked`, `running` and `needs-input` have no clock, and `reserved` only the
+reservation TTL, which returns it to `ready`, never finishes it: the prompt
+stays while the task waits, or while its session lives. What a finished record
+may still carry is the prompt's slug (at most 40 characters) — the session
+window, branch and worktree names built from it (`<slug>-<n>`, `worktree-<slug>-<n>`),
+and a `failure.message` that names one (`too many worktrees named <slug>-*`) —
+as labels, not the prompt. A finished prompt is not kept anywhere by Séance:
+the Claude transcript on the machine is the copy from when the task ran, and a
+task that never ran (cancelled or marked done while waiting, `queue_expired`,
+`dependency_failed`, a spawn refused before launch) has no copy at all. A deleted
+record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days)
+but no envelope. Residual: Cloudflare's point-in-time recovery can restore an
+earlier store state for up to 30 days, so a stripped prompt stays recoverable
+that long — still sealed under the PSK. The bearer
 token is not an asset in the same sense — see its blast radius above.
 
 **Séance's own footprint.** The daemon is structurally a remote access tool and
@@ -1158,7 +1172,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
 - `queue { tasks? }` → `{ tasks, holds, at }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
   `needs-input` leading, newest first within each) with their latest
-  decisions, prompts cut to `QUEUE_PROMPT_PREVIEW`; a decision past the reply's budget carries
+  decisions, prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task); a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
   only (at most `QUEUE_MAX_TASKS`): what a `queue-changed` named, or the one task a verdict
   follows. An unreadable filter is `invalid_request`, never "everything"; an older leader
@@ -1546,7 +1560,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   ran and the `cancelled` write was then revoked (`unrecorded` in the library: the session may
   already have ended, the term ends, and MCP shows that message, which says so), and
   `not_leader` (below). `queue`
-  replies with the `QUEUE_MAX_TASKS` most relevant tasks, unfinished first (or the ids a `tasks` filter names), prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
+  replies with the `QUEUE_MAX_TASKS` most relevant tasks, unfinished first (or the ids a `tasks` filter names), prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task), each with
   its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
   3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
   against a plaintext budget (`QUEUE_REPLY_BUDGET`, 44 000 bytes, about 59 000 sealed against
@@ -1968,6 +1982,31 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   never pruned, so they expire instead ("Expiry", below). `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
+- **A finished task keeps no prompt** (2026-10-18, owner). `forgetPrompt` (`task.ts`)
+  runs in `#update` — the one write path, as for the clocks — so the write that moves a task
+  to `done`, `failed` or `cancelled` carries `spec` without `prompt`, at no extra version, whatever
+  built the record (`advance`, expiry, cancel, mark-done, admission, a verdict). Records
+  finished before this, or by an older leader, are stripped by `#forgetPrompts` at the end of
+  a pass: oldest first, at most 8 a pass (an uncapped sweep of up to `pruneAt` − 1 records would
+  delay the next admission and dispatch, and nudge every app per write), sequential, one fenced
+  CAS'd put each; a write that did not land is reported through `onError` and the record is left
+  alone for the rest of the term (`#forgetFailed`: a record the store refuses every time would
+  otherwise take a slot of every pass and log every time), tried again by the next leader,
+  `StoreRevoked` ends the pass. It is not in `takeover`, where a throw would fail the takeover.
+  Mixed versions are safe: `parseTaskRequest` has made `prompt` optional since M2 item 6, so every
+  reader parses a finished record without one; an older leader still writes a finished record with its
+  prompt, and the next leader on this build strips it. Apps cannot write a finished record
+  (`bindTaskRecord` refuses a version-1 record that is not `queued`; apps create `task:`
+  records, only overwrites and deletes are the leader's), and no transition leaves a finished state, so nothing re-adds one. The surfaces:
+  the PWA titles a finished task with neither title nor prompt by its session's window name, else
+  its repo; MCP `get_queue` lists it without a `prompt` key, `placement.window` still naming it.
+  The slugs (`assignment.window`, `branch`) stay as labels; git and the launch ledger hold the
+  same slug anyway. **Rejected: a separate `prompt:<id>` record**, dropped when its task
+  finishes. The app's create is a single `expect: 0` put and the store has no multi-key atomicity,
+  so a task could exist with no prompt, or a prompt with no task; an older leader in a mixed fleet
+  would read a new unfinished task with no inline prompt and spawn it empty; and a new prefix is a
+  relay change (`STORE_PREFIXES`, the store's namespaces and its authorization rules), where the
+  relay stays blind to records.
 - **`lost`: a task whose machine stopped answering for it** (M2 item 3's gap B, closed in item
   6; the reservation half added 2026-10-16). A `running` or `needs-input` task whose machine has
   been absent — not connected, or gone from the registry — for `lostAfterMs` (15 min, Settled
@@ -3560,7 +3599,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   into what it holds), on a reconnect and on a leader change. Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
   Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
-  task's title (its own, else its prompt's first line cut to 80, else its repo), where it is and
+  task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). **Cancel** is offered where the leader's `cancel` is allowed, and
   where it ends a live session it takes a second tap within four seconds; **Mark done** sets the

@@ -26,10 +26,11 @@ import {
   type UnreadablePause,
   type UnreadableTask,
 } from "./ports.ts";
+import { codeUnitOrder } from "./order.ts";
 import { prunable } from "./prune.ts";
 import { accountResetAt, route, windowResetOf, type Decision } from "./route.ts";
 import { asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
-import { advance, FINISHED, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
+import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
 
@@ -41,6 +42,14 @@ export const SCHEDULER_CLIENT = "scheduler";
 
 /** A write that keeps meeting another writer's version gives up after this many tries. */
 const WRITE_ATTEMPTS = 3;
+
+/**
+ * Legacy finished records stripped of their prompt per pass. Sequential
+ * round-trips inside `#pass` delay the next admission and dispatch and nudge
+ * every app per write, so the backlog (up to `pruneAt` - 1 records, once) is
+ * worked off a few at a time.
+ */
+const FORGET_PROMPTS_PER_PASS = 8;
 
 export interface SchedulerOptions {
   readonly store: QueueStore;
@@ -134,6 +143,12 @@ export class Scheduler {
    * to no one, and `progress` holds it.
    */
   #returned = new Set<string>();
+  /**
+   * Finished records whose prompt-stripping write did not land this term: a
+   * refusal repeats, so retrying would take a slot of every pass and log every
+   * time. Cleared on takeover.
+   */
+  readonly #forgetFailed = new Set<string>();
   /** Task id → the tail of its writes (`#serial`). */
   readonly #chains = new Map<string, Promise<void>>();
   /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
@@ -235,11 +250,13 @@ export class Scheduler {
    * way, for a merge the gap hid. An unanswered machine leaves everything else
    * as it was. Then finished tasks past the keep are pruned, if the store holds
    * `pruneAt` records. Expiry runs in the first pass after it, which the host
-   * ticks right away.
+   * ticks right away — and so does stripping the prompt from finished records
+   * that still hold one (`#forgetPrompts`).
    */
   async takeover(): Promise<void> {
     await this.load();
     this.#sweptAt = this.#now();
+    this.#forgetFailed.clear();
     await this.#check(
       this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
     );
@@ -544,6 +561,29 @@ export class Scheduler {
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
+    await this.#forgetPrompts();
+  }
+
+  /**
+   * Finished records written before a finished task kept no prompt, or by an
+   * older leader, still hold one: rewrite them without it, oldest first and at
+   * most `FORGET_PROMPTS_PER_PASS` per pass, each its own fenced CAS'd put.
+   * `#update` strips at the boundary, so handing back `current` is enough. A
+   * write that did not land is reported by `#update`, and the record keeps its
+   * prompt and is skipped until the next term (`#forgetFailed`). `StoreRevoked`
+   * propagates: the term is over. Not in `takeover`: a throw there fails the
+   * takeover and blocks the term.
+   */
+  async #forgetPrompts(): Promise<void> {
+    const stale = this.tasks()
+      .filter((t) => forgetPrompt(t) !== t && !this.#forgetFailed.has(t.id))
+      .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id))
+      .slice(0, FORGET_PROMPTS_PER_PASS);
+    for (const task of stale) {
+      // oxlint-disable-next-line no-await-in-loop -- one CAS'd write at a time, as `prune` does
+      const written = await this.#update(task.id, (current) => (forgetPrompt(current) === current ? null : current));
+      if (written === null) this.#forgetFailed.add(task.id);
+    }
   }
 
   /**
@@ -860,7 +900,9 @@ export class Scheduler {
    * past the store's bound is written again with its decision cut to the
    * winner, never the task cut. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
-   * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way. Null when `change` declines (it returns null
+   * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
+   * A finished task's prompt is dropped on the same write (`forgetPrompt`), so
+   * none reaches the store with one. Null when `change` declines (it returns null
    * for a task no longer in the state it acts on), the task is gone or
    * unreadable, the store refused the write, or the conflicts outlast
    * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
@@ -874,7 +916,7 @@ export class Scheduler {
         const proposed = change(held.task);
         if (proposed === null) return null;
         const now = this.#now();
-        const changed = endClock(held.task, inputClock(proposed, now), now);
+        const changed = forgetPrompt(endClock(held.task, inputClock(proposed, now), now));
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);
