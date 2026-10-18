@@ -751,7 +751,7 @@ same PR, with the reason.
   (tombstones and the 30-day admit rule, M3 item 0). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
   exists (rotate) — which stops new junk but clears none: junk stays until removed by hand, and
-  a full `task:` refuses every enqueue (DESIGN.md Threat model, item 3; open, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
+  a full `task:` refuses every enqueue until a person clears the unreadable records from the Queue screen (`discard`; DESIGN.md Threat model, item 3, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
   M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
   M4's account records add a smaller one: being app-writable, a token holder can delete an
   alias or overwrite it with junk that readers skip — but not read, forge or roll one back. Under

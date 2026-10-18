@@ -323,17 +323,21 @@ Séance's noise is cover for a real intruder.
    registry growth (T1499.003). The store adds one act to the token: list the
    queue's sealed records and create junk tasks, bounded by `MAX_TASKS`, the
    per-socket create floor and `too_large`, never overwrite or delete one.
-   Bounded is not cleared (open, M3 review S2, 2026-10-18). Junk never opens
-   (`unopenable`), the leader never deletes a record it cannot read, and no
-   client can delete one, so it stays until someone edits the DO's storage by
-   hand. About a minute of creates (60 per socket per minute, three sockets)
-   fills `task:` to `MAX_TASKS` (128), and every enqueue after that is
-   `store_full`. Pruning counts unreadable records toward `pruneAt` but deletes
-   only readable finished ones, so meanwhile it deletes real finished tasks down
-   to `keepFinished`, and the junk refills those slots. Rotating the token stops
-   new junk and removes none. A PSK rotation does the same with no attacker:
-   every record sealed under the old key reads `unopenable` and holds its slot
-   (up to about 96, below `pruneAt`). The per-socket create floor bounds one
+   Bounded is not cleared on its own: junk never opens (`unopenable`), and the
+   leader never deletes a record it cannot read unasked. Until 2026-10-18 no
+   client could delete one either, so it stayed until someone edited the DO's
+   storage by hand; now a person clears it (M3 review S2): the Queue screen shows
+   the unreadable records a `queue` reply lists, and **Clear** sends `discard`
+   for each, at the version listed (`discard` in the op table). Until then, about
+   a minute of creates (60 per socket per minute, three sockets) fills `task:`
+   to `MAX_TASKS` (128), and every enqueue after that is `store_full`, naming the
+   unreadable records. Pruning counts unreadable records toward `pruneAt` but
+   deletes only readable finished ones, so meanwhile it deletes real finished
+   tasks down to `keepFinished`, and the junk refills those slots. Rotating the
+   token stops new junk and removes none; Clear removes it. A PSK rotation does
+   the same with no attacker: every record sealed under the old key reads
+   `unopenable` and holds its slot (up to about 96, below `pruneAt`) until
+   cleared. The per-socket create floor bounds one
    connection's rate, not the total. `store-list` costs the token holder nothing
    either (open, M3 review S4): it is unrated, one full listing reads every
    record (128 rows), and the free plan allows 5M rows read a day — about 39,000
@@ -914,7 +918,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `lead` / `follow`                                                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                                                                        | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                     |
 | `lead-proof` (daemon→relay, op `lead-proof` at rest)                | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                                                                          | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                             |
 | `msg` (→`"scheduler"`)                                              | any app or daemon                                                                                                                                                                                   | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader` |
-| ops `queue` / `route-preview` / `cancel`                            | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`                                                               | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                 |
+| ops `queue` / `route-preview` / `cancel`                            | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`                                                     | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                 |
 | `msg` (`from: "scheduler"`, `term`)                                 | the leader's app-role leg, built per term in `daemon/src/leader.ts` and sent on by `termFleet` in `daemon/src/leader-adapters.ts`, over `shared/src/app-client.ts` built with `scheduler: { term }` | fenced by `relay/src/hub.ts` `#isCurrentTerm` (term only: an app socket has no identity to check) — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                          |
 | `msg` (app→daemon)                                                  | `shared/src/app-client.ts`                                                                                                                                                                          | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                        |
 | `msg` (daemon→app)                                                  | `daemon/src/relay-client.ts`                                                                                                                                                                        | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                      |
@@ -937,8 +941,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                             | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                       |
 | `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's daemon socket after an app-leg write                                                                                                             | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged`                                                                                                                                                                                                                |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                       | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                               |
-| ops `mark-done` / `pause` / `resume`                                | an app via `shared/src/app-client.ts`: `pwa/src/store.ts` (the Queue screen)                                                                                                                        | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest`, run by `Scheduler.pause` / `resume` and `Scheduler.markDone`                                                                                                                                                                           |
-| op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                       | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/store.ts` re-reads on it                                                                                                                             |
+| ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                              | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                              |
+| op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                       | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                   |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")            | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                   |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -3854,17 +3858,26 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   and its decision and follows it: a `queue-changed` nudge that names the task (or none) re-reads
   `queue {tasks: [id]}` at once, a reconnect or a new leader re-reads it, and a poll every 2s, at
   most 30 times, is the fallback while the task has not settled (`isSettled`,
-  `shared/src/task-phase.ts`). A read that finds no task, or is answered `not_ready`, is a missed
-  poll that keeps what was shown — never "the leader forgot it", since the queue is the
-  store's and a task absent from a read is one the leader has not read yet. A read the leader
+  `shared/src/task-phase.ts`). A read answered `not_ready` is a missed
+  poll that keeps what was shown. A reply without the task decides nothing: the reply's byte
+  budget can drop a named task, and a leader lists a create only once it has read it. So the
+  app asks the store (`getTask`; 2026-10-18, M3 review Q7). If the store holds no such task,
+  the follow ends with "no longer in the queue", even on a nudge's read. If it holds the task,
+  the follow goes on, and polls that run out on such answers say the scheduler's answers leave
+  it out, not that it stopped answering. If the store cannot say, it is a missed poll. The Queue
+  screen applies the same rule. A read the leader
   refuses, or whose reply cannot be read, ends the follow and says why. With no leader or an
   unverified one the read is "waiting", and spends no poll: the verdict says the task waits in the
   queue until one leads, and it follows the task as soon as one does. Polls that run out on a miss
   say the screen may be out of date and point at the Queue screen. A lost create (`timeout`,
-  `dropped`, a transport error) says it may have queued anyway and offers **Try again**, which
+  `dropped`, a transport error) says it may have queued anyway, once: the reason it gives never
+  says so too, nor names the store frame. It offers **Try again**, which
   re-sends the same task: a repeat create answers `version_conflict`, read as "already stored"
   (`landedEarlier`), so it cannot queue twice. One that never left (`disconnected`) says it was
-  not queued, with the same retry. A pending enqueue is not persisted across a reload: a lost
+  not queued, with the same retry. A `store_full` refusal names the unreadable records the last
+  queue read listed, when there are any, since no prune frees those (M3 review S2). No
+  `queue-changed` is read while the tab is hidden (M3 review P5): showing it re-dials, and the
+  reopen reads the queue and the followed task whole. A pending enqueue is not persisted across a reload: a lost
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
   Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
   leader.
@@ -3874,7 +3887,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   keeps a list it had already read, marked possibly stale; there is deliberately no fallback that
   lists the store directly, since the leader's reply is where decisions, holds and the bounded,
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
-  into what it holds), on a reconnect and on a leader change. Tasks group by what each needs from
+  into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
+  is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
   Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
@@ -3882,7 +3896,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   credits", not "would spend"). **Cancel** and **Mark done** are offered where the leader allows
   them. Mark done sets the task `done` by hand, ending its session first when it is running,
   `needs-input` or `lost`. Either one that ends a live session takes a second tap within four
-  seconds. Holds show whole or per account, by the account's
+  seconds. A `done` or `cancelled` task with `leftRunning` says its session may still be running
+  on its machine (M3 review Q8). Records the leader cannot read (`QueueResponse.unreadable`:
+  junk, or sealed under an earlier PSK) show as one line, "N unreadable records hold queue
+  slots", with **Clear** (M3 review S2). Clear takes a second tap, then sends `discard` for each
+  record at its listed version. A record already gone counts as cleared; any other refusal stops
+  there and becomes the notice. The queue is then read whole. Holds show whole or per account, by the account's
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
   relevant `QUEUE_MAX_TASKS`. Authoring a batch or a dependency from the PWA has no UI yet
