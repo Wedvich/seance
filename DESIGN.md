@@ -1264,7 +1264,9 @@ on one daemon at a time, the one the relay nominates. Nothing else about that da
 is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's `auto` — is complete
 (2026-10-16), and so is M3 — the durable queue in the relay's store, deps, batches, caps, pause and
 the PWA's Queue screen (2026-10-18); what they leave for M4 is docs/scheduler.md's M2 and M3
-"Gaps".
+"Gaps". Two reviews are cited by name. The **M2 review** (2026-10-17) reviewed M2 and was fixed
+in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026-10-18) reviewed
+#132–#188, and its fixes are tracked outside the repo; its labels are Q, S, P, D and R.
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 
@@ -1447,7 +1449,11 @@ enforces is what it can see: who is asking, the key, a version and a size.
   ciphertext past `STORE_CREATE_MAX_CT_LENGTH` is `too_large`, as is any put past
   `STORE_MAX_CT_LENGTH`; the bound is exact. The `ct` is parsed unbounded and measured after, so a
   1 MiB one reads `too_large` rather than malformed; the WebSocket message cap bounds it at the
-  transport.
+  transport. Why a create gets 28 KiB of the 40: measured, a create with every field at its bound
+  and the prompt in two-byte characters fits the create cap, and all a leader adds at every bound
+  fits beside it with a 10-candidate decision; past that the leader cuts the stored decision. The
+  cap was 32 KiB until 2026-10-17 (M2 review), when a full create left the leader no room for its
+  own fields and its first write would have been `too_large`, leaving the task `queued` for good.
 - **Tombstones**, under `task:` only — the one prefix apps may create into, so the one where a
   delete could otherwise be undone by re-creating from an old authentic blob. A delete leaves
   `{ version, at }` and no env, for `STORE_TOMBSTONE_MS`: a put there is `version_conflict` at any
@@ -2169,6 +2175,20 @@ reuses the record helpers.
   guard, since a record is days old by design — refuses one sealed to anyone else, and keeps it
   only through `bindTaskRecord`. A blob that does not decrypt, is another op or is addressed
   elsewhere is `unopenable`; the binding gives the rest of `RecordUnreadable`.
+- **The reader's rules are one function**, `bindTaskRecord` in `shared/src/parse.ts`, each a
+  `RecordUnreadable` reason. Its sealed `version` must be the relay's (`version_mismatch`): a
+  token holder can list the queue, keep a task's old blob and put it back — authentic bytes,
+  stale state, a cancelled task back to `ready` — and the version makes it fail like a forged
+  one. Its `task.id` must be the key's own (`key_mismatch`), or a token holder could create a
+  fresh key holding another task's version-1 blob and have it run twice. A version-1 record must
+  be `queued` (`created_unqueued`): a create is an app's enqueue and only the leader moves a task
+  on, so no client can create one running. Its `createdAt` may be at most `REPLAY_WINDOW_MS`
+  ahead of the reader's clock (`created_ahead`), or a far-future stamp would let a blob outlive
+  the admit rule — a leader admits no `queued` task more than `STORE_TOMBSTONE_MS` old, since its
+  key's tombstone may be gone by then ("Admission and dependencies"). That age is admission's
+  rule, not the reader's: such a record still reads, to be failed `queue_expired` and pruned.
+  Every one of these holds against a token holder writing through the relay's checks, not
+  against the relay itself (Threat model, item 4).
 - **Unreadable is reported, never fatal, never deleted.** `RelayClient.listTasks` returns the
   tasks that bound beside `{ key, version, reason }` for each that did not; `getTask` returns
   either. The app leg has no delete at all (the relay forbids it), so clearing junk stays a
@@ -2424,7 +2444,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   - A repo on `/mnt/c` under WSL makes each git call slow; the pass is bounded by the tracked tasks
     that are not cut off: those that ever held work, and quiet ones within their hour (or never
     judged, which keeps them checked).
-- **Rejected.** Re-sending every task's state on a cadence (docs/scheduler.md's 2026-10-17 decision):
+- **Rejected.** Re-sending every task's state on a cadence (decided 2026-10-17):
   it is load for a state the ledger and `progress` already carry, and a leader that missed one reads it
   back anyway. Reading an upstream (`%(upstream:track)`, `branch.<b>.merge`): `--no-track` branches
   have none, so it would say nothing for the branches this exists for.
@@ -3751,7 +3771,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
   relevant `QUEUE_MAX_TASKS`. Authoring a batch or a dependency from the PWA has no UI yet
-  (docs/scheduler.md, M3 item 6): the app client enforces the batch-index bound at
+  (docs/scheduler.md, M4, _Authoring surface_): the app client enforces the batch-index bound at
   `createTask`, which is the only place an app could set it.
 - **Desktop shows three columns instead of a stack** (2026-10-18). From 1200px wide — room for
   three phone-width columns, the one breakpoint, in `app.tsx` — the form, the Machines screen and
