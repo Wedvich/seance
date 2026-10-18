@@ -820,6 +820,27 @@ describe("resolveOrigin", () => {
     expect(resolveOrigin(autoMachines(), "seance")).toEqual({ origin: ORIGIN });
   });
 
+  test("an origin pasted in another case or as a remote URL finds the key; a clone name stays exact", () => {
+    for (const pasted of ["github.com/M/Seance", "https://github.com/M/seance.git", "git@github.com:m/Seance.git"]) {
+      expect(resolveOrigin(autoMachines(), pasted)).toEqual({ origin: ORIGIN });
+    }
+    const resolved = resolveOrigin(autoMachines(), "Seance");
+    if (!("error" in resolved)) throw new Error("expected an error");
+    expect(resolved.error).toContain('no repo "Seance" for auto');
+  });
+
+  test("a listed origin with a port resolves as listed, not as scp host:path", () => {
+    const ported = "git.example:2222/team/repo";
+    const machines = [
+      machine({
+        deviceId: "device-1",
+        name: "MacBook Pro",
+        repos: [{ name: "repo", path: "/repos/repo", defaultBranch: "main", origin: ported }],
+      }),
+    ];
+    expect(resolveOrigin(machines, ported)).toEqual({ origin: ported });
+  });
+
   test("a clone name behind two origins is ambiguous, and the error names each with its machines", () => {
     const machines = [
       ...autoMachines(),

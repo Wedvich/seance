@@ -38,8 +38,9 @@ async function readDefaultBranchFile(repoPath: string): Promise<string | null> {
  * The scheduler's repo key: the same across machines where a clone's name
  * (machine-local, collision-disambiguated) is not. Scheme, userinfo and the
  * `.git` suffix go, scp-style `host:path` becomes `host/path`, and the whole
- * thing is lowercased — the hosts we route to compare case-insensitively, and
- * a key that differs by case would split one repo in two. A local path (or
+ * thing is lowercased — GitHub and Azure DevOps compare case-insensitively, and
+ * a key that differs by case would split one repo in two (DESIGN.md records the
+ * collision this accepts on a case-sensitive host). A local path (or
  * `file://`) is some machine's mirror, not a repo identity, so it reads as no
  * remote — a Windows drive-letter or UNC path too, which git takes as local
  * before scp syntax and which would otherwise key `C:/src/repo` as host `c`.
@@ -59,12 +60,28 @@ export function normalizeOrigin(url: string): string | null {
     if (scp === null) return null;
     rest = `${scp[1]}/${scp[2]?.replace(/^\/+/u, "") ?? ""}`;
   }
-  rest = rest
+  return originKey(rest);
+}
+
+/** `host/path` → the key; null without a path. */
+function originKey(hostPath: string): string | null {
+  const key = hostPath
     .replace(/\/+$/u, "")
     .replace(/\.git$/iu, "")
     .replace(/\/+$/u, "")
     .toLowerCase();
-  return rest.includes("/") ? rest : null;
+  return key.includes("/") ? key : null;
+}
+
+/**
+ * What a caller typed as an origin, as the keys it could mean, in any case: the
+ * input read as a key itself — a listed key with a port (`host:22/path`) would
+ * misparse as scp — then keyed as `normalizeOrigin` keys a URL or scp form as
+ * `git remote -v` prints it. Empty when neither has a path.
+ */
+export function originQuery(input: string): readonly string[] {
+  const trimmed = input.trim();
+  return [...new Set([originKey(trimmed), normalizeOrigin(trimmed)])].filter((key) => key !== null);
 }
 
 /**

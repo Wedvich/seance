@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
 import { addWorktree, makeClone, makeSeparateGitDirClone } from "../test/fixtures.ts";
-import { normalizeOrigin, readDefaultBranch, readOriginUrl, repoSetsEqual, scanRepos } from "./scan.ts";
+import { normalizeOrigin, originQuery, readDefaultBranch, readOriginUrl, repoSetsEqual, scanRepos } from "./scan.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -196,6 +196,18 @@ describe("origin", () => {
     expect(normalizeOrigin("\\\\fileserver\\mirrors\\seance.git")).toBeNull();
     expect(normalizeOrigin("https://github.com")).toBeNull();
     expect(normalizeOrigin("")).toBeNull();
+  });
+
+  test("a typed origin keys like a scanned one, bare host/path included", () => {
+    expect(originQuery("github.com/Wedvich/seance")).toEqual(["github.com/wedvich/seance"]);
+    expect(originQuery(" github.com/Wedvich/seance.git/ ")).toEqual(["github.com/wedvich/seance"]);
+    expect(originQuery("https://github.com/Wedvich/seance.git")).toContain("github.com/wedvich/seance");
+    expect(originQuery("git@github.com:Wedvich/seance.git")).toContain("github.com/wedvich/seance");
+    // A listed key with a port reads as itself, not as scp `host:path`.
+    expect(normalizeOrigin("ssh://git@git.example:2222/team/repo.git")).toBe("git.example:2222/team/repo");
+    expect(originQuery("git.example:2222/Team/repo")[0]).toBe("git.example:2222/team/repo");
+    // A clone name is no origin; the caller matches it as a name instead.
+    expect(originQuery("seance")).toEqual([]);
   });
 
   test("reads remote.origin.url from the common dir's config — first url, quoted or bare", async () => {
