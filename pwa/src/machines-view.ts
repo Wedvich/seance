@@ -75,7 +75,7 @@ export interface AccountCard {
 }
 
 export interface MachinesView {
-  /** Who leads the scheduler, or why nobody does. */
+  /** Header-meta fragment: who leads the scheduler, or that nobody does. */
   readonly scheduler: string;
   readonly cards: readonly MachineCard[];
   readonly accounts: readonly AccountCard[];
@@ -171,13 +171,13 @@ function buildLine(machine: Machine, now: number): string | null {
  * be — its entry did not open — and then only its id says which seed it is.
  */
 function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailability): string {
-  if (scheduler.kind === "none") return "No scheduler is leading. Auto tasks wait in the queue until one does.";
+  if (scheduler.kind === "none") return "no scheduler";
   const name = machines.find((machine) => machine.deviceId === scheduler.deviceId)?.name;
   if (scheduler.kind === "unverified") {
     const who = name ?? `device ${scheduler.deviceId.slice(0, 8)}`;
-    return `Scheduler nominee ${who} is unverified: it hasn't shown it holds this key.`;
+    return `scheduler ${who} unverified`;
   }
-  return `Scheduler: ${name ?? scheduler.deviceId.slice(0, 8)} leads (term ${scheduler.term}).`;
+  return `scheduler on ${name ?? scheduler.deviceId.slice(0, 8)} · term ${scheduler.term}`;
 }
 
 function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailability): MachineCard {
