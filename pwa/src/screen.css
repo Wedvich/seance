@@ -1647,3 +1647,98 @@
   font-size: 13px;
   color: var(--fg2);
 }
+
+/* ---- queue screen ---- */
+
+.queue-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.fleet-card-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg2);
+}
+
+.queue-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--gap);
+}
+
+/* The shared quiet button is full-width; in a row of two it sizes to its label. */
+.queue-actions .quiet {
+  width: auto;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.queue-actions .quiet:disabled {
+  opacity: 0.5;
+}
+
+.queue-why > summary {
+  font-size: 13px;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.queue-why > .decision {
+  margin-top: 8px;
+}
+
+.queue-refresh {
+  width: 44px;
+  height: 44px;
+  margin: -8px -8px -8px 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg2);
+  font-size: 17px;
+  cursor: pointer;
+  flex: none;
+}
+
+.queue-resume {
+  align-self: center;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--sur2);
+  color: var(--fg);
+  font-size: 14px;
+  flex: none;
+}
+
+.queue-resume:disabled {
+  color: var(--fg2);
+}
+
+/* The header's pill beside the relay group: same track, a label instead of a cog. */
+.queue-chip {
+  position: relative;
+  height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--sur2);
+  color: var(--fg);
+  font-size: 14.5px;
+  font-weight: 600;
+  flex: none;
+}
+
+.queue-chip-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

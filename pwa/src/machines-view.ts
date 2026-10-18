@@ -105,6 +105,16 @@ function accountName(accountId: string, email: string | undefined): string {
   return `acct ${account.slice(0, 8)}`;
 }
 
+/** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
+export function accountDisplayName(machines: readonly Machine[], accountId: string): string {
+  for (const machine of machines) {
+    for (const exclave of machine.exclaves ?? []) {
+      if (exclave.accountId === accountId && exclave.email !== undefined) return exclave.email;
+    }
+  }
+  return accountName(accountId, undefined);
+}
+
 function accountLabel(exclave: ExclaveInfo): string {
   if (exclave.accountId !== null) return accountName(exclave.accountId, exclave.email);
   return exclave.authOk ? "signed in" : "not signed in";

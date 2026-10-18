@@ -5,6 +5,7 @@ import {
   type MetricName,
   type MetricsSeries,
   type MetricsStep,
+  type PauseHold,
   type Decision,
   type SessionEntry,
   type SpawnErrorCode,
@@ -72,24 +73,31 @@ export type Verdict =
       readonly sessionCount: number | null;
     }
   /**
-   * An `auto` spawn the scheduler accepted. `task` is the newest copy the
-   * leader reported — refreshed from `queue` while the verdict is up — so the
-   * screen follows it from waiting to placed, with its decision.
+   * An `auto` spawn the relay's store took. `task` is the newest copy the
+   * leader reported — refreshed from `queue` on `queue-changed` and a bounded
+   * poll while the verdict is up — so the screen follows it from waiting to
+   * placed, with its decision. Until a leader reads it, it is the app's own
+   * copy.
    */
   | { readonly kind: "queued"; readonly task: Task; readonly follow?: FollowEnd }
-  /** `submit` never landed, or the leader refused it; `message` says which. */
-  | { readonly kind: "unqueued"; readonly message: string; readonly mayHaveLanded: boolean };
+  /**
+   * The store refused the task, or its answer never came; `message` says which.
+   * `retry` is the task to put again: the same id, so a retry cannot queue twice.
+   */
+  | {
+      readonly kind: "unqueued";
+      readonly message: string;
+      readonly mayHaveLanded: boolean;
+      readonly retry?: Task;
+    };
 
 /**
- * Why a queued verdict stopped following its task before it settled. `gone`:
- * the leader answered without it — M2's queue is the leader's memory, so a
- * leader change drops it. `refused`: the leader answered the read with a
- * refusal (`message`). `unanswered`: the polls ran out with the last one
- * unanswered, so what shows may be stale. `stopped`: the polls ran out while
- * the task still waited.
+ * Why a queued verdict stopped following its task before it settled.
+ * `refused`: the leader answered the read with a refusal (`message`).
+ * `unanswered`: the polls ran out with the last one unanswered, so what shows
+ * may be stale. `stopped`: the polls ran out while the task still waited.
  */
 export type FollowEnd =
-  | { readonly kind: "gone" }
   | { readonly kind: "refused"; readonly message: string }
   | { readonly kind: "unanswered" }
   | { readonly kind: "stopped" };
@@ -163,6 +171,23 @@ export type PreviewState =
   | { readonly kind: "loading"; readonly repo: string }
   | { readonly kind: "ok"; readonly repo: string; readonly decision: Decision }
   | { readonly kind: "failed"; readonly repo: string; readonly message: string };
+
+/** The Queue screen's read of the leader's `queue`: the tasks it keeps in view and what holds dispatch. */
+export type QueueState =
+  | { readonly kind: "loading" }
+  | {
+      readonly kind: "ok";
+      readonly tasks: readonly Task[];
+      readonly holds: readonly PauseHold[];
+      readonly at: number;
+    }
+  | { readonly kind: "failed"; readonly message: string };
+
+/** A cancel or mark-done on its way to the leader; the row shows it busy. */
+export interface TaskAction {
+  readonly taskId: string;
+  readonly op: "cancel" | "mark-done";
+}
 
 export type HistoryResult =
   | { readonly kind: "loading" }

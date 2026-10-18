@@ -86,9 +86,14 @@ function quotaText(
   return `quota: ${quota.source} · ${at} on ${observer?.connected === false ? `${named}, asleep` : named}`;
 }
 
-function spillText(candidate: Candidate): string | null {
+/** A placed task already spent them: "would" is wrong for a record read after the fact. */
+function spillText(candidate: Candidate, tense: "would" | "did"): string | null {
   const { spill } = candidate;
-  return spill === undefined ? null : `would spend credits (${spill.window} at ${Math.round(spill.projectedPct)}%)`;
+  if (spill === undefined) return null;
+  const pct = Math.round(spill.projectedPct);
+  return tense === "would"
+    ? `would spend credits (${spill.window} at ${pct}%)`
+    : `spending credits (${spill.window} projected at ${pct}%)`;
 }
 
 function line(
@@ -98,6 +103,7 @@ function line(
   machines: readonly Machine[],
   now: number,
   winner: Candidate | undefined,
+  tense: "would" | "did",
 ): DecisionLine {
   const quota = quotaText(candidate.quota, decision, machines, now);
   const id = lineId(candidate.deviceId, candidate.exclave);
@@ -111,7 +117,7 @@ function line(
   }
   const score = candidate.score;
   const scored = score === undefined ? "scored" : scoreText(score);
-  const spill = spillText(candidate);
+  const spill = spillText(candidate, tense);
   const why =
     outcome === "chosen"
       ? ["lowest score", scored, spill].filter((part) => part !== null).join(" — ")
@@ -151,7 +157,7 @@ export function describeDecision(
         );
   const others = decision.candidates
     .filter((c) => c !== winner)
-    .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner));
+    .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner, tense));
   const omitted = omittedOf(decision);
   if (chosen === null) {
     return {
@@ -173,7 +179,7 @@ export function describeDecision(
     chosen:
       winner === undefined
         ? { id: lineId(chosen.deviceId, chosen.exclave), where: name, outcome: "chosen", why: "chosen", quota: null }
-        : line(winner, "chosen", decision, machines, now, undefined),
+        : line(winner, "chosen", decision, machines, now, undefined, tense),
     others,
     omitted,
   };
@@ -205,7 +211,8 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "awaiting-merge":
       return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
-      return `It finished${place}.`;
+      // Marked by hand: the session may still be running, so "finished" would claim too much.
+      return task.doneBy === "manual" ? `Marked done${place}.` : `It finished${place}.`;
     case "failed":
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
       if (task.failure?.code === "lost_expired") return `Given up${place} — its session may still be running there.`;

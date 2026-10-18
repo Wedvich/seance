@@ -44,6 +44,7 @@ export interface SpawnActions {
   readonly clearPrompt: () => void;
   readonly undoClear: () => void;
   readonly openSettings: () => void;
+  readonly openQueue: () => void;
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
@@ -227,7 +228,7 @@ function ActiveSheet(props: {
       <Sheet title={SHEET_TITLES.machine} closing={closing} onExited={onExited} onClose={close}>
         <SheetItem
           label="Auto"
-          sub={auto.reason ?? "the scheduler picks the machine"}
+          sub={auto.reason ?? auto.note ?? "the scheduler picks the machine"}
           dot={auto.available ? "auto" : "off"}
           selected={view.auto !== null}
           disabled={!auto.available}
@@ -460,7 +461,13 @@ export function SpawnScreen(props: {
           <h1 className="header-title">Séance</h1>
           <p className="header-meta">{view.meta}</p>
         </div>
-        <RelaySettings state={view.relayState} onClick={actions.openSettings} />
+        <div className="header-actions">
+          <button type="button" className="queue-chip" onClick={actions.openQueue}>
+            Queue
+            {view.queueAttention && <span className="queue-chip-dot dot dot-err" role="img" aria-label="needs you" />}
+          </button>
+          <RelaySettings state={view.relayState} onClick={actions.openSettings} />
+        </div>
       </header>
 
       <div className="column">

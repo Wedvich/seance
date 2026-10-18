@@ -6,9 +6,11 @@ import {
   type HistoryView,
   type PersistedForm,
   type PreviewState,
+  type QueueState,
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type TaskAction,
   type Verdict,
 } from "./state.ts";
 
@@ -52,6 +54,8 @@ export interface AutoAvailability {
   readonly available: boolean;
   /** Why it is greyed; null while available. */
   readonly reason: string | null;
+  /** Available but not leaderless-proof: the task waits in the relay's queue until a scheduler leads. */
+  readonly note: string | null;
 }
 
 /** A repo as `auto` names it: by origin, labelled by its path on the host. */
@@ -80,6 +84,8 @@ export interface ViewModel {
   readonly autoAvailability: AutoAvailability;
   /** Non-null while the form is on `auto`. */
   readonly auto: { readonly repo: AutoRepo | null; readonly repos: readonly AutoRepo[] } | null;
+  /** A task escalated for input is waiting: the header's Queue chip says so. */
+  readonly queueAttention: boolean;
 }
 
 export interface AppState {
@@ -107,6 +113,16 @@ export interface AppState {
   readonly preview: PreviewState | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
   readonly sessions: Readonly<Record<string, SessionsView | "unknown">>;
+  /** The Queue screen, a layer like settings. */
+  readonly queue: boolean;
+  /** What the screen last read; null until it was opened. */
+  readonly queueView: QueueState | null;
+  /** The cancel or mark-done in flight, if any. */
+  readonly taskAction: TaskAction | null;
+  /** The last queue action's refusal or failure, as a sentence; cleared by the next action or refresh. */
+  readonly queueNotice: string | null;
+  /** A pause or resume in flight. */
+  readonly pausing: boolean;
 }
 
 const MINUTE = 60_000;
@@ -268,23 +284,30 @@ function deriveMeta(state: AppState): string {
 }
 
 /**
- * `auto` is offered only when a verified leader would answer it. An unverified
- * one is named as such rather than as "no leader": the relay nominates only
- * ids on `SCHEDULER_LEADERS`, so it is a listed daemon that has not shown this
- * app it holds the PSK — a listed seed running without it, most likely — and
- * nothing is sent to it (DESIGN.md, Scheduler, "Leadership").
+ * `auto` needs only an open relay socket: the app writes the task to the
+ * relay's store, which answers for itself, and whichever scheduler leads next
+ * reads it. With no leader — or one that has not shown this app it holds the
+ * PSK (the relay nominates only ids on `SCHEDULER_LEADERS`, so it is a listed
+ * seed running without it, most likely) — it still queues, and `note` says it
+ * waits. The preview is different: it asks a leader, so it keeps its own check.
  */
 export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
-  if (relay.status !== "open") return { available: false, reason: "Not connected to the relay" };
-  if (relay.scheduler.kind === "none") return { available: false, reason: "No scheduler is leading right now" };
-  if (relay.scheduler.kind === "unverified") {
-    return { available: false, reason: "Leader unverified — it hasn't shown it holds this key" };
+  if (relay.status !== "open") return { available: false, reason: "Not connected to the relay", note: null };
+  if (relay.scheduler.kind === "none") {
+    return { available: true, reason: null, note: "No scheduler is leading right now — it waits in the queue until one does" };
   }
-  return { available: true, reason: null };
+  if (relay.scheduler.kind === "unverified") {
+    return {
+      available: true,
+      reason: null,
+      note: "Leader unverified — it hasn't shown it holds this key. It waits in the queue until one does",
+    };
+  }
+  return { available: true, reason: null, note: null };
 }
 
 /** `host/path` → `path`: the host says nothing a person picks a repo by. A remote-less origin is its basename already. */
-function originLabel(origin: string): string {
+export function originLabel(origin: string): string {
   const slash = origin.indexOf("/");
   return slash === -1 ? origin : origin.slice(slash + 1);
 }
@@ -379,8 +402,8 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
 
 function deriveFooterStatus(state: AppState, machine: Machine | null, now: number): string {
   if (state.form.auto) {
-    const { reason } = deriveAutoAvailability(state.relay);
-    return reason ?? "The scheduler picks the machine";
+    const { reason, note } = deriveAutoAvailability(state.relay);
+    return reason ?? note ?? "The scheduler picks the machine";
   }
   if (machine === null) return "";
   if (!machine.connected) return `Last seen ${formatSeen(machine.lastSeen, now)} · sessions unknown`;
@@ -512,6 +535,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
     repo,
     autoAvailability: deriveAutoAvailability(state.relay),
     auto: auto ? { repo: autoRepo, repos } : null,
+    queueAttention:
+      state.queueView?.kind === "ok" && state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
   };
 }
 
