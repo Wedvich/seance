@@ -23,13 +23,13 @@ import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import type { AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
+import { resolveOrigin } from "./auto.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import {
   buildMcpServer,
   decisionText,
   isLocalRef,
-  resolveOrigin,
   mcpBunPath,
   mcpScriptCheck,
   mcpScriptPath,
