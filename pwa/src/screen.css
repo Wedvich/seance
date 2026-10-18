@@ -1142,19 +1142,30 @@
   border-radius: 16px;
 }
 
+/* Name and HISTORY share one line box, so top-aligning them centres both on the same line. */
 .fleet-card-head {
+  --fleet-line: 20px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
 }
 
+/* The dot sits in the name row, centred on the name line; the gutter keeps the lines below aligned with the name. */
 .fleet-card-title {
+  --dot-gutter: 17px;
   flex: 1;
   min-width: 0;
+  padding-left: var(--dot-gutter);
+}
+
+.fleet-name-row .dot {
+  margin-left: calc(-1 * var(--dot-gutter));
+  margin-right: 2px;
 }
 
 .fleet-name {
   margin: 0;
+  line-height: var(--fleet-line);
   font-size: 15.5px;
   font-weight: 600;
   overflow: hidden;
@@ -1177,6 +1188,7 @@
 
 .fleet-toggle {
   flex: none;
+  line-height: var(--fleet-line);
   animation: none;
 }
 
@@ -1191,6 +1203,7 @@
 }
 
 .fleet-name-row {
+  min-height: var(--fleet-line);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1200,14 +1213,13 @@
 /* `auto`'s colour: the badge marks the machine `auto` tasks go through. */
 .fleet-badge {
   flex: none;
-  padding: 1px 6px;
+  padding: 1px 8px;
   border: 1px solid var(--auto);
-  border-radius: 6px;
+  border-radius: 999px;
   font-family: var(--mono);
   font-variant-ligatures: none;
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.08em;
   color: var(--auto);
 }
 

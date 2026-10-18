@@ -101,13 +101,13 @@ function MachineCardView(props: {
   return (
     <section className="fleet-card card">
       <div className="fleet-card-head">
-        <span className={card.connected ? "dot dot-ok" : "dot"} aria-hidden="true" />
         <div className="fleet-card-title">
           <div className="fleet-name-row">
+            <span className={card.connected ? "dot dot-ok" : "dot"} aria-hidden="true" />
             <h2 className="fleet-name">{card.name}</h2>
             {card.role !== null && (
               <span className={card.role === "leader" ? "fleet-badge" : "fleet-badge fleet-badge-unverified"}>
-                {card.role === "leader" ? "SCHEDULER" : "UNVERIFIED"}
+                {card.role === "leader" ? "Scheduler" : "Unverified"}
               </span>
             )}
           </div>
