@@ -10,10 +10,12 @@ import {
   openTaskRecord,
   parseEnvelope,
   RelayClient,
+  failureReasonText,
   RequestFailure,
   sealTaskRecord,
   taskKey,
   TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
   toBase64,
   type StoreRecord,
   type Task,
@@ -184,6 +186,25 @@ describe("createTask", () => {
     expect(double.received).toEqual([]);
   });
 
+  test("refuses a batch index past the limit before any frame, and accepts one equal to it", async () => {
+    const double = startDouble();
+    const client = await connect(double);
+    const spec = (index: number): Task["spec"] => ({
+      repo: "git@github.com:m/seance.git",
+      mode: "worktree",
+      batch: { id: crypto.randomUUID(), index, strategy: { mode: "sequential" } },
+    });
+    expect(await client.createTask(queued({ spec: spec(TASK_SPEC_LIMITS.batchIndex + 1) }))).toEqual({
+      ok: false,
+      code: "invalid_request",
+    });
+    expect(double.received).toEqual([]);
+    expect(await client.createTask(queued({ spec: spec(TASK_SPEC_LIMITS.batchIndex) }))).toEqual({
+      ok: true,
+      landedEarlier: false,
+    });
+  });
+
   test("seals the checked copy: a property the task type does not carry never reaches the record", async () => {
     const double = startDouble();
     const client = await connect(double);
@@ -322,6 +343,9 @@ describe("store transport", () => {
     const client = await connect(double, 50);
     double.answer = () => "silent";
     expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
+    const timedOut = await client.getTask(crypto.randomUUID()).catch((err: unknown) => err);
+    if (!(timedOut instanceof RequestFailure)) throw new Error("expected a RequestFailure");
+    expect(failureReasonText(timedOut)).toContain("the relay did not answer");
     double.answer = () => "close";
     expect(await failure(client.createTask(queued()))).toBe("dropped");
   });

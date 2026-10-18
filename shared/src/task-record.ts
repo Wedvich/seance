@@ -5,6 +5,8 @@ import {
   type Envelope,
   type RecordUnreadable,
   type StoreRecord,
+  type Task,
+  type TaskSpec,
   type TaskRecord,
 } from "./types.ts";
 import { bindTaskRecord } from "./parse.ts";
@@ -13,6 +15,14 @@ import { openAtRest, sealAtRest } from "./crypto.ts";
 /** The store key a task lives at: the prefix, then its id as it stands (`STORE_KEY_PATTERN`). */
 export function taskKey(taskId: string): string {
   return `${STORE_PREFIXES.task.prefix}${taskId}`;
+}
+
+/**
+ * A fresh `queued` task, version 1. The id is app-minted so a retry re-puts the
+ * same task instead of minting a second one (`createTask`'s id is never reused).
+ */
+export function queuedTask(spec: TaskSpec, now: number, id: string = crypto.randomUUID()): Task {
+  return { id, spec, state: "queued", createdAt: now };
 }
 
 /**

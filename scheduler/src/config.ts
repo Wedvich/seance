@@ -39,7 +39,7 @@ export interface SchedulerConfig {
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
    * longer ago than this, and is disconnected now (a connected machine's
    * `sessions` is about to settle it), is `failed` `lost_expired`. Never pruned while `lost`,
-   * it would otherwise count toward M2's `MAX_ACTIVE_TASKS` and outlive every term.
+   * it would hold no slot but outlive every term.
    */
   readonly lostExpiryMs: number;
   /**
