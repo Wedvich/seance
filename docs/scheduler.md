@@ -47,9 +47,9 @@ stay as they are; the table says which word each one means.
 | Skills            | Hard filter on a declared or `/name` skill the fleet's inventory knows (unknown names pass); PWA autocompletes from it                                                                                                                                                                                                                                                                      |
 | Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                                                                                                                                     |
 | Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                                                                                                                                       |
-| Handoff           | Dependent task gets a preamble: predecessor title (else its window or branch slug — its prompt is gone once it finishes, Settled defaults 16), branch, PR URL, transcript path (same machine only)                                                                                                                                                                                          |
+| Handoff           | Dependent task gets a preamble: predecessor title (else its window or branch slug — its prompt is gone once it finishes, Settled defaults 16), branch, PR URL; the transcript path is proposed dropped from v1 (M4, _Stacking_)                                                                                                                                                             |
 | AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                                                                                                                                     |
-| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                                                                                                                                              |
+| Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (in waves: its items depend on each other, M4 below)                                                                                                                                                                                                                                                             |
 
 ### Why the relay holds the queue and a daemon runs it
 
@@ -90,31 +90,17 @@ PWA ──/app──┐                ┌──/daemon── seanced (mac)   �
 No new kind of PSK holder. The leader is an ordinary daemon with two extra legs: a store
 client on its daemon socket and an app-role client (the fleet broker's precedent) to receive
 registry and `status` pushes and to address other daemons. That client is the leader's own
-and long-lived, not the broker's idle-closing `LazyRelay` (Daemon changes, `leader.ts`).
+and long-lived, not the broker's idle-closing `LazyRelay` (DESIGN.md _Scheduler_, "The leader").
 
 ## Wire changes
 
-All shapes land in `shared/src/types.ts` first (schema of record); DESIGN.md's frame→module
-table gains rows. **M3's are there now** (M3 PR 0): the store frames and their limits, the
-`task` and `pause-state` records, the widened task model, the new scheduler ops,
-`queue-changed` and `branch-state`. Read the types for any M3 shape — the sketches below are the
-reasoning, `types.ts` is the record, and where they differ `types.ts` wins.
+M1–M3's wire is built, and DESIGN.md is its record: _Wire protocol_ (the frames, Layer 2's
+scheduler ops, the frame→module table) and _Scheduler_ ("The store", "Task records and the app's
+store leg", "The queue store", "The leader"). All shapes land in `shared/src/types.ts` first, the
+schema of record; where a sketch here disagrees with it, `types.ts` wins. What M4 adds:
 
-**Relay (`hub.ts`, `wire.ts`, `index.ts`)**
-
-- **Leadership** (M2; DESIGN.md _Scheduler_, "Leadership", is the record): signed `roles`,
-  nomination in `relay/src/leadership.ts`, `scheduler:term`, `lead`/`follow`, the term fence and
-  (M2 review) the `lead-proof` apps believe a nominee by. Every leader write in M3 carries its
-  term through the same fence — which checks the term, not the proof the relay cannot read (M3
-  item 1).
-- **Store ops** on the daemon leg (leader) and app leg: `store-list { prefix }` → `[{ key,
-version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (what a
-  `version_conflict` refreshes from, so a lost race costs one read, not the whole queue
-  unsealed), `store-put { key, expect, env, term? }` → `{ version }` or
-  `version_conflict`, `store-delete { key, expect, term? }`. Values live at their key as
-  `{ version, env }`; `version` starts at 1 on create and increments per put. Named for the
-  store, not the queue, because tasks are not its only records — who may write is a rule per
-  key prefix, applied by the relay:
+- **Store ops** (M3; DESIGN.md _Scheduler_, "The store"). Who may write is a rule per key
+  prefix, applied by the relay. M4 adds prefixes:
 
   | Prefix           | Create          | Overwrite / delete               | Term-fenced | Lands |
   | ---------------- | --------------- | -------------------------------- | ----------- | ----- |
@@ -122,145 +108,57 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   | `queue:pause`    | leader only     | leader overwrites; never deleted | yes         | M3    |
   | `account:<hmac>` | any app         | any app, by `expect` (CAS)       | no          | M4    |
 
-  Tasks: apps may list and create (`expect: 0`) so enqueue works with no leader; every
-  overwrite and delete is the leader's. `queue:pause` holds the pause (`PauseRecord`, op
-  `pause-state`), so it outlives the leader that took it. App-writable records exist for state a
-  person edits from any client with no leader up — an account's alias first; whether M4's
-  `settings` is one is M4's call. Bounds in `wire.ts`: keys a known prefix plus a routing id
-  (`ROUTING_ID_PATTERN`, the one bound task ids and `deviceId`s share), `env.ct` under
-  `STORE_MAX_CT_LENGTH` (40 KiB) and a create's under `STORE_CREATE_MAX_CT_LENGTH` (28 KiB), so
-  a record has room for what the leader adds to it; `MAX_TASKS` and `MAX_RECORDS` like
-  `MAX_DEVICES`, and a create rate floor per socket. The DO is SQLite-backed, so a value may
-  reach 2 MB; what keeps records small is the one-frame listing, not storage.
+  App-writable records exist for state a person edits from any client with no leader up — an
+  account's alias first. M4's `settings`, push subscriptions and the fleet quota record need
+  prefixes of their own in `STORE_PREFIXES`, decided with each item, under one policy that
+  lands before any of them ("Store rules v2", M4 below).
 
-- **Version binding closes rollback — against a token holder, not the relay** (DESIGN.md
-  Threat model, item 4: a compromised relay can serve an old version at its own version, and
-  re-run a past task). Anything with the bearer token can list the queue, keep a
-  task's old sealed blob and put it back — authentic bytes, stale state (a cancelled task back to
-  `ready`). So the sealed body carries the `version` its put will produce, and every reader
-  rejects a blob whose inner version disagrees with the relay's. A replayed blob then fails like
-  a forged one. The reader's rules are one function, `bindTaskRecord` in `shared/src/parse.ts`:
-  version and key binding, a version-1 record must be `queued`, and a `createdAt` more than the
-  replay window ahead is refused, so a far-future stamp cannot outlive the 30-day admit rule. A
-  refused record is skipped and reported with its reason, never deleted unasked — after a PSK
-  rotation every record is unreadable. A put fails as `version_conflict` (a lost race),
-  `not_leader`, `forbidden`, `too_large`, `rate_limited`, `store_full` or `invalid_request`
-  (`STORE_ERROR_CODES`), or its reply is lost after it committed — which a create's retry reads
-  as `version_conflict` and a leader's next read settles.
-- **Stored blobs are an at-rest format, not live frames.** Their `op` is the record's kind —
-  `task` and `pause-state` sealed to `"scheduler"`, `account` to `"app"` — opened _without_ the
-  `ReplayGuard` through `openAtRest` — exactly as the register blob and `status` already are —
-  and never accepted on a live routing path. Keeping the op distinct per kind is what stops a stored
-  record being replayed as a request, or as a record of another kind.
-- **Last `status` kept**, `to: "scheduler"` envelopes and the registry push's `scheduler` (M2;
-  DESIGN.md _Presence & identity_ and _Scheduler_).
-- **`status { env }`** (daemon→relay, landed in M1; DESIGN.md _Presence & identity_): the
-  leader's app-role leg receives it like any app, from the registry push and as it arrives, so
-  the routing loop reads the same snapshot the PWA renders.
-- Cost: one storage write per task _transition_ — never per tick. Well inside free-tier limits for a handful of machines and tens of tasks.
-
-The `status` payload, its encoding and the `metrics` history op landed in M1 (DESIGN.md
-_Presence & identity_, _Wire protocol_ Layer 2, _Daemon_ "Telemetry"). What the scheduler adds
-to the payload is new quota sources (session reports in M2, the OAuth poll in M4): readers
-already take the newest observation per account, whichever daemon reported it.
-
-**Daemon → scheduler (fire-and-forget, sealed to `"scheduler"`)** — events only, the things
-that must arrive when they happen rather than when someone asks:
-
-| Op              | Cadence                      | Payload (sketch)                                                                               |
-| --------------- | ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `session-event` | on event, coalesced ≤1/5s    | `SessionEvent`: session (pane), task id, exclave, state, `https:` PR URL, `at` — landed (M2 5) |
-| `branch-state`  | on change, for task branches | task id, repo, branch, `pushed`, `merged` (reap-git's rules), `at`                             |
-
-Both are lost while no leader listens, so neither is the record. What they carry is also in the
-daemon's `sessions` reply — a running session as itself, an ended task in `ended`, and each
-task's PR URL, branch, `pushed` and `merged` in `progress` (`TaskProgress`, M3; decided
-2026-10-17 over re-emitting `branch-state` on a cadence: one read the takeover already makes,
-and no standing traffic). A new leader reads it on takeover, and again when a machine holding
-a task it waits on comes back, so a gap can neither settle a task that ended with an open PR
-as `done` nor hold an `after: merged` dependent past a merge. In a reply the daemon trimmed to
-fit (`progressTrimmed`) a task with no entry settles by the PR its record already holds, and
-with none is unknown and waits for a later read (DESIGN.md, "Done detection"). The
-session and task ids in a `session-event` are the daemon's own, from its pane map, never copied
-from what the mod sent (DESIGN.md, Local op socket, "Session events"). The plan's `skill` field
-was left out: nothing reads it before M4's skill filter.
-
-**Scheduler → daemon**: existing `spawn`/`sessions`/`despawn`, addressed from `"scheduler"` by
-the leader's app-role leg (landed with item 3). The target daemon needed no change — it replies
-to `env.from` already — but the relay routes that `to: "scheduler"` reply to the leader's
-_daemon_ socket, so the leader's daemon leg hands it to its app-role leg to correlate (DESIGN.md
-_Scheduler_, "The leader").
-
-**`SpawnRequest` gains two optional fields**, both ignored harmlessly by old daemons except
-where noted — a direct spawn (PWA machine pick, MCP, Raycast, CLI) and a scheduler spawn remain
-the same op:
-
-- `taskId?: string` — **dispatch idempotency.** A daemon refuses a second spawn for a task id
-  it already runs (`task_running`, with the pane id), and `sessions` reports `taskId` per
-  session. This is what makes leader failover safe: a leader that dies between sending `spawn`
-  and reading the verdict leaves a reservation with no assignment, and the next leader must not
-  double-spawn. On takeover it reads `sessions` from every machine with a reservation before
-  dispatching anything, and the daemon-side refusal is the backstop if that read is stale.
-  Old daemons ignore the field, so the leader only reserves against daemons advertising it.
-- `baseBranch?: string` (M4, stacked deps) — start the worktree from this branch instead of
-  the default. Resolved against the repo's refs (`origin/<b>` or local), never interpolated;
-  unresolvable → new code `base_not_found`. Fetched before launch the way the default branch
-  already is (`base-fetch.ts`, DESIGN.md "Worktree spawns fetch first"), so a stacked task never
-  starts from a stale `origin/<b>`. Through `shq()` if it ever reaches the shell
-  string. Useful from the PWA directly too. Old daemons ignoring it is wrong rather than
-  harmless (B would start from main), so the scheduler only sends it to daemons that advertise
-  support.
-
-Audit: scheduler spawns reach the target through the relay, so they audit as `origin=relay
-client=scheduler` — except on the leader's own machine, which it reaches in process as
-`origin=leader client=scheduler`; task ↔ session correlation is `taskId`.
-
-**App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
-`queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
-"reset"`), `route-preview` (dry-run explanation), and M4's `push-subscribe` (not in
-`SCHEDULER_OPS` yet). `queue` and
-`route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
-answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
-term, `not_ready` during takeover. M2 added a temporary `submit` (a `TaskRequest` →
-`Scheduler.submit`), because there was no store to `store-put` into; M3 item 6 removed it
-(landed 2026-10-18) with the PWA's and MCP's move to `store-put`. `enqueue` is _not_ a
-leader op: the app seals the task and `store-put`s it at `expect: 0`, so queuing works with
-no leader and the next one picks it up. Scheduler → app: `queue-changed` push to `"app"`
-(broadcast, apps re-fetch) — no polling. It names the tasks that changed (`tasks`, absent when
-more did or the holds changed), and `queue` takes the same ids as a filter
-(`QueueRequest.tasks`), so an app re-fetches what moved rather than the whole queue; an M2
-leader ignores the filter and answers the newest, which the reader filters again.
-
-**`MachineInfo`.** `exclaves`, `RepoEntry.exclave`/`origin` and `capabilities` landed in M1
-(DESIGN.md _Daemon_, "Exclaves" and "Repo discovery"). `origin` is the scheduler's repo key.
-What remains is new `capabilities` values — `"taskId"` (M2), `"baseBranch"` (M4) — so the
-scheduler never relies on a field an old daemon would drop. (`roles` is the plaintext sibling:
-what the _relay_ must read; `capabilities` is sealed, read by apps today — they gate `metrics` on it — and by the leader to gate `taskId`.)
+- **Version binding** — the reader's rules (`bindTaskRecord`) are DESIGN.md _Scheduler_, "Task
+  records and the app's store leg". They close rollback against a token holder, not the relay
+  (DESIGN.md Threat model, item 4).
+- **Stored blobs are an at-rest format, not live frames.** M4's `account` record is sealed to
+  `"app"` under op `account` and, like `task` and `pause-state`, opened only through
+  `openAtRest`, never on a live routing path. A distinct op per kind is what stops a stored record
+  being replayed as a request, or as a record of another kind.
+- **Daemon → scheduler** (M2, M3): `session-event` and `branch-state`, and the `sessions`
+  reply's `ended` and `progress` that back them up, are DESIGN.md Local op socket ("Session
+  events") and _Scheduler_ ("Branch state", "Done detection"). M4 adds an exit status (`failed`
+  from exit status, M4 below).
+- **`SpawnRequest.baseBranch?`** (M4, stacking) — start the worktree from this branch instead of
+  the default. Resolved against the repo's refs, never interpolated; unresolvable is a new code,
+  `base_not_found`. Fetched before launch as the default branch is (`base-fetch.ts`), so a
+  stacked task never starts from a stale `origin/<b>`. An old daemon drops an unknown field
+  silently, and B would start from main, so the leader sends it only to a daemon advertising the
+  `"baseBranch"` capability — required, not optional. How the worktree gets made is the open part
+  (Stacking, below).
+- **App → scheduler ops**: M2 and M3's (`queue`, `route-preview`, `cancel`, `mark-done`,
+  `pause`/`resume`) are DESIGN.md _Wire protocol_, Layer 2. M4 adds `push-subscribe` (Web Push),
+  not in `SCHEDULER_OPS` yet. `enqueue` stays a `store-put`, never a leader op.
+- **`MachineInfo.capabilities`** gains `"baseBranch"`; `status` gains each exclave's auth state
+  (Auth health, below).
 
 ## Daemon changes
 
-- `exclaves.ts` and `telemetry.ts` landed in M1 (DESIGN.md _Daemon_). Session events (M2) and
-  the OAuth poll (M4) add quota observations to the same store under the same metric names.
-  Collectors not yet built — LXC PSI/cgroup views, the Proxmox node view, macOS I/O rates — are
-  listed there too.
-- `daemon/src/oauth-quota.ts` (M4; not `shared/src/quota.ts`, the fleet fold readers
-  share): OAuth usage poll per exclave when the newest session report is older than
-  `quota.staleAfter` (default 10m). **Token never leaves the daemon process** — same invariant
-  class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
-- Local socket `session-event` and `claude-mods/session-events` (M2; DESIGN.md Local op socket,
-  "Session events"). The mod is also the phase-2 bus.
-- **`leader.ts`, the scheduler role** (M2; DESIGN.md _Scheduler_, "The leader"). Since M3 item 3
-  its `QueueStore` is `daemon/src/queue-store.ts` on the relay's `store-*` ops, mapping the
-  relay's answers onto the port rather than widening it (DESIGN.md, "The queue store").
+What M1–M3 built is DESIGN.md's: _Daemon_ (exclaves, telemetry), Local op socket ("Session
+events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 adds:
+
+- `daemon/src/oauth-quota.ts` (not `shared/src/quota.ts`, the fleet fold readers share): an OAuth
+  usage poll per exclave when the newest session report is older than `quota.staleAfter`
+  (default 10m), adding observations to the same store under the same metric names. **Token
+  never leaves the daemon process** — the same invariant class as the service-delivered PSK.
+  Failure is quiet and non-fatal (unofficial endpoint).
+- Collectors not yet built — LXC PSI and cgroup views, the Proxmox node view, macOS I/O rates
+  (DESIGN.md _Daemon_, "Telemetry").
 
 ## Scheduler (`scheduler/`)
 
 **A pure library, no I/O of its own**, behind two interfaces the host supplies — `QueueStore`
 and `Fleet` — so the placement decision stays reversible: moving the scheduler to a fixed box
-later is two new adapters (SQLite store, own app-role client) and no change here. M2 built it,
-and DESIGN.md _Scheduler_ is the record of what exists: "The library" for the interfaces,
-routing, states, takeover and `lost`, "The leader" for the daemon hosting it. This section keeps
-only what M3 and M4 change. Labels code comments cite, and where M2's half now lives:
+later is two new adapters (SQLite store, own app-role client) and no change here. DESIGN.md
+_Scheduler_ is the record of what exists: "The library" for the interfaces, routing, states,
+takeover and `lost`, "The leader" for the daemon hosting it, "The queue store" for the adapter on
+the relay's store. This section keeps only what M4 changes. Labels code comments cite, and where
+they now live:
 
 - **Routing** (filter, score, stickiness, reserve, record) — DESIGN.md "The library", "One
   routing function" through "Reserve, then dispatch"; what is ahead is below.
@@ -269,67 +167,40 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
   function": pressure only from a live, unstale status, quota from every status by its own
   `at`. Why there is no age cap: _Settled defaults_ 7.
 - **Task states**, **Takeover** and **Done detection** — DESIGN.md "States", "Admission and
-  dependencies", "Batches", "Done detection", "Pruning", "`lost`" and "What takeover settles" (M2, and M3
-  item 4a), with `scheduler/src/task.ts` the table that runs; the store's half of takeover is
-  below.
+  dependencies", "Batches", "Done detection", "Pruning", "`lost`" and "What takeover settles",
+  with `scheduler/src/task.ts` the table that runs; the store's half of takeover is "The queue
+  store".
+- **The store adapter** and **Records** — DESIGN.md "The queue store"; what a leader change loses
+  is the library's in-memory view, listed in "What takeover settles".
 
-**The store adapter (M3 item 3, landed 2026-10-18).** The leader runs on the relay's store;
-`MemoryQueueStore` is the library's reference store and its tests'. The `QueueStore` is
-`daemon/src/queue-store.ts` over the relay's `store-*` ops, behind the port as the store port
-left it (DESIGN.md _Scheduler_, "The queue store"). The library sees plain task bodies, plus each
-record that did not read as `{ id, version, reason }`: the adapter seals and opens each under the
-daemon's imported key, binds it through `bindTaskRecord` (Wire changes, _Version binding_), and
-carries the term on every write. It maps the relay's answers onto the port's: `not_leader` (and
-a disconnected daemon socket) to a `StoreRevoked` throw, a reply lost to the timeout to
-`indeterminate`, `forbidden` and `invalid_request` to `refused`, and the rest by name. Tests stay
-layered: the library against in-memory fakes of both interfaces, the adapter against
-`daemon/test/harness.ts`, the store against the real DO in e2e.
+**Routing, ahead.** M4 adds:
 
-**Records (M3).** One sealed `TaskRecord` per task at `task:<id>`, the pause at `queue:pause`;
-machines, exclaves, pressure and quota come from the fleet feed and are persisted nowhere. A
-leader change then loses only the in-memory view (the absence clock, an unplaced task's latest
-decision, the credits-spill de-dupe and the set of machines seen to return). M4's `settings` (_Secrets_) and push subscriptions need prefixes of their own in
-`STORE_PREFIXES`, decided with that item.
-
-**Takeover (M3).** M2's reconcile stands. M3 adds the store's half: list the store, open every
-body, and skip and report one that does not decrypt or whose version or id disagrees with its
-key — as the PWA skips registry entries, never fatal — before the reconcile runs.
-
-**Routing, ahead.** Today's cadence, for reference: the leader runs a pass on every change to
-its leg's machine list, after each app's create (`store-changed`), and on a 30s timer that runs for the whole term
-whether or not anything is ready; reservation TTLs and `lost` are checked only inside a pass. A
-task's decision is written with its reservation (one store write) — never after the spawn —
-and an unplaced task's stays in memory. M4 adds:
-
-- Filters (the per-account cap and the per-batch bound landed with M3 items 5 and 4a, DESIGN.md
-  "Routing caps" and "Batches"): `skill absent` (M4,
-  _Skills_: a hard filter when declared or the prompt starts with `/name`, and only for a name the
-  fleet's inventory knows); stacked base
-  unpushed and not on this exclave (M4, _Stacking_).
+- Filters (the per-account cap and the per-batch bound are DESIGN.md "Routing caps" and
+  "Batches"): `skill absent` (M4, _Skills_: a hard filter when declared or the prompt starts with
+  `/name`, and only for a name the fleet's inventory knows); stacked base unpushed and not on
+  this exclave (M4, _Stacking_); auth expired (M4, _Auth health_).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The Proxmox
   node view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
   deltas per task.
 
-**Credits spill:** detected, logged and shown in the PWA since M3 item 5 (DESIGN.md "Credits
-spill"). From M4 the same `onAlert` fires a Web Push ("Spending credits on <account> for
-<task>" + Pause actions), once per account per window, not per task; whether that de-dupe must
-outlive a leader change (today it is in memory) is M4's call.
+**Credits spill:** detected, logged and shown in the PWA (DESIGN.md "Credits spill"). From M4 the
+same `onAlert` fires a Web Push ("Spending credits on <account> for <task>"), once per account
+per window, not per task; the de-dupe outliving a leader change is M4's (Settings and Web Push,
+below).
 
-**Done detection, ahead.** `branch-state merged` → `done`, a session ending with a PR open →
-`awaiting-merge`, and the read-back from `progress` landed with M3 item 4a (DESIGN.md "Done
-detection"); the leader passes them on since item 3. `mark-done` (always wins) landed with item 6. Still ahead: Linear Done (M4, if linked,
-poll); and `failed` for a session that ends with no
-PR and a nonzero exit, which needs an exit status no event carries — until then a PR-less end
-is `done` by `session`.
+**Done detection, ahead.** Linear Done (M4, if linked, polled), and `failed` for a session that
+ends with no PR and a nonzero exit (M4, _`failed` from exit status_) — until then a PR-less end
+is `done` by `session`, which releases every dependent.
 
 **Secrets (M4).** The first draft gave a fixed box a Linear key, a VAPID key and a Proxmox
 token. Under a moving leader: the Proxmox token stays on the LXC daemons, which read their own
-host (above); the VAPID keypair and Linear key live as one more sealed key in the store
-(`settings`), opened by whichever daemon leads — the PSK is already the only trust boundary,
-so sealing them under it adds no second one. Linear polling is optional from day one, since
-daemon-local merge detection is the primary done signal.
+host (above); the VAPID keypair and Linear key live in the store (`settings`), opened by
+whichever daemon leads — the PSK is already the only trust boundary, so sealing them under it
+adds no second one. Who writes `settings`, and who can read it, is open (Settings and Web Push,
+below). Linear polling is optional from day one, since daemon-local merge detection is the
+primary done signal.
 
 ## Milestones
 
@@ -344,7 +215,7 @@ replaces is deleted here in the same PR.
 | M1  | Visibility across machines, exclaves and accounts      | See pressure and quota everywhere; no scheduler yet |
 | M2  | Routing + leadership                                   | "spawn this in repo X" without picking a machine    |
 | M3  | Durable queue                                          | Queue a block of work with deps and walk away       |
-| M4  | Stacking, OAuth quota, skills, Proxmox, alerts, Linear | Refinement; items are independent                   |
+| M4  | Stacking, OAuth quota, skills, Proxmox, alerts, Linear | Refinement, in waves                                |
 
 ### M1 — visibility (done 2026-10-15)
 
@@ -500,13 +371,117 @@ report now reach apps, #184; the registry push's shape is otherwise unchanged).
 
 ### M4 — refinement
 
-Independent items, any order, each its own PR with its own DESIGN.md update:
+M4's items are **not independent**. The M3 review (2026-10-18) found four real dependencies in
+the code, so M4 runs in waves:
 
-- **Stacking** — `baseBranch` + `base_not_found`, lineage, the handoff preamble. Exit: a
+- Auth health needs the OAuth poll, since the poll's 401 is the signal.
+- Web Push and Linear need `settings`.
+- Stacking and Linear need an authoring surface. No client writes `deps`, `batch` or `linear`
+  today.
+- The disk and auth alerts need Web Push.
+
+Each item still lands as its own PR with its own DESIGN.md subsection. Budget one follow-up PR per
+item: every M3 item needed one within hours.
+
+**Every recommendation marked _Proposed_ below is the review's, for the owner to confirm before
+that item's code.** None is settled. The numbers (#) are the review's owner-decision list.
+
+**Order.** Wave 0 settles the seams the items share. Wave 1 is the items nothing else in M4 has to
+precede. Wave 2 waits on the wave-1 item named.
+
+| Wave | Item                                                                        | Depends on                                                             | Size                     |
+| ---- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------ |
+| 0    | Store rules v2 (relay)                                                      | the review's S4 store bounds; #29                                      | —                        |
+| 0    | One schema PR for every M4 shape                                            | the owner's calls below                                                | —                        |
+| 0    | Daemon seams and test infrastructure                                        | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
+| 0    | #28 (the seed prompt on stdin) and #29 (relay security), rebased and landed | —                                                                      | —                        |
+| 1    | Authoring surface (new)                                                     | —                                                                      | M                        |
+| 1    | Settings and Web Push, in three PRs                                         | store rules v2; the fetch seam                                         | L                        |
+| 1    | OAuth quota poll                                                            | a credentials spike; the fetch seam                                    | M                        |
+| 1    | Skills filter                                                               | —                                                                      | S; M with project skills |
+| 1    | Proxmox node view                                                           | the token decision                                                     | M–L                      |
+| 1    | Account records                                                             | store rules v2                                                         | M                        |
+| 1    | Fleet quota record                                                          | store rules v2                                                         | M                        |
+| 1    | CLI and keyless MCP `auto`                                                  | MCP's enqueue split out                                                | S–M                      |
+| 1    | `failed` from exit status (new)                                             | —                                                                      | S–M                      |
+| 2    | Stacking                                                                    | authoring surface; #28                                                 | L                        |
+| 2    | Auth health                                                                 | OAuth poll; Web Push for its alert                                     | M                        |
+| 2    | Linear                                                                      | settings; authoring surface                                            | L                        |
+
+**Wave 0.** Owned by the review's relay and daemon sessions, not planned here in full:
+
+- **Store rules v2**, one relay PR before any new prefix:
+  - a per-prefix tombstone flag, off for deterministic keys;
+  - per-prefix caps sized so caps plus singletons fit `MAX_RECORDS`;
+  - a delete policy per prefix;
+  - the create floor on the daemon leg for any prefix that is not term-fenced, with store frames
+    handled only after register;
+  - `store-changed` fanned out to apps for app-writable prefixes (today it reaches only the
+    leader);
+  - the new prefixes.
+
+  M4's first app-side `store-list` (`account:` on open) means any `store-list` rate bucket must be
+  per prefix, or it throttles that list against takeover.
+
+- **One schema PR**, every M4 shape in `types.ts` and `parse.ts` at once: the spawn's base fields,
+  `base_not_found` and its capability, the new reason codes, a declared skill on `TaskRequest`,
+  `RepoEntry.skills`, auth in `MachineStatus`, a `linear` done signal, the exit status, the new
+  at-rest ops and record types, and `push-subscribe`. The prefixes stay unaccepted until store
+  rules v2.
+- **Daemon seams.**
+  - An injectable `fetch` and clock through `startDaemon`, the leader and telemetry. Without them
+    the OAuth poll, auth health, push, Linear and Proxmox can be tested only at the unit tier.
+  - `probe` passed through `startDaemon` to telemetry (today it is not).
+  - `run.ts`'s wiring split into a capabilities list and a collector registry.
+  - `e2e/e2e.test.ts` split by area.
+  - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
+    push-endpoint stub.
+
+**Items.**
+
+- **Authoring surface (new, M3 review R3).** MCP and PWA fields for `deps`, `batch` and a Linear
+  link. The library, the record and the leader support all three, and the app client already
+  bounds a batch index at `createTask`, but no client writes them. Without this item, stacking
+  and Linear ship unusable. Exit: a task enqueued from MCP and from the PWA with an
+  `after: opened` dep and a batch is admitted with both (e2e).
+- **`failed` from exit status (new, M3 review R3).** Today a session that crashes with no PR
+  settles `done` by `session`, and `done` releases every edge (`released` in
+  `scheduler/src/deps.ts`). Under stacking its dependents would start on a branch with nothing
+  pushed. The daemon already sets `remain-on-exit` on a spawned window, so `pane_dead_status` is a
+  cheap source. Carry it in the launch ledger or in `ended`, so the event path and the sweep
+  agree. Exit: a session that exits nonzero with no PR is `failed` and fails its dependents; one
+  that exits zero is `done` (scheduler + daemon).
+- **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
-- **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an idle exclave's
-  quota refreshes within `staleAfter`; a failing endpoint is quiet.
+  Corrected by the review (R2):
+  - _The daemon has to make the worktree._ `claude --worktree` creates the worktree itself from
+    `origin/<default>`, and no CLI flag overrides that (DESIGN.md "Worktree mode does no git
+    preparation"). So "start the worktree from this branch" means the daemon creates it.
+    _Proposed (#3):_ spike whether `claude --worktree <name>` reuses an existing worktree. If it
+    does, run `git worktree add --no-track -B worktree-<name> … origin/<base>` and keep the
+    `.claude/worktrees` layout reap and branch-state rely on.
+  - _Fetches are keyed by repo, not branch._ `base-fetch.ts` keys its in-flight fetch by common
+    dir alone, so two bases in one repo would share one fetch.
+  - _Proposed (#4), which dependency stacks:_ only `after: opened`, the first in `deps` order.
+    While the predecessor's branch is unpushed, restrict the dependent to the predecessor's
+    placement.
+  - _Proposed (#15), validating `baseBranch`:_ `check-ref-format` rules at every hop (today a
+    branch name is only length-checked in `shared/src/parse.ts`), and pass
+    `refs/remotes/origin/<b>` after `--end-of-options`. Through `shq()` if it ever reaches the
+    shell string.
+  - _Proposed (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
+    knows it, so the PR is the handoff.
+- **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an
+  idle exclave's quota refreshes within `staleAfter`; a failing endpoint is quiet. Missing today:
+  a credentials reader, a fetch seam and `quota.staleAfter`. `QuotaSource "oauth"` is reserved,
+  and telemetry already layers sources.
+  - _Proposed (#7), exit criterion:_ "while the access token is live" — the daemon never
+    refreshes.
+  - _Proposed (#13), endpoint:_ hard-coded, never an exclave's `ANTHROPIC_BASE_URL` or proxy
+    settings, which a session can write. Read tokens, never refresh, and record the daemon in
+    DESIGN.md as a new keychain reader. Poll only idle exclaves, and mind a macOS keychain read
+    per poll.
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
   - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
     and served from the blob, never per request. Tightened to directories (or symlinks
@@ -514,7 +489,8 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
     advertising a skill — landed with the autocomplete (PR #167).
   - _Filter_ (open): only a name somewhere in the fleet's inventory restricts — to the exclaves
     that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
-    anything the inventory skips; cost: a typo routes anywhere rather than failing.
+    anything the inventory skips; cost: a typo routes anywhere rather than failing. _Proposed
+    (#19):_ keep "unknown names pass"; detect `/name` only until a client declares a skill.
   - _Autocomplete_ — **DONE (PR #167)**: union of names across machines and exclaves, from data
     the PWA already holds — needs no leader, which is why it landed before the filter. Names
     only, no descriptions (blob size; revisit if wanted).
@@ -523,12 +499,40 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   - _Required, not yet built_: project skills (`<repo>/.claude/skills/`) belong to a clone,
     not an exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until
     then a project-only skill is unknown and passes.
-- **Proxmox node view** — read by the LXC daemons, folded into their own `status`.
-- **Sealed `settings` + Web Push** — VAPID keypair in the store under the PSK, the
+  - _Proposed (#20):_ park #128 (penalise the default exclave's account) and redo it as a flag
+    on the account record once those land; decide before the skills filter takes `route.ts`.
+- **Proxmox node view** — read by the LXC daemons, folded into their own `status`. An injectable
+  `HostProbe` exists at the unit tier only; missing are cgroup and PSI readers, an API client and
+  token storage. _Proposed (#17):_ a read-only token (PVEAuditor), stored as the PSK is, with a
+  pinned certificate fingerprint.
+- **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
   nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the PWA shows no
-  disk numbers, since a fill level is upkeep rather than load).
-- **Linear** — key in `settings`; relation-derived deps and Done as a done signal.
+  disk numbers, since a fill level is upkeep rather than load). The `onAlert` seam exists,
+  hard-wired to a log line (`startTerm` in `daemon/src/leader.ts`); a workbox service worker
+  exists. Missing: the prefixes, `push-subscribe`, VAPID and RFC 8291 encryption, a push
+  handler, the new alert kinds and a persisted de-dupe. Push endpoints can take seconds, so never
+  await a send in the pass (as `#launch` does for spawns), and read subscriptions once per term,
+  not per alert.
+  - _Proposed (#9), who writes `settings`:_ a leader op, not an app-writable prefix.
+    - Record that every PSK holder, the PWA included, can open the Linear token and VAPID key,
+      or seal them to a key apps do not hold.
+    - Apply the review's version floor (S1) to it.
+    - Never put it in logs, `queue`, MCP or `status`.
+  - _Proposed (#10), Web Push egress from a dev machine:_
+    - Allow only https push-service hosts: no IP literals, no private ranges, no redirects.
+    - Short timeouts.
+    - Ids and state only in payloads.
+    - Prune a subscription on 404 or 410.
+  - _Proposed (#11), notification actions:_ clicking opens the Queue screen. iOS ignores
+    actions, and the service worker holds no PSK.
+  - _Proposed (#12), spill de-dupe across leader changes:_ stamp the alerted window on the task
+    record and seed it at takeover. The 31 terms seen in 6 hours would otherwise repeat a push per
+    term.
+- **Linear** — key in `settings`; relation-derived deps and Done as a done signal. Needs settings
+  and the authoring surface. _Proposed (#18):_ decide which relations count, whether `blocks`
+  means opened or merged, what Linear Done against an open PR means, and whether the leader may
+  add deps.
 - **Account records** — `account:<hmac>` in the store, app-writable (Wire changes, _Store
   ops_), holding `{ accountId, alias }` sealed to `"app"` under op `account`. The key is
   HMAC-SHA-256 over the account's id under a key HKDF derives from the PSK with its own label —
@@ -541,29 +545,48 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   disjoint from these; what identifies such an account (the provider's org or workspace, or a
   fingerprint of the key, which changes on rotation) is decided with that kind. PWA: rename on
   the account card, which shows the alias, else the email (DESIGN.md _PWA_), else the short
-  account id — clearing an alias falls back to the email. Exit: an alias set in one client shows in another; a record whose
-  `accountId` does not hash to its key is ignored (shared + e2e). Record: DESIGN.md _Threat
-  model_ (the HKDF label, what the key reveals, a token holder can delete an alias).
-- **Fleet quota record** (after account records; decided 2026-10-17, no longer conditional) —
-  a single `quota` key, `{ accountId → newest observation }`, written by daemons on a fixed
-  cadence (~5 min) whether or not anything changed, by read-open-compare-`expect`: a daemon
-  writes only an observation newer than the one stored, so the record keeps the newest
-  observation, not the last write. One key, not one per account — per-account writes would
-  tell the relay when each account is in use. Why it is needed, not just nice: the kept-status
-  fold (M2) holds an account's quota only as long as some machine's own snapshot does. Each
-  daemon writes over its own, so the fleet's newest reading lives only on the machine that saw
-  it, and a `forget`, a reinstall or a machine retired takes that reading with it. Persisting
-  `SessionQuota` (DESIGN.md, "Session events") stops a restart regressing it, and does nothing
-  for those. The record makes the newest observation a fleet fact rather than a machine's.
-  Its other payoff is `status` shrinking to pressure, which frees most of the 2 KiB socket
-  attachment; its cost is a daemon write path into the store and a 5-min floor on freshness,
-  where `status` is faster — so readers fold both, newest wins, as they fold statuses today.
-- **Auth health** — `authOk` says only that `.claude.json` names an `oauthAccount`: a revoked
-  or lapsed login still reads as signed in, and the `auth missing` filter routes to an exclave
-  that cannot start a session. Per exclave `auth: ok | expired | unknown` with its observed-at,
-  carried in `status`, not the register blob (a change there re-registers and drops the status,
-  #102). Filter widens to "missing **or expired**"; `unknown` routes, since it is every exclave
-  before its first poll. Signals:
+  account id — clearing an alias falls back to the email. Exit: an alias set in one client shows
+  in another; a record whose `accountId` does not hash to its key is ignored (shared + e2e).
+  Record: DESIGN.md _Threat model_ (the HKDF label, what the key reveals).
+  - _Correction (R2), deleting an alias:_ the relay tombstones every prefix apps can create into,
+    and a standing tombstone refuses every put for 30 days. Account keys are a deterministic HMAC,
+    so under today's rules a token holder's delete blocks that alias for 30 days; it is not
+    "retyped in a second". Today `parse.test.ts` asserts `account:` is refused.
+  - _Proposed (#8):_ refuse deletes on `account:`, `quota:` and `settings:` as on `queue:`, with no
+    tombstone; clear by overwrite.
+  - _Proposed (#14):_ record the HKDF salt, label and input. Confirm that `termFenced: false`
+    gives every `/daemon` socket app rights, delete included.
+- **Fleet quota record** (decided 2026-10-17, no longer conditional) — one record of
+  `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) by
+  read-open-compare-`expect`: a daemon writes only an observation newer than the one stored, so
+  the record keeps the newest observation, not the last write. One record, not one per account —
+  per-account writes would tell the relay when each account is in use. Why it is needed, not just
+  nice: the kept-status fold (M2) holds an account's quota only as long as some machine's own
+  snapshot does. Each daemon writes over its own, so the fleet's newest reading lives only on the
+  machine that saw it, and a `forget`, a reinstall or a machine retired takes that reading with
+  it. Persisting `SessionQuota` (DESIGN.md, "Session events") stops a restart regressing it, and
+  does nothing for those. Its other payoff is `status` shrinking to pressure, which frees most of
+  the 2 KiB socket attachment; its cost is a daemon write path into the store and a 5-min floor
+  on freshness, where `status` is faster — so readers fold both, newest wins.
+  - _Corrections (R2)._
+    - "A single `quota` key" does not fit `STORE_KEY_PATTERN`, which needs a prefix plus a
+      routing id.
+    - Daemons are a writer class the prefix table does not have, and the first writer on a prefix
+      that is not term-fenced. So the create floor must cover the daemon leg, and `#nudgeLeader`'s
+      premise — a daemon-leg write is the leader's — stops holding.
+    - The plan said both "whether or not anything changed" and "only an observation newer than the
+      one stored". The second is the rule.
+    - It depends on store rules v2, not on account records.
+  - _Estimate:_ about 288 get-and-put pairs per daemon a day, roughly 2,900 rows written at 10
+    daemons (3% of the free limit).
+- **Auth health** (after the OAuth poll) — `authOk` says only that `.claude.json` names an
+  `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
+  filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
+unknown` with its observed-at, carried in `status`, not the register blob (a change there
+  re-registers and drops the status, #102). Filter widens to "missing **or expired**"; `unknown`
+  routes, since it is every exclave before its first poll. _Proposed (#6):_ a compact,
+  never-trimmed list of expired exclaves in `status`, since auth shares about 680 bytes with
+  quota. Signals:
   - _The OAuth poll's 401, read against the access token's `expiresAt`._ A 401 with
     `expiresAt` still ahead is `expired` (revoked or lapsed); a 401 after it is `unknown` —
     Claude Code refreshes on next use. **The daemon never refreshes**: refresh tokens rotate,
@@ -580,7 +603,8 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
   clears after `/login`; an expired access token alone never reads as `expired` (daemon).
 
 - **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
-  exists already (DESIGN.md "MCP server"; item 6 moved it to the store). What remains:
+  exists already (DESIGN.md "MCP server"). Its `enqueueAuto` is module-private in
+  `daemon/src/mcp.ts`, so it is split out before a second caller. What remains:
   - `seanced spawn --auto` (spelling open), enqueueing through the store as the PWA does:
     seal the task, `store-put` it at `expect: 0`, so it queues with no leader up; the
     verdict is "queued" plus the task id, and `get_sessions` finds the session by
@@ -591,6 +615,7 @@ Independent items, any order, each its own PR with its own DESIGN.md update:
     actions are fixed; today its `auto` is refused ("needs this machine's own key"). An
     enqueue there is a new broker action, which is a threat-model change (DESIGN.md
     "Fleet broker"); without it, keyless MCP gets no `auto`.
+  - _Proposed (#16):_ ship CLI `--auto` on boxes with the key; defer the broker action.
 
   Raycast attaches the same way. Exit: a CLI `auto` spawn lands as a task with no leader
   up and runs once one leads (e2e); `seanced spawn` without `--auto` still works with the
@@ -668,12 +693,9 @@ same PR, with the reason.
     whole queue lists in one frame with no paging (checked in production 2026-10-18, and in headless Chromium and Firefox 2026-10-18 with a 5.13 MB
     frame intact; WKWebView open; DESIGN.md "The store", Send size). A task names its work ("implement this
     Linear issue, and here are the details") and the session gathers the rest with tools; 8K
-    characters is far more than that takes. A direct spawn is not bound by it. Measured: a
-    create with every field at its bound and the prompt in two-byte characters fits the create
-    cap, and all a leader adds at every bound fits beside it with a 10-candidate decision; past
-    that the leader cuts the stored decision. Raised from 32 KiB on 2026-10-17 (the M2 review):
-    at 32 a full create left the leader no room for its own fields, and its first write would
-    have been `too_large`, leaving the task `queued` for good.
+    characters is far more than that takes. A direct spawn is not bound by it. Raised from 32 KiB
+    on 2026-10-17 (the M2 review), so a full create leaves the leader room for its own fields;
+    the measurements are DESIGN.md's (_Scheduler_, "The store", "Versions").
 12. **Running tasks are checked against their machines every 2 min** (`sweepIntervalMs`, set
     with the M2 review, 2026-10-17): the backstop for an `ended` event that never arrived,
     whose task would otherwise hold its slot for good; `awaiting-merge` tasks ride the same
@@ -726,59 +748,20 @@ same PR, with the reason.
   Queued tasks are not rebuilt: a token holder can list the queue (ciphertext) and create junk
   (the leader skips what doesn't decrypt, as the PWA does for the registry). It still cannot
   read a prompt, forge a task, roll one back (version binding), or replay a deleted one
-  (tombstones and the 30-day admit rule, M3 PR 0). Accepted: what is lost is a
+  (tombstones and the 30-day admit rule, M3 item 0). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
   exists (rotate) — which stops new junk but clears none: junk stays until removed by hand, and
   a full `task:` refuses every enqueue (DESIGN.md Threat model, item 3; open, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
   M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
   M4's account records add a smaller one: being app-writable, a token holder can delete an
-  alias or overwrite it with junk that readers skip — but not read, forge or roll one back, and
-  an alias is a label, retyped in a second. Holding the leader's term would be a larger act,
-  and as planned it is not an edge case — next item.
-- **Leader capture is routine. Decided for M2: readers ignore an unverifiable leader (B
-  below); for M3's gate: the deploy-time allowlist, with the reader check kept.**
-  Earliest `connectedAt` wins, and `roles` is the only other gate. Device ids are
-  self-certifying, so anyone with the bearer token can mint one, sign a valid register with
-  `roles: ["scheduler"]` and hold one socket open. A real leader's socket is replaced after
-  every laptop sleep or network change, resetting its `connectedAt`; the squatter's never
-  resets. So the first sleep, network change or relay deploy that drops the leader's socket
-  makes the squatter the earliest-connected capable daemon, with no reconnect storm needed —
-  the assumption this item used to rest on. Holding the term it can
-  delete every task (overwrite and delete are leader-only and term-fenced, so the fence now
-  protects the squatter) or simply never dispatch. Two ways to close it:
-  - _A deploy-time allowlist._ A wrangler var (say `SCHEDULER_LEADERS`: device ids, not a
-    secret) names the daemons the relay may nominate; unset, it nominates no one. Register
-    verification already proves a socket is the machine its device id names, so the relay can
-    enforce this alone, before anything acts on the term. Cost: a new leader-capable machine
-    is a config change and a relay deploy, after reading its device id off `seanced doctor`.
-  - _Readers ignore an unverifiable leader._ Apps and daemons treat a nominated leader whose
-    registry entry does not open — `info` sealed `from` its own device id, the rule that
-    already decides which entries become a `Machine` — as no leader. No config, nothing to
-    deploy. But it changes only what readers believe: the relay still holds the term for the
-    squatter, so its `store-put` and `store-delete` still succeed, and no honest daemon can
-    lead until the squatter's socket goes. It turns a silent stall into a visible one and
-    stops apps sending it requests; it does not protect the queue.
-
-  **Decision (owner, 2026-10-16): the reader check for M2.** M2 has no store — the queue is
-  in-memory on the leader — so what a squatter's term can do there is hold `auto` unavailable
-  until its socket goes, and the reader check makes that visible ("leader unverified") instead
-  of a silent stall. It cannot read a prompt, forge a spawn or open an event: everything it
-  would receive is sealed under the PSK it lacks. M3 changes that: term-fenced `store-put` and
-  `store-delete` would let it delete the queue, and only a check in the relay — the one party
-  that acts on the term — stops that. So the question reopens as M3's gate; the allowlist is
-  the standing recommendation, with the reader check kept as its tripwire (an allowlisted seed
-  copied out of `state.json` without the PSK then reads "leader unverified").
-
-  **Decision (owner, 2026-10-16, M3 gate): the allowlist, as a secret; the reader check
-  kept.** `SCHEDULER_LEADERS` is a Worker secret (`wrangler secret put`), not a var — not
-  because ids are secret, but so a CI deploy never overwrites it and no ids sit in git. Unset
-  or empty nominates nobody; there is no wildcard. The cost is as planned, plus one effect of
-  the mechanism: adding a leader-capable machine is a `wrangler secret put` with its id off
-  `seanced doctor`, which rolls a new relay version, so every socket drops and re-registers.
-  What remains open is the allowlist's own trust — whoever can put secrets on the Cloudflare
-  account, who could already replace the relay — and a listed machine's stolen seed, which the
-  reader check catches unless the PSK went with it. Built and recorded in DESIGN.md
-  (_Scheduler_, "Leadership"; _Threat model_, item 3).
+  alias or overwrite it with junk that readers skip — but not read, forge or roll one back. Under
+  today's tombstones a delete blocks that alias for 30 days rather than being retyped in a second
+  (M4, _Account records_). Holding the leader's term would be a larger act — next item.
+- **Leader capture** (decided 2026-10-16, M2 and M3's gate; built). A bearer-token holder could
+  mint a capable id and outlast a real leader's socket. The relay now nominates only
+  `SCHEDULER_LEADERS`, a Worker secret, and apps believe a nominee only with its `lead-proof`. The
+  record, rejected options and what remains (the allowlist's own trust, a listed machine's
+  stolen seed) are DESIGN.md _Scheduler_, "Leadership", and _Threat model_, item 3.
 
 - **Prompts at rest on Cloudflare.** Sealed under the PSK like `info`, and ciphertext length is
   unpadded, so the relay bounds prompt length — the same concession as live frames. At rest
