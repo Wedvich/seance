@@ -91,6 +91,9 @@ export type StoreWrite =
   | { readonly ok: true; readonly version: number }
   | { readonly ok: false; readonly code: StoreWriteFailure };
 
+/** A write that keeps meeting another writer's version gives up after this many tries. */
+export const WRITE_ATTEMPTS = 3;
+
 /**
  * The store said this writer may no longer write (`not_leader`: its term is
  * over). A throw, unlike every `StoreWrite` failure: nothing the library could

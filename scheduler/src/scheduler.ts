@@ -1,7 +1,5 @@
 import {
   DECISION_MAX_CANDIDATES,
-  MAX_PAUSE_HOLDS,
-  PAUSE_KEY,
   quote,
   type BranchState,
   type PauseHold,
@@ -9,41 +7,38 @@ import {
   type ResumeRequest,
   type SessionState,
 } from "@seance/shared";
-import { escalation, inputClock, type SchedulerAlert } from "./alerts.ts";
+import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
 import { branchChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
-import { activeHolds, sameHolds, withHold, withoutHold } from "./pause.ts";
+import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
   StoreRevoked,
   UNREACHABLE,
+  WRITE_ATTEMPTS,
   type Fleet,
   type QueueStore,
-  type StoredPause,
   type StoreEntry,
   type StoreWrite,
   type TaskSessionsReply,
-  type UnreadablePause,
   type UnreadableTask,
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable } from "./prune.ts";
-import { accountResetAt, route, windowResetOf, type Decision } from "./route.ts";
+import { accountResetAt, route, type Decision } from "./route.ts";
 import { answerable, asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
+export type { PauseResult } from "./pause.ts";
 
 /**
  * The `client` a scheduler spawn audits as: `origin=relay client=scheduler`
  * (Settled defaults 3) on another machine, `origin=leader` on the leader's own.
  */
 export const SCHEDULER_CLIENT = "scheduler";
-
-/** A write that keeps meeting another writer's version gives up after this many tries. */
-const WRITE_ATTEMPTS = 3;
 
 /**
  * Legacy finished records rewritten lean (`lean`) per pass. Sequential
@@ -71,28 +66,27 @@ export interface SchedulerOptions {
 }
 
 /**
- * `pause` and `resume`: every hold in force after the change, or why not.
- * `full`: past `MAX_PAUSE_HOLDS`, one of them kept for the whole-queue hold
- * (account holds stop at one fewer, so a queue `pause` always fits). `conflict`: the record kept changing under
- * the write.
+ * `cancel` and `markDone`: the task as written, or why not (`#byHand`).
+ * `dispatching`: it is `reserved`, its spawn in flight. `despawn_failed`: its
+ * machine refused to end the session. `conflict`: it moved under the write.
+ * `unrecorded`: the session was ended, then the term was lost before the write.
  */
-export type PauseResult =
-  | { readonly ok: true; readonly holds: readonly PauseHold[] }
-  | { readonly ok: false; readonly code: "reset_unknown" | "conflict" | "full" };
-
-export type MarkDoneResult =
+export type ByHandResult =
   | { readonly ok: true; readonly task: Task }
   | {
       readonly ok: false;
       readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
     };
 
-export type CancelResult =
-  | { readonly ok: true; readonly task: Task }
-  | {
-      readonly ok: false;
-      readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
-    };
+export type CancelResult = ByHandResult;
+export type MarkDoneResult = ByHandResult;
+
+/** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
+interface ByHand {
+  readonly task: Task;
+  readonly live: boolean;
+  readonly despawned: boolean;
+}
 
 /**
  * `discard`: `not_found` when no record by that id is held unreadable,
@@ -125,14 +119,8 @@ export class Scheduler {
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #held = new Map<string, Held>();
-  /** `queue:pause` as last read or written; version 0 before the first pause. */
-  #pause: { readonly version: number; readonly holds: readonly PauseHold[] } = { version: 0, holds: [] };
-  /**
-   * `account window` → the reset (ms) of the window a spill was last alerted
-   * for, 0 when that reading carried none: one alert per account per window,
-   * not per task. Memory only, so a new leader alerts an ongoing spill once more.
-   */
-  readonly #spilled = new Map<string, number>();
+  readonly #pause: PauseRecord;
+  readonly #spills: SpillAlerts;
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
   readonly #decisions = new Map<string, Decision>();
@@ -192,6 +180,8 @@ export class Scheduler {
         this.#fault ??= { err };
       });
     this.#onAlert = options.onAlert ?? (() => {});
+    this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
+    this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
   }
 
@@ -202,12 +192,12 @@ export class Scheduler {
     this.#unreadable.clear();
     this.#decisions.clear();
     for (const entry of stored) this.#keep(entry);
-    this.#pause = this.#pauseOf(await this.#store.getPause());
+    await this.#pause.load();
   }
 
   /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
   holds(): readonly PauseHold[] {
-    return activeHolds(this.#pause.holds, this.#now());
+    return this.#pause.active();
   }
 
   /**
@@ -228,12 +218,12 @@ export class Scheduler {
       if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
       hold = { account, until: "reset", at: now, resumeAt };
     }
-    return this.#writeHolds((current) => withHold(current, hold, now));
+    return this.#pause.write((current) => withHold(current, hold, now));
   }
 
   /** Lifts the hold on `account`, or the whole-queue hold when absent; lifting none writes nothing. */
   async resume(request: ResumeRequest): Promise<PauseResult> {
-    return this.#writeHolds((current) => withoutHold(current, request.account, this.#now()));
+    return this.#pause.write((current) => withoutHold(current, request.account, this.#now()));
   }
 
   /**
@@ -458,33 +448,51 @@ export class Scheduler {
    * ends, and asking again is safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
+    return this.#byHand(taskId, (current, { task, live }) => {
+      if (FINISHED.includes(current.state)) return { ok: true, task: current };
+      if (current.state === "reserved") return { ok: false, code: "dispatching" };
+      const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
+      // What was despawned, or found gone, must still be what is cancelled.
+      if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
+        return null;
+      }
+      return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+    });
+  }
+
+  /**
+   * What `cancel` and `markDone` share: refuse a `reserved` or finished task,
+   * end the session of a live one (`running`, `needs-input`, or `lost` on a
+   * machine that is connected), then write what `decide` makes of the task as
+   * it is by then — a result instead answers without writing, and null is a
+   * `conflict`. A despawn that ran and then lost the right to write is
+   * `unrecorded`: the session is gone but the record still says otherwise, so
+   * the term must end, yet the caller must not read that as "nothing happened".
+   */
+  async #byHand(
+    taskId: string,
+    decide: (current: Task, at: ByHand) => Task | ByHandResult | null,
+  ): Promise<ByHandResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
-    const refused = cancelRefusal(task);
-    if (refused !== null) return refused;
+    if (task.state === "reserved") return { ok: false, code: "dispatching" };
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
     const { assignment } = task;
-    const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
-    const ended = leftRunning ? { ok: true as const, despawned: false } : await this.#endSession(task);
+    const live =
+      task.state === "running" ||
+      task.state === "needs-input" ||
+      (task.state === "lost" && assignment !== undefined && this.#connected(assignment.deviceId));
+    const ended = live ? await this.#endSession(task) : { ok: true as const, despawned: false };
     if (!ended.ok) return ended;
-    const { despawned } = ended;
-    let outcome: CancelResult = { ok: false, code: "conflict" };
+    const at: ByHand = { task, live, despawned: ended.despawned };
+    let outcome: ByHandResult = { ok: false, code: "conflict" };
     const next = await this.#update(taskId, (current) => {
-      if (FINISHED.includes(current.state)) {
-        outcome = { ok: true, task: current };
-        return null;
-      }
-      const refusal = cancelRefusal(current);
-      if (refusal !== null) {
-        outcome = refusal;
-        return null;
-      }
-      // What was despawned, or found gone, must still be what is cancelled.
-      if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== assignment?.deviceId) return null;
-      return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+      const step = decide(current, at);
+      if (step === null || !("ok" in step)) return step;
+      outcome = step;
+      return null;
     }).catch((err: unknown) => {
-      // The session is gone but the record still says otherwise: the term must end, yet the
-      // caller must not read that as "nothing happened".
-      if (!despawned || !(err instanceof StoreRevoked)) throw err;
+      if (!at.despawned || !(err instanceof StoreRevoked)) throw err;
       this.#onError(err);
       outcome = { ok: false, code: "unrecorded" };
       return null;
@@ -528,41 +536,18 @@ export class Scheduler {
    * and then lost the right to write `done` is `unrecorded`, as for `cancel`.
    */
   async markDone(taskId: string): Promise<MarkDoneResult> {
-    const task = this.task(taskId);
-    if (task === undefined) return { ok: false, code: "not_found" };
-    if (task.state === "reserved") return { ok: false, code: "dispatching" };
-    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
-    const { assignment } = task;
-    const lostReachable = task.state === "lost" && assignment !== undefined && this.#connected(assignment.deviceId);
-    const live = task.state === "running" || task.state === "needs-input" || lostReachable;
-    const ended = live ? await this.#endSession(task) : { ok: true as const, despawned: false };
-    if (!ended.ok) return ended;
-    let outcome: MarkDoneResult = { ok: false, code: "conflict" };
-    const next = await this.#update(taskId, (current) => {
-      if (FINISHED.includes(current.state)) {
-        // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
-        outcome = ended.despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
-        return null;
-      }
-      if (current.state === "reserved") {
-        outcome = { ok: false, code: "dispatching" };
-        return null;
-      }
+    return this.#byHand(taskId, (current, { task, live, despawned }) => {
+      // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
+      if (FINISHED.includes(current.state))
+        return despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
+      if (current.state === "reserved") return { ok: false, code: "dispatching" };
       // No despawn ran, yet a session is live now: it would outlive a `done` write.
       if (!live && (current.state === "running" || current.state === "needs-input")) return null;
       // What was despawned must still be what is settled.
-      if (live && current.assignment?.deviceId !== assignment?.deviceId) return null;
+      if (live && current.assignment?.deviceId !== task.assignment?.deviceId) return null;
       const leftRunning = !live && current.state === "lost";
       return advance(current, "done", { doneBy: "manual", ...(leftRunning ? { leftRunning: true } : {}) });
-    }).catch((err: unknown) => {
-      if (!ended.despawned || !(err instanceof StoreRevoked)) throw err;
-      this.#onError(err);
-      outcome = { ok: false, code: "unrecorded" };
-      return null;
     });
-    if (next === null) return outcome;
-    this.#decisions.delete(taskId);
-    return { ok: true, task: next };
   }
 
   #connected(deviceId: string): boolean {
@@ -656,53 +641,6 @@ export class Scheduler {
     }
   }
 
-  /**
-   * A confirmed spawn on a candidate that `spill`s spends credits: alerted once
-   * per account per quota window, not per task — the record's decision carries
-   * the spill for each task. The window is told apart by its reset; two
-   * readings of one window differ by seconds, so a reset only counts as a new
-   * window when it is later by more than `resetGraceMs` (or the alerted one has
-   * passed), and a reading with no reset never does.
-   */
-  #spill(taskId: string, decision: Decision): void {
-    const { chosen } = decision;
-    if (chosen === null) return;
-    const spill = decision.candidates.find(
-      (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave,
-    )?.spill;
-    if (spill === undefined) return;
-    const machines = this.#fleet.machines();
-    const accountId = machines
-      .find((m) => m.deviceId === chosen.deviceId)
-      ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
-    if (accountId === undefined || accountId === null) return;
-    const key = `${accountId} ${spill.window}`;
-    const resetS = windowResetOf(accountId, machines, spill.window);
-    const reset = resetS === undefined ? undefined : resetS * 1000;
-    const now = this.#now();
-    const alerted = this.#spilled.get(key);
-    if (alerted !== undefined) {
-      if (reset === undefined) return;
-      // An alert stamped with no reset learns it, without alerting again.
-      if (alerted === 0) {
-        this.#spilled.set(key, reset);
-        return;
-      }
-      const newWindow = reset - alerted > this.#config.resetGraceMs || (alerted <= now && reset > now);
-      if (!newWindow) return;
-    }
-    this.#spilled.set(key, reset ?? 0);
-    const pct = Math.round(spill.projectedPct);
-    this.#alert({
-      kind: "spill",
-      taskId,
-      accountId,
-      window: spill.window,
-      projectedPct: spill.projectedPct,
-      message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
-    });
-  }
-
   /** An alert is a side channel: a host that throws must not strand a reservation or end a pass. */
   #alert(alert: SchedulerAlert): void {
     try {
@@ -735,58 +673,6 @@ export class Scheduler {
           });
         }),
     );
-  }
-
-  /**
-   * `queue:pause` as read. Unreadable fails closed — the whole queue held until
-   * a `resume`, which overwrites it at its version: a pause is usually about
-   * spending, and dispatching through one nobody can read is the costlier guess.
-   */
-  #pauseOf(read: StoredPause | UnreadablePause | null): {
-    readonly version: number;
-    readonly holds: readonly PauseHold[];
-  } {
-    if (read === null) return { version: 0, holds: [] };
-    if (read.reason === undefined) return { version: read.version, holds: read.holds };
-    this.#onError(
-      new Error(`${PAUSE_KEY} is unreadable (${read.reason}): the whole queue is held until a resume overwrites it`),
-    );
-    return { version: read.version, holds: [{ until: "resume", at: this.#now() }] };
-  }
-
-  /**
-   * The one way `queue:pause` is written, serialized like a task's writes
-   * (`PAUSE_KEY` is no task id). A conflict or a lost reply re-reads and
-   * applies `change` again, as `#update` does; after a lost reply the one
-   * version past ours is ours, the pause being the leader's alone. A change
-   * that leaves the holds as they are writes nothing.
-   */
-  #writeHolds(change: (holds: readonly PauseHold[]) => readonly PauseHold[]): Promise<PauseResult> {
-    return this.#serial(PAUSE_KEY, async (): Promise<PauseResult> => {
-      for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
-        const held = this.#pause;
-        const next = change(held.holds);
-        if (next.filter((h) => h.account !== undefined).length >= MAX_PAUSE_HOLDS) return { ok: false, code: "full" };
-        if (sameHolds(next, held.holds)) return { ok: true, holds: this.holds() };
-        // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
-        const write = await this.#store.putPause(held.version, next);
-        if (write.ok) {
-          this.#pause = { version: write.version, holds: next };
-          return { ok: true, holds: this.holds() };
-        }
-        if (write.code !== "version_conflict" && write.code !== "indeterminate") {
-          throw new Error(`store refused put of ${PAUSE_KEY}: ${write.code}`);
-        }
-        // oxlint-disable-next-line no-await-in-loop -- as above
-        const fresh = await this.#store.getPause();
-        if (write.code === "indeterminate" && fresh?.reason === undefined && fresh?.version === held.version + 1) {
-          this.#pause = { version: fresh.version, holds: next };
-          return { ok: true, holds: this.holds() };
-        }
-        this.#pause = this.#pauseOf(fresh);
-      }
-      return { ok: false, code: "conflict" };
-    });
   }
 
   /**
@@ -838,7 +724,9 @@ export class Scheduler {
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
     await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
     // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
-    if (reply.ok) this.#spill(task.id, decision);
+    if (!reply.ok) return;
+    const spill = this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now());
+    if (spill !== null) this.#alert(spill);
   }
 
   /**
@@ -1127,10 +1015,4 @@ function byDevice(tasks: readonly Task[]): ReadonlyMap<string, readonly Task[]> 
     if (deviceId !== undefined) out.set(deviceId, [...(out.get(deviceId) ?? []), task]);
   }
   return out;
-}
-
-function cancelRefusal(task: Task): CancelResult | null {
-  if (task.state === "reserved") return { ok: false, code: "dispatching" };
-  if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
-  return null;
 }
