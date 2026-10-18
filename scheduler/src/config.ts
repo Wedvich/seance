@@ -1,8 +1,11 @@
 import { LAUNCH_LEDGER_MAX_AGE_MS } from "@seance/shared";
 
+/** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
+export type WindowSpan = "5h" | "7d";
+
 /** One seat tier's size and the gated models its quota covers (docs/scheduler.md, Settled defaults 17). */
 export interface SeatProfile {
-  /** Quota relative to the largest seat; the per-task estimate there is `taskEstimatePct / capacity`. */
+  /** Quota relative to the largest seat; the per-task estimate there is `taskEstimatePct[span] / capacity`. */
   readonly capacity: number;
   /** `gatedModels` families this seat's quota covers; any other gated one is billed to credits. */
   readonly includes: readonly string[];
@@ -27,10 +30,12 @@ export interface SchedulerConfig {
   /** A window resetting within this counts as empty for the filter: a task started now runs mostly after it. */
   readonly resetGraceMs: number;
   /**
-   * Fixed per-task usage estimate, percent per window on a capacity-1 seat (v1;
-   * tuned later from observed deltas). A smaller seat's is scaled up by its `capacity`.
+   * Fixed per-task usage estimate, percent of a window on a capacity-1 seat, by
+   * the window's span (v1; tuned later from observed deltas). Per span because a
+   * task's share of a week is a fraction of its share of five hours; per-model
+   * weeklies take `7d`. A smaller seat's is scaled up by its `capacity`.
    */
-  readonly taskEstimatePct: number;
+  readonly taskEstimatePct: Readonly<Record<WindowSpan, number>>;
   /** By `ExclaveInfo.seatTier`. */
   readonly seats: Readonly<Record<string, SeatProfile>>;
   /**
@@ -102,7 +107,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   stickyBonus: 2,
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
-  taskEstimatePct: 5,
+  taskEstimatePct: { "5h": 5, "7d": 1 },
   // Premium seats have 6.25× a standard seat's limits, and only they cover Fable from quota.
   seats: {
     team_tier_1: { capacity: 1, includes: ["fable"] },

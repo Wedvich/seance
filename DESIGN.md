@@ -1730,7 +1730,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
   `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
-  the same account; the filter additionally treats a window resetting within 15 min as
+  the same account, per window span (`taskEstimatePct`: 5% of a 5h window, 1% of a weekly —
+  a task's share of a week is a fraction of its share of five hours); the filter additionally treats a window resetting within 15 min as
   empty. An exclave with extra usage on is scored past the line and its candidate
   carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
@@ -1739,7 +1740,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `gatedModels` families its quota covers. A task whose model names a gated family
   (case-insensitive substring: `fable`, `claude-fable-5-1[1m]`) rejects every exclave whose
   seat doesn't include it with `model_not_included`, never a spill — the point is that it
-  would bill credits. The per-task estimate is `taskEstimatePct / capacity`, for this task
+  would bill credits. The per-task estimate is `taskEstimatePct[span] / capacity`, for this task
   and each in-flight one on the account, in the filter, the score and `accountResetAt`
   alike. A tier missing from the table, or no tier, is `unknownSeat`: capacity 1, no gated
   model, so an older daemon's exclave routes as before except that it gets no Fable task.
