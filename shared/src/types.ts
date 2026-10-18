@@ -553,13 +553,10 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * Request ops an app sends `to: SCHEDULER_ID`, answered by the leader rather
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
- * `submit` is M2's alone (`SubmitResponse`); M3's store replaces it, and M3
- * item 6 removes it. `cancel`, `mark-done`, `pause` and `resume` are M3's: the
- * leader answers all but `mark-done`, which it refuses `invalid_request` until
- * M3 item 6.
- * Enqueue is not among them — an app `store-put`s the task itself.
+ * The leader answers all five. Enqueue is not among them — an app
+ * `store-put`s the task itself.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview", "submit", "cancel", "mark-done", "pause", "resume"] as const;
+export const SCHEDULER_OPS = ["queue", "route-preview", "cancel", "mark-done", "pause", "resume"] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -578,7 +575,6 @@ export const OP_TIMEOUT_MS = {
   metrics: 15_000,
   queue: 10_000,
   "route-preview": 10_000,
-  submit: 15_000,
   cancel: 25_000,
   "mark-done": 10_000,
   pause: 10_000,
@@ -1662,7 +1658,7 @@ export interface PauseRecord extends VersionBound {
  * its dependents fail too and it can be pruned. `lost_expired`: `lost` past
  * `SchedulerConfig.lostExpiryMs` since its machine went away, while that machine
  * is disconnected. Failed so it
- * stops counting toward `MAX_ACTIVE_TASKS` and can be pruned. Its session may
+ * stops holding a slot and can be pruned. Its session may
  * still be running there. `merge_expired`: `awaiting-merge` past `mergeExpiryMs`
  * with no merge. Its `after: "merged"` dependents fail with it.
  */
@@ -1702,15 +1698,13 @@ export const SCHEDULER_ERROR_CODES = [
   "not_leader",
   "not_ready",
   "invalid_request",
-  /** `submit` only: the leader already holds `MAX_ACTIVE_TASKS` unfinished tasks. */
-  "queue_full",
   /** `cancel`, `mark-done`: the leader holds no task by that id. */
   "task_not_found",
   /** `cancel`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
   "dispatching",
   /** `cancel`, `mark-done`: the task is already `done`, `failed` or `cancelled`. */
   "finished",
-  /** `cancel`: its machine answered the despawn with a refusal; the task is unchanged. */
+  /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
   /** `cancel`, `mark-done`, `pause`, `resume`: the record changed under the request (a lost store race); ask again. */
   "conflict",
@@ -1732,18 +1726,17 @@ export interface SchedulerError {
   readonly message: string;
 }
 
-/** `queue` replies with at most this many tasks, newest first: each carries a decision, which grows with the fleet. */
+/** `queue` replies with at most this many tasks, unfinished first (a task waiting on a person leads), newest first within each: each carries a decision, which grows with the fleet. */
 export const QUEUE_MAX_TASKS = 20;
 
 /** A `queue` reply's prompts are cut to this many UTF-16 units — enough to name a task, not to re-read it. */
 export const QUEUE_PROMPT_PREVIEW = 120;
 
 /**
- * `op: "queue"` → the leader's newest tasks, each with its latest decision.
+ * `op: "queue"` → the leader's most relevant tasks (unfinished first), each with its latest decision.
  * `tasks` asks for those ids only (at most `QUEUE_MAX_TASKS`) — what a
- * `queue-changed` named, or the one task a verdict follows. M2's leaders ignore
- * the payload and answer the newest, so a reader filters the reply again. Not
- * sent yet (M3).
+ * `queue-changed` named, or the one task a verdict follows. Older leaders
+ * ignore the payload and answer their own listing, so a reader filters the reply again.
  */
 export interface QueueRequest {
   readonly tasks?: readonly string[];
@@ -1796,7 +1789,7 @@ export interface QueueChanged {
   /**
    * The tasks that changed, at most `QUEUE_MAX_TASKS`, so an app re-fetches
    * those (`QueueRequest.tasks`) rather than the queue. Absent: more changed,
-   * or a holds change — re-fetch it whole. Not sent yet (M3 item 6).
+   * or a holds change — re-fetch it whole.
    */
   readonly tasks?: readonly string[];
 }
@@ -1806,25 +1799,7 @@ export interface RoutePreviewResponse {
   readonly decision: Decision;
 }
 
-/**
- * **M2 only.** `op: "submit"` (a `TaskRequest`) → the task the leader queued.
- * M2's queue is in memory on the leader, so this is the one way in; M3 replaces
- * it with the app sealing the task and `store-put`ting it at `expect: 0`, which
- * queues with no leader up, and removes this op (docs/scheduler.md, M3).
- */
-export interface SubmitResponse {
-  readonly task: Task;
-}
-
-/**
- * **M2 only**, with `submit`: unfinished tasks the in-memory queue holds at
- * most. A bound on what an app can make the leader hold, not a scheduling cap
- * — `SchedulerConfig.globalMax` is that.
- */
-export const MAX_ACTIVE_TASKS = 64;
-
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
-export type SubmitReply = SubmitResponse | SchedulerError;
 export type TaskReply = TaskResponse | SchedulerError;
 export type PauseReply = PauseResponse | SchedulerError;

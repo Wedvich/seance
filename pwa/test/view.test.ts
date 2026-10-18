@@ -62,6 +62,11 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     verdict: null,
     preview: null,
     sessions: {},
+    queue: false,
+    queueView: null,
+    taskAction: null,
+    queueNotice: null,
+    pausing: false,
     ...overrides,
   };
 }
@@ -478,21 +483,30 @@ describe("auto", () => {
   });
   const ready = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
 
-  test("greyed with the reason whenever no verified leader would answer it", () => {
+  test("with no verified leader it still queues, and the note says the task waits for one", () => {
     const cases = [
-      [{ kind: "none" }, "No scheduler is leading right now"],
-      [{ kind: "unverified", deviceId: "squat", term: 3 }, "Leader unverified — it hasn't shown it holds this key"],
+      [{ kind: "none" }, "No scheduler is leading right now — it waits in the queue until one does"],
+      [
+        { kind: "unverified", deviceId: "squat", term: 3 },
+        "Leader unverified — it hasn't shown it holds this key. It waits in the queue until one does",
+      ],
     ] as const;
-    for (const [scheduler, reason] of cases) {
+    for (const [scheduler, note] of cases) {
       const view = deriveView(state({ relay: relay({ machines: [withOrigins], scheduler }) }, { auto: true }), NOW);
-      expect(view.autoAvailability).toEqual({ available: false, reason });
-      expect(view.footerStatus).toBe(reason);
-      expect(view.button).toEqual({ label: "Auto is unavailable", enabled: false, busy: false });
-      // Still "Auto" on the tile, but its dot no longer claims it would answer.
-      expect(view.machineTile).toMatchObject({ value: "Auto", dot: "off" });
+      expect(view.autoAvailability).toEqual({ available: true, reason: null, note });
+      expect(view.footerStatus).toBe(note);
+      expect(view.button).toEqual({ label: "Queue on auto", enabled: true, busy: false });
+      expect(view.machineTile).toMatchObject({ value: "Auto", dot: "auto" });
     }
-    const down = deriveView(state({ relay: relay({ status: "retrying", scheduler: ready }) }), NOW);
-    expect(down.autoAvailability.available).toBe(false);
+  });
+
+  test("greyed with the reason only while the relay socket is not open", () => {
+    const down = deriveView(
+      state({ relay: relay({ machines: [withOrigins], status: "retrying", scheduler: ready }) }, { auto: true }),
+      NOW,
+    );
+    expect(down.autoAvailability).toEqual({ available: false, reason: "Not connected to the relay", note: null });
+    expect(down.machineTile).toMatchObject({ dot: "off" });
   });
 
   test("with a verified leader it queues, naming no machine, over every repo some machine clones", () => {
@@ -500,7 +514,7 @@ describe("auto", () => {
       state({ relay: relay({ machines: [withOrigins, other], scheduler: ready }) }, { auto: true }),
       NOW,
     );
-    expect(view.autoAvailability).toEqual({ available: true, reason: null });
+    expect(view.autoAvailability).toEqual({ available: true, reason: null, note: null });
     expect(view.machineTile).toEqual({ label: "MACHINE", value: "Auto", mono: false, dot: "auto" });
     // One row per origin, however many machines clone it; the host is dropped from the label.
     expect(view.auto?.repos).toEqual([
@@ -547,7 +561,7 @@ describe("failedBody", () => {
     expect(failedBody("lost_expired")).toContain("may still be running");
     expect(failedBody("lost_expired")).not.toEndWith("Nothing is running.");
     expect(failedBody("merge_expired")).toContain("No merge of its pull request was seen");
-    // The task is failed and terminal: there is no mark-done, so the advice is to resubmit what waited on it.
+    // The task is failed and terminal (a failed task can't be marked done), so the advice is to resubmit what waited on it.
     expect(failedBody("merge_expired")).toContain("submit the tasks that waited on it again");
     expect(failedBody("merge_expired")).not.toContain("by hand");
   });

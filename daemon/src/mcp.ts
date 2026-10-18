@@ -6,13 +6,15 @@ import {
   failureReasonText,
   importPsk,
   isTransportError,
+  queuedTask,
   reasonText,
   RequestFailure,
   QUEUE_MAX_TASKS,
   schedulerErrorText,
+  schedulerRefusal,
+  storeErrorText,
   taskFailureText,
   TASK_FAILURE_LIMITS,
-  TASK_PHASES,
   TASK_REQUEST_LIMITS,
   type Candidate,
   type Decision,
@@ -20,6 +22,7 @@ import {
   type DespawnResponse,
   type ErrorResponse,
   type Machine,
+  type PauseHold,
   type RepoEntry,
   type RequestOp,
   type SessionsResponse,
@@ -216,30 +219,22 @@ function isAutoRef(ref: string): boolean {
 
 /**
  * Said wherever `auto` is described, because an agent will otherwise take the
- * queue for a backlog. The queue is the relay's store, so a waiting task survives
- * a leader change (docs/scheduler.md, M3); dependencies and ordering still aren't offered here.
+ * queue for something it is not. The queue is the relay's store, so a waiting
+ * task survives a leader change (docs/scheduler.md, M3); dependencies and
+ * ordering aren't offered here.
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay, so a task still waiting for capacity survives a change of leader (every relay deploy and daemon self-update) and the next leader picks it up. A task already placed is an ordinary session. There are no dependencies or ordering between tasks. Do not use auto as a backlog — submit only work that should start now.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies and ordering can't be set from here.";
 
 /** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
-type SchedulerTool = "auto" | "get_queue" | "cancel_task";
+type SchedulerCall = "get_queue" | "cancel_task";
+type SchedulerTool = "auto" | SchedulerCall;
 
 /** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
 function keylessText(op: SchedulerTool): string {
   const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
   return `${op} needs this machine's own key; unavailable through the broker${instead}`;
 }
-
-/** Nothing answered (a timeout, a socket dropped after the send, an answer that would not parse): the task may be queued, and a blind retry would run it twice. */
-const MAY_HAVE_QUEUED = "the task may have queued anyway — check get_queue and get_sessions before retrying";
-
-/**
- * A transport-code answer carries the leader's own message, which may say the task
- * was not stored, or may have been: never contradict it with "may have queued".
- */
-const LEADER_SAYS_IF_STORED =
-  "the leader's message says whether the task was stored — if it does not, check get_queue and get_sessions before retrying";
 
 /**
  * The leader's message is its own `String(err)` — any length, any lines — and a tool result is
@@ -253,10 +248,10 @@ function oneLine(message: string): string {
     .slice(0, TASK_FAILURE_LIMITS.message);
 }
 
-/** MAY_HAVE_QUEUED for a cancel: its session may already be ended, and the queue says. */
+/** A cancel's answer lost: its session may already be ended, and the queue says. */
 const MAY_HAVE_CANCELLED = "the cancel may have landed anyway — check get_queue";
 
-/** LEADER_SAYS_IF_STORED for a cancel: an `unrecorded` cancel's message already says its session may have ended. */
+/** A transport-code answer carries the leader's own message, never contradicted: an `unrecorded` cancel's already says its session may have ended. */
 const LEADER_SAYS_IF_CANCELLED =
   "the leader's message says whether the cancel landed — if it does not, check get_queue";
 
@@ -389,6 +384,15 @@ function failureMessage(failure: NonNullable<Task["failure"]>): string {
   return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
+function describeHold(hold: PauseHold): Record<string, unknown> {
+  return {
+    ...(hold.account === undefined ? {} : { account: hold.account }),
+    until: hold.until,
+    since: new Date(hold.at).toISOString(),
+    ...(hold.resumeAt === undefined ? {} : { resumeAt: new Date(hold.resumeAt).toISOString() }),
+  };
+}
+
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const { spec } = task;
@@ -403,81 +407,22 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     ...(placement === null ? {} : { placement }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
+    // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
+    ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
+    ...(task.escalated === true ? { escalated: true } : {}),
+    ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
   };
 }
 
 /**
- * Still on its way to a machine, so worth another look before answering. A
- * ready task the last pass routed nowhere waits for capacity — no point
- * holding the tool call for that.
+ * Why a scheduler call threw. A cancel whose reply was lost is "may have landed",
+ * never "failed". A request that never left ("disconnected") is a plain failure.
  */
-function stillPlacing(task: Task): boolean {
-  if (TASK_PHASES[task.state] === "dispatching") return true;
-  return task.state === "ready" && task.decision?.chosen !== null;
-}
-
-/** The answer to an `auto` spawn: where the task is and what to do next, worded per state. */
-function renderAutoTask(task: Task, machines: readonly Machine[], note: string | null): ToolResult {
-  const placement = placementOf(task, machines);
-  const window = placement?.window === undefined ? "" : `, window ${placement.window}`;
-  const where =
-    placement === null
-      ? ""
-      : ` on ${placement.machine} (exclave ${placement.exclave}, clone ${placement.clone}${window})`;
-  const lines = [`task ${task.id}: ${task.state}${where}`];
-  if (task.decision !== undefined) lines.push(`decision: ${decisionText(task.decision)}`);
-  if (task.failure !== undefined) lines.push(`failure (${task.failure.code}): ${failureMessage(task.failure)}`);
-  const machine = placement?.machine ?? "its machine";
-  switch (task.state) {
-    case "running":
-    case "needs-input":
-      lines.push(
-        `It is an ordinary session now: get_sessions on ${machine} lists it with taskId ${task.id}, and despawn_session ends it.`,
-      );
-      break;
-    case "awaiting-merge":
-    case "done":
-      lines.push(`Its session on ${machine} has already ended.`);
-      break;
-    case "reserved":
-      lines.push(`Its spawn on ${machine} is still in flight — check get_queue for the outcome.`);
-      break;
-    case "lost":
-      lines.push(
-        `${machine} stopped answering before the spawn was confirmed — check get_sessions there before retrying.`,
-      );
-      break;
-    case "failed":
-    case "cancelled":
-      break;
-    default:
-      lines.push(
-        "Not placed yet: it waits in the relay's queue for capacity, and survives a leader change. Check get_queue; if it is gone with no session to show for it, submit again or name a machine.",
-      );
-  }
-  if (note !== null) lines.push(note);
-  const text = lines.join("\n");
-  const settledBadly = task.state === "failed" || task.state === "lost" || task.state === "cancelled";
-  return settledBadly ? errorResult(text) : textResult(text);
-}
-
-/** What a lost answer to a call that changes the queue may have done anyway; null for a read. */
-function mayHaveLanded(op: SchedulerTool): string | null {
-  if (op === "auto") return MAY_HAVE_QUEUED;
-  return op === "cancel_task" ? MAY_HAVE_CANCELLED : null;
-}
-
-/**
- * Why a scheduler call threw. A reply lost on `submit` is "may have queued",
- * never "failed": the leader may have queued it before the answer went missing.
- * A request that never left ("disconnected") is a plain failure.
- */
-function schedulerFailureText(op: SchedulerTool, err: unknown): string {
-  const landed = mayHaveLanded(op);
+function schedulerFailureText(op: SchedulerCall, err: unknown): string {
+  const landed = op === "cancel_task" ? MAY_HAVE_CANCELLED : null;
   if (err instanceof RequestFailure) {
     if (err.reason === "no_leader" || err.reason === "leader_unverified") {
-      const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
-      return `${op} unavailable: ${failureReasonText(err)}${instead}`;
+      return `${op} unavailable: ${failureReasonText(err)}`;
     }
     if (landed !== null && (err.reason === "timeout" || err.reason === "dropped")) {
       return `${op}: no answer from the scheduler (${err.message}) — ${landed}`;
@@ -502,90 +447,70 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
   return textResult(lines.join("\n"));
 }
 
-export interface McpServerOpts {
-  /** How an `auto` spawn follows its task to a machine through `queue`; tests shorten it. */
-  readonly autoFollow?: { readonly intervalMs: number; readonly polls: number };
-}
-
-/** About as long as a spawn takes to land and be confirmed; a task still placing past it is reported as such. */
-const AUTO_FOLLOW = { intervalMs: 1_000, polls: 20 } as const;
+/** Tries at one create: each re-sends the same task, so a lost reply can never queue it twice. */
+const ENQUEUE_ATTEMPTS = 3;
+const ENQUEUE_RETRY_MS = 1_000;
 
 /**
- * Submits, then re-reads `queue` while the task is on its way to a machine,
- * so the answer names where it landed. The leader routes on submit, so this
- * is usually a poll or two. Nothing here ever submits twice.
+ * Enqueues by `store-put` — the relay answers it itself, so no leader is needed:
+ * with none (or an unverified one) the task waits in the relay's queue until one
+ * leads. A lost reply (timeout, dropped socket) or no socket is tried again with
+ * the same task, since a repeat create reads `landedEarlier`; every try lost says
+ * so and names the id. Never logs: stdout is the JSON-RPC channel.
  */
-async function spawnAuto(
-  scheduler: SchedulerLeg,
-  machines: readonly Machine[],
-  request: TaskRequest,
-  follow: NonNullable<McpServerOpts["autoFollow"]>,
-): Promise<ToolResult> {
-  let reply: Awaited<ReturnType<SchedulerLeg["submit"]>>;
-  try {
-    reply = await scheduler.submit(request);
-  } catch (err) {
-    return errorResult(schedulerFailureText("auto", err));
-  }
-  if (reply === null) {
-    return errorResult(
-      `auto: the scheduler's answer was unreadable (a seanced version mismatch?) — ${MAY_HAVE_QUEUED}`,
-    );
-  }
-  if ("ok" in reply) {
-    // `too_large` comes from the leader's transport after the handler returned a stored task that would not seal.
-    if (reply.code === "too_large") {
-      return errorResult(
-        "auto: the task was queued, but the leader's answer was too large to send — check get_queue for it",
-      );
+async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promise<ToolResult> {
+  const task = queuedTask(request, Date.now());
+  // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
+  let sent = false;
+  for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      // oxlint-disable-next-line no-await-in-loop -- the wait between tries
+      await Bun.sleep(ENQUEUE_RETRY_MS);
     }
-    // A transport code judges the reply, not the submit; the leader's message is the one that knows what landed.
-    const said = isTransportError(reply.code) ? `: ${oneLine(reply.message)} — ${LEADER_SAYS_IF_STORED}` : "";
-    return errorResult(`auto failed (${reply.code}): ${schedulerErrorText(reply.code)}${said}`);
-  }
-  let task = reply.task;
-  const { id } = task;
-  let seen = false;
-  for (let poll = 0; poll < follow.polls && stillPlacing(task); poll += 1) {
-    // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
-    await Bun.sleep(follow.intervalMs);
-    let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+    let reply: Awaited<ReturnType<SchedulerLeg["enqueue"]>>;
     try {
-      // oxlint-disable-next-line no-await-in-loop -- as above
-      queue = await scheduler.queue();
+      // oxlint-disable-next-line no-await-in-loop -- each try follows the one before
+      reply = await scheduler.enqueue(task);
     } catch (err) {
-      const why = schedulerFailureText("get_queue", err);
-      return renderAutoTask(task, machines, `Queued, but following it went wrong (${why}) — check get_queue.`);
-    }
-    // An unreadable or refused poll is one poll lost, not a verdict: the next asks again.
-    if (queue === null || "ok" in queue) continue;
-    seen = true;
-    const found = queue.tasks.find((t) => t.id === id);
-    if (found === undefined) {
-      // The reply is the newest QUEUE_MAX_TASKS only: a full one may just have scrolled past this task.
-      if (queue.tasks.length >= QUEUE_MAX_TASKS) {
-        return renderAutoTask(
-          task,
-          machines,
-          "Newer tasks pushed it out of the queue's view before it was seen placed — check get_sessions before submitting again.",
-        );
+      const lost =
+        err instanceof RequestFailure &&
+        (err.reason === "timeout" || err.reason === "dropped" || err.reason === "disconnected");
+      if (lost) {
+        if (!(err instanceof RequestFailure && err.reason === "disconnected")) sent = true;
+        continue;
       }
-      return errorResult(
-        `task ${id} was queued, then left the queue before it was placed — most likely a mixed-fleet rollout: a leader still running an older seanced took over and does not hold it. Check get_sessions before submitting again.`,
+      const why =
+        err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+      return errorResult(`auto failed: ${why}`);
+    }
+    if (reply === null) {
+      sent = true;
+      continue;
+    }
+    if (!reply.ok) return errorResult(`auto refused (${reply.code}): ${storeErrorText(reply.code)}`);
+    const lines = [
+      `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
+      "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
+    ];
+    if (schedulerRefusal(scheduler.availability()) !== null) {
+      lines.push(
+        "No scheduler is leading right now (or its leader is unverified); the task waits in the relay's queue until one does.",
       );
     }
-    task = found;
+    return textResult(lines.join("\n"));
   }
-  // Each refused poll was not a verdict, but all of them together are worth saying.
-  const unread =
-    !seen && stillPlacing(task) ? "Queued, but the scheduler never answered a follow-up read — check get_queue." : null;
-  return renderAutoTask(task, machines, unread);
+  if (!sent) {
+    return errorResult(`auto: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
+  }
+  return errorResult(
+    `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; check get_queue before retrying`,
+  );
 }
 
 /**
  * The MCP face of Séance: tools mapping 1:1 onto the registry and the
- * `sessions`/`spawn`/`despawn` ops, plus the scheduler's `submit`, `queue` and
- * `cancel` behind `machine: "auto"`, `get_queue` and `cancel_task`. Anything this hands to the relay rides the same
+ * `sessions`/`spawn`/`despawn` ops, plus the scheduler behind `machine: "auto"` (a
+ * store-put the relay answers), `get_queue` and `cancel_task`. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface, whether
  * this process seals it or the daemon's broker does (`fleet.ts`).
  *
@@ -595,8 +520,7 @@ async function spawnAuto(
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
  */
-export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, opts: McpServerOpts = {}): McpServer {
-  const follow = opts.autoFollow ?? AUTO_FOLLOW;
+export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
@@ -683,7 +607,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's newest tasks — the ones spawn_session with machine "auto" submitted from any client — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. Prompts are cut to a preview. ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview. ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -699,7 +623,8 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
         const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
-        return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), tasks }, null, 2));
+        const holds = (reply.holds ?? []).map(describeHold);
+        return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
   );
 
@@ -745,7 +670,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" hands the spawn to the scheduler, which picks the machine and account and answers with the task id, where it landed and why; it needs this machine's own key, the relay and a scheduler leading, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account, and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()
@@ -798,7 +723,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
           // The origin a clone name resolved to is what the leader bounds, not the name.
           const longOrigin = overBound("repo", resolved.origin);
           if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}`);
-          return spawnAuto(lease.scheduler, lease.machines, { repo: resolved.origin, ...task }, follow);
+          return enqueueAuto(lease.scheduler, { repo: resolved.origin, ...task });
         });
       }
       const request: SpawnRequest = {

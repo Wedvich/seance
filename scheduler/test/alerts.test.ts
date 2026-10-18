@@ -10,7 +10,7 @@ import {
 } from "../src/index.ts";
 import { escalation, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import { exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
+import { enqueue, exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
@@ -23,14 +23,12 @@ function setup(
   const clock = { now: NOW };
   const alerts: SchedulerAlert[] = [];
   const errors: unknown[] = [];
-  let n = 0;
   const make = (): Scheduler =>
     new Scheduler({
       store: readerChecked(store, () => clock.now),
       fleet,
       config,
       now: () => clock.now,
-      newId: () => `t${++n}`,
       onAlert: sink ?? ((alert) => void alerts.push(alert)),
       onError: (err) => errors.push(err),
     });
@@ -52,7 +50,7 @@ async function stored(store: MemoryQueueStore, id: string): Promise<StoredTask> 
 describe("needs-input escalation", () => {
   test("the clock rides the state's own write, escalates once after 30 min, and clears on leaving", async () => {
     const { alerts, clock, fleet, make, scheduler, store } = setup();
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const pane = scheduler.task(task.id)?.assignment?.pane ?? "";
     const from = { deviceId: "a", pane };
@@ -94,7 +92,7 @@ describe("needs-input escalation", () => {
 
   test("lost keeps the clock: the stay resumes where it was, and never alerts twice", async () => {
     const { alerts, clock, fleet, scheduler, store } = setup();
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const from = { deviceId: "a", pane: scheduler.task(task.id)?.assignment?.pane ?? "" };
     await scheduler.onSession(task.id, "needs-input", from);
@@ -135,7 +133,7 @@ describe("needs-input escalation", () => {
 
   test("an escalation write that fails alerts nothing; the next pass retries it", async () => {
     const { alerts, clock, errors, fleet, scheduler, store } = setup();
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const pane = scheduler.task(task.id)?.assignment?.pane ?? "";
     await scheduler.onSession(task.id, "needs-input", { deviceId: "a", pane });
@@ -177,8 +175,8 @@ function spilling(hr: number): ReturnType<typeof machine> {
 describe("credits spill", () => {
   test("alerted once per account per window, not per task; again once the window has reset", async () => {
     const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
-    const first = await scheduler.submit(spec());
-    const second = await scheduler.submit(spec());
+    const first = await enqueue(store, scheduler, spec());
+    const second = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(scheduler.task(first.id)?.state).toBe("running");
     expect(scheduler.task(second.id)?.state).toBe("running");
@@ -192,7 +190,7 @@ describe("credits spill", () => {
 
     // The next 5h window, as full: a new spill.
     fleet.fleet = [spilling(NOW_S + 5 * 3600)];
-    const third = await scheduler.submit(spec());
+    const third = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(alerts.map((a) => a.taskId)).toEqual([first.id, third.id]);
   });
@@ -204,9 +202,9 @@ describe("credits spill", () => {
   });
 
   test("one window is one alert across reading jitter and a reading without its reset; the next window alerts", async () => {
-    const { alerts, clock, fleet, scheduler } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
+    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
     const spillOnce = async (): Promise<void> => {
-      await scheduler.submit(spec());
+      await enqueue(store, scheduler, spec());
       await pass(scheduler, fleet, clock.now);
     };
     await spillOnce();
@@ -228,32 +226,37 @@ describe("credits spill", () => {
   });
 
   test("a refused spawn alerts nothing and leaves the window's alert for the next confirmed spill", async () => {
-    const { alerts, clock, fleet, scheduler } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
+    const { alerts, clock, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE);
     fleet.scripts.set("a", () => ({ ok: false, code: "launch_error", message: "no" }));
-    await scheduler.submit(spec());
+    await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(alerts).toEqual([]);
 
     fleet.scripts.delete("a");
-    const next = await scheduler.submit(spec());
+    const next = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ kind: "spill", taskId: next.id });
   });
 
   test("a throwing onAlert goes to onError and the task still launches", async () => {
-    const { clock, errors, fleet, scheduler } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE, () => {
-      throw new Error("sink down");
-    });
-    const task = await scheduler.submit(spec());
+    const { clock, errors, fleet, scheduler, store } = setup(
+      new FakeFleet([spilling(NOW_S + 3600)]),
+      undefined,
+      WIDE,
+      () => {
+        throw new Error("sink down");
+      },
+    );
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(scheduler.task(task.id)?.state).toBe("running");
     expect(errors).toHaveLength(1);
   });
 
   test("a dispatch under the line alerts nothing", async () => {
-    const { alerts, clock, fleet, scheduler } = setup();
-    await scheduler.submit(spec());
+    const { alerts, clock, fleet, scheduler, store } = setup();
+    await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(fleet.spawns).toHaveLength(1);
     expect(alerts).toEqual([]);

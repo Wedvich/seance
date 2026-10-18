@@ -2,15 +2,16 @@ import {
   FINISHED,
   StoreRevoked,
   type CancelResult,
+  type MarkDoneResult,
   type PauseResult,
   type Scheduler,
   winnerOnly,
 } from "@seance/scheduler";
 import {
   APP_ID,
-  MAX_ACTIVE_TASKS,
   MAX_PAUSE_HOLDS,
   parsePauseRequest,
+  parseQueueRequest,
   parseResumeRequest,
   parseTaskRef,
   parseTaskRequest,
@@ -27,7 +28,6 @@ import {
   type SchedulerError,
   type SchedulerErrorCode,
   type SchedulerOp,
-  type SubmitResponse,
   type Task,
   type TaskResponse,
 } from "@seance/shared";
@@ -46,8 +46,11 @@ function schedulerError(code: SchedulerErrorCode, message: string): SchedulerErr
   return { ok: false, code, message };
 }
 
-function queueView(scheduler: Scheduler, now: number): QueueResponse {
-  return boundedQueue(scheduler.tasks(), (id) => scheduler.lastDecision(id), now, scheduler.holds());
+/** `only` narrows to those ids (an unknown one simply is not in the reply); absent, the whole queue. */
+function queueView(scheduler: Scheduler, now: number, only?: readonly string[]): QueueResponse {
+  const wanted = only === undefined ? null : new Set(only);
+  const tasks = wanted === null ? scheduler.tasks() : scheduler.tasks().filter((t) => wanted.has(t.id));
+  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds());
 }
 
 /**
@@ -72,8 +75,23 @@ function undecided(task: Task): Task {
   return { ...rest, spec: prompt === undefined ? spec : { ...spec, prompt: prompt.slice(0, QUEUE_PROMPT_PREVIEW) } };
 }
 
+function rank(t: Task): number {
+  return FINISHED.includes(t.state) ? 2 : t.escalated === true ? 0 : 1;
+}
+
 /**
- * Newest first and bounded, prompts cut, with every hold in force (at most
+ * What the reply keeps when the store holds more than `QUEUE_MAX_TASKS`: what
+ * still needs someone first — an escalated `needs-input` task, then the rest of
+ * the unfinished, newest first — and finished tasks after, newest first. The
+ * store holds far more than the reply, and a task waiting on a person must not
+ * fall off behind twenty newer finished ones.
+ */
+function byRelevance(a: Task, b: Task): number {
+  return rank(a) - rank(b) || b.createdAt - a.createdAt;
+}
+
+/**
+ * Most relevant first (`byRelevance`) and bounded, prompts cut, with every hold in force (at most
  * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
  * drops one). Full decisions are filled against
  * `QUEUE_REPLY_BUDGET`, live ones first and then newest first; the rest go out
@@ -87,10 +105,7 @@ export function boundedQueue(
   now: number,
   holds: readonly PauseHold[] = [],
 ): QueueResponse {
-  const newest = all
-    .toSorted((a, b) => b.createdAt - a.createdAt)
-    .slice(0, QUEUE_MAX_TASKS)
-    .map(undecided);
+  const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
   const sizes = new Map<string, number>();
   for (const task of newest) {
@@ -145,11 +160,6 @@ interface Asked {
   readonly id: string;
   readonly now: number;
   readonly tick: () => void;
-  /**
-   * Runs submits one at a time. The `MAX_ACTIVE_TASKS` count and the submit it
-   * admits sit either side of awaits, so two run together would both pass it.
-   */
-  readonly admit: <T>(step: () => Promise<T>) => Promise<T>;
 }
 
 const PAUSE_REFUSALS: Record<Exclude<PauseResult, { readonly ok: true }>["code"], SchedulerError> = {
@@ -173,6 +183,19 @@ async function held(
   return { holds: result.holds };
 }
 
+const MARK_DONE_REFUSALS: Record<Exclude<MarkDoneResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
+  finished: schedulerError("finished", "the task has already finished"),
+  despawn_failed: schedulerError("despawn_failed", "its machine did not end the session; the task is unchanged"),
+  conflict: schedulerError("conflict", "the task changed while it was marked done; ask again"),
+  // A transport code, so MCP adds its "may have landed anyway": the despawn did run. Asking again is safe.
+  unrecorded: schedulerError(
+    "internal_error",
+    "its session may already have ended, but marking it done was not recorded before this daemon's term ended; check the queue, then mark it done again if it still shows",
+  ),
+};
+
 const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code"], SchedulerError> = {
   not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
   dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
@@ -194,32 +217,17 @@ const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code
 async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<unknown> {
   const { scheduler, id, tick } = asked;
   switch (op) {
-    case "queue":
-      return queueView(scheduler, asked.now);
+    case "queue": {
+      // An unreadable filter is a malformed request, never "everything".
+      const request = parseQueueRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed queue request");
+      return queueView(scheduler, asked.now, request.tasks);
+    }
     case "route-preview": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
       const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
       return reply;
-    }
-    // Until M3 item 6, the one way in: the leader creates the record itself.
-    // Item 6 replaces it with an app's `store-put` at `expect: 0` and drops the op.
-    case "submit": {
-      const request = parseTaskRequest(payload);
-      if (request === null) return schedulerError("invalid_request", "malformed submit request");
-      // No prune here: the library prunes at `pruneAt` and on its own `store_full`, and an unconditional one would delete a finished task an app may be naming in `deps` (each delete also leaves a tombstone).
-      return asked.admit(async () => {
-        const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
-        if (active >= MAX_ACTIVE_TASKS) {
-          await audit.refused("submit", id, "queue_full");
-          return schedulerError("queue_full", `the leader already holds ${active} unfinished tasks`);
-        }
-        const reply: SubmitResponse = { task: await scheduler.submit(request) };
-        await audit.submitted(id, reply.task.id);
-        // Placed now rather than on the next 30s tick; the reply is the task as queued.
-        tick();
-        return reply;
-      });
     }
     case "cancel": {
       const ref = parseTaskRef(payload);
@@ -248,10 +256,20 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       tick();
       return reply;
     }
-    // M3 item 6's op, in the schema ahead of its handler: a refusal rather
-    // than silence, which an app would read as a dead leader.
-    case "mark-done":
-      return schedulerError("invalid_request", `this leader does not handle ${op} yet`);
+    case "mark-done": {
+      const ref = parseTaskRef(payload);
+      if (ref === null) return schedulerError("invalid_request", "malformed mark-done request");
+      const result = await scheduler.markDone(ref.taskId);
+      if (!result.ok) {
+        await audit.refused("mark-done", id, result.code, { taskId: ref.taskId });
+        return MARK_DONE_REFUSALS[result.code];
+      }
+      await audit.markedDone(id, result.task);
+      // What waited on it (an `after: merged` dependent) is released now rather than on the next 30s tick.
+      tick();
+      const reply: TaskResponse = { task: result.task };
+      return reply;
+    }
   }
 }
 
@@ -281,15 +299,9 @@ export interface TermRequests {
 /** One term's handler for an app's scheduler request, as the leg hands it over. */
 export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerOp, from: string) => Promise<void> {
   const { term, now, tick } = ctx;
-  let admitting: Promise<unknown> = Promise.resolve();
-  const admit = <T>(step: () => Promise<T>): Promise<T> => {
-    const turn = admitting.then(step);
-    admitting = turn.catch(() => undefined);
-    return turn;
-  };
   // Only an app asks the scheduler anything; a daemon's envelope is an event.
   // Answered `not_ready` until takeover ends: before it the queue is the
-  // store's unreconciled view, and a submit would race the load.
+  // store's unreconciled view, and a write would race the load.
   return async (plain: Plain, op: SchedulerOp, from: string): Promise<void> => {
     if (from !== APP_ID) {
       log.warn(`scheduler: dropped op=${quote(op)} from=${quote(from)} — requests come from apps only`);
@@ -299,7 +311,7 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
     let payload: unknown;
     try {
       payload = ctx.running()
-        ? await answer({ scheduler: ctx.scheduler(), id: plain.id, now: now(), tick, admit }, op, plain.payload)
+        ? await answer({ scheduler: ctx.scheduler(), id: plain.id, now: now(), tick }, op, plain.payload)
         : schedulerError("not_ready", `term ${term} is still taking over`);
     } catch (err) {
       if (err instanceof StoreRevoked) {
@@ -308,7 +320,7 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
         payload = schedulerError("not_leader", "this daemon's term has ended");
       } else {
         log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
-        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code on a submit or cancel must mean it ran (the task's own reply was too big), and a crash is not.
+        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code on a cancel or mark-done must mean it ran (the task's own reply was too big), and a crash is not.
         payload = schedulerError("internal_error", String(err).slice(0, TASK_FAILURE_LIMITS.message));
       }
     }

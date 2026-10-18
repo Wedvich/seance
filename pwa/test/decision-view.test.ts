@@ -8,7 +8,7 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, taskHeadline } from "../src/decision-view.ts";
+import { describeDecision, isPlaced, queuedBody, taskHeadline } from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
@@ -143,6 +143,42 @@ describe("describeDecision", () => {
       "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00) — would spend credits (7d at 93%)",
     );
   });
+
+  test("a placed task's record says it is spending credits, not that it would", () => {
+    const base = scored("mac", "Mac", 0.5);
+    const spilling: Candidate = { ...base, spill: { window: "7d", projectedPct: 93.4 } };
+    const placedDecision: Decision = {
+      at: NOW,
+      chosen: { deviceId: "mac", exclave: "default", clone: "app" },
+      candidates: [spilling, { ...scored("pc", "PC", 0.9), spill: { window: "5h", projectedPct: 101 } }],
+    };
+    const placed = describeDecision(placedDecision, [], NOW, "did");
+    expect(placed.chosen?.why).toEndWith("— spending credits (7d projected at 93%)");
+    expect(placed.others[0]?.why).toEndWith("— spending credits (5h projected at 101%)");
+    expect(JSON.stringify(placed)).not.toContain("would spend");
+  });
+});
+
+describe("taskHeadline on a manual done", () => {
+  const task = (fields: Partial<Task>): Task => ({
+    id: "t",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "done",
+    createdAt: NOW,
+    ...fields,
+  });
+
+  test("reads as marked done, with where it ran if it did, and a session's own finish still reads as finished", () => {
+    const machines = [machine("mac", "Mac")];
+    const at = { deviceId: "mac", exclave: "default", clone: "app", window: "w" };
+    expect(taskHeadline(task({ doneBy: "manual", assignment: at }), machines, NOW)).toBe(
+      "Marked done on Mac · default.",
+    );
+    expect(taskHeadline(task({ doneBy: "manual" }), machines, NOW)).toBe("Marked done.");
+    expect(taskHeadline(task({ doneBy: "session", assignment: at }), machines, NOW)).toBe(
+      "It finished on Mac · default.",
+    );
+  });
 });
 
 test("every reason has its own words", () => {
@@ -228,5 +264,24 @@ describe("taskHeadline", () => {
     // A code minted after this build is no scheduler code it knows: read as a refusal.
     expect(taskHeadline(failed("minted_later"), machines, NOW)).toBe("It didn't take.");
     expect(taskHeadline(task({ state: "failed" }), machines, NOW)).toBe("It didn't take.");
+  });
+});
+
+describe("the queued verdict's body", () => {
+  const base: Task = { id: "t", spec: { repo: "github.com/acme/app", mode: "worktree" }, state: "done", createdAt: 1 };
+
+  test("a task marked done by hand makes no claim about a session; one that finished says it ended", () => {
+    expect(queuedBody({ ...base, doneBy: "manual" })).toBe("Marked done by hand.");
+    expect(queuedBody({ ...base, doneBy: "session" })).toBe("The session ended.");
+  });
+
+  test("placed follows the assignment, not the state: a waiting task marked done never reads as placed", () => {
+    expect(isPlaced({ ...base, doneBy: "manual" })).toBe(false);
+    expect(isPlaced({ ...base, state: "running", assignment: { deviceId: "a", exclave: "main", clone: "app" } })).toBe(
+      true,
+    );
+    expect(
+      isPlaced({ ...base, doneBy: "manual", assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } }),
+    ).toBe(true);
   });
 });

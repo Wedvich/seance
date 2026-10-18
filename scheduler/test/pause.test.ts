@@ -1,19 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { MAX_PAUSE_HOLDS } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, StoreRevoked } from "../src/index.ts";
-import { FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
+import { enqueue, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), store = new MemoryQueueStore()) {
   const clock = { now: NOW };
   const errors: unknown[] = [];
-  let n = 0;
   const make = (): Scheduler =>
     new Scheduler({
       store: readerChecked(store, () => clock.now),
       fleet,
       config: DEFAULT_CONFIG,
       now: () => clock.now,
-      newId: () => `t${++n}`,
       onError: (err) => errors.push(err),
     });
   return { store, fleet, clock, errors, make, scheduler: make() };
@@ -27,12 +25,12 @@ async function pass(scheduler: Scheduler): Promise<void> {
 describe("pause and resume", () => {
   test("pause stops dispatch and keeps the running session; resume continues", async () => {
     const { fleet, scheduler, store } = setup();
-    const first = await scheduler.submit(spec());
+    const first = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(scheduler.task(first.id)?.state).toBe("running");
 
     expect(await scheduler.pause({ until: "resume" })).toEqual({ ok: true, holds: [{ until: "resume", at: NOW }] });
-    const second = await scheduler.submit(spec());
+    const second = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
     expect(fleet.despawns).toEqual([]);
@@ -51,12 +49,12 @@ describe("pause and resume", () => {
   });
 
   test("an account hold sends work to another account, and a preview says why", async () => {
-    const { scheduler } = setup(new FakeFleet([machine("a"), machine("b")]));
+    const { scheduler, store } = setup(new FakeFleet([machine("a"), machine("b")]));
     await scheduler.pause({ until: "resume", account: "org:a" });
     expect(scheduler.preview(spec()).candidates.find((c) => c.deviceId === "a")?.rejected).toEqual([
       { code: "paused", until: "resume", scope: "account" },
     ]);
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(scheduler.task(task.id)?.assignment?.deviceId).toBe("b");
     // Resuming an account that holds nothing, or the queue when only an account is held, lifts nothing.
@@ -65,9 +63,9 @@ describe("pause and resume", () => {
   });
 
   test("holds outlive the leader: the next one's takeover reads them before it dispatches", async () => {
-    const { fleet, make, scheduler } = setup();
+    const { fleet, make, scheduler, store } = setup();
     await scheduler.pause({ until: "resume" });
-    await scheduler.submit(spec());
+    await enqueue(store, scheduler, spec());
     const next = make();
     await next.takeover();
     expect(next.holds()).toEqual([{ until: "resume", at: NOW }]);
@@ -84,7 +82,7 @@ describe("pause and resume", () => {
       ok: true,
       holds: [{ account: "org:a", until: "reset", at: NOW, resumeAt: resetAt }],
     });
-    const task = await scheduler.submit(spec());
+    const task = await enqueue(store, scheduler, spec());
 
     clock.now = resetAt;
     fleet.beat(clock.now);
@@ -120,7 +118,7 @@ describe("pause and resume", () => {
     await scheduler.takeover();
     expect(errors).toHaveLength(1);
     expect(scheduler.holds()).toEqual([{ until: "resume", at: NOW }]);
-    await scheduler.submit(spec());
+    await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(fleet.spawns).toEqual([]);
 

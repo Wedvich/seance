@@ -1,6 +1,7 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
   type Decision,
@@ -8,14 +9,22 @@ import {
   type MetricsReply,
   type MetricsRequest,
   type MetricsSeries,
+  type PauseReply,
+  type PauseRequest,
+  type QueueChanged,
   type QueueReply,
+  type QueueRequest,
   type RelayState,
+  type ResumeRequest,
   type RoutePreviewReply,
-  type SubmitReply,
+  type StoreRefusal,
   type Task,
+  type TaskCreated,
+  type TaskReply,
   type TaskRequest,
 } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
+import { deriveView } from "../src/view.ts";
 import {
   PREVIEW_DEBOUNCE_MS,
   PREVIEW_RETRY_MS,
@@ -361,7 +370,8 @@ describe("layers and history", () => {
 
 /**
  * A client whose scheduler answers are the test's: registry state it sets, and
- * `route-preview`, `submit` and `queue` answered by scripts. The relay is a
+ * `route-preview`, the store put, `queue` and the queue actions answered by
+ * scripts, `queue-changed` nudges emitted on demand. The relay is a
  * network boundary; the real client meets the real relay in client.test.ts.
  */
 class ScriptedClient extends RelayClient {
@@ -369,8 +379,25 @@ class ScriptedClient extends RelayClient {
   readonly listeners = new Set<() => void>();
   readonly previews: TaskRequest[] = [];
   onPreview: () => Promise<RoutePreviewReply | null> = async () => ({ decision: DECISION });
-  onSubmit: () => Promise<SubmitReply | null> = async () => ({ task: QUEUED });
-  onQueue: () => Promise<QueueReply | null> = async () => ({ tasks: [QUEUED], at: 1 });
+  /** Every task a create was handed, in order: a retry shows up as the same task again. */
+  readonly creates: Task[] = [];
+  onCreate: (task: Task) => Promise<TaskCreated | StoreRefusal | null> = async () => ({
+    ok: true,
+    landedEarlier: false,
+  });
+  readonly queueRequests: QueueRequest[] = [];
+  onQueue: (request: QueueRequest) => Promise<QueueReply | null> = async () => ({ tasks: [QUEUED], at: 1 });
+  onCancel: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
+    task: { ...QUEUED, id, state: "cancelled" },
+  });
+  onMarkDone: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
+    task: { ...QUEUED, id, state: "done", doneBy: "manual" },
+  });
+  onPause: (request: PauseRequest) => Promise<PauseReply | null> = async () => ({
+    holds: [{ until: "resume", at: 5 }],
+  });
+  onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
+  readonly nudgeListeners = new Set<(change: QueueChanged) => void>();
 
   constructor(relay: Partial<RelayState> = {}) {
     super({ url: "ws://127.0.0.1:1/app", token: "unused", key });
@@ -396,12 +423,39 @@ class ScriptedClient extends RelayClient {
     return this.onPreview();
   }
 
-  override submit(): Promise<SubmitReply | null> {
-    return this.onSubmit();
+  override createTask(task: Task): Promise<TaskCreated | StoreRefusal | null> {
+    this.creates.push(task);
+    return this.onCreate(task);
   }
 
-  override queue(): Promise<QueueReply | null> {
-    return this.onQueue();
+  override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
+    this.queueRequests.push(request);
+    return this.onQueue(request);
+  }
+
+  override cancel(taskId: string): Promise<TaskReply | null> {
+    return this.onCancel(taskId);
+  }
+
+  override markDone(taskId: string): Promise<TaskReply | null> {
+    return this.onMarkDone(taskId);
+  }
+
+  override pause(request: PauseRequest): Promise<PauseReply | null> {
+    return this.onPause(request);
+  }
+
+  override resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
+    return this.onResume(request);
+  }
+
+  override onQueueChanged(listener: (change: QueueChanged) => void): () => void {
+    this.nudgeListeners.add(listener);
+    return () => this.nudgeListeners.delete(listener);
+  }
+
+  nudge(change: QueueChanged): void {
+    for (const listener of this.nudgeListeners) listener(change);
   }
 }
 
@@ -499,6 +553,18 @@ async function drain(): Promise<void> {
   }
 }
 
+/** The one task a test's store put, which the client double kept. */
+function firstCreate(client: ScriptedClient): Task {
+  const task = client.creates[0];
+  if (task === undefined) throw new Error("nothing created");
+  return task;
+}
+
+function queuedState(store: Store): string | undefined {
+  const verdict = store.getState().verdict;
+  return verdict?.kind === "queued" ? verdict.task.state : undefined;
+}
+
 function followEnd(store: Store): unknown {
   const verdict = store.getState().verdict;
   return verdict?.kind === "queued" ? verdict.follow : undefined;
@@ -559,41 +625,90 @@ describe("auto's error paths", () => {
     detach();
   });
 
-  test("a submit that times out keeps the prompt and says it may have queued", async () => {
+  test("a create that times out keeps the prompt, says it may have queued, and a retry re-puts the same task", async () => {
     const client = new ScriptedClient();
-    client.onSubmit = async () => {
-      throw new RequestFailure("timeout", "submit timed out after 10000ms");
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
     };
     const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
     await store.spawn();
-    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true });
+    const verdict = store.getState().verdict;
+    expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: { id: client.creates[0]?.id } });
     expect(store.getState().form.prompt).toBe("fix it");
+    expect(verdict?.kind === "unqueued" && verdict.message).toContain("the relay did not answer");
+
+    // The store had it after all: the same id answers version_conflict, which the client reports as queued.
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
+    await store.retryEnqueue(verdict);
+    expect(client.creates).toHaveLength(2);
+    expect(client.creates[1]).toBe(client.creates[0]);
+    expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { id: client.creates[0]?.id } });
+    expect(store.getState().form.prompt).toBe("");
   });
 
-  test("a submit that never left is not queued; one dropped after the send may be", async () => {
+  test("a create that never left is not queued; one dropped after the send may be; both can be retried", async () => {
     for (const [reason, mayHaveLanded] of [
       ["disconnected", false],
       ["dropped", true],
     ] as const) {
       const client = new ScriptedClient();
-      client.onSubmit = async () => {
-        throw new RequestFailure(reason, "the relay socket closed");
+      client.onCreate = async () => {
+        throw new RequestFailure(reason, "the relay socket closed", "relay");
       };
       const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
-      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded });
+      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded, retry: expect.anything() });
     }
+  });
+
+  test("a store refusal is worded without 'may have queued'; only a full store or a busy minute offers a retry", async () => {
+    for (const [code, retry] of [
+      ["store_full", true],
+      ["rate_limited", true],
+      ["too_large", false],
+      ["invalid_request", false],
+    ] as const) {
+      const client = new ScriptedClient();
+      client.onCreate = async () => ({ ok: false, code });
+      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store each
+      await store.spawn();
+      const verdict = store.getState().verdict;
+      expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+      expect(verdict !== null && "retry" in verdict).toBe(retry);
+      expect(store.getState().form.prompt).toBe("fix it");
+    }
+  });
+
+  test("a store answer this build cannot read may have landed, and can be re-put", async () => {
+    const client = new ScriptedClient();
+    client.onCreate = async () => null;
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: expect.anything() });
+  });
+
+  test("a created task becomes the queued verdict as the app's own copy, and the prompt clears", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    const created = firstCreate(client);
+    expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: created });
+    expect(store.getState().form.prompt).toBe("");
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
   });
 
   test("following stops once the task is running", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
     await store.spawn();
-    expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { state: "ready" } });
-    expect(store.getState().form.prompt).toBe("");
+    const created = firstCreate(client);
+    expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { state: "queued" } });
 
-    const running: Task = { ...QUEUED, state: "running" };
+    const running: Task = { ...created, state: "running" };
     client.onQueue = async () => ({ tasks: [running], at: 2 });
     timers.fire(QUEUE_POLL_MS);
     await until(() => {
@@ -603,30 +718,37 @@ describe("auto's error paths", () => {
     await drain();
     expect(store.getState().verdict).toEqual({ kind: "queued", task: running });
     expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    // The read asked for this task only.
+    expect(client.queueRequests.at(-1)).toEqual({ tasks: [created.id] });
   });
 
-  test("following stops and says so when the leader answers without the task, or refuses", async () => {
-    for (const [reply, follow] of [
-      [{ tasks: [], at: 2 }, { kind: "gone" }],
-      [{ ok: false, code: "invalid_request", message: "?" }, { kind: "refused" }],
-    ] as const) {
-      const client = new ScriptedClient();
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
-      // oxlint-disable-next-line no-await-in-loop -- one store each
-      await store.spawn();
-      client.onQueue = async () => reply;
-      timers.fire(QUEUE_POLL_MS);
-      // oxlint-disable-next-line no-await-in-loop -- as above
-      await until(() => followEnd(store) !== undefined, "following to stop");
-      expect(store.getState().verdict).toMatchObject({ kind: "queued", follow });
-      expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
-    }
+  test("following stops and says so when the leader refuses the read", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    client.onQueue = async () => ({ ok: false, code: "invalid_request", message: "?" });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => followEnd(store) !== undefined, "following to stop");
+    expect(store.getState().verdict).toMatchObject({ kind: "queued", follow: { kind: "refused" } });
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+  });
+
+  test("a leader that answers without the task is a missed poll, never a verdict that it is gone", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    client.onQueue = async () => ({ tasks: [], at: 2 });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the read");
+    await until(() => timers.armed(QUEUE_POLL_MS) === 1, "the next poll armed");
+    expect(followEnd(store)).toBeUndefined();
   });
 
   test("missed polls keep what was shown and ask again; out of polls, it says what it last knew may be stale", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
     await store.spawn();
+    const created = firstCreate(client);
     client.onQueue = async () => {
       throw new RequestFailure("timeout", "queue timed out");
     };
@@ -639,6 +761,495 @@ describe("auto's error paths", () => {
     }
     timers.fire(QUEUE_POLL_MS);
     await until(() => followEnd(store) !== undefined, "following to give up");
-    expect(store.getState().verdict).toEqual({ kind: "queued", task: QUEUED, follow: { kind: "unanswered" } });
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: created, follow: { kind: "unanswered" } });
+  });
+
+  test("with no leader the task still queues, the follow waits without spending polls, and a leader's arrival places it", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    await store.spawn();
+    expect(store.getState().verdict).toMatchObject({ kind: "queued" });
+    expect(client.creates).toHaveLength(1);
+
+    // More polls than the budget: none of them counted, so it never gives up.
+    const nextArmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
+    for (let poll = 0; poll < QUEUE_POLLS + 3; poll += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
+      await until(nextArmed, "the next poll armed");
+    }
+    expect(followEnd(store)).toBeUndefined();
+
+    const placed: Task = { ...firstCreate(client), state: "running" };
+    client.onQueue = async () => ({ tasks: [placed], at: 3 });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => queuedState(store) === "running", "placed");
+  });
+
+  test("the preview still says there is no leader, though queueing needs none", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    client.onPreview = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
+    store.selectAuto();
+    await until(() => store.getState().preview?.kind === "failed", "the preview to fail");
+    expect(store.getState().preview).toMatchObject({
+      kind: "failed",
+      message: expect.stringMatching(/no scheduler/iu),
+    });
+  });
+
+  test("a queue-changed naming the followed task reads it without spending a poll; one naming another does not", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+
+    client.nudge({ at: 2, tasks: ["someone-else"] });
+    await drain();
+    // The queue list may be re-read for the chip; the followed task is not.
+    expect(client.queueRequests.filter((r) => r.tasks?.includes(created.id))).toEqual([]);
+
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 3 });
+    client.nudge({ at: 3, tasks: [created.id] });
+    await until(() => queuedState(store) === "running", "placed");
+    expect(client.queueRequests).toContainEqual({ tasks: [created.id] });
+    // Settled by the nudge: the poll that was waiting is gone.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a nudge with no ids reads the followed task too, and spends nothing when the read misses", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    client.onQueue = async () => {
+      throw new RequestFailure("timeout", "queue timed out");
+    };
+    client.nudge({ at: 2 });
+    await until(() => client.queueRequests.length > 1, "the read");
+    await drain();
+    expect(followEnd(store)).toBeUndefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a slow poll answered after a newer read settled the verdict does not walk it back", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+
+    const slow = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => slow.promise;
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.some((r) => r.tasks?.[0] === created.id), "the poll's read");
+
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 3 });
+    client.nudge({ at: 3, tasks: [created.id] });
+    await until(() => queuedState(store) === "running", "placed");
+
+    slow.resolve({ tasks: [created], at: 2 });
+    await drain();
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: running });
+    // No restarted follow either.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a poll answered after a newer unsettled read is dropped, and its follow carries on", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+
+    const slow = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => slow.promise;
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.some((r) => r.tasks?.[0] === created.id), "the poll's read");
+
+    const ready: Task = { ...created, state: "ready" };
+    client.onQueue = async () => ({ tasks: [ready], at: 3 });
+    client.nudge({ at: 3, tasks: [created.id] });
+    await until(() => queuedState(store) === "ready", "the newer read");
+
+    slow.resolve({ tasks: [created], at: 2 });
+    await drain();
+    expect(queuedState(store)).toBe("ready");
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+});
+
+describe("the queue screen", () => {
+  let timers: ReturnType<typeof captureTimers>;
+  let fake: ReturnType<typeof fakeHistory>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+    fake = fakeHistory();
+  });
+
+  afterEach(() => {
+    timers.restore();
+    fake.restore();
+  });
+
+  const waiting: Task = { ...QUEUED, id: "w-1", state: "ready" };
+  const running: Task = { ...QUEUED, id: "r-1", state: "running" };
+
+  function loaded(client: ScriptedClient): Promise<Store> {
+    client.onQueue = async () => ({ tasks: [waiting, running], holds: [], at: 1 });
+    const store = new Store(client);
+    store.openQueue();
+    return until(() => store.getState().queueView?.kind === "ok", "the queue read").then(() => store);
+  }
+
+  test("opening reads the whole queue and the layer is closed by back", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    expect(client.queueRequests).toEqual([{}]);
+    expect(store.getState().queue).toBe(true);
+    expect(store.getState().queueView).toEqual({ kind: "ok", tasks: [waiting, running], holds: [], at: 1 });
+
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().queue).toBe(false);
+    expect(fake.index()).toBe(0);
+  });
+
+  test("a leader that answers with a refusal fails the screen; one with no leader says so", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "failed", "the failure");
+
+    const none = new ScriptedClient({ scheduler: { kind: "none" } });
+    none.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const lone = new Store(none);
+    lone.openQueue();
+    await until(() => lone.getState().queueView?.kind === "failed", "no leader");
+    expect(lone.getState().queueView).toMatchObject({ message: expect.stringMatching(/no scheduler/iu) });
+    // No fallback to listing the relay's store: nothing is asked of it.
+    expect(none.queueRequests).toHaveLength(1);
+  });
+
+  test("a queue-changed naming ids merges only those, and replaces the holds", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    // Attaching reads the whole queue once; the nudge below is a read of its own.
+    await drain();
+    const done: Task = { ...waiting, state: "running" };
+    client.onQueue = async (request) => {
+      expect(request).toEqual({ tasks: ["w-1"] });
+      return { tasks: [done], holds: [{ until: "resume", at: 9 }], at: 2 };
+    };
+    client.nudge({ at: 2, tasks: ["w-1"] });
+    await until(() => {
+      const view = store.getState().queueView;
+      return view?.kind === "ok" && view.holds.length === 1;
+    }, "the merge");
+    expect(store.getState().queueView).toEqual({
+      kind: "ok",
+      tasks: [done, running],
+      holds: [{ until: "resume", at: 9 }],
+      at: 2,
+    });
+
+    // No ids: the whole queue again.
+    client.onQueue = async (request) => {
+      expect(request).toEqual({});
+      return { tasks: [done], holds: [], at: 3 };
+    };
+    client.nudge({ at: 3 });
+    await until(() => {
+      const view = store.getState().queueView;
+      return view?.kind === "ok" && view.tasks.length === 1;
+    }, "the whole read");
+    detach();
+  });
+
+  test("a read that fails keeps the list that was shown and says so in the notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    await store.refreshQueue();
+    expect(store.getState().queueView).toMatchObject({ kind: "ok" });
+    expect(store.getState().queueNotice).toContain("taking over");
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 5 });
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("an ask made while a read is out waits for it, then reads once more: reads are single-flight", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const late = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => late.promise;
+    const before = client.queueRequests.length;
+    const first = store.refreshQueue();
+    client.onQueue = async () => ({ tasks: [], holds: [], at: 9 });
+    const second = store.refreshQueue();
+    await drain();
+    expect(client.queueRequests).toHaveLength(before + 1);
+    late.resolve({ tasks: [waiting], holds: [], at: 1 });
+    await Promise.all([first, second]);
+    expect(client.queueRequests).toHaveLength(before + 2);
+    expect(store.getState().queueView).toMatchObject({ kind: "ok", tasks: [], at: 9 });
+  });
+
+  test("cancel and mark done merge the task as it now stands; a refusal is the notice, a lost answer says to refresh", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+
+    await store.cancelTask("w-1");
+    expect(store.getState().queueView).toMatchObject({
+      tasks: [{ id: "w-1", state: "cancelled" }, { id: "r-1" }],
+    });
+    expect(store.getState().taskAction).toBeNull();
+
+    client.onMarkDone = async () => ({ task: { ...running, state: "done", doneBy: "manual" } });
+    await store.markDone("r-1");
+    expect(store.getState().queueView).toMatchObject({ tasks: [{}, { id: "r-1", state: "done", doneBy: "manual" }] });
+
+    client.onMarkDone = async () => ({ ok: false, code: "dispatching", message: "in flight" });
+    await store.markDone("w-1");
+    expect(store.getState().queueNotice).toContain("starting");
+
+    client.onCancel = async () => {
+      throw new RequestFailure("timeout", "cancel timed out");
+    };
+    await store.cancelTask("w-1");
+    expect(store.getState().queueNotice).toContain("refresh to see whether it landed");
+
+    // The next action clears the last one's notice.
+    client.onCancel = async () => ({ task: { ...waiting, state: "cancelled" } });
+    await store.cancelTask("w-1");
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("pause and resume replace the holds with the leader's answer, and a refusal is the notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const requests: unknown[] = [];
+    client.onPause = async (request) => {
+      requests.push(request);
+      return { holds: [{ until: "resume", at: 5 }] };
+    };
+    await store.pauseQueue();
+    expect(store.getState().queueView).toMatchObject({ holds: [{ until: "resume", at: 5 }] });
+    expect(requests).toEqual([{ until: "resume" }]);
+
+    const resumed: unknown[] = [];
+    client.onResume = async (request) => {
+      resumed.push(request);
+      return { holds: [] };
+    };
+    await store.resumeQueue("acct");
+    await store.resumeQueue();
+    expect(resumed).toEqual([{ account: "acct" }, {}]);
+    expect(store.getState().queueView).toMatchObject({ holds: [] });
+    expect(store.getState().pausing).toBe(false);
+
+    client.onPause = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    await store.pauseQueue();
+    expect(store.getState().queueNotice).toContain("taking over");
+  });
+
+  test("a re-dialed socket reads the whole queue again, and a followed task once", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    client.queueRequests.length = 0;
+
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open" });
+    await until(() => client.queueRequests.some((r) => r.tasks === undefined), "the whole read");
+    expect(client.queueRequests).toEqual([{}]);
+    detach();
+  });
+
+  test("a new leader makes an open screen read again", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    client.queueRequests.length = 0;
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-b", term: 2 } });
+    await until(() => client.queueRequests.length === 1, "the read under the new leader");
+    detach();
+  });
+
+  test("a nudge naming the followed task asks the leader once: the queue read it set off updates the verdict too", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    const before = client.queueRequests.length;
+    const placed: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [placed], holds: [], at: 3 });
+    client.nudge({ at: 3, tasks: [created.id] });
+    await until(() => queuedState(store) === "running", "placed");
+    await drain();
+    expect(client.queueRequests.length - before).toBe(1);
+    detach();
+  });
+
+  test("a reconnect while a queued verdict waits reads that task once, spending no poll", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open" });
+    await until(() => client.queueRequests.some((r) => r.tasks !== undefined), "the read");
+    expect(client.queueRequests.filter((r) => r.tasks !== undefined)).toEqual([{ tasks: [created.id] }]);
+    detach();
+  });
+
+  test("named nudges while a read is out fold into one trailing read of their union, whole past the leader's cap", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const late = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => late.promise;
+    const first = store.refreshQueue();
+    const asked: unknown[] = [];
+    const moved: Task = { ...waiting, state: "running" };
+    const moved2: Task = { ...running, state: "done" };
+    client.onQueue = async (request) => {
+      asked.push(request);
+      return { tasks: [moved, moved2], holds: [], at: 4 };
+    };
+    void store.refreshQueue(["w-1"], true);
+    const last = store.refreshQueue(["r-1"], true);
+    late.resolve({ tasks: [], holds: [], at: 1 });
+    await Promise.all([first, last]);
+    expect(asked).toEqual([{ tasks: ["w-1", "r-1"] }]);
+    expect(store.getState().queueView).toEqual({ kind: "ok", tasks: [moved, moved2], holds: [], at: 4 });
+
+    const many = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) => `m-${i}`);
+    const stuck = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => stuck.promise;
+    const third = store.refreshQueue(many, true);
+    asked.length = 0;
+    client.onQueue = async (request) => {
+      asked.push(request);
+      return { tasks: [], holds: [], at: 5 };
+    };
+    void store.refreshQueue(many.slice(0, 11), true);
+    void store.refreshQueue(many.slice(11).concat(["extra", "extra-2"]), true);
+    stuck.resolve({ tasks: [], holds: [], at: 4 });
+    await third;
+    expect(asked).toEqual([{}]);
+  });
+
+  test("a person's refresh folded into a nudge read keeps its notice behaviour, and a nudge read leaves an action's notice up", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onMarkDone = async () => ({ ok: false, code: "dispatching", message: "in flight" });
+    await store.markDone("w-1");
+    expect(store.getState().queueNotice).toContain("starting");
+
+    const late = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => late.promise;
+    const nudge = store.refreshQueue(["w-1"], true);
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    const person = store.refreshQueue();
+    late.resolve({ tasks: [waiting], holds: [], at: 6 });
+    await Promise.all([nudge, person]);
+    expect(store.getState().queueNotice).toContain("taking over");
+
+    store.dismissLayer();
+    await store.markDone("w-1");
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 7 });
+    await store.refreshQueue(["w-1"], true);
+    expect(store.getState().queueNotice).toContain("starting");
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a read that fails with the screen closed leaves no loading view behind", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("timeout", "queue timed out");
+    };
+    const store = new Store(client);
+    store.openQueue();
+    store.dismissLayer();
+    fake.settle(store);
+    await drain();
+    expect(store.getState().queue).toBe(false);
+    expect(store.getState().queueView?.kind).not.toBe("loading");
+  });
+
+  test("a named id the leader no longer lists is dropped from the screen, one it was not asked about is kept", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onQueue = async () => ({ tasks: [running], holds: [], at: 3 });
+    await store.refreshQueue(["w-1"], true);
+    expect(store.getState().queueView).toMatchObject({ kind: "ok", tasks: [{ id: "r-1" }] });
+  });
+
+  test("a nudge-driven read answered not_ready is ignored; one the person asked for is worded", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    await store.refreshQueue(["w-1"], true);
+    expect(store.getState().queueNotice).toBeNull();
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toContain("taking over");
+  });
+
+  test("with the screen closed a verified leader's nudge still keeps the Queue chip's attention dot current", async () => {
+    const client = new ScriptedClient();
+    const stuck: Task = { ...running, id: "s-1", state: "needs-input", escalated: true };
+    client.onQueue = async () => ({ tasks: [running], holds: [], at: 1 });
+    const store = new Store(client);
+    const detach = store.attach();
+    await until(() => store.getState().queueView?.kind === "ok", "the read on attach");
+    expect(store.getState().queue).toBe(false);
+    expect(deriveView(store.getState(), Date.now()).queueAttention).toBe(false);
+
+    client.onQueue = async () => ({ tasks: [stuck, running], holds: [], at: 2 });
+    client.nudge({ at: 2, tasks: ["s-1"] });
+    await until(() => deriveView(store.getState(), Date.now()).queueAttention, "the dot");
+
+    // A failed background read says nothing on a screen nobody is looking at.
+    client.onQueue = async () => {
+      throw new RequestFailure("timeout", "queue timed out");
+    };
+    client.nudge({ at: 3 });
+    await drain();
+    expect(store.getState().queueNotice).toBeNull();
+    expect(deriveView(store.getState(), Date.now()).queueAttention).toBe(true);
+    detach();
+  });
+
+  test("with no verified leader and the screen closed, nothing is read", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    const store = new Store(client);
+    const detach = store.attach();
+    client.nudge({ at: 2 });
+    await drain();
+    expect(client.queueRequests).toEqual([]);
+    detach();
   });
 });

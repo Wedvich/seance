@@ -15,10 +15,19 @@ import {
   type MachineInfo,
   type MachineStatus,
   type Plain,
+  type QueueChanged,
   type SessionsResponse,
+  type Task,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { connectDaemon, newDeviceId, register, startRelay, type TestRelay } from "../../relay/test/harness.ts";
+import {
+  connectApp,
+  connectDaemon,
+  newDeviceId,
+  register,
+  startRelay,
+  type TestRelay,
+} from "../../relay/test/harness.ts";
 import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
@@ -905,6 +914,98 @@ describe("scheduler leg", () => {
   });
 });
 
+// The queue ops and the nudge, against the real DO and a leader's two legs: its daemon
+// socket (where requests arrive and replies leave) and its app-role leg under the term.
+describe("queue ops", () => {
+  type Msg = { t: "msg"; env: Envelope };
+
+  test("mark-done, pause, resume and a filtered queue round-trip; a leader's queue-changed reaches apps and nothing forged does", async () => {
+    const leaderId = listed.legLeader;
+    const info = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      { id: leaderId, ts: Date.now(), op: "machine-info", payload: machineInfo(leaderId) },
+    );
+    const leader = await connectDaemon(relay);
+    leader.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+    const { term } = await leader.waitFor<{ t: "lead"; term: number }>("lead");
+    const proof = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term } },
+    );
+    leader.send({ t: "lead-proof", term, env: proof });
+    const { client, waitFor } = startClient();
+    const leg = startClient({ scheduler: { term } });
+    const raw = await connectApp(relay);
+    const heard: QueueChanged[] = [];
+    const legHeard: QueueChanged[] = [];
+    const stopHearing = client.onQueueChanged((change) => heard.push(change));
+    const stopLeg = leg.client.onQueueChanged((change) => legHeard.push(change));
+
+    // The leader's side of one request: what arrived, then the reply it sends.
+    const answer = async (payload: unknown): Promise<Plain> => {
+      const plain = await open(key, (await leader.waitFor<Msg>("msg")).env);
+      const reply: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: plain.op, re: plain.id, payload };
+      leader.send({ t: "msg", env: await seal(key, { to: APP_ID, from: leaderId }, reply) });
+      return plain;
+    };
+    const task: Task = {
+      id: "t",
+      spec: { repo: "github.com/acme/app", mode: "worktree" },
+      state: "done",
+      createdAt: 1,
+    };
+
+    try {
+      await waitFor((s) => s.scheduler.kind === "ready", "the leader verified");
+      await leg.waitFor((s) => s.status === "open", "the leg open");
+
+      const marked = client.markDone("t");
+      const sent = await answer({ task: { ...task, doneBy: "manual" } });
+      expect(sent).toMatchObject({ op: "mark-done", payload: { taskId: "t" } });
+      expect(await marked).toEqual({ task: { ...task, doneBy: "manual" } });
+
+      const paused = client.pause({ until: "resume" });
+      expect(await answer({ holds: [{ until: "resume", at: 1 }] })).toMatchObject({
+        op: "pause",
+        payload: { until: "resume" },
+      });
+      expect(await paused).toEqual({ holds: [{ until: "resume", at: 1 }] });
+
+      const resumed = client.resume({ account: "acct" });
+      expect(await answer({ holds: [] })).toMatchObject({ op: "resume", payload: { account: "acct" } });
+      expect(await resumed).toEqual({ holds: [] });
+
+      const filtered = client.queue({ tasks: ["t"] });
+      expect(await answer({ tasks: [], at: 1 })).toMatchObject({ op: "queue", payload: { tasks: ["t"] } });
+      expect(await filtered).toEqual({ tasks: [], at: 1 });
+
+      // A nudge sealed from the app address is anyone-with-the-key's, not the leader's: not heard.
+      const forged: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "queue-changed", payload: { at: 2 } };
+      raw.send({ t: "msg", env: await seal(key, { to: APP_ID, from: APP_ID }, forged) });
+      // Sent after, so by the time it is heard the forged one has been seen and dropped.
+      expect(await leg.client.queueChanged({ at: 3, tasks: ["t"] })).toBe(true);
+      await pollUntil(() => heard.length > 0, "the leader's nudge");
+      expect(heard).toEqual([{ at: 3, tasks: ["t"] }]);
+      // Only an app's client listens: the leader's own leg ignores the fan-out of its nudge.
+      expect(legHeard).toEqual([]);
+      // An app's client has no term, so it cannot send one.
+      expect(await client.queueChanged({ at: 4 })).toBe(false);
+    } finally {
+      stopHearing();
+      stopLeg();
+      raw.close();
+      leg.client.stop();
+      leader.close();
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId || !m.connected), "the leader gone");
+      client.forget(leaderId);
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId), "the leader forgotten");
+      client.stop();
+    }
+  });
+});
+
 describe("auto", () => {
   type Msg = { t: "msg"; env: Envelope };
   const decision: Decision = { at: 1, chosen: null, candidates: [] };
@@ -925,7 +1026,7 @@ describe("auto", () => {
       expect(unverified.scheduler).toMatchObject({ kind: "unverified", deviceId: squatterId });
       const request = { repo: "github.com/acme/app", mode: "worktree" } as const;
       await expect(client.routePreview(request)).rejects.toMatchObject({ reason: "leader_unverified" });
-      await expect(client.submit(request)).rejects.toMatchObject({ reason: "leader_unverified" });
+      await expect(client.markDone("t")).rejects.toMatchObject({ reason: "leader_unverified" });
       await squatter.expectNo("msg");
 
       squatter.close();

@@ -1,8 +1,8 @@
 import type { JSX } from "preact";
-import { isRouted, isSettled, type Machine, type Task } from "@seance/shared";
-import { describeDecision, taskHeadline } from "../decision-view.ts";
+import { isSettled, type Machine } from "@seance/shared";
+import { describeDecision, isPlaced, queuedBody, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
-import { failedBody, failureBody } from "../view.ts";
+import { failureBody } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 
 interface Content {
@@ -15,54 +15,16 @@ interface Content {
   readonly showBack: boolean;
 }
 
-/** What the person can do next about a task the scheduler holds, by its state. */
-function queuedBody(task: Task): string {
-  switch (task.state) {
-    case "queued":
-      return "It is in the queue. The scheduler picks it up as soon as one is running. Nothing is running yet.";
-    case "blocked":
-      return "It waits for the tasks it depends on. Nothing is running yet.";
-    case "ready":
-      return "The scheduler holds it and places it as soon as a machine can take it. Nothing is running yet.";
-    case "reserved":
-      return "The scheduler picked a machine and is starting the session there.";
-    case "running":
-    case "needs-input":
-      return "Open Claude on your phone and continue the session from there.";
-    case "lost":
-      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back, or is given up on after a week.";
-    case "awaiting-merge":
-      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
-    case "done":
-      return "The session ended.";
-    case "failed":
-      return failedBody(task.failure?.code);
-    case "cancelled":
-      return task.leftRunning === true
-        ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."
-        : "Nothing is running.";
-  }
-}
-
-function describe(verdict: Verdict, machineName: string, machines: readonly Machine[], now: number): Content {
+function describe(
+  verdict: Verdict,
+  machineName: string,
+  machines: readonly Machine[],
+  now: number,
+  waitingNote: string | null,
+): Content {
   if (verdict.kind === "queued") {
     const { task, follow } = verdict;
     const settled = isSettled(task.state);
-    if (follow?.kind === "gone") {
-      // Reserved, its spawn may have been out when the leader let it go; ready, nothing was started.
-      const started = task.state === "reserved";
-      return {
-        glyph: started ? "?" : "!",
-        glyphClass: started ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
-        headline: "The scheduler no longer holds it.",
-        body: started
-          ? "It was starting on a machine when the leader let it go, so it may be running. Look for its session before trying again."
-          : "The leader probably changed, which drops tasks still waiting for a machine. Nothing was started.",
-        detail: null,
-        primary: { label: "Start another", onClick: "another" },
-        showBack: true,
-      };
-    }
     const stale =
       follow === undefined
         ? ""
@@ -81,7 +43,8 @@ function describe(verdict: Verdict, machineName: string, machines: readonly Mach
             ? "verdict-glyph"
             : "verdict-glyph verdict-glyph-muted",
       headline: taskHeadline(task, machines, now),
-      body: `${queuedBody(task)}${stale}`,
+      // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.
+      body: `${queuedBody(task)}${task.state === "queued" && waitingNote !== null ? ` ${waitingNote}.` : ""}${stale}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
       primary: { label: "Start another", onClick: "another" },
       showBack: true,
@@ -92,14 +55,16 @@ function describe(verdict: Verdict, machineName: string, machines: readonly Mach
     return {
       glyph: verdict.mayHaveLanded ? "?" : "!",
       glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
-      headline: verdict.mayHaveLanded ? "The scheduler's answer was lost." : "The scheduler didn't queue it.",
+      headline: verdict.mayHaveLanded ? "The relay's answer was lost." : "It wasn't queued.",
       body: verdict.mayHaveLanded
-        ? // No queue view until M3's (docs/scheduler.md, M3 item 6): sessions are what this app can show.
-          `${verdict.message} It may have queued anyway. Give it a moment and look for its session before trying again — one still waiting for a machine won't show yet.`
+        ? `${verdict.message} It may have queued anyway — trying again is safe: it re-sends the same task, which can't queue twice.`
         : verdict.message,
       detail: null,
-      primary: { label: "Back to the form", onClick: "back" },
-      showBack: false,
+      primary:
+        verdict.retry === undefined
+          ? { label: "Back to the form", onClick: "back" }
+          : { label: "Try again", onClick: "retry" },
+      showBack: verdict.retry !== undefined,
     };
   }
 
@@ -211,15 +176,19 @@ export function VerdictView(props: {
   /** True while the exit animation plays; unmount follows via onExited. */
   closing?: boolean;
   onExited?: () => void;
+  /** The queued verdict's way to the Queue screen. */
+  onQueue: () => void;
+  /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
+  waitingNote?: string | null;
   onRetry: () => void;
   onAnother: () => void;
   onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
   const { verdict, machineName, machines, now, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
-  const content = describe(verdict, machineName, machines, now);
+  const content = describe(verdict, machineName, machines, now, props.waitingNote ?? null);
   const decision = verdict.kind === "queued" ? verdict.task.decision : undefined;
-  const placed = verdict.kind === "queued" && isRouted(verdict.task.state);
+  const placed = verdict.kind === "queued" && isPlaced(verdict.task);
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
@@ -249,6 +218,11 @@ export function VerdictView(props: {
         <button type="button" className="primary" onClick={onPrimary}>
           {content.primary.label}
         </button>
+        {verdict.kind === "queued" && (
+          <button type="button" className="quiet" onClick={props.onQueue}>
+            See the queue
+          </button>
+        )}
         {verdict.kind === "ok" && verdict.prompt !== undefined && (
           <button type="button" className="quiet" onClick={onReuse}>
             Reuse this prompt

@@ -18,7 +18,8 @@ import {
   type TaskSpawnReply,
   type TaskSpawnRequest,
 } from "../src/index.ts";
-import type { TaskSpec } from "../src/task.ts";
+import type { Scheduler } from "../src/index.ts";
+import type { Task, TaskSpec } from "../src/task.ts";
 
 export const NOW = 1_800_000_000_000;
 export const NOW_S = NOW / 1000;
@@ -182,4 +183,27 @@ export function readerChecked(store: QueueStore, now: () => number): QueueStore 
     getPause: () => store.getPause(),
     putPause: (expect, holds) => store.putPause(expect, holds),
   };
+}
+
+const enqueued = new WeakMap<QueueStore, number>();
+
+/**
+ * What an app's create plus the relay's `store-changed` does: a `queued` record
+ * at version 1, then the leader reading it. Admission is the next pass's, not
+ * this call's. Ids count per store (`t1`, `t2`…) unless given: a second scheduler over the same store must not reuse one.
+ */
+export async function enqueue(
+  store: QueueStore,
+  scheduler: Scheduler,
+  taskSpec: TaskSpec,
+  id?: string,
+  createdAt = NOW,
+): Promise<Task> {
+  const n = (enqueued.get(store) ?? 0) + 1;
+  enqueued.set(store, n);
+  const task: Task = { id: id ?? `t${n}`, spec: taskSpec, state: "queued", createdAt };
+  const write = await store.put(task.id, 0, task);
+  if (!write.ok) throw new Error(`enqueue: ${task.id} was refused (${write.code})`);
+  await scheduler.refresh(task.id);
+  return task;
 }

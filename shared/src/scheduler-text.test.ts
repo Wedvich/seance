@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { reasonText, taskFailureText } from "./scheduler-text.ts";
-import { TASK_FAILURE_CODES } from "./types.ts";
+import { reasonText, storeErrorText, taskFailureText } from "./scheduler-text.ts";
+import { STORE_ERROR_CODES, TASK_FAILURE_CODES } from "./types.ts";
 
 describe("taskFailureText", () => {
   test("words every scheduler-set code apart, and leaves a daemon's or a later code to the caller", () => {
@@ -19,5 +19,16 @@ describe("reasonText", () => {
     const text = reasonText({ code: "batch_order", index: 0 });
     expect(text).toContain("#0");
     expect(text).not.toContain("ended");
+  });
+});
+
+describe("storeErrorText", () => {
+  test("words every store refusal, apart where the cause differs, and names a code it does not know", () => {
+    for (const code of STORE_ERROR_CODES) expect(storeErrorText(code).length).toBeGreaterThan(0);
+    expect(storeErrorText("version_conflict")).toContain("earlier attempt");
+    expect(storeErrorText("too_large")).toContain("shorten");
+    expect(storeErrorText("rate_limited")).toContain("wait a minute");
+    expect(storeErrorText("store_full")).toContain("queue is full");
+    expect(storeErrorText("minted_later")).toContain("minted_later");
   });
 });

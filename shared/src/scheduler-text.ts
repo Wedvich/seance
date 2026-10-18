@@ -1,10 +1,12 @@
 import {
   SCHEDULER_ERROR_CODES,
+  STORE_ERROR_CODES,
   STORE_TOMBSTONE_MS,
   TASK_FAILURE_CODES,
   TRANSPORT_ERROR_CODES,
   type Reason,
   type SchedulerErrorCode,
+  type StoreErrorCode,
   type TaskFailureCode,
   type TransportErrorCode,
 } from "./types.ts";
@@ -22,12 +24,10 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   not_ready: "the scheduler is still taking over after a leader change; try again in a few seconds",
   invalid_request:
     "the scheduler refused the request as malformed — this end and the leader probably run different seanced versions",
-  queue_full:
-    "the scheduler already holds as many unfinished tasks as it will take; wait for some to start, or pick a machine",
   task_not_found: "the scheduler holds no such task",
   dispatching: "the task is starting on a machine right now; try again in a moment",
   finished: "the task has already finished",
-  despawn_failed: "its machine refused to end the session; nothing changed",
+  despawn_failed: "its session could not be ended — its machine refused or is offline; nothing changed",
   conflict: "the task changed while this was on its way; try again",
   reset_unknown: "no quota reading says when that account resets, so it can't be paused until then",
   internal_error: "the scheduler hit an error",
@@ -40,6 +40,25 @@ export function schedulerErrorText(code: string): string {
   return known === undefined
     ? `the scheduler refused it with a code this build does not know (${code})`
     : SCHEDULER_ERROR_TEXT[known];
+}
+
+const STORE_ERROR_TEXT: Record<StoreErrorCode, string> = {
+  version_conflict: "an earlier attempt already stored it",
+  not_leader: "the relay refused the write — this end and the relay probably run different versions",
+  forbidden: "the relay refused the write — this end and the relay probably run different versions",
+  invalid_request:
+    "the task did not pass the checks every reader applies (a field past its bound, a batch index past the limit, or this end and the leader on different versions)",
+  too_large: "the task is too large to store — shorten the prompt",
+  rate_limited: "too many tasks queued from this connection in the last minute; wait a minute",
+  store_full: "the queue is full; the scheduler prunes finished tasks as it runs — try again later",
+};
+
+/** A relay store refusal of an enqueue, worded once for the PWA and `seanced mcp`. */
+export function storeErrorText(code: string): string {
+  const known = STORE_ERROR_CODES.find((c) => c === code);
+  return known === undefined
+    ? `the relay refused it with a code this build does not know (${code})`
+    : STORE_ERROR_TEXT[known];
 }
 
 /**

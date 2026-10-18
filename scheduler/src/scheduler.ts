@@ -47,7 +47,6 @@ export interface SchedulerOptions {
   readonly fleet: Fleet;
   readonly config?: SchedulerConfig;
   readonly now: () => number;
-  readonly newId?: () => string;
   /**
    * A dispatch runs outside any tick (`#launch`), so its fault has no caller to
    * reject. Without this, the first one surfaces from the next `drain()`.
@@ -70,12 +69,21 @@ export type PauseResult =
   | { readonly ok: true; readonly holds: readonly PauseHold[] }
   | { readonly ok: false; readonly code: "reset_unknown" | "conflict" | "full" };
 
+export type MarkDoneResult =
+  | { readonly ok: true; readonly task: Task }
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
+    };
+
 export type CancelResult =
   | { readonly ok: true; readonly task: Task }
   | {
       readonly ok: false;
       readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
     };
+
+type CancelFailure = { readonly ok: false; readonly code: "despawn_failed" };
 
 interface Held {
   readonly version: number;
@@ -97,7 +105,6 @@ export class Scheduler {
   readonly #fleet: Fleet;
   readonly #config: SchedulerConfig;
   readonly #now: () => number;
-  readonly #newId: () => string;
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #held = new Map<string, Held>();
@@ -141,7 +148,6 @@ export class Scheduler {
     this.#fleet = options.fleet;
     this.#config = options.config ?? DEFAULT_CONFIG;
     this.#now = options.now;
-    this.#newId = options.newId ?? (() => crypto.randomUUID());
     this.#onError =
       options.onError ??
       ((err) => {
@@ -243,9 +249,9 @@ export class Scheduler {
   /**
    * The store caps `task:` (`MAX_TASKS`), so past `keep` the oldest finished
    * tasks are deleted (`prunable`) — never one with anything left to happen,
-   * nor one an unfinished task names. Runs on `submit`'s own `store_full`, and
-   * after takeover and at the end of a pass once the store holds `pruneAt`
-   * records — an app's create meeting `store_full` is never seen here.
+   * nor one an unfinished task names. Runs after takeover and at the end of a
+   * pass once the store holds `pruneAt` records — an app's create meeting
+   * `store_full` is never seen here.
    */
   async prune(keep = this.#config.keepFinished): Promise<void> {
     for (const task of prunable(this.tasks(), keep)) {
@@ -290,71 +296,6 @@ export class Scheduler {
         holds: this.#pause.holds,
       }),
     );
-  }
-
-  /**
-   * M2's enqueue, until M3 item 6 replaces it with an app's `queued` create.
-   * Created `queued` — `bindTaskRecord` refuses a version-1 record that is not
-   * (`created_unqueued`) — and admitted in the same call, so the reply carries
-   * the admitted state (`ready` with no deps) that MCP's placement follow and
-   * the PWA's `auto` verdict read. A full store is pruned once and the create
-   * tried again. A create the store never answered may have landed, and the
-   * leader's own write raises no `store-changed`: it is read back, or a later
-   * leader would run an orphan the caller then resubmits. Where even the read
-   * fails the error says so, because the caller must check the queue before it
-   * submits again; a read that finds nothing says the task was not stored, as of
-   * that read. Once the create has landed this never rejects: the admit
-   * write is a later pass's to retry, and a caller told "failed" would submit
-   * the work twice.
-   */
-  async submit(spec: TaskSpec): Promise<Task> {
-    const task: Task = { id: this.#newId(), spec, state: "queued", createdAt: this.#now() };
-    let write = await this.#create(task);
-    if (!write.ok && write.code === "store_full") {
-      await this.prune();
-      write = await this.#create(task);
-    }
-    if (!write.ok) {
-      if (write.code === "indeterminate") {
-        throw new Error(
-          `task ${task.id} may have been stored: the store never answered the create or the read-back (check the queue before submitting again)`,
-        );
-      }
-      if (write.code === "absent") {
-        throw new Error(`task ${task.id} was not stored: the create got no answer and the read-back found nothing`);
-      }
-      throw new Error(`task ${task.id} was not stored (${write.code})`);
-    }
-    this.#held.set(task.id, { version: write.version, task });
-    // `StoreRevoked` still reaches the host through `onError`, which ends the term.
-    await this.#admit().catch(this.#onError);
-    return this.#held.get(task.id)?.task ?? task;
-  }
-
-  /**
-   * The id is freshly minted, so a readable version-1 record under it is this create, landed.
-   * `absent`: the create went unanswered and the read-back found no record, so it did not land
-   * as of that read; `indeterminate` stays the read-back itself failing or finding another record.
-   */
-  async #create(task: Task): Promise<StoreWrite | { readonly ok: false; readonly code: "absent" }> {
-    const write = await this.#store.put(task.id, 0, task);
-    if (write.ok || write.code !== "indeterminate") return write;
-    const entry = await this.#store.get(task.id).catch((err: unknown) => {
-      // A revoked term must still end; any other read failure leaves the create indeterminate.
-      if (err instanceof StoreRevoked) this.#onError(err);
-      // Undefined, not null: the read failed, which is not the same as finding nothing.
-      return undefined;
-    });
-    if (
-      entry !== null &&
-      entry !== undefined &&
-      entry.reason === undefined &&
-      entry.version === 1 &&
-      entry.body.id === task.id
-    ) {
-      return { ok: true, version: 1 };
-    }
-    return entry === null ? { ok: false, code: "absent" } : write;
   }
 
   /** Coalesces: a tick asked for while one runs runs once more after it, never alongside. */
@@ -435,22 +376,10 @@ export class Scheduler {
     const refused = cancelRefusal(task);
     if (refused !== null) return refused;
     const { assignment } = task;
-    let despawned = false;
     const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
-    if (assignment !== undefined && !leftRunning && PLACED.includes(task.state)) {
-      // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
-      let pane = assignment.pane;
-      if (pane === undefined) {
-        const listed = await this.#fleet.sessions(assignment.deviceId);
-        if (!listed.ok) return { ok: false, code: "despawn_failed" };
-        pane = listed.sessions.find((s) => s.taskId === task.id)?.id;
-      }
-      if (pane !== undefined) {
-        const reply = await this.#fleet.despawn(assignment.deviceId, { id: pane, client: SCHEDULER_CLIENT });
-        if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
-        despawned = true;
-      }
-    }
+    const ended = leftRunning ? { ok: true as const, despawned: false } : await this.#endSession(task);
+    if (!ended.ok) return ended;
+    const { despawned } = ended;
     let outcome: CancelResult = { ok: false, code: "conflict" };
     const next = await this.#update(taskId, (current) => {
       if (FINISHED.includes(current.state)) {
@@ -478,13 +407,82 @@ export class Scheduler {
     return { ok: true, task: next };
   }
 
+  /**
+   * Ends the session of a placed task: whether it was despawned, or refused as
+   * `despawn_failed`. No pane to name and none listed is nothing to end.
+   */
+  async #endSession(task: Task): Promise<{ readonly ok: true; readonly despawned: boolean } | CancelFailure> {
+    const { assignment } = task;
+    if (assignment === undefined || !PLACED.includes(task.state)) return { ok: true, despawned: false };
+    // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
+    let pane = assignment.pane;
+    if (pane === undefined) {
+      const listed = await this.#fleet.sessions(assignment.deviceId);
+      if (!listed.ok) return { ok: false, code: "despawn_failed" };
+      pane = listed.sessions.find((s) => s.taskId === task.id)?.id;
+    }
+    if (pane === undefined) return { ok: true, despawned: false };
+    const reply = await this.#fleet.despawn(assignment.deviceId, { id: pane, client: SCHEDULER_CLIENT });
+    if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
+    return { ok: true, despawned: true };
+  }
+
+  /**
+   * Settles an unfinished task `done` (`doneBy: "manual"`) as it stands: the
+   * human says its work is over, so it wins over whatever else the task was
+   * waiting for. A `running` or `needs-input` task, or a `lost` one whose machine
+   * is connected, has its session ended first, as `cancel` does, since a `done` task holds no slot and a session left
+   * running would keep working beyond the caps. `lost`, `awaiting-merge` and the
+   * waiting states are settled as they stand (their session is gone, or
+   * unreachable, or never was). A later event for a `done` task is ignored
+   * (`sessionChange` and `branchChange` touch placed tasks only). `reserved` is
+   * refused as `cancel` refuses it: its spawn is in flight. A despawn that ran
+   * and then lost the right to write `done` is `unrecorded`, as for `cancel`.
+   */
+  async markDone(taskId: string): Promise<MarkDoneResult> {
+    const task = this.task(taskId);
+    if (task === undefined) return { ok: false, code: "not_found" };
+    if (task.state === "reserved") return { ok: false, code: "dispatching" };
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    const { assignment } = task;
+    const lostReachable = task.state === "lost" && assignment !== undefined && this.#connected(assignment.deviceId);
+    const live = task.state === "running" || task.state === "needs-input" || lostReachable;
+    const ended = live ? await this.#endSession(task) : { ok: true as const, despawned: false };
+    if (!ended.ok) return ended;
+    let outcome: MarkDoneResult = { ok: false, code: "conflict" };
+    const next = await this.#update(taskId, (current) => {
+      if (FINISHED.includes(current.state)) {
+        // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
+        outcome = ended.despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
+        return null;
+      }
+      if (current.state === "reserved") {
+        outcome = { ok: false, code: "dispatching" };
+        return null;
+      }
+      // No despawn ran, yet a session is live now: it would outlive a `done` write.
+      if (!live && (current.state === "running" || current.state === "needs-input")) return null;
+      // What was despawned must still be what is settled.
+      if (live && current.assignment?.deviceId !== assignment?.deviceId) return null;
+      return advance(current, "done", { doneBy: "manual" });
+    }).catch((err: unknown) => {
+      if (!ended.despawned || !(err instanceof StoreRevoked)) throw err;
+      this.#onError(err);
+      outcome = { ok: false, code: "unrecorded" };
+      return null;
+    });
+    if (next === null) return outcome;
+    this.#decisions.delete(taskId);
+    return { ok: true, task: next };
+  }
+
   #connected(deviceId: string): boolean {
     return this.#fleet.machines().some((m) => m.deviceId === deviceId && m.connected);
   }
 
   /**
-   * `lost` and `awaiting-merge` are never pruned yet count toward M2's
-   * `MAX_ACTIVE_TASKS` and outlive every term: past their bound they fail
+   * `lost` and `awaiting-merge` are never pruned, hold no slot and outlive
+   * every term: past their bound they fail
    * (`expiry`). After the checks, so a machine back in time settles its task
    * first; before admission, so dependents fail in the same pass. A `lost` task
    * whose machine is connected now is left to the next pass's check: it may have

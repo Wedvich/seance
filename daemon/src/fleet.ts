@@ -1,4 +1,13 @@
-import type { ErrorResponse, Machine, QueueReply, SubmitReply, TaskReply, TaskRequest } from "@seance/shared";
+import type {
+  ErrorResponse,
+  Machine,
+  QueueReply,
+  SchedulerAvailability,
+  StoreRefusal,
+  Task,
+  TaskCreated,
+  TaskReply,
+} from "@seance/shared";
 import type { LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
@@ -22,12 +31,15 @@ import type { Check } from "./check.ts";
  */
 
 /**
- * The scheduler leader, asked as an app: M2's `submit` and `queue`, as
- * `RelayClient` has them — refused before sending unless a verified leader is
- * nominated (`no_leader`, `leader_unverified`).
+ * The scheduler, asked as an app: `queue` and `cancel` as `RelayClient` has
+ * them — refused before sending unless a verified leader is nominated
+ * (`no_leader`, `leader_unverified`) — and `enqueue`, a store-put the relay
+ * answers itself, which needs no leader (`availability` says whether one will
+ * pick the task up).
  */
 export interface SchedulerLeg {
-  readonly submit: (request: TaskRequest) => Promise<SubmitReply | null>;
+  readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
+  readonly availability: () => SchedulerAvailability;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
 }
@@ -61,7 +73,8 @@ export function relayFleet(relay: LazyRelay): Fleet {
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
           client.request<T>(deviceId, op, payload),
         scheduler: {
-          submit: (request) => client.submit(request),
+          enqueue: (task) => client.createTask(task),
+          availability: () => client.getState().scheduler,
           queue: () => client.queue(),
           cancel: (taskId) => client.cancel(taskId),
         },

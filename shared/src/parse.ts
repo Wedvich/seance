@@ -62,7 +62,6 @@ import {
   type SchedulerError,
   type SchedulerOp,
   type Score,
-  type SubmitReply,
   type Target,
   type Task,
   type TaskRequest,
@@ -755,7 +754,7 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
 }
 
 /**
- * A task as `queue`, `cancel`, `mark-done` and `submit` carry it, and as its
+ * A task as `queue`, `cancel` and `mark-done` carry it, and as its
  * record holds it at rest. A state this build does not know nulls the task: it
  * cannot say what the task is doing, and guessing would be worse than leaving
  * it out.
@@ -1061,12 +1060,6 @@ export function parseRoutePreviewReply(value: unknown): RoutePreviewReply | null
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const decision = isRecord(value) ? parseDecision(value["decision"]) : null;
   return decision === null ? null : { decision };
-}
-
-export function parseSubmitReply(value: unknown): SubmitReply | null {
-  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
-  const task = isRecord(value) ? parseTask(value["task"]) : null;
-  return task === null ? null : { task };
 }
 
 export function isSchedulerOp(value: unknown): value is SchedulerOp {
