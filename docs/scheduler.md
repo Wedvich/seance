@@ -678,7 +678,9 @@ are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adap
 harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. Item 6
 also touched `relay/src/hub.ts`, item 1's alone until then: one line in `#route`, so an accepted
 `from: "scheduler"` → `"app"` envelope logs no `wire fanout` line (DESIGN.md _Threat model_,
-item 3). It is the only relay change in item 6. PR 0 touched
+item 3). It is the only relay change in item 6. A follow-up in the same file quieted the
+residual that left: an app's request to the scheduler, the leader's reply to it (by a
+per-socket reply credit) and the leader's dispatch to a machine log only failures. PR 0 touched
 `leader.ts` (a `not supported yet` answer for the four new ops, so they are refused rather than
 met with silence), `task.ts` (the three states with no edges) and the PWA's state wording, only
 as the widened types forced.
@@ -707,7 +709,8 @@ as the widened types forced.
   `queued` and is run by the next verified leader; the leader's `queue-changed` reaches an app
   and one an app seals does not (e2e, pwa + relay).
 - `mark-done` finishes a running task as `manual` and ends its session first; `pause` and `resume`
-  show as `holds` in `queue` (e2e). A leader's nudge logs no `wire fanout` line (relay).
+  show as `holds` in `queue` (e2e). A leader's nudge, an app's `queue`
+  fetch it prompts, the leader's answer and its dispatch log no `wire` line (relay).
 
 **Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until
 M4's Web Push. Linear is not consulted; done comes from local merge detection, the session

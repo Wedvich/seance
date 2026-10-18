@@ -4,7 +4,9 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
   MACHINES_ID,
+  OP_TIMEOUT_MS,
   SCHEDULER_ID,
+  SCHEDULER_OPS,
   STATUS_MIN_INTERVAL_MS,
   STORE_TOMBSTONE_MS,
   quote,
@@ -97,6 +99,15 @@ const MAX_REGISTERS_PER_WINDOW = 10;
 const SWEEP_INTERVAL_MS = 60_000;
 const SWEEP_SILENCE_LIMIT_MS = HEARTBEAT_MISSES_TO_SWEEP * HEARTBEAT_INTERVAL_MS;
 
+/**
+ * How long a daemon socket owes a reply for an app request the relay delivered
+ * it as the scheduler: the app's own deadline for the slowest scheduler op, so
+ * a reply the app could still use is never logged for lateness alone. The cap
+ * bounds what a burst can bank; past either, replies log as any other.
+ */
+const SCHEDULER_REPLY_WINDOW_MS = Math.max(...SCHEDULER_OPS.map((op) => OP_TIMEOUT_MS[op]));
+const OWED_MAX = 16;
+
 /** Vars arrive as strings; anything unparsable falls back to the default. */
 function msOverride(value: string | undefined): number | null {
   const parsed = Number(value);
@@ -118,9 +129,17 @@ interface SocketAttachment {
    * sample. When the socket goes, `#leftBy` keeps it in the entry with the
    * `lastSeen` put the relay makes anyway, for its accounts' quota — never as
    * pressure (DESIGN.md, Presence & identity). Bounded by
-   * `STATUS_MAX_CT_LENGTH` so it and the identity fit the attachment's 2 KiB together.
+   * `STATUS_MAX_CT_LENGTH` so it, the identity and `owed` fit the attachment's 2 KiB together.
    */
   readonly status?: SocketStatus;
+  /**
+   * Scheduler replies this socket owes: one per app request delivered to it as
+   * the leader, spent by its next `to: APP_ID` send, which then logs no line.
+   * A blind relay cannot read `re`, so this pairs by count, not identity — a
+   * reply to the machine's own ops can take the slot, and the scheduler reply
+   * logs instead (DESIGN.md, threat model item 3). Every miss logs.
+   */
+  readonly owed?: SocketOwed;
   /**
    * Set when a register on another socket took this one's route. The entry is
    * the registering socket's from then on: this one's close or sweep writes
@@ -148,6 +167,12 @@ interface SocketStatus {
   readonly at: number;
 }
 
+interface SocketOwed {
+  readonly n: number;
+  /** Past this, ms, `n` reads as zero. */
+  readonly until: number;
+}
+
 interface SocketIdentity {
   readonly deviceId: string;
   /** Known roles a verified v2 register signed; absent on attachments from before roles existed. */
@@ -169,11 +194,13 @@ export class Hub implements DurableObject {
   /** Who may be nominated. Parsed per wake: a secret change rolls a new version, so it cannot change under one. */
   readonly #leaders: ReadonlySet<string>;
   readonly #store: RelayStore;
+  readonly #schedulerReplyWindowMs: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
+    this.#schedulerReplyWindowMs = msOverride(env.SCHEDULER_REPLY_WINDOW_MS) ?? SCHEDULER_REPLY_WINDOW_MS;
     const leaders = parseLeaders(env.SCHEDULER_LEADERS);
     this.#leaders = leaders.ids;
     this.#store = new RelayStore(ctx.storage, msOverride(env.STORE_TOMBSTONE_MS) ?? STORE_TOMBSTONE_MS);
@@ -669,11 +696,14 @@ export class Hub implements DurableObject {
         else failures.push(err);
       }
       // The leader's `queue-changed` nudges are sealed `from: SCHEDULER_ID` and
-      // fan to apps whenever a task changes, so a line each would be a timeline
-      // of queue activity (DESIGN.md, threat model item 3). Only a failed send
-      // is logged for them; zero apps is the lost-reply case DESIGN.md
-      // reconciles from the session list, and stays logged for everything else.
-      if (env.from === SCHEDULER_ID && failures.length === 0) return;
+      // fan to apps whenever a task changes, and each makes a following app ask
+      // `queue`, so a line per nudge or per answer would be a timeline of queue
+      // activity (DESIGN.md, threat model item 3). Only a failed send is logged
+      // for them; zero apps is the lost-reply case DESIGN.md reconciles from
+      // the session list, and stays logged for everything else. Credit is spent
+      // even on a failed send: the socket did answer.
+      const scheduler = env.from === SCHEDULER_ID || (senderRole === "daemon" && this.#spendCredit(sender));
+      if (scheduler && failures.length === 0) return;
       wireLog("fanout", env, ` apps=${fanned}${failSuffix(failures)}`);
       return;
     }
@@ -716,10 +746,12 @@ export class Hub implements DurableObject {
     // A daemon's traffic to the scheduler is mostly its sessions' busy/idle
     // events, so a line per delivery would be a timeline of when each machine
     // was working — the activity record the blind relay keeps out of its logs
-    // (DESIGN.md, threat model item 3), as `#status` does for beats. Only a
-    // failed send is logged; with no leader the drop is the expected steady
-    // state, and logging it would be the same timeline.
-    const quiet = senderRole === "daemon" && env.to === SCHEDULER_ID;
+    // (DESIGN.md, threat model item 3), as `#status` does for beats. An app's
+    // requests follow queue changes and the leader's dispatches (`from` is
+    // only accepted term-fenced) are task starts and cancels: the same
+    // timeline. Only a failed send is logged; with no leader a daemon's drop
+    // is the expected steady state, and logging it would be the same timeline.
+    const quiet = env.to === SCHEDULER_ID || env.from === SCHEDULER_ID;
     const text = JSON.stringify({ t: "msg", env } satisfies RelayToDaemonFrame);
     for (const { ws: target } of targets) {
       // A failure falls through to the next candidate and, past the last, to
@@ -728,6 +760,7 @@ export class Hub implements DurableObject {
       // reports `offline`, which the app promotes to *proven* offline.
       const err = trySend(target, text);
       if (err === null) {
+        if (senderRole === "app" && env.to === SCHEDULER_ID && env.from === APP_ID) this.#credit(target);
         if (!quiet) wireLog("deliver", env, ` role=${senderRole}`);
         return;
       }
@@ -751,6 +784,31 @@ export class Hub implements DurableObject {
     const noticeErr = trySend(sender, JSON.stringify(notice));
     if (noticeErr !== null) wireLog("dropped", env, ` reason=notice-send-failed err=${noticeErr}`);
     else wireLog("undeliverable", env, ` code=${code}`);
+  }
+
+  /** Synchronous read-modify-write: an `await` between the two could lose a concurrent update. */
+  #credit(ws: WebSocket): void {
+    const now = Date.now();
+    const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
+    const held = attachment.owed !== undefined && now <= attachment.owed.until ? attachment.owed.n : 0;
+    const owed: SocketOwed = { n: Math.min(held + 1, OWED_MAX), until: now + this.#schedulerReplyWindowMs };
+    ws.serializeAttachment({ ...attachment, owed } satisfies SocketAttachment);
+  }
+
+  /** True when the socket owed a scheduler reply, which this send then pays. */
+  #spendCredit(ws: WebSocket): boolean {
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    const owed = attachment?.owed;
+    if (attachment === null || owed === undefined) return false;
+    const { owed: _spent, ...rest } = attachment;
+    if (Date.now() > owed.until || owed.n <= 0) {
+      ws.serializeAttachment(rest satisfies SocketAttachment);
+      return false;
+    }
+    ws.serializeAttachment(
+      (owed.n === 1 ? rest : { ...rest, owed: { ...owed, n: owed.n - 1 } }) satisfies SocketAttachment,
+    );
+    return true;
   }
 
   /** Only daemon sockets carry an identity, so an app socket closing is a no-op. */

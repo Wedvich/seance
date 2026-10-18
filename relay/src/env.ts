@@ -13,11 +13,12 @@ export interface Env {
    */
   readonly SCHEDULER_LEADERS?: string;
   /**
-   * Test-only overrides for the silent-socket sweep and the store's tombstone
-   * age, in ms (vars are strings). Unset in production — the defaults in hub.ts
-   * and shared's `STORE_TOMBSTONE_MS` apply.
+   * Test-only overrides for the silent-socket sweep, the store's tombstone age
+   * and the scheduler-reply window, in ms (vars are strings). Unset in
+   * production — the defaults in hub.ts and shared's `STORE_TOMBSTONE_MS` apply.
    */
   readonly SWEEP_INTERVAL_MS?: string;
   readonly SWEEP_SILENCE_LIMIT_MS?: string;
   readonly STORE_TOMBSTONE_MS?: string;
+  readonly SCHEDULER_REPLY_WINDOW_MS?: string;
 }

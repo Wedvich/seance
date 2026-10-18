@@ -249,15 +249,32 @@ Séance's noise is cover for a real intruder.
    no leader nominated is the steady state and is not logged either. The leader's
    `queue-changed` nudge to apps (M3 item 6) follows the rule: an accepted
    `from: "scheduler"` → `"app"` envelope logs no `wire fanout` line (a failed send
-   still does; a daemon's own reply to an app still logs one, as it is neither). A line per
+   still does). A line per
    nudge would be the queue's activity timeline, with the nudge's own timing. The
    nudge is still a feed on the wire: every `/app` socket receives one when the queue
    changes, so a token holder sees when the queue was worked, at most one per 500 ms,
    and its sealed size is fixed by the ids it carries (at most `QUEUE_MAX_TASKS`) —
    the metadata class `store-list` already gives, recorded so it is not mistaken for
-   something the seal hides. And a nudge makes apps ask `queue`, whose request and reply
-   the relay routes and logs as any other (`wire fanout` per reply), so the fetch is
-   the residual timeline: accepted, since a request log line names no task. Two more
+   something the seal hides. A nudge also makes every following app ask `queue`, and
+   the leader's dispatch to a machine is one envelope per task start or cancel, so a
+   line for either would be the same timeline: an app's delivered request to the
+   scheduler and the term leg's `from: "scheduler"` dispatch log no `wire deliver`
+   line (a failed send, and an app's `undeliverable` notice, still do). The leader's
+   reply is the hard part — sealed `to: "app"` on its daemon socket, it is
+   wire-identical to that machine's replies to its own `sessions` or `spawn`, and a
+   blind relay cannot read `re`. So the relay credits a daemon socket, on its
+   attachment, for each app request it delivers it as the scheduler, and that socket's
+   next `to: "app"` send spends one credit and logs no `wire fanout` line (a failed
+   send still does). A credit lasts the app's deadline for the slowest scheduler op
+   (`OP_TIMEOUT_MS`), at most 16 are banked, and an expired, missing or capped credit
+   logs: every miss fails toward a line. It pairs by count, not identity — a reply to
+   the leader machine's own ops inside a window can take the quiet slot, and the
+   scheduler reply then logs instead; the count of lines is right, only which shows is
+   off. Rejected: quieting every `to: "app"` from the term holder's socket (hides that
+   machine's ordinary replies, a per-machine hole); the request's `iv` in plaintext on
+   the reply frame (precise, but a frame change across the client, the leader and the
+   wire spec, and still nothing the relay can verify); sampling (a sampled timeline is
+   still one) or aggregate counters (they need a DO flush timer). Two more
    things ride the same feed in plaintext. Every push carries the leader's
    `deviceId` and `term` beside its sealed proof (Scheduler, "Leadership"): which
    machine leads, and — since every leader reconnect bumps the term — a counter
