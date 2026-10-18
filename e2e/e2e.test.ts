@@ -1399,6 +1399,15 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(now.kind === "ready" ? now.term : 0).toBeGreaterThan(term);
       // The form asks the new leader at once, mid-takeover: `not_ready` is waited out, not shown.
       await app.waitForApp((state) => state.preview?.kind === "ok", "the preview from the new leader");
+      // The verified leader takes over the store and runs what was queued under the unverified one.
+      const queued = queuedId;
+      if (queued === null) throw new Error("no queued task");
+      await pollUntil(
+        async () => (await stack.queue().get(queued))?.body?.state === "running",
+        "the verified leader to run the task queued while unverified",
+        20_000,
+      );
+      expect((await stack.queue().get(queued))?.body?.assignment).toBeDefined();
       await squatter.expectNo("lead");
       await squatter.expectNo("msg");
     } finally {

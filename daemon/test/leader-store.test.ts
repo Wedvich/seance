@@ -559,7 +559,7 @@ describe("leader in the daemon", () => {
   });
 
   /** Takeover of one task running on `b`, whose `sessions` answer is `payload`. */
-  async function takeOver(payload: object): Promise<string | undefined> {
+  async function takeOver(payload: object): Promise<Task | undefined> {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
     await store.put("p", 0, task("p", { state: "running", assignment: placedOnB }));
@@ -576,7 +576,7 @@ describe("leader in the daemon", () => {
       );
       relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: reply }));
       await daemon.leader.settled();
-      return await stateOf(store, "p");
+      return (await store.get("p"))?.body;
     } finally {
       daemon.stop();
       relay.stop();
@@ -585,16 +585,26 @@ describe("leader in the daemon", () => {
 
   test("a sessions reply's progress reaches takeover: a gone session with a PR is awaiting-merge", async () => {
     const progress = [{ taskId: "p", prUrl: "https://github.com/acme/app/pull/9", branch: "x", pushed: true, at: 1 }];
-    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toBe("awaiting-merge");
+    expect((await takeOver({ sessions: [], at: Date.now(), progress }))?.state).toBe("awaiting-merge");
   });
 
   test("a progress list that does not parse leaves the task unsettled rather than done", async () => {
     // A malformed entry makes the list one nobody can read: every task's progress is unknown.
     const progress = [{ taskId: 5 }];
-    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toBe("running");
+    expect((await takeOver({ sessions: [], at: Date.now(), progress }))?.state).toBe("running");
   });
 
   test("with no progress at all, the same gone session is done", async () => {
-    expect(await takeOver({ sessions: [], at: Date.now() })).toBe("done");
+    expect(await takeOver({ sessions: [], at: Date.now() })).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("a branch that merged during the gap settles the gone session as done by merge", async () => {
+    const progress = [
+      { taskId: "p", prUrl: "https://github.com/acme/app/pull/9", branch: "x", pushed: true, merged: true, at: 1 },
+    ];
+    expect(await takeOver({ sessions: [], at: Date.now(), progress })).toMatchObject({
+      state: "done",
+      doneBy: "merged",
+    });
   });
 });
