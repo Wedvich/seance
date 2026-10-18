@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DECISION_MAX_CANDIDATES, TASK_FAILURE_LIMITS, TASK_REQUEST_LIMITS } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, StoreRevoked, type Task } from "../src/index.ts";
-import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
+import { clone, exclave, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
  * The store port (`QueueStore`): what a store can answer besides a clean write,
@@ -184,8 +184,9 @@ describe("the scheduler over a store", () => {
     await pass(scheduler);
     const body = (await store.get("t"))?.body;
     expect(body?.failure?.message).toHaveLength(TASK_FAILURE_LIMITS.message);
-    expect(body?.decision?.candidates).toHaveLength(DECISION_MAX_CANDIDATES);
-    expect(body?.decision?.trimmed).toBe(5);
+    // The reservation wrote the capped decision (`readerChecked` held it to the bound); failed, it keeps the winner.
+    expect(body?.decision?.candidates).toHaveLength(1);
+    expect(body?.decision?.trimmed).toBe(DECISION_MAX_CANDIDATES + 4);
     expect(scheduler.preview(spec()).candidates).toHaveLength(DECISION_MAX_CANDIDATES);
   });
 });
@@ -206,7 +207,7 @@ async function seed(store: MemoryQueueStore, task: Task, version = 1): Promise<v
   }
 }
 
-describe("a finished task keeps no prompt", () => {
+describe("a finished task is kept lean: no prompt, and its decision cut to the winner", () => {
   const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as const;
   const FROM_A = { deviceId: "a", pane: "%1" } as const;
 
@@ -312,6 +313,34 @@ describe("a finished task keeps no prompt", () => {
 
     await pass(scheduler);
     expect((await read(store, "t")).version).toBe(4);
+  });
+
+  test("a finished record on a 10 × 5 fleet keeps only its winner, and an earlier leader's full one is cut in the first pass", async () => {
+    const exclaves = ["e0", "e1", "e2", "e3", "e4"];
+    const wide = (id: string) =>
+      machine(id, {
+        repos: exclaves.map((x) => clone("app", x)),
+        exclaves: exclaves.map((x) => exclave(x, `org:${id}-${x}`)),
+      });
+    const fleet = new FakeFleet(Array.from({ length: 10 }, (_, i) => wide(`m${i}`)));
+    const { store, scheduler } = setup(fleet);
+    await store.put("t", 0, queued("t"));
+    await scheduler.load();
+    await pass(scheduler);
+    const running = await read(store, "t");
+    expect(running.body.decision?.candidates).toHaveLength(50);
+    const at = running.body.assignment;
+    await scheduler.onSession("t", "ended", { deviceId: at?.deviceId ?? "", pane: at?.pane ?? "" });
+    const done = await read(store, "t");
+    expect(done.body.decision).toMatchObject({ candidates: [{ deviceId: at?.deviceId }], trimmed: 49 });
+    expect(JSON.stringify(done.body).length).toBeLessThanOrEqual(1536);
+
+    // As an earlier leader left it: finished with the full decision, and no prompt to strip.
+    const { prompt: _prompt, ...noPrompt } = running.body.spec;
+    await seed(store, { ...running.body, id: "legacy", spec: noPrompt, state: "done", doneBy: "session" });
+    await scheduler.takeover();
+    await pass(scheduler);
+    expect((await read(store, "legacy")).body.decision?.candidates).toHaveLength(1);
   });
 
   test("a sweep strips at most eight records a pass, the oldest by createdAt first", async () => {

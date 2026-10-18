@@ -669,15 +669,27 @@ describe("prune", () => {
     expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
   });
 
-  test("takeover and a pass at pruneAt prune to the configured keep", async () => {
+  test("takeover answers without pruning; the pass after it prunes to the keep, its deletes all out at once", async () => {
     const config = { ...DEFAULT_CONFIG, keepFinished: 1, pruneAt: 2 };
     const { store, fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), config);
     for (const id of ["f1", "f2", "f3"]) {
       // oxlint-disable-next-line no-await-in-loop -- created in order, so their ages differ
       await store.put(id, 0, { id, spec: spec(), state: "done", createdAt: (clock.now += 1) });
     }
+    let out = 0;
+    let most = 0;
+    const remove = store.delete.bind(store);
+    store.delete = async (id, version) => {
+      most = Math.max(most, (out += 1));
+      await Bun.sleep(1);
+      out -= 1;
+      return remove(id, version);
+    };
     await scheduler.takeover();
+    expect((await store.list()).map((s) => s.id)).toEqual(["f1", "f2", "f3"]);
+    await pass(scheduler);
     expect((await store.list()).map((s) => s.id)).toEqual(["f3"]);
+    expect(most).toBe(2);
 
     const task = await enqueue(store, scheduler, spec(), undefined, clock.now);
     await pass(scheduler);
@@ -1120,6 +1132,95 @@ test("ticks asked for while one runs coalesce into one more pass, never a concur
   await scheduler.drain();
   expect(fleet.spawns).toHaveLength(2);
   expect(scheduler.tasks().map((t) => t.state)).toEqual(["running", "running"]);
+});
+
+describe("a pass never waits on a check", () => {
+  const SWEEP = DEFAULT_CONFIG.sweepIntervalMs;
+
+  /** `a` runs a task; its `sessions` answers only once `release` is called. */
+  async function slowA() {
+    const fleet = new FakeFleet([machine("a"), machine("b")]);
+    const env = setup(fleet);
+    const run = await enqueue(env.store, env.scheduler, spec());
+    await pass(env.scheduler);
+    const gate = { open: (): void => {}, asked: 0 };
+    const answered = fleet.sessions.bind(fleet);
+    fleet.sessions = async (deviceId) => {
+      if (deviceId === "a") {
+        gate.asked += 1;
+        await new Promise<void>((resolve) => {
+          gate.open = resolve;
+        });
+      }
+      return answered(deviceId);
+    };
+    return { ...env, run, release: () => gate.open(), asked: () => gate.asked };
+  }
+
+  test("a create during a slow sweep is dispatched while the sweep's sessions is still out", async () => {
+    const { asked, clock, fleet, release, scheduler, store } = await slowA();
+    clock.now += SWEEP;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    const fresh = await enqueue(store, scheduler, spec(), undefined, clock.now);
+    await scheduler.tick();
+    expect(scheduler.task(fresh.id)?.state).not.toBe("queued");
+    await until(() => scheduler.task(fresh.id)?.state === "running", "the create running");
+    release();
+    await scheduler.drain();
+    expect(asked()).toBe(1);
+  });
+
+  test("one check per machine is out at a time, however many passes run meanwhile", async () => {
+    const { asked, clock, fleet, release, run, scheduler } = await slowA();
+    clock.now += SWEEP;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    clock.now += SWEEP;
+    fleet.beat(clock.now);
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(asked()).toBe(1);
+    fleet.end("a", run.id);
+    release();
+    await scheduler.drain();
+    // The answer settles its task, and the pass it ticks moves what that releases.
+    expect(scheduler.task(run.id)?.state).toBe("done");
+  });
+
+  test("a machine whose sessions goes unanswered is not asked again until the next sweep, or until it reconnects", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    const { clock, scheduler, store } = setup(fleet);
+    await store.put("x", 0, {
+      id: "x",
+      spec: spec(),
+      state: "lost",
+      createdAt: NOW,
+      absentSince: NOW,
+      assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" },
+    });
+    await scheduler.load();
+    fleet.sessionsReply = () => unreachable;
+    const asked = (): number => fleet.sessionCalls.filter((d) => d === "a").length;
+    for (let i = 0; i < 5; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- passes in turn, inside one sweep interval
+      await pass(scheduler);
+    }
+    expect(asked()).toBe(1);
+
+    clock.now += SWEEP;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(asked()).toBe(2);
+
+    fleet.fleet = [machine("a", { connected: false })];
+    await pass(scheduler);
+    fleet.fleet = [machine("a")];
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(asked()).toBe(3);
+    expect(scheduler.task("x")?.state).toBe("lost");
+  });
 });
 
 describe("a pass never waits on a spawn", () => {
