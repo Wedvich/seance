@@ -139,6 +139,21 @@ describe("parseMachineInfo", () => {
     expect(parsed?.exclaves).toBeUndefined();
     expect(parsed?.capabilities).toBeUndefined();
   });
+
+  // The build and the last update report are what the Machines screen and list_machines show.
+  test("carries the build and the last update report; a malformed one costs that field alone", () => {
+    const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: null };
+    const lastUpdate = { at: 1_700_000_100_000, outcome: "skipped_dirty" as const, detail: "2 files" };
+    expect(parseMachineInfo({ ...info, source, lastUpdate })).toEqual({ ...info, source, lastUpdate });
+    expect(parseMachineInfo({ ...info, source: null, lastUpdate: null })).toEqual(info);
+    const bad = [
+      { source: { ...source, sha: "short" } },
+      { source: { ...source, branch: 3 } },
+      { lastUpdate: { ...lastUpdate, outcome: "exploded" } },
+      { lastUpdate: { ...lastUpdate, at: -1 } },
+    ];
+    for (const fields of bad) expect(parseMachineInfo({ ...info, ...fields })).toEqual(info);
+  });
 });
 
 describe("parseMachineStatus", () => {
