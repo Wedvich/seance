@@ -332,17 +332,25 @@ follows it until it is running, with the decision behind it. With no scheduler l
 (no machine on the relay's `SCHEDULER_LEADERS` is connected — step 4), or one that
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
-Auto is greyed only when the app isn't connected to the relay. The **Queue** chip in
-the header opens everything queued: what needs you, what is running or waiting, and
-what finished, with **Cancel** (ends a running session, so it takes a second tap),
-**Mark done** (finishes the task, ending its session if it is running), and **Pause** /
-**Resume** for the whole queue or one account. Picking a machine directly always
-works, with or without a scheduler.
+Auto is greyed only when the app isn't connected to the relay. **Queue** (a column on
+desktop, in the header menu on a phone) shows everything queued: what needs you, what
+is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
+a second tap when it would end a running session), and **Pause** / **Resume**. The app
+pauses the whole queue only; a hold on one account shows with its own **Resume**, but
+no client sets one yet. Picking a machine directly always works, with or without a
+scheduler.
 
-**Machines**, a column on desktop (not yet reachable on a phone), shows every
-machine with its exclaves and accounts, current CPU and memory pressure, the newest
-quota reading per account, and history charts drawn from each daemon's own store —
-an asleep machine's history waits until it wakes.
+Upgrading into the queue: until the machine leading the scheduler runs a build with
+it, tasks an updated app or `seanced mcp` queues sit unrun, and an older app's
+`auto` is refused by an updated leader. Update the leader-capable machines first.
+
+**Machines** (a column on desktop, in the header menu on a phone) shows every machine
+with its exclaves and accounts, current CPU and memory pressure, the newest quota
+reading per account, the build its daemon runs, and history charts drawn from each
+daemon's own store — an asleep machine's history waits until it wakes. Its header
+names who leads the scheduler and under which term, or says no machine does; the
+leader's card carries a **Scheduler** badge, or **Unverified** while its claim to lead
+doesn't check out with your key.
 
 <p align="center">
   <img src="docs/images/machine-sheet.png" width="260"

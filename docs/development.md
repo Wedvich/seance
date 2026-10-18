@@ -208,9 +208,9 @@ lands. Both go through `raycast/node_modules/.bin/ray`, so the "never `npx ray`"
 rule holds for the CLI too.
 
 The install path is macOS-only and needs the Raycast app, so CI never exercises
-it. `daemon/test/raycast-cli.test.ts` drives the real CLI against a stub `ray` in
-a temp `HOME` and self-skips where the app is absent, the way the `install
---system` test self-skips without systemd; `daemon/src/raycast.test.ts` covers the
+it for real. `daemon/test/raycast-cli.test.ts` drives the real CLI against a stub `ray` in
+a temp `HOME`, with the app's presence probe stubbed too, so it runs everywhere and
+never launches Raycast; `daemon/src/raycast.test.ts` covers the
 parsing, path and staleness logic everywhere. Two seams exist for those tests:
 `SEANCE_RAYCAST_DIR` points the CLI at a workspace other than this checkout's, and
 `SEANCE_RAYCAST_ANY_PLATFORM=1` crosses the macOS-only gate so `uninstall`'s

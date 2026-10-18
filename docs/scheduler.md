@@ -133,7 +133,9 @@ version, env }]`, `store-get { key }` → `{ key, version, env }` or `null` (wha
   `MAX_DEVICES`, and a create rate floor per socket. The DO is SQLite-backed, so a value may
   reach 2 MB; what keeps records small is the one-frame listing, not storage.
 
-- **Version binding closes rollback.** Anything with the bearer token can list the queue, keep a
+- **Version binding closes rollback — against a token holder, not the relay** (DESIGN.md
+  Threat model, item 4: a compromised relay can serve an old version at its own version, and
+  re-run a past task). Anything with the bearer token can list the queue, keep a
   task's old sealed blob and put it back — authentic bytes, stale state (a cancelled task back to
   `ready`). So the sealed body carries the `version` its put will produce, and every reader
   rejects a blob whose inner version disagrees with the relay's. A replayed blob then fails like
@@ -215,7 +217,8 @@ client=scheduler` — except on the leader's own machine, which it reaches in pr
 
 **App → scheduler ops** (request/response, PWA via `RelayClient`, routed to the leader):
 `queue` (list + decisions), `cancel`, `mark-done`, `pause`/`resume` (`until: "resume" |
-"reset"`), `route-preview` (dry-run explanation), `push-subscribe`. `queue` and
+"reset"`), `route-preview` (dry-run explanation), and M4's `push-subscribe` (not in
+`SCHEDULER_OPS` yet). `queue` and
 `route-preview` landed with M2 item 6 — DESIGN.md _Scheduler_, "The leader", is the record:
 answered from the daemon socket rather than the term's leg, `not_leader` from a daemon running no
 term, `not_ready` during takeover. M2 added a temporary `submit` (a `TaskRequest` →
@@ -266,7 +269,7 @@ only what M3 and M4 change. Labels code comments cite, and where M2's half now l
   function": pressure only from a live, unstale status, quota from every status by its own
   `at`. Why there is no age cap: _Settled defaults_ 7.
 - **Task states**, **Takeover** and **Done detection** — DESIGN.md "States", "Admission and
-  dependencies", "Batches", "Done detection", "Pruning", "`lost`" and "Takeover" (M2, and M3
+  dependencies", "Batches", "Done detection", "Pruning", "`lost`" and "What takeover settles" (M2, and M3
   item 4a), with `scheduler/src/task.ts` the table that runs; the store's half of takeover is
   below.
 
@@ -285,7 +288,7 @@ layered: the library against in-memory fakes of both interfaces, the adapter aga
 **Records (M3).** One sealed `TaskRecord` per task at `task:<id>`, the pause at `queue:pause`;
 machines, exclaves, pressure and quota come from the fleet feed and are persisted nowhere. A
 leader change then loses only the in-memory view (the absence clock, an unplaced task's latest
-decision). M4's `settings` (_Secrets_) and push subscriptions need prefixes of their own in
+decision, the credits-spill de-dupe and the set of machines seen to return). M4's `settings` (_Secrets_) and push subscriptions need prefixes of their own in
 `STORE_PREFIXES`, decided with that item.
 
 **Takeover (M3).** M2's reconcile stands. M3 adds the store's half: list the store, open every
@@ -299,7 +302,7 @@ task's decision is written with its reservation (one store write) — never afte
 and an unplaced task's stays in memory. M4 adds:
 
 - Filters (the per-account cap and the per-batch bound landed with M3 items 5 and 4a, DESIGN.md
-  "Caps" and "Batches"): `skill absent` (M4,
+  "Routing caps" and "Batches"): `skill absent` (M4,
   _Skills_: a hard filter when declared or the prompt starts with `/name`, and only for a name the
   fleet's inventory knows); stacked base
   unpushed and not on this exclave (M4, _Stacking_).
@@ -443,12 +446,14 @@ finishes without anyone watching. Landed by item ("M3 item N" in commits and cod
 | 6     | The PWA's Queue screen, enqueue by `store-put` from the PWA and MCP, M2's `submit` removed                | #183       |
 
 After it: MCP's `cancel_task` wording (#181), the leader and builds in `list_machines` and the
-PWA (#184), and the relay logging only failures for scheduler traffic (#186). Recorded in
+PWA (#184), the relay logging only failures for scheduler traffic (#186), and the leader in the PWA's
+Machines header (#188). Recorded in
 DESIGN.md _Scheduler_ ("Leadership", "The store", "Task records and the app's store leg", "The
 queue store", "The leader", "The library": states, deps, batches, caps, pause, done detection,
 expiry, "Branch state"), _Wire protocol_ (the store frames, Layer 2's scheduler ops), _PWA_ ("The Queue screen"), _MCP server_, _Security model_ and _Threat model_ (the
 leader allowlist, the bearer token's store acts, prompts at rest, the term fence that is not a
-PSK check, rollback closed by version binding and tombstones).
+PSK check, rollback closed by version binding and tombstones against token holders, not the
+relay).
 
 Every exit criterion below has a test, with the tier named in each; the takeover's merged half
 and the verified leader running an unverified-era task were added at close-out.
@@ -490,7 +495,7 @@ reserved `after`/`next` is the fallback.
 
 **Record.** DESIGN.md _Scheduler_ (store, states, takeover), _Security model_ and _Threat
 model_ (the bearer token's app-leg store access, prompts at rest, rollback closed by version
-binding), _Wire protocol_ rows, _Presence & identity_ (each machine's build and last update
+binding against token holders), _Wire protocol_ rows, _Presence & identity_ (each machine's build and last update
 report now reach apps, #184; the registry push's shape is otherwise unchanged).
 
 ### M4 — refinement
@@ -636,7 +641,8 @@ same PR, with the reason.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
    dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
-   weekly (all-models or per-model); global max 8 in-flight tasks. The estimate is per span
+   weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 120 s
+   (`reservationTtlMs`, twice the replay window, so a spawn that ever runs has begun by half of it). The estimate is per span
    (owner, 2026-10-18): one number for both added a task's 5h share to every week, so a
    standard seat (×6.25, item 17) at 41% weekly with one task in flight projected 104% and
    scored ~8000× worse than any other account. 1% is a guess at a week's share; tune both
@@ -683,7 +689,7 @@ same PR, with the reason.
     name in `deps` is gone before the leader hears of the create; it does not close it. M2's leader
     also pruned on every submit, bypassing `pruneAt`, until 2026-10-18.
 14. **A task `lost` over 7 days fails `lost_expired`** (`lostExpiryMs`, set 2026-10-18, owner).
-    Why: never pruned, it counted toward `MAX_ACTIVE_TASKS` and persisted across terms. It ages
+    Why: never pruned, it counted toward `MAX_TASKS` and persisted across terms. It ages
     from `absentSince`, else `createdAt`. A task whose machine is connected is left to its own
     `sessions` check. Cost: a machine asleep past it may still run the session, untracked
     (DESIGN.md "Expiry").
@@ -722,7 +728,8 @@ same PR, with the reason.
   read a prompt, forge a task, roll one back (version binding), or replay a deleted one
   (tombstones and the 30-day admit rule, M3 PR 0). Accepted: what is lost is a
   pointer to work, never the work or the repo it lives in; the remedy is the one that already
-  exists (rotate). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
+  exists (rotate) — which stops new junk but clears none: junk stays until removed by hand, and
+  a full `task:` refuses every enqueue (DESIGN.md Threat model, item 3; open, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
   M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
   M4's account records add a smaller one: being app-writable, a token holder can delete an
   alias or overwrite it with junk that readers skip — but not read, forge or roll one back, and
