@@ -450,7 +450,13 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     await refreshChanged();
     if (!live) return;
     seen = relay.getState().machines;
-    timer = setInterval(tick, intervalMs);
+    timer = setInterval(() => {
+      // A create stamped ahead of this clock (a phone's fast clock) binds once the clock passes
+      // its stamp, and no `store-changed` will say so: re-read it on the timer, one get each, and
+      // not on every push's tick.
+      for (const entry of scheduler.unreadable()) if (entry.reason === "created_ahead") changed.add(entry.id);
+      tick();
+    }, intervalMs);
     log.info(
       `scheduler: term ${term} took over ${scheduler.tasks().length} tasks (${scheduler.unreadable().length} unreadable) — dispatching`,
     );

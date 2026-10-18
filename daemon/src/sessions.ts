@@ -1,6 +1,6 @@
 import { isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { capturePane, FIELD_SEP, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
+import { capturePane, FIELD_SEP, listAllPanes, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
@@ -208,10 +208,13 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
   return panes;
 }
 
+/**
+ * Every pane, none when no server runs. Throws `TmuxError` on any other failed
+ * read: reap would take an in-use worktree for idle, and a spawn a running task
+ * for none.
+ */
 export async function listPanes(): Promise<readonly PaneInfo[]> {
-  const result = await tmux(["list-panes", "-a", "-F", PANE_INFO_FORMAT]);
-  if (result.exitCode !== 0) return []; // no tmux server — no panes
-  return parsePaneInfo(result.stdout);
+  return parsePaneInfo(await listAllPanes(PANE_INFO_FORMAT));
 }
 
 /**
@@ -313,19 +316,21 @@ export async function listStuckWindows(): Promise<readonly string[]> {
   return stuckWindows(await listPanes());
 }
 
+/**
+ * The running claude sessions, none when no server runs. Any other failed read
+ * throws `TmuxError`, so `sessions` answers `internal_error`: an empty list
+ * would read as every task this machine launched having ended (DESIGN.md,
+ * "Done detection").
+ */
 export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<readonly SessionEntry[]> {
-  const result = await tmux([
-    "list-panes",
-    "-a",
-    "-F",
+  const stdout = await listAllPanes(
     // Window names are unvalidated wire text (SpawnRequest.title), so tmux
     // substitutes the separator out of them before the line reaches us.
     `#{pane_id}${FIELD_SEP}#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}` +
       `#{pane_current_command}${FIELD_SEP}` +
       `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}${TASK_FIELD}${FIELD_SEP}#{pane_current_path}`,
-  ]);
-  if (result.exitCode !== 0) return []; // no tmux server — nothing running
-  const panes = registeredPanes(result.stdout);
+  );
+  const panes = registeredPanes(stdout);
   const [paneCommonDirs, repoCommonDirs] = await Promise.all([
     resolveLive(
       paneMemo,

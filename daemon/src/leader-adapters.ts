@@ -11,6 +11,7 @@ import {
   type Unreachable,
 } from "@seance/scheduler";
 import {
+  OP_TIMEOUT_MS,
   parseTaskProgressList,
   quote,
   RequestFailure,
@@ -86,6 +87,29 @@ export interface TermFleetOpts {
   readonly local: LocalOps;
   readonly live: () => boolean;
   readonly demote: (why: string) => void;
+  /** How long this machine's own `sessions` may take; `OP_TIMEOUT_MS.sessions`, as a remote's, by default. */
+  readonly sessionsTimeoutMs?: number;
+}
+
+/**
+ * This machine's `sessions`, held to the deadline a remote one gets. It waits
+ * for every launch in flight, ones that start while it waits included, and the
+ * pass waits for it: past the deadline it is `unreachable`, as a remote that
+ * never answered is.
+ */
+async function timeBoxed(
+  reply: Promise<SessionsResponse | ErrorResponse>,
+  timeoutMs: number = OP_TIMEOUT_MS.sessions,
+): Promise<SessionsResponse | ErrorResponse | Unreachable> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<Unreachable>((resolve) => {
+    timer = setTimeout(() => resolve(unreachable(`this machine's sessions took over ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([reply, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -124,7 +148,7 @@ export function termFleet(o: TermFleetOpts): Fleet {
     },
     sessions: async (deviceId) => {
       if (!o.live()) return ended;
-      if (deviceId === o.selfDeviceId) return sessionsOf(await o.local.sessions());
+      if (deviceId === o.selfDeviceId) return sessionsOf(await timeBoxed(o.local.sessions(), o.sessionsTimeoutMs));
       return sessionsOf(await remote<SessionsResponse>(deviceId, "sessions", {}));
     },
     despawn: async (deviceId, request) => {

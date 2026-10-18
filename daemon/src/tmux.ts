@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { exec, type ExecResult } from "./exec.ts";
 
@@ -12,6 +13,29 @@ export async function tmux(args: readonly string[]): Promise<ExecResult> {
 }
 
 export class TmuxError extends Error {}
+
+/**
+ * A failed call is "nothing running" only when no server is: tmux's own "no
+ * server running on" (a stale socket), or a socket path that does not exist.
+ * The path is checked rather than the errno text, which libc localizes. Any
+ * other failure — the exec timeout, a permission error, a server from another
+ * tmux version — is no answer, and a caller must not read it as an empty list.
+ */
+export async function noServer(result: ExecResult): Promise<boolean> {
+  if (result.exitCode === 0 || result.timedOut) return false;
+  if (/^no server running on /mu.test(result.stderr)) return true;
+  const socket = /^error connecting to (.+) \([^()]*\)$/mu.exec(result.stderr.trim())?.[1];
+  return socket !== undefined && (await stat(socket).catch(() => null)) === null;
+}
+
+/** `list-panes -a` with `format`: "" when no server is running, and any other failure thrown. */
+export async function listAllPanes(format: string): Promise<string> {
+  const result = await tmux(["list-panes", "-a", "-F", format]);
+  if (result.exitCode === 0) return result.stdout;
+  if (await noServer(result)) return "";
+  const why = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.exitCode}`;
+  throw new TmuxError(`tmux list-panes failed: ${why}`);
+}
 
 /**
  * Field separator for `-F` formats: tmux 3.4 (Linux distros) mangles
