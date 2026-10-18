@@ -66,6 +66,7 @@ function state(
     taskAction: null,
     queueNotice: null,
     pausing: false,
+    discarding: false,
     ...overrides,
   };
 }
@@ -78,7 +79,7 @@ const placedAt = { deviceId: "dev-a", exclave: "default", clone: "app", window: 
 const decision: Decision = { at: NOW, chosen: null, candidates: [] };
 
 function ok(tasks: readonly Task[], holds: readonly PauseHold[] = []): QueueState {
-  return { kind: "ok", tasks, holds, at: NOW };
+  return { kind: "ok", tasks, holds, unreadable: [], at: NOW };
 }
 
 function titles(view: ReturnType<typeof deriveQueue>): string[] {
@@ -279,5 +280,22 @@ describe("deriveQueue", () => {
     const many = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) => task(`t${i}`));
     expect(deriveQueue(state(ok(many)), NOW).partial).toBe(`Showing the ${QUEUE_MAX_TASKS} most relevant tasks`);
     expect(deriveQueue(state(ok(many.slice(1))), NOW).partial).toBeNull();
+  });
+
+  test("unreadable records get a line of their own, counted, and none gets none", () => {
+    const listing = (count: number): QueueState => ({
+      kind: "ok",
+      tasks: [],
+      holds: [],
+      unreadable: Array.from({ length: count }, (_, i) => ({ taskId: `j${i}`, version: 1, reason: "unopenable" })),
+      at: NOW,
+    });
+    expect(deriveQueue(state(listing(1)), NOW).unreadable).toBe(
+      "1 unreadable record holds a queue slot — junk, or sealed under an earlier key",
+    );
+    expect(deriveQueue(state(listing(4)), NOW).unreadable).toStartWith("4 unreadable records hold queue slots");
+    expect(deriveQueue(state(listing(0)), NOW).unreadable).toBeNull();
+    // Nothing else on the screen claims the queue is empty of them.
+    expect(deriveQueue(state(listing(4)), NOW).empty).toBe("Nothing in the queue.");
   });
 });

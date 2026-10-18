@@ -25,6 +25,7 @@ import {
   schedulerErrorText,
   sentence,
   storeErrorText,
+  storeFullUnreadableText,
   TASK_REQUEST_LIMITS,
   type RelayClient,
 } from "@seance/shared";
@@ -245,6 +246,7 @@ export class Store {
       taskAction: null,
       queueNotice: null,
       pausing: false,
+      discarding: false,
     };
   }
 
@@ -751,8 +753,15 @@ export class Store {
       else if ("ok" in reply) {
         if (nudged && reply.code === "not_ready" && current?.kind === "ok") next = null;
         else next = { notice: sentence(schedulerErrorText(reply.code)) };
-      } else if (named === null) next = { kind: "ok", tasks: reply.tasks, holds: reply.holds ?? [], at: reply.at };
-      else {
+      } else if (named === null) {
+        next = {
+          kind: "ok",
+          tasks: reply.tasks,
+          holds: reply.holds ?? [],
+          unreadable: reply.unreadable ?? [],
+          at: reply.at,
+        };
+      } else {
         // An older leader ignores the filter and answers its newest: only the named ids are taken.
         const fresh = reply.tasks.filter((t) => named.includes(t.id));
         const listed = this.#state.queueView;
@@ -768,7 +777,14 @@ export class Store {
           return gone.has(t.id) ? [] : [t];
         });
         const added = fresh.filter((f) => !base.some((t) => t.id === f.id));
-        next = { kind: "ok", tasks: [...added, ...merged], holds: reply.holds ?? [], at: reply.at };
+        // Unreadable records come whole whatever was named, as holds do.
+        next = {
+          kind: "ok",
+          tasks: [...added, ...merged],
+          holds: reply.holds ?? [],
+          unreadable: reply.unreadable ?? [],
+          at: reply.at,
+        };
       }
     } catch (err) {
       next = { notice: readFailureText(err, "the queue could not be read") };
@@ -881,6 +897,43 @@ export class Store {
       notice = this.#actionFailure(err);
     }
     this.#patch({ pausing: false, queueNotice: notice });
+  }
+
+  /**
+   * Discards every record the last read listed as unreadable, one at a time,
+   * then reads the whole queue again, so what is still listed is what is left.
+   * A record already gone is what was asked for; any other refusal, or a lost
+   * answer, stops it and becomes the notice.
+   */
+  async discardUnreadable(): Promise<void> {
+    const view = this.#state.queueView;
+    if (this.#state.discarding || view?.kind !== "ok" || view.unreadable.length === 0) return;
+    this.#patch({ discarding: true, queueNotice: null });
+    let notice: string | null = null;
+    for (const { taskId, version } of view.unreadable) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one at a time: the leader serializes store writes anyway
+        const reply = await this.#client.discard({ taskId, version });
+        if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
+        else if ("ok" in reply && reply.code !== "task_not_found") {
+          const text = sentence(schedulerErrorText(reply.code));
+          notice = isTransportError(reply.code) ? `${text} ${MAY_HAVE_LANDED}` : text;
+        }
+      } catch (err) {
+        notice = this.#actionFailure(err);
+      }
+      if (notice !== null) break;
+    }
+    this.#patch({ discarding: false });
+    await this.refreshQueue();
+    // After the read, which clears the notice when it lands.
+    if (notice !== null) this.#patch({ queueNotice: notice });
+  }
+
+  /** How many unreadable records the last queue read listed; zero when there is no read to go by. */
+  #unreadableCount(): number {
+    const view = this.#state.queueView;
+    return view?.kind === "ok" ? view.unreadable.length : 0;
   }
 
   /**
@@ -1056,7 +1109,8 @@ export class Store {
       this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
       return;
     }
-    await this.#enqueue(queuedTask(this.#taskRequest(repo.origin, true), Date.now()));
+    const spec = { ...this.#taskRequest(repo.origin, true), client: "pwa" satisfies SpawnClient };
+    await this.#enqueue(queuedTask(spec, Date.now()));
   }
 
   /**
@@ -1074,9 +1128,13 @@ export class Store {
       } else if (!reply.ok) {
         // A refusal says nothing was stored. Only a full store or a busy minute is worth asking again.
         const again = reply.code === "rate_limited" || reply.code === "store_full";
+        const unreadable = reply.code === "store_full" ? this.#unreadableCount() : 0;
         this.#showVerdict({
           kind: "unqueued",
-          message: sentence(storeErrorText(reply.code)),
+          message:
+            unreadable > 0
+              ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
+              : sentence(storeErrorText(reply.code)),
           mayHaveLanded: false,
           ...(again ? { retry: task } : {}),
         });

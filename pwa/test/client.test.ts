@@ -919,7 +919,7 @@ describe("scheduler leg", () => {
 describe("queue ops", () => {
   type Msg = { t: "msg"; env: Envelope };
 
-  test("mark-done, pause, resume and a filtered queue round-trip; a leader's queue-changed reaches apps and nothing forged does", async () => {
+  test("mark-done, pause, resume, discard and a filtered queue round-trip; a leader's queue-changed reaches apps and nothing forged does", async () => {
     const leaderId = listed.legLeader;
     const info = await seal(
       key,
@@ -976,6 +976,10 @@ describe("queue ops", () => {
       const resumed = client.resume({ account: "acct" });
       expect(await answer({ holds: [] })).toMatchObject({ op: "resume", payload: { account: "acct" } });
       expect(await resumed).toEqual({ holds: [] });
+
+      const discarded = client.discard({ taskId: "t", version: 3 });
+      expect(await answer({ taskId: "t" })).toMatchObject({ op: "discard", payload: { taskId: "t", version: 3 } });
+      expect(await discarded).toEqual({ taskId: "t" });
 
       const filtered = client.queue({ tasks: ["t"] });
       expect(await answer({ tasks: [], at: 1 })).toMatchObject({ op: "queue", payload: { tasks: ["t"] } });

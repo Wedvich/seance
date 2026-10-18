@@ -62,6 +62,15 @@ export function storeErrorText(code: string): string {
 }
 
 /**
+ * `store_full` while the leader lists records it cannot read: those hold slots
+ * no prune frees, so `storeErrorText`'s "try again later" would never come true.
+ */
+export function storeFullUnreadableText(unreadable: number): string {
+  const records = unreadable === 1 ? "1 of its records" : `${unreadable} of its records`;
+  return `the queue is full, and ${records} cannot be read (junk, or sealed under an earlier key), which no prune frees`;
+}
+
+/**
  * A transport error judges the reply, not the request: a crashed handler may have
  * got as far as acting, and `too_large` is a reply that would not fit after the
  * work was done. So the request may have landed.

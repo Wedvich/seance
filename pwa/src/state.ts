@@ -10,6 +10,7 @@ import {
   type SessionEntry,
   type SpawnErrorCode,
   type Task,
+  type UnreadableTaskRef,
 } from "@seance/shared";
 
 /** Offered models. The wire keeps `model` a free string so this can change without a daemon deploy. */
@@ -184,6 +185,8 @@ export type QueueState =
       readonly kind: "ok";
       readonly tasks: readonly Task[];
       readonly holds: readonly PauseHold[];
+      /** Records the leader cannot read: they hold store slots no prune frees, until a person discards them. */
+      readonly unreadable: readonly UnreadableTaskRef[];
       readonly at: number;
     }
   | { readonly kind: "failed"; readonly message: string };

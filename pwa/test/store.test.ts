@@ -5,6 +5,8 @@ import {
   RelayClient,
   RequestFailure,
   type Decision,
+  type DiscardReply,
+  type DiscardRequest,
   type Machine,
   type MetricsReply,
   type MetricsRequest,
@@ -25,6 +27,7 @@ import {
   type TaskRequest,
 } from "@seance/shared";
 import { DEFAULT_FORM } from "../src/state.ts";
+import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import {
@@ -401,6 +404,8 @@ class ScriptedClient extends RelayClient {
   onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
   readonly nudgeListeners = new Set<(change: QueueChanged) => void>();
   readonly getTasks: string[] = [];
+  readonly discards: DiscardRequest[] = [];
+  onDiscard: (request: DiscardRequest) => Promise<DiscardReply | null> = async ({ taskId }) => ({ taskId });
   /** The store's own answer for one task: by default it holds whatever is asked about. */
   onGetTask: (taskId: string) => Promise<TaskLookup | StoreRefusal | null> = async (id) => ({
     ok: true,
@@ -439,6 +444,11 @@ class ScriptedClient extends RelayClient {
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
     this.queueRequests.push(request);
     return this.onQueue(request);
+  }
+
+  override discard(request: DiscardRequest): Promise<DiscardReply | null> {
+    this.discards.push(request);
+    return this.onDiscard(request);
   }
 
   override getTask(taskId: string): Promise<TaskLookup | StoreRefusal | null> {
@@ -750,6 +760,28 @@ describe("auto's error paths", () => {
     }
   });
 
+  test("a full store names the unreadable records the last queue read listed; with none it reads as before", async () => {
+    for (const [count, says] of [
+      [3, "3 of its records cannot be read"],
+      [0, "prunes finished tasks"],
+    ] as const) {
+      const client = new ScriptedClient();
+      const listed = Array.from({ length: count }, (_, i) => ({ taskId: `j-${i}`, version: 1, reason: "unopenable" }));
+      client.onQueue = async () => ({ tasks: [], holds: [], unreadable: listed, at: 1 });
+      client.onCreate = async () => ({ ok: false, code: "store_full" });
+      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store each
+      await store.refreshQueue();
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await store.spawn();
+      const verdict = store.getState().verdict;
+      expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false, retry: expect.anything() });
+      const message = verdict?.kind === "unqueued" ? verdict.message : "";
+      expect(message).toContain(says);
+      expect(message.endsWith("Clear them on the Queue screen, then try again.")).toBe(count > 0);
+    }
+  });
+
   test("a store answer this build cannot read may have landed, and can be re-put", async () => {
     const client = new ScriptedClient();
     client.onCreate = async () => null;
@@ -1050,7 +1082,13 @@ describe("the queue screen", () => {
     const store = await loaded(client);
     expect(client.queueRequests).toEqual([{}]);
     expect(store.getState().queue).toBe(true);
-    expect(store.getState().queueView).toEqual({ kind: "ok", tasks: [waiting, running], holds: [], at: 1 });
+    expect(store.getState().queueView).toEqual({
+      kind: "ok",
+      tasks: [waiting, running],
+      holds: [],
+      unreadable: [],
+      at: 1,
+    });
 
     store.dismissLayer();
     fake.settle(store);
@@ -1114,6 +1152,7 @@ describe("the queue screen", () => {
       kind: "ok",
       tasks: [done, running],
       holds: [{ until: "resume", at: 9 }],
+      unreadable: [],
       at: 2,
     });
 
@@ -1296,7 +1335,13 @@ describe("the queue screen", () => {
     late.resolve({ tasks: [], holds: [], at: 1 });
     await Promise.all([first, last]);
     expect(asked).toEqual([{ tasks: ["w-1", "r-1"] }]);
-    expect(store.getState().queueView).toEqual({ kind: "ok", tasks: [moved, moved2], holds: [], at: 4 });
+    expect(store.getState().queueView).toEqual({
+      kind: "ok",
+      tasks: [moved, moved2],
+      holds: [],
+      unreadable: [],
+      at: 4,
+    });
 
     const many = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) => `m-${i}`);
     const stuck = Promise.withResolvers<QueueReply | null>();
@@ -1369,6 +1414,47 @@ describe("the queue screen", () => {
       document.visibilityState = "visible";
     }
     detach();
+  });
+
+  const junk = { taskId: "j-1", version: 1, reason: "unopenable" };
+  const old = { taskId: "j-2", version: 4, reason: "malformed" };
+
+  test("unreadable records come with the queue; clearing discards each at its version, then reads the whole queue", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], unreadable: [junk, old], at: 1 });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(deriveQueue(store.getState(), Date.now()).unreadable).toStartWith("2 unreadable records hold queue slots");
+
+    // One already gone by the time it is asked for is what was asked for.
+    client.onDiscard = async ({ taskId }) =>
+      taskId === "j-2" ? { ok: false, code: "task_not_found", message: "gone" } : { taskId };
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 2 });
+    await store.discardUnreadable();
+    expect(client.discards).toEqual([
+      { taskId: "j-1", version: 1 },
+      { taskId: "j-2", version: 4 },
+    ]);
+    expect(client.queueRequests.at(-1)).toEqual({});
+    expect(store.getState().queueNotice).toBeNull();
+    expect(store.getState().discarding).toBe(false);
+    expect(deriveQueue(store.getState(), Date.now()).unreadable).toBeNull();
+  });
+
+  test("a discard refused because the record changed stops there and says so; the re-read shows what is left", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => ({ tasks: [], holds: [], unreadable: [junk, old], at: 1 });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+
+    client.onDiscard = async () => ({ ok: false, code: "conflict", message: "moved" });
+    client.onQueue = async () => ({ tasks: [], holds: [], unreadable: [{ ...junk, version: 2 }, old], at: 2 });
+    await store.discardUnreadable();
+    expect(client.discards).toHaveLength(1);
+    expect(store.getState().queueNotice).toBe("The task changed while this was on its way; try again.");
+    expect(store.getState().queueView).toMatchObject({ unreadable: [{ taskId: "j-1", version: 2 }, old] });
   });
 
   test("a named id gone from the store is dropped from the screen, one the leader was not asked about is kept", async () => {
