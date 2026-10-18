@@ -1,6 +1,6 @@
-import type { BatchStrategy, Reason } from "@seance/shared";
+import { TASK_PHASES, type BatchStrategy, type Reason } from "@seance/shared";
 import { codeUnitOrder } from "./order.ts";
-import { FINISHED, IN_FLIGHT, type Task, type TaskState } from "./task.ts";
+import { IN_FLIGHT, type Task, type TaskState } from "./task.ts";
 
 /**
  * Batches (`BatchMembership`): no batch record exists, so a batch is the tasks
@@ -28,9 +28,10 @@ function strategyOf(batchId: string, tasks: readonly Task[]): BatchStrategy | un
  */
 const BATCH_HELD: ReadonlySet<TaskState> = new Set([...IN_FLIGHT, "lost"]);
 
-/** Past its session: finished, or `awaiting-merge` (no slot, no session). */
+/** Past its session: finished, or ended with its PR still open (`awaiting-merge`: no slot, no session). */
 export function over(t: Task): boolean {
-  return FINISHED.includes(t.state) || t.state === "awaiting-merge";
+  const phase = TASK_PHASES[t.state];
+  return phase === "finished" || phase === "ended";
 }
 
 /**

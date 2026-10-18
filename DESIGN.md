@@ -1732,8 +1732,9 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   input past 30 minutes (_The library_, "Credits spill" and "Needs input"). The line names task
   and account ids, never a prompt or title. M4's Web Push takes the same alerts.
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
-  once running; while still reserved, at its TTL, and then only with its `sessions` check
-  unanswered and its machine not connected — and is never dispatched again on that evidence
+  once running; while still reserved, at its TTL with its `sessions` check unanswered and its
+  machine not connected, or 15 minutes past its TTL with every check failing on a machine that
+  is — and is never dispatched again on that evidence
   alone (_The library_, below, "`lost`"). Lost for `lostExpiryMs` (7 days) while its machine is
   disconnected it is `failed` `lost_expired`, and an `awaiting-merge` task past `mergeExpiryMs` (7 days) is `failed`
   `merge_expired` (_The library_, "Expiry").
@@ -1750,7 +1751,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   for `queue:pause`) holds plain task bodies — sealing, opening and the reader rules
   (`bindTaskRecord`) are the adapter's. A record the adapter cannot read comes back as
   `{ id, version, reason }`: the library holds it apart (`Scheduler.unreadable()`), never acts
-  on it and never deletes it, since after a PSK rotation every record reads that way. A failed
+  on it and never deletes it unasked, since after a PSK rotation every record reads that way.
+  `discard(id, version)` (M3 review S2, 2026-10-18) deletes one when a person asks: only a record
+  held unreadable, only at the version it was read at (`conflict` otherwise, `not_found` for a
+  readable task or none), so junk and old-PSK records can leave a store they would otherwise
+  fill for good. A lost reply or a conflict is read back, as prune reads one. A failed
   write is a value (store port, 2026-10-17), handled as "One write at a time per task" (below)
   says. Losing the right to write is a throw, `StoreRevoked`, which unwinds the pass.
   `refresh(id)` re-reads one record, for a host told that key changed.
@@ -1863,8 +1868,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   rides the write that moves the state: `#update`, the one write path, stamps
   `needsInputSince` on a task entering `needs-input` and clears it and `escalated` on leaving
   it for any state but `lost` (a machine's absence is not an answer: the stay resumes where it
-  was, and an escalated one is not alerted twice), so no transition can skip it and it costs no write of its own. On the record, so a new
-  leader does not restart it. A pass marks a task waiting past `needsInputEscalateMs` (30 min)
+  was, and an escalated one is not alerted twice), so no transition can skip it and it costs no
+  write of its own. On the record, so a new leader does not restart it. A `lost` task
+  its machine's `sessions` shows alive again returns to `needs-input` when it holds
+  `needsInputSince` — only one lost from `needs-input` does — since no event re-sends the wait
+  on reconnect (M3 review Q2, 2026-10-18); before, it read `running` and never escalated. A pass marks a task waiting past `needsInputEscalateMs` (30 min)
   `escalated: true` — one write per stay — and alerts once that write lands, so neither the
   next pass nor the next leader alerts it again; the task keeps its slot and is never killed.
   A `needs-input` record no leader stamped (one written before this) has its clock started by
@@ -1877,8 +1885,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reset, and two readings of one reset differ by seconds, so a later reset is a new window only
   by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
   never is one. An `onAlert` that throws goes to `onError`, never into the pass.
-  The de-dupe is in memory, so a new leader alerts an ongoing spill once more; accepted for a
-  log line, M4's push decides whether it needs more.
+  The de-dupe is in memory (`SpillAlerts`, `alerts.ts`), so a new leader alerts an ongoing
+  spill once more; accepted for a log line, M4's push decides whether it needs more.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
@@ -1888,7 +1896,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   check behind it, and one that throws cuts no pass short — its fault goes to the host's
   `onError`. A verdict applies only to the reservation it answers (same machine, same
   expiry), and a reservation whose spawn is still out skips the TTL check below, its
-  verdict being the better answer; `drain()` waits for ticks and spawns alike. A spawn
+  verdict being the better answer; `drain()` waits for ticks, spawns and checks alike. A spawn
   resolves its reservation once, never with a second spawn: started or `task_running` →
   `running` on the reported pane; `undelivered` → `ready` at once, routed afresh by the
   next pass, since nothing can have run; a daemon refusal → `failed`; `unreachable` or a
@@ -1903,7 +1911,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   task is `failed` `dispatch_unconfirmed`: terminal, because a re-dispatch could be a twin
   on another machine, where `task_running` cannot see it. An unanswered check waits while
   the machine is connected, and once it is not the task is `lost` on that machine (below),
-  never `ready`. **Why the TTL check cannot race a late spawn:** a daemon drops a request
+  never `ready`. So does a connected machine whose checks have all failed for `lostAfterMs`
+  past the TTL (M3 review Q3, 2026-10-18): one answering only errors held the reservation's
+  slot for good, and `cancel` and `mark-done` refuse a reservation. The clock is per machine,
+  in memory, reset by any answer. **Why the TTL check cannot race a late spawn:** a daemon drops a request
   envelope stamped more than 60s before its own clock (`ReplayGuard`,
   `shared/src/crypto.ts`; `daemon/src/relay-client.ts` checks every inbound request), and
   the dispatch is sealed just after the reservation is written, so a spawn that ever runs
@@ -1939,23 +1950,29 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `awaiting-merge` read is the backstop for a `branch-state` merge that never arrived, which
   would otherwise leave its `after: "merged"` dependents blocked for good; it shares the one
   cadence, since a merge is no more urgent than a freed slot.
-  It shares the pass's one `sessions` call per machine with the TTL and `lost` checks, and
-  runs before routing, so a slot it frees is used in the same pass. An answer is applied
+  It shares one `sessions` call per machine with the TTL and `lost` checks. **The pass does
+  not wait for it** (M3 review P1, 2026-10-18): at most one check per machine is out, and its
+  answer is settled when it comes and ticks again, so a slot it frees is used in that tick and
+  one slow machine — the leader's own waits out every launch in flight — holds no admission or
+  dispatch. A machine whose check came back `unreachable` (a timeout) is not asked again until
+  the next sweep or a change in its connection, or a hung peer costs a timed-out call every
+  pass. Expiry leaves a task alone while its machine's check is out. An answer is applied
   only to a task still where it was when its machine was asked, since one read before an
   event landed could undo it. Rejected: a sweep every pass, which is one `sessions` per busy
   machine per status beat; and trusting events alone, which is what left the slot held.
-- **What takeover settles** (`takeover()`; hosted by "The leader", above) is `load()` plus one `sessions`
-  read per machine with an
-  in-flight, `lost` or `awaiting-merge` task, settled before the host's first tick: a
+- **What takeover settles** (`takeover()`; hosted by "The leader", above) is `load()` plus one
+  `sessions` read per machine with a task
+  that read can move (`answerable`: in flight, `lost`, or `awaiting-merge` on a task branch —
+  what a pass checks), settled before the host's first tick: a
   reservation as the TTL check settles one, except that a session or an `ended` entry
   carrying its id counts at any age, so one inside its TTL with neither waits it out; a
   running task with no session left has ended while nobody led, and is settled by its PR
   ("Done detection") — unless a trimmed reply leaves that unknown, when it stays as it was;
   a `lost` task as below. An unanswered machine
   changes nothing, with the TTL check's one exception: a reservation past its TTL on a
-  machine no longer connected becomes `lost`. Then, once the store holds `pruneAt` records,
-  finished tasks are pruned ("Pruning"); below it, takeover prunes nothing.
-  Expiry ("Expiry") runs in the first pass, which the host ticks right after takeover.
+  machine no longer connected becomes `lost`. It does not prune (M3 review P2, 2026-10-18):
+  pruning ("Pruning") and expiry ("Expiry") run in the first pass, which the host ticks right
+  after takeover, so the term answers after one list and one round of `sessions`.
 - **States** (`task.ts`; M2 item 1, M3's added in M3 item 4a, 2026-10-17): `queued →
 blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
   `failed`, `cancelled` and `lost` off-path, one transition table, an illegal move a thrown
@@ -1996,10 +2013,13 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   member already blocked too — leaving out the edges of a finished task, whose dependents
   its outcome has already released or failed, so a `cancelled` member's dependent fails
   `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
-  `STORE_TOMBSTONE_MS` old is never admitted: its key's tombstone may be gone, so it may be
+  `ADMIT_MAX_AGE_MS` old — `STORE_TOMBSTONE_MS` less a day (M3 review S6, 2026-10-18) — is
+  never admitted: its key's tombstone may be gone, so it may be
   a pruned task's authentic version-1 blob put back (`createdAt` is app-sealed, so an app clock
-  30 days behind fails a fresh task: accepted, skew of that size is out of scope, as for
-  `DEP_MISSING_GRACE_MS`). It fails `queue_expired`, first in the
+  29 days behind fails a fresh task: accepted, skew of that size is out of scope, as for
+  `DEP_MISSING_GRACE_MS`). The day is there because the tombstone runs from the delete on the
+  relay's clock and the age from a `createdAt` that may be `REPLAY_WINDOW_MS` ahead: a task
+  pruned soon after its create would read young enough once its tombstone lapsed. It fails `queue_expired`, first in the
   call, so its dependents fail `dependency_failed` with it and pruning can take it — held
   `queued` instead, it would wait forever and hold its dependents with it. A release lands at the next pass, not on
   the event: the host ticks at least every 30s.
@@ -2070,26 +2090,33 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
 - **Pruning** (`prune.ts`, M3 item 4a). The store caps `task:` at `MAX_TASKS`, and an
   app's create past it is `store_full` — which the leader never sees. So `prune()`
   deletes the oldest finished tasks past `keepFinished` (50, docs/scheduler.md Settled
-  defaults 13) after takeover and at the
-  end of a pass only once the store holds `pruneAt` records (96, held plus unreadable;
+  defaults 13) at the end of a pass, only once the store holds `pruneAt` records (96, held plus unreadable;
   under `MAX_TASKS` so creates still fit): pruning every time would delete a finished task
   an app is naming in a create still on its way to us, and the dependent would fail
   `dependency_missing`. `pruneAt` narrows that race, it does not close it. It
   writes only when something is over the keep; never a task an unfinished one names in
   `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
-  there. Equally old tasks go in id order, so two leaders prune the same ones. `lost` and `awaiting-merge` tasks are
+  there. Equally old tasks go in id order, so two leaders prune the same ones. The deletes go
+  out together, each its own CAS on its task's chain, so crossing `pruneAt` costs a round trip,
+  not one per record; a delete whose reply was lost, or that met another write, is read back,
+  so one that landed leaves no ghost taking a slot of every later prune (M3 review P2 and Q4,
+  2026-10-18). `lost` and `awaiting-merge` tasks are
   never pruned, so they expire instead ("Expiry", below). `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
-- **A finished task keeps no prompt** (2026-10-18, owner). `forgetPrompt` (`task.ts`)
-  runs in `#update` — the one write path, as for the clocks — so the write that moves a task
-  to `done`, `failed` or `cancelled` carries `spec` without `prompt`, at no extra version, whatever
-  built the record (`advance`, expiry, cancel, mark-done, admission, a verdict). Records
-  finished before this, or by an older leader, are stripped by `#forgetPrompts` at the end of
+- **A finished task keeps no prompt** (2026-10-18, owner), **and only its decision's winner**
+  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
+  `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
+  write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
+  and a winner-only decision, at no extra version, whatever built the record (`advance`,
+  expiry, cancel, mark-done, admission, a verdict). Nothing re-routes a finished task, and the
+  losers made a 10 × 5 fleet's record 19 KB against 1 KB, carried by every listing and
+  re-seal until pruned. Records finished before this, or by an older leader, are made lean by
+  `#leanFinished` at the end of
   a pass: oldest first, at most 8 a pass (an uncapped sweep of up to `pruneAt` − 1 records would
   delay the next admission and dispatch, and nudge every app per write), sequential, one fenced
   CAS'd put each; a write that did not land is reported through `onError` and the record is left
-  alone for the rest of the term (`#forgetFailed`: a record the store refuses every time would
+  alone for the rest of the term (`#leanFailed`: a record the store refuses every time would
   otherwise take a slot of every pass and log every time), tried again by the next leader,
   `StoreRevoked` ends the pass. It is not in `takeover`, where a throw would fail the takeover.
   Mixed versions are safe: `parseTaskRequest` has made `prompt` optional since M2 item 6, so every
@@ -2110,13 +2137,15 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   6; the reservation half added 2026-10-16). A `running` or `needs-input` task whose machine has
   been absent — not connected, or gone from the registry — for `lostAfterMs` (15 min, Settled
   defaults 10) moves to `lost`, with `absentSince` on the record. So does a `reserved` one whose
-  TTL passes with its `sessions` check unanswered and its machine not connected: it keeps the
+  TTL passes with its `sessions` check unanswered and its machine not connected, or whose
+  connected machine's checks keep failing for `lostAfterMs` past the TTL: it keeps the
   reservation's target as its assignment, with no pane, and `reservedAt`, which marks it as never
   confirmed. The rule it keeps: **never dispatched again without proof it is not running.** A
   machine that sleeps keeps its tmux session, so re-routing would leave a twin on wake, and
   `task_running` cannot catch a twin placed on another machine. Only its own machine moves it:
   once connected, its `sessions` reply decides — a session carrying the task id is `running`
-  again, on the pane listed now — or a `session-event` sealed by that machine does, as for any
+  again, on the pane listed now (`needs-input` if it was waiting when lost: "Needs input") — or
+  a `session-event` sealed by that machine does, as for any
   placed task (the event names the pane a never-confirmed task lacks). With no session, a task
   that ran has ended — `awaiting-merge` or `done` by its PR — whether or not `ended` still
   remembers it, as takeover settles a running task whose session is gone; a never-confirmed
@@ -2131,7 +2160,10 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   `cancel` takes it (gap 4, 2026-10-16): with its machine connected it is despawned as a
   running task is, its pane read from `sessions` when the record has none; with its machine
   away nothing can be despawned, so it is `cancelled` as it stands with `leftRunning` on the
-  record, and the PWA says the session may still be running there. Apps reach it through the
+  record, and the PWA says the session may still be running there. `mark-done` of a `lost`
+  task whose machine is away records `leftRunning` the same way (M3 review Q8, 2026-10-18).
+  Both take the one step `#byHand`: refuse a reservation or a finished task, end a live
+  session, write. Apps reach it through the
   leader's `cancel` op and MCP's `cancel_task` (the PWA's Queue screen has the button). Cancelled is terminal: a
   later event or `sessions` reply for it changes nothing. The earlier refusal (`unreachable`)
   left a task the owner had given up on holding its place indefinitely, to protect a session

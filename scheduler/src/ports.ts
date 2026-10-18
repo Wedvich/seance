@@ -5,10 +5,9 @@ import type {
   Machine,
   PauseHold,
   RecordUnreadable,
-  SessionEntry,
+  SessionsResponse,
   SpawnRequest,
   SpawnResponse,
-  TaskProgress,
 } from "@seance/shared";
 import type { Task } from "./task.ts";
 
@@ -92,6 +91,9 @@ export type StoreWrite =
   | { readonly ok: true; readonly version: number }
   | { readonly ok: false; readonly code: StoreWriteFailure };
 
+/** A write that keeps meeting another writer's version gives up after this many tries. */
+export const WRITE_ATTEMPTS = 3;
+
 /**
  * The store said this writer may no longer write (`not_leader`: its term is
  * over). A throw, unlike every `StoreWrite` failure: nothing the library could
@@ -142,33 +144,16 @@ export interface TaskSpawnRequest extends SpawnRequest {
 
 export type TaskSpawnReply = SpawnResponse | ErrorResponse | NoAnswer;
 
+/**
+ * A machine's `sessions` as the library reads it: the fields `settle` uses, as
+ * `SessionsResponse` documents them. An adapter whose `progress` did not parse
+ * sets `progressTrimmed` too, so every task without an entry reads as unknown.
+ */
 export type TaskSessionsReply =
-  | {
-      readonly ok: true;
-      readonly sessions: readonly SessionEntry[];
-      /**
-       * `SessionsResponse.ended`: task ids launched or ended here that no live
-       * pane carries. Absent from older daemons, and when there are none.
-       */
-      readonly ended?: readonly string[];
-      /**
-       * `SessionsResponse.ledgerSince`, the machine's clock: `ended` is complete
-       * for launches from here on. Absent from older daemons, which prove nothing.
-       */
-      readonly ledgerSince?: number;
-      /**
-       * `SessionsResponse.progress`: each task's PR and branch as the machine
-       * last saw them. Absent from older daemons; read as no entry for any task.
-       */
-      readonly progress?: readonly TaskProgress[];
-      /**
-       * `SessionsResponse.progressTrimmed`. Present, a task with no `progress`
-       * entry is unknown: it settles by the PR its record holds, and with none
-       * waits for a later read. An adapter whose
-       * `progress` did not parse sets it too.
-       */
-      readonly progressTrimmed?: number;
-    }
+  | ({ readonly ok: true } & Pick<
+      SessionsResponse,
+      "sessions" | "ended" | "ledgerSince" | "progress" | "progressTrimmed"
+    >)
   | ErrorResponse
   | NoAnswer;
 
