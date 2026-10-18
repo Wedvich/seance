@@ -8,7 +8,7 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, taskHeadline } from "../src/decision-view.ts";
+import { describeDecision, isPlaced, queuedBody, taskHeadline } from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
@@ -264,5 +264,24 @@ describe("taskHeadline", () => {
     // A code minted after this build is no scheduler code it knows: read as a refusal.
     expect(taskHeadline(failed("minted_later"), machines, NOW)).toBe("It didn't take.");
     expect(taskHeadline(task({ state: "failed" }), machines, NOW)).toBe("It didn't take.");
+  });
+});
+
+describe("the queued verdict's body", () => {
+  const base: Task = { id: "t", spec: { repo: "github.com/acme/app", mode: "worktree" }, state: "done", createdAt: 1 };
+
+  test("a task marked done by hand makes no claim about a session; one that finished says it ended", () => {
+    expect(queuedBody({ ...base, doneBy: "manual" })).toBe("Marked done by hand.");
+    expect(queuedBody({ ...base, doneBy: "session" })).toBe("The session ended.");
+  });
+
+  test("placed follows the assignment, not the state: a waiting task marked done never reads as placed", () => {
+    expect(isPlaced({ ...base, doneBy: "manual" })).toBe(false);
+    expect(isPlaced({ ...base, state: "running", assignment: { deviceId: "a", exclave: "main", clone: "app" } })).toBe(
+      true,
+    );
+    expect(
+      isPlaced({ ...base, doneBy: "manual", assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } }),
+    ).toBe(true);
   });
 });

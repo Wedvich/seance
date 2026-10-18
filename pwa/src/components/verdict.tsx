@@ -1,8 +1,8 @@
 import type { JSX } from "preact";
-import { isRouted, isSettled, type Machine, type Task } from "@seance/shared";
-import { describeDecision, taskHeadline } from "../decision-view.ts";
+import { isSettled, type Machine } from "@seance/shared";
+import { describeDecision, isPlaced, queuedBody, taskHeadline } from "../decision-view.ts";
 import type { Verdict } from "../state.ts";
-import { failedBody, failureBody } from "../view.ts";
+import { failureBody } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 
 interface Content {
@@ -13,35 +13,6 @@ interface Content {
   readonly detail: string | null;
   readonly primary: { readonly label: string; readonly onClick: "retry" | "another" | "back" };
   readonly showBack: boolean;
-}
-
-/** What the person can do next about a task the scheduler holds, by its state. */
-function queuedBody(task: Task): string {
-  switch (task.state) {
-    case "queued":
-      return "It is in the queue. The scheduler picks it up as soon as one is running. Nothing is running yet.";
-    case "blocked":
-      return "It waits for the tasks it depends on. Nothing is running yet.";
-    case "ready":
-      return "The scheduler holds it and places it as soon as a machine can take it. Nothing is running yet.";
-    case "reserved":
-      return "The scheduler picked a machine and is starting the session there.";
-    case "running":
-    case "needs-input":
-      return "Open Claude on your phone and continue the session from there.";
-    case "lost":
-      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back, or is given up on after a week.";
-    case "awaiting-merge":
-      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
-    case "done":
-      return "The session ended.";
-    case "failed":
-      return failedBody(task.failure?.code);
-    case "cancelled":
-      return task.leftRunning === true
-        ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."
-        : "Nothing is running.";
-  }
 }
 
 function describe(
@@ -217,7 +188,7 @@ export function VerdictView(props: {
   const { verdict, machineName, machines, now, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
   const content = describe(verdict, machineName, machines, now, props.waitingNote ?? null);
   const decision = verdict.kind === "queued" ? verdict.task.decision : undefined;
-  const placed = verdict.kind === "queued" && isRouted(verdict.task.state);
+  const placed = verdict.kind === "queued" && isPlaced(verdict.task);
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 

@@ -168,6 +168,15 @@ export class Store {
   #queueLeader = "";
   /** The newest queue read in flight; an older reply is dropped, as a preview's is. */
   #queueAsked: object | null = null;
+  /**
+   * What that read asked for: "whole", or the named ids. A later read folds into it
+   * rather than replacing it, since replacing drops the earlier reply and with it
+   * whatever that reply was the only word on.
+   */
+  #queueInflight: "whole" | readonly string[] | null = null;
+  /** Sequence of task reads: a poll answered after a newer read landed is stale. */
+  #taskReadSeq = 0;
+  #taskReadApplied = 0;
   /** Whether the socket was open at the last relay change, so a re-dial reads as one. */
   #wasOpen = false;
   #previewRetry: ReturnType<typeof setTimeout> | null = null;
@@ -279,7 +288,7 @@ export class Store {
    * never heals a task it was not told about, so the screen reads whole again.
    */
   #catchUpQueue(scheduler: SchedulerAvailability, reopened: boolean): void {
-    if (this.#state.queue && (reopened || schedulerKey(scheduler) !== this.#queueLeader)) void this.refreshQueue();
+    if (this.#watchesQueue() && (reopened || schedulerKey(scheduler) !== this.#queueLeader)) void this.refreshQueue();
     const verdict = this.#state.verdict;
     if (reopened && verdict?.kind === "queued" && !isSettled(verdict.task.state)) {
       void this.#refreshTask(verdict.task.id, null);
@@ -295,7 +304,15 @@ export class Store {
     ) {
       void this.#refreshTask(verdict.task.id, null);
     }
-    if (this.#state.queue) void this.refreshQueue(change.tasks);
+    if (this.#watchesQueue()) void this.refreshQueue(change.tasks, true);
+  }
+
+  /**
+   * The Queue chip's attention dot reads from the list, so it is kept current
+   * with the screen closed too, whenever a verified leader could answer.
+   */
+  #watchesQueue(): boolean {
+    return this.#state.queue || (this.#state.relay.status === "open" && this.#state.relay.scheduler.kind === "ready");
   }
 
   /** Debounced: each change restarts the wait. */
@@ -583,25 +600,39 @@ export class Store {
    * what is shown (a `queue-changed` named them), holds always replace; without
    * it, or with nothing to merge into, the whole queue is read. Never throws: a
    * failure is the screen's to word, and a list already read stays up under it.
+   * `nudged` marks a read a `queue-changed` asked for: a takeover still running
+   * answers it `not_ready`, and the takeover's own nudge reads again.
    */
-  async refreshQueue(tasks?: readonly string[]): Promise<void> {
+  async refreshQueue(tasks?: readonly string[], nudged = false): Promise<void> {
     this.#queueLeader = schedulerKey(this.#state.relay.scheduler);
     const current = this.#state.queueView;
-    const named = tasks !== undefined && current?.kind === "ok" ? tasks : null;
+    const pending = this.#queueAsked !== null ? this.#queueInflight : null;
+    let named: readonly string[] | null = tasks !== undefined && current?.kind === "ok" ? tasks : null;
+    // A whole read already out is as fresh as this one's ids can make it: upgrade, never supersede it with less.
+    if (named !== null && pending === "whole") named = null;
+    else if (named !== null && Array.isArray(pending)) named = [...new Set([...pending, ...named])];
     const asked = {};
     this.#queueAsked = asked;
+    this.#queueInflight = named ?? "whole";
     if (current === null || current.kind === "failed") this.#patch({ queueView: { kind: "loading" } });
-    let next: QueueState | { readonly notice: string };
+    let next: QueueState | { readonly notice: string } | null;
     try {
       const reply = await this.#client.queue(named === null ? {} : { tasks: named });
       if (reply === null) next = { notice: SCHEDULER_UNREADABLE };
-      else if ("ok" in reply) next = { notice: sentence(schedulerErrorText(reply.code)) };
-      else if (named === null) next = { kind: "ok", tasks: reply.tasks, holds: reply.holds ?? [], at: reply.at };
+      else if ("ok" in reply) {
+        if (nudged && reply.code === "not_ready" && current?.kind === "ok") next = null;
+        else next = { notice: sentence(schedulerErrorText(reply.code)) };
+      } else if (named === null) next = { kind: "ok", tasks: reply.tasks, holds: reply.holds ?? [], at: reply.at };
       else {
         // An older leader ignores the filter and answers its newest: only the named ids are taken.
         const fresh = reply.tasks.filter((t) => named.includes(t.id));
         const base = current?.kind === "ok" ? current.tasks : [];
-        const merged = base.map((t) => fresh.find((f) => f.id === t.id) ?? t);
+        // A named id the reply lacks is gone (pruned, deleted), not unchanged.
+        const merged = base.flatMap((t) => {
+          const now = fresh.find((f) => f.id === t.id);
+          if (now !== undefined) return [now];
+          return named.includes(t.id) ? [] : [t];
+        });
         const added = fresh.filter((f) => !base.some((t) => t.id === f.id));
         next = { kind: "ok", tasks: [...added, ...merged], holds: reply.holds ?? [], at: reply.at };
       }
@@ -611,11 +642,15 @@ export class Store {
     }
     if (this.#queueAsked !== asked) return;
     this.#queueAsked = null;
+    this.#queueInflight = null;
+    if (next === null) return;
     if (!("notice" in next)) {
       this.#patch({ queueView: next, queueNotice: null });
       return;
     }
     // Keeps a list that was read: the status line says whether anyone is leading.
+    // A read nobody is looking at has no one to tell.
+    if (!this.#state.queue) return;
     const view = this.#state.queueView;
     if (view?.kind === "ok") this.#patch({ queueNotice: next.notice });
     else this.#patch({ queueView: { kind: "failed", message: next.notice } });
@@ -936,6 +971,7 @@ export class Store {
       return verdict?.kind === "queued" && verdict.task.id === taskId ? verdict.task : null;
     };
     if (showing() === null) return;
+    const seq = ++this.#taskReadSeq;
     let read: { readonly task: Task } | FollowEnd | "missed" | "waiting";
     try {
       const reply = await this.#client.queue({ tasks: [taskId] });
@@ -960,7 +996,14 @@ export class Store {
           : "missed";
     }
     const shown = showing();
-    if (shown === null) return;
+    // A settled verdict is never walked back by a reply that was in flight when it settled.
+    if (shown === null || isSettled(shown.state)) return;
+    // Answered after a newer read landed: its task is older, but the poll chain it carries goes on.
+    if (seq < this.#taskReadApplied) {
+      if (left !== null && left > 0) this.#follow(taskId, left);
+      return;
+    }
+    this.#taskReadApplied = seq;
     const task = typeof read === "object" && "task" in read ? read.task : shown;
     if (typeof read === "object" && !("task" in read)) {
       if (left === null) return;

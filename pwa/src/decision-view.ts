@@ -8,7 +8,7 @@ import {
   type Score,
   type Task,
 } from "@seance/shared";
-import { formatSeen } from "./view.ts";
+import { failedBody, formatSeen } from "./view.ts";
 
 /**
  * A decision record as sentences: "chose X because …, rejected Y because …"
@@ -211,7 +211,7 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "awaiting-merge":
       return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
-      // Marked by hand: the session may still be running, so "finished" would claim too much.
+      // Marked by hand: nothing saw it finish, so "finished" would claim too much.
       return task.doneBy === "manual" ? `Marked done${place}.` : `It finished${place}.`;
     case "failed":
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
@@ -223,5 +223,39 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
         : `It didn't take${place}.`;
     case "cancelled":
       return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";
+  }
+}
+
+/** Keyed on `assignment`, not the state: a waiting task marked done was never placed, so its decision stays a "would". */
+export function isPlaced(task: Task): boolean {
+  return task.assignment !== undefined;
+}
+
+/** What the person can do next about a task the scheduler holds, by its state. */
+export function queuedBody(task: Task): string {
+  switch (task.state) {
+    case "queued":
+      return "It is in the queue. The scheduler picks it up as soon as one is running. Nothing is running yet.";
+    case "blocked":
+      return "It waits for the tasks it depends on. Nothing is running yet.";
+    case "ready":
+      return "The scheduler holds it and places it as soon as a machine can take it. Nothing is running yet.";
+    case "reserved":
+      return "The scheduler picked a machine and is starting the session there.";
+    case "running":
+    case "needs-input":
+      return "Open Claude on your phone and continue the session from there.";
+    case "lost":
+      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back, or is given up on after a week.";
+    case "awaiting-merge":
+      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
+    case "done":
+      return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
+    case "failed":
+      return failedBody(task.failure?.code);
+    case "cancelled":
+      return task.leftRunning === true
+        ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."
+        : "Nothing is running.";
   }
 }
