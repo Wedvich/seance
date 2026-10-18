@@ -253,8 +253,12 @@ function oneLine(message: string): string {
     .slice(0, TASK_FAILURE_LIMITS.message);
 }
 
-/** Likewise for a cancel: its session may already be ended, and the queue says. */
+/** MAY_HAVE_QUEUED for a cancel: its session may already be ended, and the queue says. */
 const MAY_HAVE_CANCELLED = "the cancel may have landed anyway — check get_queue";
+
+/** LEADER_SAYS_IF_STORED for a cancel: an `unrecorded` cancel's message already says its session may have ended. */
+const LEADER_SAYS_IF_CANCELLED =
+  "the leader's message says whether the cancel landed — if it does not, check get_queue";
 
 /**
  * `auto`'s `repo` as the scheduler keys it, `RepoEntry.origin`. Callers hold
@@ -723,9 +727,15 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
           );
         }
         if ("ok" in reply) {
-          // As on submit: `too_large` judges the reply, and a crashed handler may have got as far as the despawn.
-          const landed = isTransportError(reply.code) ? ` — ${MAY_HAVE_CANCELLED}` : "";
-          return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${landed}`);
+          // As on submit, only a successful reply is swapped for `too_large`: the cancel ran, though the task may have finished first.
+          if (reply.code === "too_large") {
+            return errorResult(
+              "cancel_task: the leader took the cancel, but its answer was too large to send — check get_queue for how the task stands",
+            );
+          }
+          // A crashed handler may have got as far as the despawn; its message is the one that knows.
+          const said = isTransportError(reply.code) ? `: ${oneLine(reply.message)} — ${LEADER_SAYS_IF_CANCELLED}` : "";
+          return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${said}`);
         }
         return renderCancelled(reply.task, lease.machines);
       }),

@@ -1470,8 +1470,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `MAX_ACTIVE_TASKS`), `cancel`'s own (`task_not_found`, `dispatching`, `finished`,
   `despawn_failed`, `conflict`), `internal_error` when the handler throws or a cancel's despawn
   ran and the `cancelled` write was then revoked (`unrecorded` in the library: the session may
-  already have ended, the term ends, and MCP adds its "may have landed anyway" because
-  `internal_error` is a transport code), and `not_leader` (below). `queue`
+  already have ended, the term ends, and MCP shows that message, which says so), and
+  `not_leader` (below). `queue`
   replies with the newest `QUEUE_MAX_TASKS` tasks, prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
   its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
   3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
@@ -3566,7 +3566,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   leader's `cancel`) is the `cancel` op by the task id `get_queue` shows: it answers the task
   as it now stands, says so when it had already finished, and says a `lost` task cancelled
   with its machine away (`leftRunning`) may still have a session there to end by hand. Its
-  lost reply is "the cancel may have landed anyway — check get_queue". `"auto"` is matched
+  lost reply is "the cancel may have landed anyway — check get_queue"; its transport codes
+  read as on `submit` (2026-10-18): `too_large` means the cancel ran (the task may still have
+  finished first, so MCP points at `get_queue`), and `internal_error` shows the leader's message
+  on one line, pointing at `get_queue` when it does not say whether the cancel landed. `"auto"` is matched
   in any case before the local short circuit, so a machine named "auto" is reached by
   `deviceId`. **`repo` on auto** is the `TaskRequest`'s origin, but an agent holds clone
   names from `list_machines`, so either is accepted: an origin exactly, or a clone name
