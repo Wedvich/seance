@@ -1240,12 +1240,14 @@ export interface ErrorResponse {
  * a task whose machine stopped answering for it — a running one absent past
  * `lostAfterMs`, or a reservation whose spawn was never confirmed and whose
  * machine was gone at its TTL: held, never dispatched again without proof,
- * until that machine's own `sessions` says what became of it.
+ * until that machine's own `sessions` says what became of it, or `lostExpiryMs`
+ * fails it `lost_expired`.
  *
  * M3 adds three. `queued`: stored, not yet admitted by a leader — the only
  * state an app creates a task in. `blocked`: admitted, waiting on its `deps`.
  * `awaiting-merge`: its session ended with a PR open; it frees its slot but
- * keeps `after: "merged"` dependents blocked.
+ * keeps `after: "merged"` dependents blocked until the merge is seen, or
+ * `mergeExpiryMs` fails it `merge_expired` and them with it.
  */
 export const TASK_STATES = [
   "queued",
@@ -1658,7 +1660,8 @@ export interface PauseRecord extends VersionBound {
  * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be
  * a pruned task's blob put back (`TaskRecord`); failed rather than held, so
  * its dependents fail too and it can be pruned. `lost_expired`: `lost` past
- * `SchedulerConfig.lostExpiryMs` since its machine went away. Failed so it
+ * `SchedulerConfig.lostExpiryMs` since its machine went away, while that machine
+ * is disconnected. Failed so it
  * stops counting toward `MAX_ACTIVE_TASKS` and can be pruned. Its session may
  * still be running there. `merge_expired`: `awaiting-merge` past `mergeExpiryMs`
  * with no merge. Its `after: "merged"` dependents fail with it.
@@ -1681,6 +1684,14 @@ export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
  * and by a reader too, so an older leader's long one costs its tail, not the task.
  */
 export const TASK_FAILURE_LIMITS = { code: 64, message: 512 } as const;
+
+/**
+ * How long a machine's launch ledger keeps a task: a week covers a laptop shut
+ * for one, and past it the machine can no longer prove a spawn never landed or
+ * report the task's merge. Shared because the scheduler's `mergeExpiryMs` is
+ * derived from it — past it nothing waits on a signal that can still arrive.
+ */
+export const LAUNCH_LEDGER_MAX_AGE_MS = 7 * 24 * 3_600_000;
 
 /**
  * `not_leader`: the daemon the relay routed the request to runs no term — it

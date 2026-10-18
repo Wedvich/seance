@@ -6,6 +6,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const days = (ms: number): number => Math.round(ms / DAY_MS);
 
+const iso = (at: number): string => new Date(at).toISOString();
+
 /**
  * The merge clock rides the write that moves the state: entering `awaiting-merge`
  * stamps `endedAt`. Stamps only the transition, so a legacy `awaiting-merge`
@@ -39,20 +41,22 @@ export function expiry(
   if (task.state === "lost") {
     const since = task.absentSince ?? task.createdAt;
     if (now - since <= config.lostExpiryMs) return null;
-    return fail(
-      task,
-      "lost_expired",
-      `its machine went away ${new Date(since).toISOString()} and has not answered for it in over ${days(config.lostExpiryMs)} days; any session it had may still be running there`,
-    );
+    // Without `absentSince` the clock is `createdAt`, which says when the task was made, not when its machine went away.
+    const why =
+      task.absentSince === undefined
+        ? `its machine has not answered since before ${iso(since)}, over ${days(config.lostExpiryMs)} days ago`
+        : `its machine went away ${iso(since)} and has not answered for it in over ${days(config.lostExpiryMs)} days`;
+    return fail(task, "lost_expired", `${why}; any session it had may still be running there`);
   }
   if (task.state === "awaiting-merge") {
     const since = task.endedAt ?? task.createdAt;
     if (now - since <= config.mergeExpiryMs) return null;
-    return fail(
-      task,
-      "merge_expired",
-      `its session ended over ${days(config.mergeExpiryMs)} days ago and no merge of its pull request was seen (a machine reports a merge only while the task is in its launch ledger, 7 days at most)`,
-    );
+    // Without `endedAt` (an older leader's record) the clock is `createdAt`: when the session ended is unknown.
+    const age =
+      task.endedAt === undefined
+        ? `it was created over ${days(config.mergeExpiryMs)} days ago`
+        : `its session ended over ${days(config.mergeExpiryMs)} days ago`;
+    return fail(task, "merge_expired", `${age} and no merge of its pull request was seen`);
   }
   return null;
 }

@@ -488,7 +488,8 @@ export class Scheduler {
    * (`expiry`). After the checks, so a machine back in time settles its task
    * first; before admission, so dependents fail in the same pass. A `lost` task
    * whose machine is connected now is left to the next pass's check: it may have
-   * reconnected while this pass's check waited on a slower peer.
+   * reconnected while this pass's check waited on a slower peer. Judged again
+   * inside the write, since the machine may reconnect between the two.
    */
   async #expire(): Promise<void> {
     const now = this.#now();
@@ -496,7 +497,14 @@ export class Scheduler {
       this.tasks()
         .filter((t) => expiry(t, now, this.#config) !== null)
         .filter((t) => t.state !== "lost" || t.assignment === undefined || !this.#connected(t.assignment.deviceId))
-        .map((seen) => this.#update(seen.id, (current) => expiry(current, now, this.#config))),
+        .map((seen) =>
+          this.#update(seen.id, (current) =>
+            // Again at the write: the machine may have reconnected since the filter, and its own `sessions` is about to settle the task.
+            current.state === "lost" && current.assignment !== undefined && this.#connected(current.assignment.deviceId)
+              ? null
+              : expiry(current, now, this.#config),
+          ),
+        ),
     );
   }
 

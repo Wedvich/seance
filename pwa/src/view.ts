@@ -523,7 +523,7 @@ export function failedBody(code: string | undefined): string {
     return "Its machine stayed away too long, so the scheduler stopped waiting for it. Its session may still be running there — end it on that machine once it is back.";
   }
   if (code === "merge_expired") {
-    return "No merge of its pull request was seen in time, so the scheduler stopped waiting for one, and tasks waiting on it failed with it. If it did merge, mark the work done by hand. Its session had already ended.";
+    return "No merge of its pull request was seen in time, so the scheduler stopped waiting for one, and tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.";
   }
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
   const scheduler = code === undefined ? null : taskFailureText(code);

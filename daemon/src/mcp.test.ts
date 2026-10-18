@@ -8,6 +8,7 @@ import {
   QUEUE_MAX_TASKS,
   RequestFailure,
   SCHEDULER_ID,
+  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   taskFailureText,
   type Decision,
@@ -990,6 +991,16 @@ describe("spawn_session on auto", () => {
       expect(text).toContain(wording);
       expect(text).not.toContain("may have queued");
     }
+  });
+
+  test("a leader's long, multi-line message is cut to one bounded line", async () => {
+    const message = `Error: first line\n${"x".repeat(2000)}\r\n\tat stack frame\u2028end`;
+    const { text, error } = await callAuto(leaderRelay(() => ({ ok: false, code: "internal_error", message })));
+    expect(error).toBe(true);
+    expect(text).not.toMatch(/[\n\r\t\u2028]/u);
+    expect(text).toContain("Error: first line xxx");
+    expect(text).not.toContain("x".repeat(TASK_FAILURE_LIMITS.message + 1));
+    expect(text).not.toContain("stack frame");
   });
 
   test("a lost reply may have queued: it says to look before retrying, and never submits twice", async () => {

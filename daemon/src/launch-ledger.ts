@@ -5,6 +5,7 @@ import {
   httpsUrl,
   isRecord,
   isTaskId,
+  LAUNCH_LEDGER_MAX_AGE_MS,
   parseTaskProgressList,
   type TaskProgress,
 } from "@seance/shared";
@@ -39,7 +40,7 @@ import { stateDir } from "./paths.ts";
  * unprovable rather than holding entries forever.
  */
 export const LEDGER_MAX = 128;
-export const LEDGER_MAX_AGE_MS = 7 * 24 * 3_600_000;
+export const LEDGER_MAX_AGE_MS = LAUNCH_LEDGER_MAX_AGE_MS;
 
 const LEDGER_VERSION = 1;
 const LEDGER_MODE = 0o600;

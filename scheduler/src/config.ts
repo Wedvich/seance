@@ -1,3 +1,5 @@
+import { LAUNCH_LEDGER_MAX_AGE_MS } from "@seance/shared";
+
 /**
  * Every tunable the routing reads. Defaults are docs/scheduler.md's "Settled
  * defaults"; changing one there is changing it here, and the reverse.
@@ -29,12 +31,14 @@ export interface SchedulerConfig {
   readonly reservationTtlMs: number;
   /**
    * A running task whose machine has been absent this long is `lost`: shown as
-   * such, never dispatched again, until that machine answers for it.
+   * such, never dispatched again, until that machine answers for it or
+   * `lostExpiryMs` gives up on it.
    */
   readonly lostAfterMs: number;
   /**
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
-   * longer ago than this is `failed` `lost_expired`. Never pruned while `lost`,
+   * longer ago than this, and is disconnected now (a connected machine's
+   * `sessions` is about to settle it), is `failed` `lost_expired`. Never pruned while `lost`,
    * it would otherwise count toward M2's `MAX_ACTIVE_TASKS` and outlive every term.
    */
   readonly lostExpiryMs: number;
@@ -42,8 +46,8 @@ export interface SchedulerConfig {
    * An `awaiting-merge` task this long past `endedAt` (else `createdAt`) is
    * `failed` `merge_expired`, for the same reason. Its `after: "merged"`
    * dependents fail with it. Seven days because that is as long as a machine can
-   * report the merge at all: its launch ledger evicts a task after 7 days or 128
-   * launches (`LEDGER_MAX_AGE_MS` in the daemon's launch ledger), and a `here`
+   * report the merge at all: its launch ledger evicts a task after
+   * `LAUNCH_LEDGER_MAX_AGE_MS` or 128 launches, and a `here`
    * task is never read back, so past it nothing waits on a signal that can still arrive.
    */
   readonly mergeExpiryMs: number;
@@ -86,7 +90,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
   lostExpiryMs: 7 * 24 * 60 * 60_000,
-  mergeExpiryMs: 7 * 24 * 60 * 60_000,
+  // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
+  mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
   sweepIntervalMs: 120_000,
   keepFinished: 50,
   pruneAt: 96,

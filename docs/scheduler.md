@@ -606,7 +606,7 @@ wave's PRs run in parallel; a wave starts once the one before it has merged.
     production check above passed on 2026-10-18 for the daemon leg and the app leg from Bun (128
     records at 40 KiB listed intact as one 5.26 MB frame, DESIGN.md "The store", _Send size_);
     checked in headless Chromium and Firefox on 2026-10-18; the iOS WKWebView app leg is still
-    open, and paging stays the fallback). Its follow-up (2026-10-18) added that e2e, removed the
+    open, and paging stays the fallback. Its follow-up (2026-10-18) added the 'kill the leader between spawn and verdict' e2e, removed the
     leader's per-submit prune, added `lost`/`awaiting-merge` expiry (Settled defaults 14, 15) and
     reworded MCP's transport-code answer to `submit`. `submit`
     admits inside its call rather than in the next pass, so its reply still carries `ready` for
@@ -856,7 +856,8 @@ same PR, with the reason.
 11. **Task records stay small** (owner, 2026-10-17): a task prompt is at most 8,192 characters
     (`TASK_REQUEST_LIMITS.prompt`), a record's ciphertext 40 KiB (`STORE_MAX_CT_LENGTH`) and a
     create's 28 KiB (`STORE_CREATE_MAX_CT_LENGTH`), and `task:` holds 128 (`MAX_TASKS`), so the
-    whole queue lists in one frame with no paging (checked in production 2026-10-18; DESIGN.md "The store"). **Checked in a browser (2026-10-18):** the PWA's app client (`shared/src/index.ts` bundled for the browser, native `WebSocket`) in headless Chromium 156 and Firefox 157, against a throwaway production Worker (`seance-relay-sizecheck`, deleted afterwards) holding 128 `task:` records of 39,968-byte ct each: a 5,134,668-byte `store-listed` frame arrived intact on 3 runs per browser (every record's ct byte-identical, `listTasks` 128 tasks / 0 unreadable, ~320–355 ms, no close code). That is ~2.5% under a listing at the full 40,960-byte ct cap. The iOS WKWebView leg stays open. A task names its work ("implement this
+    whole queue lists in one frame with no paging (checked in production 2026-10-18, and in headless Chromium and Firefox 2026-10-18 with a 5.13 MB
+    frame intact; WKWebView open; DESIGN.md "The store", Send size). A task names its work ("implement this
     Linear issue, and here are the details") and the session gathers the rest with tools; 8K
     characters is far more than that takes. A direct spawn is not bound by it. Measured: a
     create with every field at its bound and the prompt in two-byte characters fits the create

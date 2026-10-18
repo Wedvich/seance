@@ -289,6 +289,21 @@ describe("the merge clock", () => {
   });
 });
 
+describe("the merge clock from a reservation", () => {
+  test("an ended event with a PR open on a reserved task starts it", async () => {
+    const { clock, scheduler, put } = setup();
+    await put("r", {
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 120_000 },
+      reservedAt: NOW,
+    });
+    await scheduler.load();
+    clock.now += 3000;
+    await scheduler.onSession("r", "ended", FROM_A, PR);
+    expect(scheduler.task("r")).toMatchObject({ state: "awaiting-merge", prUrl: PR, endedAt: NOW + 3000 });
+  });
+});
+
 describe("a `here` task awaiting merge", () => {
   test("is left out of the sweep: no reply can change it", async () => {
     const { fleet, clock, scheduler, put } = setup();

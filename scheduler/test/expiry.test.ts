@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TaskDep } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import type { DespawnRequest, DespawnResponse, Machine } from "@seance/shared";
 import { prunable } from "../src/prune.ts";
 import { FakeFleet, machine, NOW, readerChecked, spec, unreachable } from "./fixtures.ts";
 
@@ -65,7 +66,10 @@ describe("a lost task", () => {
     await put("t", { state: "lost", assignment: ON_A, createdAt: NOW - LOST_MS - 1 });
     await scheduler.load();
     await pass(scheduler);
-    expect(scheduler.task("t")?.failure?.code).toBe("lost_expired");
+    const message = scheduler.task("t")?.failure?.message ?? "";
+    // `createdAt` says when the task was made, so the message must not claim the machine went away then.
+    expect(message).toContain(`has not answered since before ${new Date(NOW - LOST_MS - 1).toISOString()}`);
+    expect(message).not.toContain("went away");
   });
 
   test("a machine that is back and settles it first: the check precedes expiry", async () => {
@@ -93,6 +97,31 @@ describe("a lost task", () => {
     expect(scheduler.task("t")?.failure?.code).toBe("lost_expired");
   });
 
+  test("whose machine reconnects between the filter and the write is left to its own check", async () => {
+    // A pass reads `machines()` for absence, for what is due, then in `#expire`'s filter: that third
+    // read says "gone", and the machine is back before the write's change runs.
+    class ReconnectingFleet extends FakeFleet {
+      reads = 0;
+      override machines(): readonly Machine[] {
+        this.reads += 1;
+        const gone = super.machines();
+        if (this.reads === 3) {
+          queueMicrotask(() => {
+            this.fleet = [machine("a")];
+          });
+        }
+        return gone;
+      }
+    }
+    const fleet = new ReconnectingFleet([machine("a", { connected: false })]);
+    const { scheduler, put } = setup(fleet);
+    await put("t", lost(NOW - LOST_MS - 1));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(fleet.fleet[0]?.connected).toBe(true);
+    expect(scheduler.task("t")?.state).toBe("lost");
+  });
+
   test("is prunable once expired, and its blocked dependent fails with it", async () => {
     const { scheduler, put } = setup();
     await put("t", lost(NOW - LOST_MS - 1));
@@ -118,6 +147,17 @@ describe("an awaiting-merge task", () => {
     expect(scheduler.task("edge")?.state).toBe("awaiting-merge");
     expect(scheduler.task("over")).toMatchObject({ state: "failed", failure: { code: "merge_expired" } });
     expect(scheduler.task("over")?.endedAt).toBe(NOW - MERGE_MS - 1);
+    expect(scheduler.task("over")?.failure?.message).toBe(
+      "its session ended over 7 days ago and no merge of its pull request was seen",
+    );
+  });
+
+  test("still expires when its machine is connected: only a lost task's machine spares it", async () => {
+    const { scheduler, put } = setup(new FakeFleet([machine("a")]));
+    await put("t", waiting({ endedAt: NOW - MERGE_MS - 1 }));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "merge_expired" } });
   });
 
   test("a legacy record with no endedAt ages from createdAt", async () => {
@@ -127,6 +167,10 @@ describe("an awaiting-merge task", () => {
     await scheduler.load();
     await pass(scheduler);
     expect(scheduler.task("legacy")?.failure?.code).toBe("merge_expired");
+    // No `endedAt`: when the session ended is unknown, so the message ages the task, not the session.
+    expect(scheduler.task("legacy")?.failure?.message).toBe(
+      "it was created over 7 days ago and no merge of its pull request was seen",
+    );
     expect(scheduler.task("young")?.state).toBe("awaiting-merge");
   });
 
@@ -144,6 +188,48 @@ describe("an awaiting-merge task", () => {
     }
     expect(scheduler.task("released")?.state).toBe("running");
     expect(fleet.spawns).toEqual([]);
+  });
+});
+
+describe("the merge clock on the way in", () => {
+  test("a lost task whose machine returns with its session ended and a PR open starts the clock at that write", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    const { clock, scheduler, put } = setup(fleet);
+    await put("t", lost(NOW - 1000));
+    await scheduler.load();
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      ended: ["t"],
+      progress: [{ taskId: "t", at: NOW, prUrl: PR, branch: "t", pushed: true }],
+    });
+    clock.now += 5000;
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "awaiting-merge", prUrl: PR, endedAt: NOW + 5000 });
+  });
+});
+
+describe("a cancel racing expiry", () => {
+  test("answers the task as it now stands, failed, and despawns nothing further", async () => {
+    let scheduler: Scheduler | null = null;
+    class ExpiringFleet extends FakeFleet {
+      override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
+        // The machine drops out while the despawn is in flight, and a pass expires the task before the cancel writes.
+        this.fleet = [machine("a", { connected: false })];
+        if (scheduler !== null) await pass(scheduler);
+        return super.despawn(deviceId, request);
+      }
+    }
+    const env = setup(new ExpiringFleet([machine("a")]));
+    scheduler = env.scheduler;
+    await env.put("t", lost(NOW - LOST_MS - 1));
+    await env.scheduler.load();
+    env.fleet.sessionsReply = () => unreachable;
+    expect(await env.scheduler.cancel("t")).toMatchObject({
+      ok: true,
+      task: { id: "t", state: "failed", failure: { code: "lost_expired" } },
+    });
+    expect(env.scheduler.task("t")?.state).toBe("failed");
   });
 });
 

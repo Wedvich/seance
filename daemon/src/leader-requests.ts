@@ -17,6 +17,7 @@ import {
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
+  TASK_FAILURE_LIMITS,
   type Decision,
   type PauseHold,
   type PauseResponse,
@@ -307,7 +308,8 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
         payload = schedulerError("not_leader", "this daemon's term has ended");
       } else {
         log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
-        payload = schedulerError("internal_error", String(err));
+        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code on a submit must mean "stored" (the task's own reply was too big), and a crash is not.
+        payload = schedulerError("internal_error", String(err).slice(0, TASK_FAILURE_LIMITS.message));
       }
     }
     await ctx.reply(from, { id: crypto.randomUUID(), ts: Date.now(), op, re: plain.id, payload });

@@ -1106,8 +1106,9 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `submit` (a `TaskRequest`) → `{ task }`, the task as queued — **until M3 item 6**. Until
   then this op is the one way in for MCP and the PWA's `auto`; the queue itself is the relay's
   store since M3 item 3. It ends in `Scheduler.submit` and refuses `queue_full` past
-  `MAX_ACTIVE_TASKS` unfinished tasks. It does not prune: pruning is the library's ("Pruning",
-  "The library", below), and the leader's own per-submit prune was removed 2026-10-18. M3 replaces it with the
+  `MAX_ACTIVE_TASKS` unfinished tasks. It does not prune before its create; `Scheduler.submit`
+  prunes only on its own `store_full` ("Pruning", "The library", below), and the leader's own
+  per-submit prune was removed 2026-10-18. M3 replaces it with the
   app sealing the task and `store-put`ting it at `expect: 0`, which queues with no leader up, and
   removes the op (docs/scheduler.md, M3).
 - `cancel { taskId }` (`TaskRef`) → `{ task }` (`TaskResponse`), the task as it now stands:
@@ -1570,8 +1571,8 @@ code=…`: the request id finds the app's side, and the task id joins the line t
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL, and then only with its `sessions` check
   unanswered and its machine not connected — and is never dispatched again on that evidence
-  alone (_The library_, below, "`lost`"). Lost for `lostExpiryMs` (7 days) it is `failed`
-  `lost_expired`, and an `awaiting-merge` task past `mergeExpiryMs` (7 days) is `failed`
+  alone (_The library_, below, "`lost`"). Lost for `lostExpiryMs` (7 days) while its machine is
+  disconnected it is `failed` `lost_expired`, and an `awaiting-merge` task past `mergeExpiryMs` (7 days) is `failed`
   `merge_expired` (_The library_, "Expiry").
 
 ### The library (`scheduler/`) — landed 2026-10-16, M2 item 1; M3's states 2026-10-17, M3 item 4a; caps, pause and alerts 2026-10-17, M3 item 5
@@ -1936,8 +1937,10 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   judged again. A `lost` task whose machine is connected at that moment is skipped, left to its
   own check next pass (it may have reconnected while this pass's check waited on a slower
   peer); so a connected machine whose `sessions` never answers keeps its task `lost`, and only a
-  disconnected one expires it. The write goes through `#update`, serialized and CAS'd, so a racing
-  `cancel` answers `finished`. A machine that returns after expiry: its session keeps running
+  disconnected one expires it; the same check repeats inside the write, since the machine may
+  reconnect between the two. The write goes through `#update`, serialized and CAS'd, so a racing
+  `cancel` that reaches its own write second answers the task as it now stands, `failed`, with
+  `ok: true`, as it does for any task that finished meanwhile. A machine that returns after expiry: its session keeps running
   there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
   No alert and no audit line: nothing spawns or despawns, and the record is the trace.
@@ -2196,7 +2199,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   - A PR closed without merging keeps its repo fetched every five minutes until the ledger evicts the
     task (7 days or 128 launches): it has a PR URL, so the quiet-task cut-off above never applies,
     and nothing the daemon sees tells a closed PR from one awaiting review. Merge expiry (7 days,
-    matched to the ledger's age because past it no merge can be reported; 128 launches can evict
+    matched to the ledger's age — `mergeExpiryMs` is derived from `LAUNCH_LEDGER_MAX_AGE_MS` in `shared/`, which the daemon's `LEDGER_MAX_AGE_MS` re-exports — because past it no merge can be reported; 128 launches can evict
     sooner) now fails such a task `merge_expired`, and its `after: "merged"` dependents with it, so a
     `here` task, or a PR merged after eviction, needs mark-done (item 6) before then. Owner's
     decision 2026-10-18, made knowing this.
@@ -3554,8 +3557,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   lost reply (`timeout`, `dropped`, an unreadable answer) is "may have queued — check
   get_queue and get_sessions before retrying", never a retry, since a second submit is a second
   task. A transport code is not a lost reply (2026-10-18): `too_large` on `submit` always means the
-  task was stored (the leader's transport refused the successful reply), and MCP says so;
-  `internal_error` shows the leader's own message, which says whether the task was stored, and
+  task was stored (the leader's transport refused the successful reply; a crashed handler's
+  `internal_error` message is cut to `TASK_FAILURE_LIMITS.message`, so it can never be the reply
+  that is swapped), and MCP says so;
+  `internal_error` shows the leader's own message (one line, cut to the same bound), which says whether the task was stored, and
   points at `get_queue`/`get_sessions` when it does not; `disconnected` never
   left this process, so it is a plain failure. **`cancel_task`** (added 2026-10-17, with the
   leader's `cancel`) is the `cancel` op by the task id `get_queue` shows: it answers the task

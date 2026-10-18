@@ -1414,6 +1414,8 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
   });
 
   test("a spawn answered after the leader stopped is settled running by the next term, with no second spawn", async () => {
+    // A rerun in this process finds the go file the last run left, and the stub would not hold.
+    await rm(go, { force: true });
     const id = crypto.randomUUID();
     const title = "held-dispatch";
     // The suite's daemon audits to its stdout, which in-process is console.log.
