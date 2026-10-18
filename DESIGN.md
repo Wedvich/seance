@@ -584,8 +584,10 @@ The Durable Object persists a machine registry:
   blobs lack them. `source` is read once per daemon process, so it names the
   build running, not the checkout on disk. Rendered on the Machines screen and
   in MCP `list_machines` since 2026-10-18 (each card's build, plus a note when
-  the last update attempt was a skip or failure, with its age — `lastUpdate` is
-  never cleared, so it can predate a later fix; `list_machines` omits its raw
+  the last update attempt was a skip or failure, with its age — the first
+  `current` check after one replaces it, so a fixed machine stops showing it,
+  except that an install or restart failure clears only once a later process
+  finds itself current; `list_machines` omits its raw
   `detail`, and the parser caps it), reversing an earlier "not
   rendered — converged is the steady state" decision: a dev check found a
   scheduler leader still on an older build, and nothing an app could see said
@@ -3241,7 +3243,10 @@ relay state unnecessary).
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite
   state.json and push a registry frame on every reconnect for information
-  nobody reads. The Machines screen and `list_machines` render both (since
+  nobody reads. The one exception is the first `current` after a skip or
+  failure (seeded from state.json at startup), reported once so a fixed
+  problem stops being shown; not for an install or restart failure this
+  process recorded, since HEAD is already at target while old code serves. The Machines screen and `list_machines` render both (since
   2026-10-18; Presence & identity says why), beside `seanced doctor`/`status`.
 - **Rollback is deferred** (the bootstrap paradox: rollback logic would ship
   inside the very version that is broken; a stable shim is v2 if ever). A
