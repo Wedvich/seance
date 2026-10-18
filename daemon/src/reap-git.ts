@@ -152,17 +152,17 @@ export async function listBranches(repoPath: string): Promise<readonly BranchRec
  * - `squash` — merging it changes nothing: its combined diff is already on the
  *   default branch, which is what a squash-merged PR leaves behind.
  *   Also a squash the tree check misses because the default branch has since
- *   edited the same lines: upstream gone, and the tip's whole diff from its
+ *   edited the same lines: patches checked, and the tip's whole diff from its
  *   merge-base is, patch id for patch id, one commit on the default branch
  *   since that merge-base.
- * - `gone` — its upstream was deleted and every commit's patch is upstream
+ * - `gone` — patches checked, and every commit's patch is upstream
  *   (`git cherry`), which catches a rebase-merge the tree check can't once the
  *   default branch has since edited the same lines.
- * - `unmerged-gone` — upstream deleted, but commits whose patch is nowhere
- *   upstream: kept, and reported, since that is unpushed work. A branch
+ * - `unmerged-gone` — patches checked, but commits whose patch is nowhere
+ *   upstream: reap keeps and reports it, since that is unpushed work. A branch
  *   stacked on another PR's branch lands here too: its diff from the default
  *   branch holds the parent's changes as well, so no one commit matches.
- * - `active` — none of the above; kept quietly.
+ * - `active` — none of the above, patches not checked; kept quietly.
  */
 export type Merged = "ancestor" | "squash" | "gone";
 export type BranchVerdict = Merged | "unmerged-gone" | "active";
@@ -234,13 +234,18 @@ async function squashPatchId(repoPath: string, mergeBase: string, tip: string): 
   return ids?.values().next().value ?? null;
 }
 
-/** `baseTree` is `base^{tree}`, resolved once per repo by the caller rather than once per tip. */
+/**
+ * `baseTree` is `base^{tree}`, resolved once per repo by the caller rather than once per tip. `checkPatches` gates
+ * the `cherry` and patch-id checks behind a failed tree check: reap's gate is a `[gone]` upstream, the emitter's is
+ * pushed evidence, since origin may keep a merged PR's branch (GitHub's default) and the tree check conflicts once
+ * the default branch edits the same lines.
+ */
 export async function classifyTip(
   repoPath: string,
   tip: string,
   base: string,
   baseTree: string,
-  upstreamGone: boolean,
+  checkPatches: boolean,
   patches: PatchIndex,
 ): Promise<BranchVerdict> {
   const ancestor = await hardenedGit(repoPath, ["merge-base", "--is-ancestor", tip, base]);
@@ -252,7 +257,7 @@ export async function classifyTip(
     const merged = await hardenedGit(repoPath, ["merge-tree", "--write-tree", base, tip]);
     if (merged.exitCode === 0 && merged.stdout.split("\n")[0]?.trim() === baseTree) return "squash";
   }
-  if (!upstreamGone) return "active";
+  if (!checkPatches) return "active";
   const cherry = await hardenedGit(repoPath, ["cherry", base, tip]);
   if (cherry.exitCode !== 0) return "unmerged-gone";
   if (!cherry.stdout.split("\n").some((line) => line.startsWith("+"))) return "gone";

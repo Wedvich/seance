@@ -307,13 +307,12 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
       evidence &&
       (note.branch === undefined || branch === note.branch)
     ) {
-      // Tracked upstreams are meaningless under --no-track: "gone" is a remote ref that was seen and has been pruned.
-      const gone = (note.pushed === true || note.prUrl !== undefined) && refs.remote === undefined;
-      const key = `${workTip} ${ctx.base.sha} ${refs.remote ?? "-"} ${gone}`;
+      const key = `${workTip} ${ctx.base.sha}`;
       const known = verdicts.get(note.taskId);
       if (known?.key === key) merged = known.merged;
       else {
-        const verdict = await classifyTip(ctx.repo.path, workTip, ctx.base.sha, ctx.base.tree, gone, ctx.base.patches);
+        // Patch checks on the evidence alone, not on origin pruning the branch: GitHub keeps a merged PR's by default.
+        const verdict = await classifyTip(ctx.repo.path, workTip, ctx.base.sha, ctx.base.tree, true, ctx.base.patches);
         merged = isMerged(verdict);
         verdicts.set(note.taskId, { key, merged });
       }

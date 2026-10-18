@@ -2361,9 +2361,12 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   is then an ancestor. The own-work answer is memoized per task on tip and default sha. With no recorded work tip nothing is judged. That also stops a fresh branch reusing a stale
   `refs/remotes/origin/<b>` from an earlier attempt from reading as pushed. And (2) **pushed
   evidence**: merged needs the branch seen pushed, or a recorded PR URL, which proves a push even
-  when push, merge and prune all happened while the daemon was down. "Gone" is derived, since
-  there is no upstream to be gone: the branch was seen pushed (or has a PR URL) and its remote
-  ref is now absent, which is what `git fetch --prune` does after the merge deletes it. A branch
+  when push, merge and prune all happened while the daemon was down. The same evidence is the
+  gate for `classifyTip`'s `cherry` and patch-id checks, where reap's is a `[gone]` upstream: there
+  is no upstream to be gone under `--no-track`, and a merge need not delete the remote branch
+  (GitHub keeps head branches by default). Gated on the remote ref being pruned, a squash whose
+  branch survived was caught only by the tree check, which conflicts once the default branch
+  edits the same lines, and the task sat `awaiting-merge` until `merge_expired`. A branch
   whose local ref was deleted (claude's worktree-exit "remove") before the PR merged is still
   judged, by its last-seen tip: the commit outlives the ref until gc. The verdict is memoized per
   task on its inputs, so an idle branch costs no classification per pass. It is computed against

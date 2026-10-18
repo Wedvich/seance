@@ -198,6 +198,43 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
+  test("a squash merge whose branch origin keeps is merged, though main has since edited the same lines", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    // GitHub's default: the head branch stays. Then another task's commit rewrites the same line, before the
+    // daemon (asleep through the merge) runs its first pass: the tree check now conflicts.
+    seq += 1;
+    const server = join(base, `server-${seq}`);
+    await git(base, "clone", "-q", w.fixture.barePath, server);
+    await git(server, "merge", "--squash", "origin/worktree-x");
+    await git(server, "commit", "-q", "-m", "worktree-x (#1)");
+    await writeFile(join(server, "a.txt"), "rewritten\n");
+    await git(server, "commit", "-q", "-am", "rewrite a.txt");
+    await git(server, "push", "-q", "origin", "main");
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ branch: "worktree-x", pushed: true, merged: true });
+    stopAll(w);
+  });
+
+  test("a pushed branch whose work is not on main stays unmerged while origin keeps it", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.advanceOrigin();
+    await emitter.check();
+    await emitter.check();
+    expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
+    expect(w.ledger.notes()[0]?.merged).toBeUndefined();
+    stopAll(w);
+  });
+
   test("a fast-forward merge after a push sends merged", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
