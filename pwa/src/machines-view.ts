@@ -3,10 +3,14 @@ import {
   effectivePct,
   liveStatus,
   newestQuotaByAccount,
+  schedulerRole,
   type ExclaveInfo,
   type Machine,
   type NewestQuota,
   type QuotaObservation,
+  type SchedulerAvailability,
+  type SchedulerRole,
+  type UpdateOutcome,
 } from "@seance/shared";
 import { formatSeen } from "./view.ts";
 
@@ -38,6 +42,12 @@ export interface MachineCard {
   readonly name: string;
   readonly connected: boolean;
   readonly meta: string;
+  /** Null for every machine but the relay's nominee. */
+  readonly role: SchedulerRole | null;
+  /** The build its daemon runs — short sha, commit age, branch; null from a daemon that doesn't say. */
+  readonly build: string | null;
+  /** Set only when its last update attempt was a skip or a failure; it may predate a later fix, so it carries its age. */
+  readonly updateNote: string | null;
   /**
    * CPU and memory only. Disk is collected and stored but not shown: a fill
    * level is upkeep, not load, and belongs in a health alert (docs/scheduler.md, M4).
@@ -65,6 +75,8 @@ export interface AccountCard {
 }
 
 export interface MachinesView {
+  /** Who leads the scheduler, or why nobody does. */
+  readonly scheduler: string;
   readonly cards: readonly MachineCard[];
   readonly accounts: readonly AccountCard[];
 }
@@ -128,7 +140,47 @@ function machineNote(machine: Machine): string | null {
   return null;
 }
 
-function machineCard(machine: Machine, now: number): MachineCard {
+/** Null for the outcomes that leave the machine on the build it meant to run. */
+const UPDATE_TROUBLE: Record<UpdateOutcome, string | null> = {
+  ok: null,
+  current: null,
+  skipped_dirty: "skipped, working tree had uncommitted changes",
+  skipped_branch: "skipped, checkout was off its default branch",
+  skipped_diverged: "skipped, checkout had diverged from its upstream",
+  fetch_failed: "failed, could not fetch",
+  install_failed: "failed, installing dependencies failed",
+  restart_failed: "failed, updated on disk but the restart failed",
+};
+
+function updateNote(machine: Machine, now: number): string | null {
+  const report = machine.lastUpdate;
+  if (report === undefined) return null;
+  const trouble = UPDATE_TROUBLE[report.outcome];
+  return trouble === null ? null : `Last update attempt ${formatSeen(report.at, now)}: ${trouble}.`;
+}
+
+function buildLine(machine: Machine, now: number): string | null {
+  const { source } = machine;
+  if (source === undefined) return null;
+  const where = source.branch ?? "detached";
+  return `${source.sha.slice(0, 12)} · committed ${formatSeen(source.commitTs, now)} · ${where}`;
+}
+
+/**
+ * Named by the registry where the nominee is in it. An unverified one may not
+ * be — its entry did not open — and then only its id says which seed it is.
+ */
+function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailability): string {
+  if (scheduler.kind === "none") return "No scheduler is leading. Auto tasks wait in the queue until one does.";
+  const name = machines.find((machine) => machine.deviceId === scheduler.deviceId)?.name;
+  if (scheduler.kind === "unverified") {
+    const who = name ?? `device ${scheduler.deviceId.slice(0, 8)}`;
+    return `Scheduler nominee ${who} is unverified: it hasn't shown it holds this key.`;
+  }
+  return `Scheduler: ${name ?? scheduler.deviceId.slice(0, 8)} leads (term ${scheduler.term}).`;
+}
+
+function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailability): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
   // still counts — an observation carries its own stamp.
@@ -146,6 +198,9 @@ function machineCard(machine: Machine, now: number): MachineCard {
     name: machine.name,
     connected: machine.connected,
     meta,
+    role: schedulerRole(machine.deviceId, scheduler),
+    build: buildLine(machine, now),
+    updateNote: updateNote(machine, now),
     gauges,
     note: machineNote(machine),
     exclaves: (machine.exclaves ?? []).map((exclave, index) => ({
@@ -247,9 +302,14 @@ function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[
   });
 }
 
-export function deriveMachines(machines: readonly Machine[], now: number): MachinesView {
+export function deriveMachines(
+  machines: readonly Machine[],
+  now: number,
+  scheduler: SchedulerAvailability,
+): MachinesView {
   return {
-    cards: machines.map((machine) => machineCard(machine, now)),
+    scheduler: schedulerLine(machines, scheduler),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler)),
     accounts: deriveAccounts(machines, now),
   };
 }

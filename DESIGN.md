@@ -581,10 +581,15 @@ The Durable Object persists a machine registry:
   decrypt. Re-sent on reconnect and repo rescan; DO overwrites. It also carries
   the daemon checkout's git identity (`source {sha, commitTs, branch}`) and the
   last self-update report (`lastUpdate`), both optional on the wire — older
-  blobs lack them. Deliberately not rendered in the app: once updates
-  self-propagate, converged is the steady state and a SHA per row is noise.
-  `seanced doctor`/`status` print both instead; a PWA warning on a stuck
-  (skip/fail) machine is deferred and needs no wire change.
+  blobs lack them. `source` is read once per daemon process, so it names the
+  build running, not the checkout on disk. Rendered on the Machines screen and
+  in MCP `list_machines` since 2026-10-18 (each card's build, plus a note when
+  the last update attempt was a skip or failure, with its age — `lastUpdate` is
+  never cleared, so it can predate a later fix; `list_machines` omits its raw
+  `detail`, and the parser caps it), reversing an earlier "not
+  rendered — converged is the steady state" decision: a dev check found a
+  scheduler leader still on an older build, and nothing an app could see said
+  so. `seanced doctor`/`status` print both too. No wire change was needed.
 - `connected` is **not persisted** — it's derived from `state.getWebSockets()`
   when the registry is read, so an eviction or crash can never leave a stale
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
@@ -3236,8 +3241,8 @@ relay state unnecessary).
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite
   state.json and push a registry frame on every reconnect for information
-  nobody reads. No PWA rendering by decision; `seanced doctor`/`status` are
-  the visibility surface.
+  nobody reads. The Machines screen and `list_machines` render both (since
+  2026-10-18; Presence & identity says why), beside `seanced doctor`/`status`.
 - **Rollback is deferred** (the bootstrap paradox: rollback logic would ship
   inside the very version that is broken; a stable shim is v2 if ever). A
   machine bricked by an update shows offline in the app with its last-known
@@ -3389,6 +3394,13 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
   sleep leaves exactly that, one tick per dark wake. Quota holds its level between
   observations, since a sample carries the observation's time, not the tick's.
+- **Machines say who leads and what each runs** (2026-10-18). A line above the cards names
+  the scheduler leader, an unverified nominee (by registry name, or a short id when its entry
+  did not open), or that nobody leads; the leader's card carries a SCHEDULER badge and an
+  unverified nominee's an UNVERIFIED one — read through `schedulerRole` in
+  `shared/src/app-client.ts`, the rule `list_machines` uses too, so an unproven nominee is
+  never drawn as leading. Each card shows its daemon's build (short sha, commit age, branch)
+  and, when its last update attempt was a skip or failure, a note saying which and how long ago.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
@@ -3575,7 +3587,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   nobody is looking at. Rejected: connect-per-call (pays connect latency and
   the registry settle on every call), always-on (idle sockets × sessions).
 - **Tools**: `list_machines` (registry + presence, works for offline machines
-  because repos ride the register blob), `get_sessions { machine }`,
+  because repos ride the register blob; each entry's `source` build and
+  `lastUpdate` from the same blob, and `scheduler: "leader"` on the nominee
+  whose lead proof verified or `"unverified"` on one whose did not — never a
+  leader on the relay's word alone, and no mark at all through the fleet
+  broker, which has no scheduler view; still a bare array, so the field is
+  per entry rather than a wrapper), `get_sessions { machine }`,
   `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort?, plan? }`
   and `despawn_session { machine, id, force? }` (added 2026-10-09, see
   "Despawn") mapping 1:1 onto the `sessions`/`spawn`/`despawn` ops with the existing

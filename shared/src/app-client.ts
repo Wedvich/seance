@@ -35,6 +35,7 @@ import {
   type RoutePreviewReply,
   type SchedulerLeader,
   type SchedulerOp,
+  type SourceInfo,
   type StoreReplyFrame,
   type Task,
   type TaskRecord,
@@ -42,6 +43,7 @@ import {
   type TaskReply,
   type TaskRequest,
   type UndeliverableCode,
+  type UpdateReport,
 } from "./types.ts";
 import {
   bindTaskRecord,
@@ -206,6 +208,10 @@ export interface Machine {
   readonly capabilities?: readonly string[];
   /** The register blob's `exclaves`, which `status` indexes; absent from a daemon that predates them. */
   readonly exclaves?: readonly ExclaveInfo[];
+  /** The build the daemon is running (read once per process, not the checkout on disk); absent from an old daemon or one outside git. */
+  readonly source?: SourceInfo;
+  /** Its last self-update attempt that did something other than find itself current. */
+  readonly lastUpdate?: UpdateReport;
 }
 
 /**
@@ -222,6 +228,15 @@ export type SchedulerAvailability =
   | { readonly kind: "ready"; readonly deviceId: string; readonly term: number };
 
 const NO_SCHEDULER: SchedulerAvailability = { kind: "none" };
+
+/** Where one machine stands with the scheduler, for display: only a `ready` nominee is ever shown as leading. */
+export type SchedulerRole = "leader" | "unverified";
+
+/** Null for every machine but the relay's nominee. */
+export function schedulerRole(deviceId: string, scheduler: SchedulerAvailability): SchedulerRole | null {
+  if (scheduler.kind === "none" || scheduler.deviceId !== deviceId) return null;
+  return scheduler.kind === "ready" ? "leader" : "unverified";
+}
 
 export interface RelayState {
   readonly status: RelayStatus;
@@ -454,7 +469,9 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.connected === b.connected &&
     a.status === b.status &&
     a.capabilities === b.capabilities &&
-    a.exclaves === b.exclaves
+    a.exclaves === b.exclaves &&
+    a.source === b.source &&
+    a.lastUpdate === b.lastUpdate
   );
 }
 
@@ -1283,6 +1300,8 @@ export class RelayClient {
         ...(status === null ? {} : { status }),
         ...(info.capabilities !== undefined ? { capabilities: info.capabilities } : {}),
         ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
+        ...(info.source !== undefined && info.source !== null ? { source: info.source } : {}),
+        ...(info.lastUpdate !== undefined && info.lastUpdate !== null ? { lastUpdate: info.lastUpdate } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {

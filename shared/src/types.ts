@@ -735,8 +735,9 @@ export interface UpdateAvailable {
 
 /**
  * Payload of the encrypted register blob (`op: "machine-info"`). `source` and
- * `lastUpdate` are optional on the wire — blobs from older daemons lack them,
- * and the app renders neither in v1 (doctor/status are the visibility surface).
+ * `lastUpdate` are optional on the wire — blobs from older daemons lack them.
+ * The app and `list_machines` render both (which build each machine runs is
+ * what tells a stale leader apart), beside doctor/status on the box itself.
  */
 export interface MachineInfo {
   readonly name: string;

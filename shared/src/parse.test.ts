@@ -28,6 +28,7 @@ import {
   parseTaskProgressList,
   parseTaskRef,
   parseTaskReply,
+  UPDATE_DETAIL_MAX,
   parseTaskRequest,
   parseTaskSpec,
 } from "./parse.ts";
@@ -138,6 +139,32 @@ describe("parseMachineInfo", () => {
     expect(parsed).toEqual(info);
     expect(parsed?.exclaves).toBeUndefined();
     expect(parsed?.capabilities).toBeUndefined();
+  });
+
+  // The build and the last update report are what the Machines screen and list_machines show.
+  test("carries the build and the last update report; a malformed one costs that field alone", () => {
+    const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: null };
+    const lastUpdate = { at: 1_700_000_100_000, outcome: "skipped_dirty" as const, detail: "2 files" };
+    expect(parseMachineInfo({ ...info, source, lastUpdate })).toEqual({ ...info, source, lastUpdate });
+    expect(parseMachineInfo({ ...info, source: null, lastUpdate: null })).toEqual(info);
+    const bad = [
+      { source: { ...source, sha: "short" } },
+      { source: { ...source, branch: 3 } },
+      { lastUpdate: { ...lastUpdate, outcome: "exploded" } },
+      { lastUpdate: { ...lastUpdate, at: -1 } },
+      // Past Date's range, where toISOString() throws in list_machines.
+      { source: { ...source, commitTs: 9e15 } },
+      { lastUpdate: { ...lastUpdate, at: 9e15 } },
+      { source: { ...source, commitTs: Number.NaN } },
+      { lastUpdate: { ...lastUpdate, at: Number.NaN } },
+      { lastUpdate: { ...lastUpdate, detail: 7 } },
+    ];
+    for (const fields of bad) expect(parseMachineInfo({ ...info, ...fields })).toEqual(info);
+
+    // An oversized detail is cut, not refused: the outcome still says what happened.
+    const cut = parseMachineInfo({ ...info, lastUpdate: { ...lastUpdate, detail: "x".repeat(5_000) } });
+    expect(cut?.lastUpdate?.detail).toHaveLength(UPDATE_DETAIL_MAX);
+    expect(cut?.lastUpdate?.outcome).toBe("skipped_dirty");
   });
 });
 

@@ -126,7 +126,7 @@ export function App(props: { store: Store }): JSX.Element {
       {shown(2) && (
         <main key="machines" className={panelClass(anim, 2)}>
           <MachinesScreen
-            view={deriveMachines(state.relay.machines, now)}
+            view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
             relayLine={view.relayLine}
             relayState={view.relayState}
             settled={state.relay.registrySettled}

@@ -1197,6 +1197,11 @@
   color: var(--fg2);
 }
 
+/* A branch name has no spaces to wrap at. */
+.fleet-build {
+  overflow-wrap: anywhere;
+}
+
 .fleet-toggle {
   flex: none;
   animation: none;
@@ -1206,6 +1211,42 @@
   margin: 0;
   font-size: 13px;
   color: var(--fg2);
+}
+
+.fleet-warn {
+  color: var(--warn);
+}
+
+.fleet-scheduler {
+  margin: 0 2px;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
+.fleet-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* `auto`'s colour: the badge marks the machine `auto` tasks go through. */
+.fleet-badge {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--auto);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--auto);
+}
+
+.fleet-badge-unverified {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 .bars {
