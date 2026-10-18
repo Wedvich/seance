@@ -177,6 +177,8 @@ describe("deriveQueue", () => {
     }
     expect(rowOf({ state: "running" }).cancelEndsSession).toBe(true);
     expect(rowOf({ state: "ready" }).cancelEndsSession).toBe(false);
+    expect(rowOf({ state: "needs-input" }).markDoneEndsSession).toBe(true);
+    expect(rowOf({ state: "lost" }).markDoneEndsSession).toBe(false);
   });
 
   test("a row's decision is placed ('did') by its assignment, so a waiting task marked done never reads as placed", () => {

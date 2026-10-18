@@ -39,13 +39,17 @@ export function QueueScreen(props: {
     return () => clearTimeout(timer);
   }, [armed]);
 
-  const cancel = (row: QueueRow): void => {
-    if (row.cancelEndsSession && armed !== row.id) {
-      setArmed(row.id);
+  // An act that ends a session asks twice; the key names the act so one button's tap can't arm the other.
+  const act = (row: QueueRow, op: "cancel" | "mark-done"): void => {
+    const key = `${op}:${row.id}`;
+    const endsSession = op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession;
+    if (endsSession && armed !== key) {
+      setArmed(key);
       return;
     }
     setArmed(null);
-    onCancel(row.id);
+    if (op === "cancel") onCancel(row.id);
+    else onMarkDone(row.id);
   };
 
   return (
@@ -126,9 +130,9 @@ export function QueueScreen(props: {
                         type="button"
                         className="quiet"
                         disabled={!view.available || row.busy}
-                        onClick={() => onMarkDone(row.id)}
+                        onClick={() => act(row, "mark-done")}
                       >
-                        Mark done
+                        {armed === `mark-done:${row.id}` ? "Tap again to end it" : "Mark done"}
                       </button>
                     )}
                     {row.canCancel && (
@@ -136,9 +140,9 @@ export function QueueScreen(props: {
                         type="button"
                         className="quiet"
                         disabled={!view.available || row.busy}
-                        onClick={() => cancel(row)}
+                        onClick={() => act(row, "cancel")}
                       >
-                        {armed === row.id ? "Tap again to cancel" : "Cancel"}
+                        {armed === `cancel:${row.id}` ? "Tap again to cancel" : "Cancel"}
                       </button>
                     )}
                   </div>
