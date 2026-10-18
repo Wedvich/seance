@@ -117,6 +117,34 @@ describe("needs-input escalation", () => {
     expect(alerts[0]).toMatchObject({ kind: "needs-input", since: NOW });
   });
 
+  test("lost and back through its machine's sessions alone: waiting again on the original clock, escalated once", async () => {
+    const { alerts, clock, fleet, scheduler, store } = setup();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    const from = { deviceId: "a", pane: scheduler.task(task.id)?.assignment?.pane ?? "" };
+    await scheduler.onSession(task.id, "needs-input", from);
+
+    clock.now = NOW + MINUTE;
+    fleet.fleet = fleet.fleet.map((m) => ({ ...m, connected: false }));
+    await scheduler.tick();
+    clock.now = NOW + MINUTE + DEFAULT_CONFIG.lostAfterMs;
+    await scheduler.tick();
+    expect(scheduler.task(task.id)).toMatchObject({ state: "lost", needsInputSince: NOW });
+
+    // Back, its session still waiting: no event re-sends the wait, so only `sessions` speaks.
+    fleet.fleet = fleet.fleet.map((m) => ({ ...m, connected: true }));
+    await pass(scheduler, fleet, clock.now);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "needs-input", needsInputSince: NOW });
+    expect(alerts).toHaveLength(0);
+
+    clock.now = NOW + 30 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    clock.now = NOW + 60 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ kind: "needs-input", since: NOW });
+  });
+
   test("inputClock: lost keeps both fields, any other leaving clears them, an escalated stay is not due again", () => {
     const running: Task = { id: "x", spec: spec(), state: "running", createdAt: NOW };
     const waiting = inputClock(advance(running, "needs-input"), NOW);

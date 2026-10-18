@@ -138,6 +138,12 @@ export class Scheduler {
    */
   readonly #absentSince = new Map<string, number>();
   /**
+   * deviceId → when its `sessions` first failed, until one answers: how long
+   * a connected machine has said nothing usable, for a reservation past its
+   * TTL (`goneSince`). Memory only, as `#absentSince` is.
+   */
+  readonly #unansweredSince = new Map<string, number>();
+  /**
    * Machines seen absent that are connected again, until the next `#due` reads
    * their tasks' `sessions`: what they sent while away (`branch-state`) went
    * to no one, and `progress` holds it.
@@ -257,6 +263,7 @@ export class Scheduler {
     await this.load();
     this.#sweptAt = this.#now();
     this.#forgetFailed.clear();
+    this.#unansweredSince.clear();
     await this.#check(
       this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
     );
@@ -277,12 +284,24 @@ export class Scheduler {
         const held = this.#held.get(task.id);
         if (held === undefined || !FINISHED.includes(held.task.state) || named(this.tasks()).has(task.id)) return;
         const write = await this.#store.delete(task.id, held.version);
-        if (!write.ok) {
+        if (write.ok) {
+          this.#held.delete(task.id);
+          this.#decisions.delete(task.id);
+          return;
+        }
+        if (write.code !== "version_conflict" && write.code !== "indeterminate") {
           this.#refused(task.id, "delete", write);
           return;
         }
+        // A lost reply may be our delete landing, a conflict another write: the store says which,
+        // and a record held after it is gone would take a slot of every later prune.
+        const fresh = await this.#store.get(task.id);
         this.#held.delete(task.id);
-        this.#decisions.delete(task.id);
+        if (fresh === null) {
+          this.#decisions.delete(task.id);
+          return;
+        }
+        this.#keep(fresh);
       });
     }
   }
@@ -447,11 +466,12 @@ export class Scheduler {
   /**
    * Settles an unfinished task `done` (`doneBy: "manual"`) as it stands: the
    * human says its work is over, so it wins over whatever else the task was
-   * waiting for. A `running` or `needs-input` task, or a `lost` one whose machine
-   * is connected, has its session ended first, as `cancel` does, since a `done` task holds no slot and a session left
-   * running would keep working beyond the caps. `lost`, `awaiting-merge` and the
-   * waiting states are settled as they stand (their session is gone, or
-   * unreachable, or never was). A later event for a `done` task is ignored
+   * waiting for. A `running` or `needs-input` task, or a `lost` one whose
+   * machine is connected, has its session ended first, as `cancel` does, since a
+   * `done` task holds no slot and a session left running would keep working
+   * beyond the caps. `lost`, `awaiting-merge` and the waiting states are settled
+   * as they stand (their session is gone, or unreachable, or never was); a
+   * `lost` one is marked `leftRunning`, as `cancel` marks it. A later event for a `done` task is ignored
    * (`sessionChange` and `branchChange` touch placed tasks only). `reserved` is
    * refused as `cancel` refuses it: its spawn is in flight. A despawn that ran
    * and then lost the right to write `done` is `unrecorded`, as for `cancel`.
@@ -481,7 +501,8 @@ export class Scheduler {
       if (!live && (current.state === "running" || current.state === "needs-input")) return null;
       // What was despawned must still be what is settled.
       if (live && current.assignment?.deviceId !== assignment?.deviceId) return null;
-      return advance(current, "done", { doneBy: "manual" });
+      const leftRunning = !live && current.state === "lost";
+      return advance(current, "done", { doneBy: "manual", ...(leftRunning ? { leftRunning: true } : {}) });
     }).catch((err: unknown) => {
       if (!ended.despawned || !(err instanceof StoreRevoked)) throw err;
       this.#onError(err);
@@ -847,6 +868,11 @@ export class Scheduler {
     const replies = new Map(
       await Promise.all([...devices].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
     );
+    const now = this.#now();
+    for (const [deviceId, reply] of replies) {
+      if (reply.ok) this.#unansweredSince.delete(deviceId);
+      else if (!this.#unansweredSince.has(deviceId)) this.#unansweredSince.set(deviceId, now);
+    }
     await Promise.all(
       tasks.map(async (seen) => {
         const deviceId = deviceOf(seen);
@@ -857,7 +883,9 @@ export class Scheduler {
             ? settle(current, reply, {
                 now: this.#now(),
                 connected: this.#connected(deviceId),
+                unansweredSince: this.#unansweredSince.get(deviceId),
                 reservationTtlMs: this.#config.reservationTtlMs,
+                lostAfterMs: this.#config.lostAfterMs,
               })
             : null,
         );

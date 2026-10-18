@@ -43,7 +43,10 @@ export interface Observed {
   readonly now: number;
   /** Whether the task's machine is connected now. */
   readonly connected: boolean;
+  /** Since when every `sessions` to the task's machine has failed; absent once one answers. */
+  readonly unansweredSince?: number | undefined;
   readonly reservationTtlMs: number;
+  readonly lostAfterMs: number;
 }
 
 function targetOf(at: Target): Target {
@@ -160,10 +163,10 @@ function changed(before: Task, after: Task): Task | null {
  * Before its TTL only a session carrying the task id, or the id in `ended`,
  * resolves a reservation; anything else is a spawn still on its way. Past it
  * the machine's answer settles it (`settleUnconfirmed`). An unanswered check
- * keeps waiting while the machine is connected; once it is not, the task is
- * `lost` on that machine — never released to `ready` on a silence, since a
- * machine that only sleeps may wake still running it, and `task_running`
- * guards only a re-dispatch to that same machine.
+ * keeps waiting while the machine may still answer (`goneSince`); once it
+ * cannot, the task is `lost` on that machine — never released to `ready` on a
+ * silence, since a machine that only sleeps may wake still running it, and
+ * `task_running` guards only a re-dispatch to that same machine.
  */
 function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Task | null {
   const { reservation } = task;
@@ -171,9 +174,10 @@ function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Tas
   const expired = reservation.expiresAt <= at.now;
   const target = targetOf(reservation);
   if (!reply.ok) {
-    if (!expired || at.connected) return null;
+    const since = expired ? goneSince(reservation, at) : null;
+    if (since === null) return null;
     const reservedAt = task.reservedAt ?? reservation.expiresAt - at.reservationTtlMs;
-    return advance(task, "lost", { assignment: target, absentSince: at.now, reservedAt });
+    return advance(task, "lost", { assignment: target, absentSince: since, reservedAt });
   }
   const known = reply.sessions.some((s) => s.taskId === task.id) || reply.ended?.includes(task.id) === true;
   if (!known && !expired) return null;
@@ -181,13 +185,28 @@ function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Tas
 }
 
 /**
+ * When a past-TTL reservation's machine stopped counting as there: now, once
+ * it is not connected; once its checks have failed for `lostAfterMs` past the
+ * TTL, when they began. A machine that answers only errors would otherwise hold
+ * the slot for good, and past the TTL no spawn can still land — a daemon drops
+ * an envelope older than the replay window. Null while it may yet answer.
+ */
+function goneSince(reservation: Reservation, at: Observed): number | null {
+  if (!at.connected) return at.now;
+  if (at.unansweredSince === undefined) return null;
+  const since = Math.max(at.unansweredSince, reservation.expiresAt);
+  return at.now - since >= at.lostAfterMs ? since : null;
+}
+
+/**
  * A placed task against its machine's own `sessions`: a session carrying its
  * id is the task still running (a `lost` one runs again, on the pane listed
- * now), with its `progress` applied; none is a session that ended while nobody
- * listened — settled by its PR as `ended` settles one, whether or not `ended`
- * still remembers it, unless a trimmed reply leaves that unknown
- * (`unknownEnd`). A `lost` task never confirmed is not placed but a
- * reservation its machine kept, and settles as one.
+ * now, or waits for input again if it was waiting when lost), with its
+ * `progress` applied; none is a session that ended while nobody listened —
+ * settled by its PR as `ended` settles one, whether or not `ended` still
+ * remembers it, unless a trimmed reply leaves that unknown (`unknownEnd`). A
+ * `lost` task never confirmed is not placed but a reservation its machine
+ * kept, and settles as one.
  */
 function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
   const { assignment } = task;
@@ -198,9 +217,12 @@ function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
     if (unknownEnd(task, entry, reply)) return null;
     return ended(task, entry);
   }
+  // `lost` keeps `needsInputSince` only for a task that was waiting, and no event re-sends the wait on reconnect.
   const live =
     task.state === "lost" && assignment !== undefined
-      ? advance(task, "running", { assignment: assignmentOf(assignment, session) })
+      ? advance(task, task.needsInputSince === undefined ? "running" : "needs-input", {
+          assignment: assignmentOf(assignment, session),
+        })
       : task;
   return changed(task, progressed(live, entry));
 }
