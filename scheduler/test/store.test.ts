@@ -103,6 +103,39 @@ describe("the scheduler over a store", () => {
     expect((await store.list()).map((entry) => entry.id).toSorted()).toEqual(["good", "junk", "rolled"]);
   });
 
+  test("discard deletes a record held unreadable at the version asked, and nothing else", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    await store.put("good", 0, queued("good"));
+    store.plant("junk", "unopenable");
+    store.plant("stale", "unopenable");
+    await scheduler.load();
+
+    expect(await scheduler.discard("good", 1)).toEqual({ ok: false, code: "not_found" });
+    expect(await scheduler.discard("nope", 1)).toEqual({ ok: false, code: "not_found" });
+    expect(await scheduler.discard("junk", 2)).toEqual({ ok: false, code: "conflict" });
+    expect(await scheduler.discard("junk", 1)).toEqual({ ok: true });
+    expect(scheduler.unreadable().map((u) => u.id)).toEqual(["stale"]);
+    expect((await store.list()).map((e) => e.id).toSorted()).toEqual(["good", "stale"]);
+    // A tombstone stands behind it, so the same blob cannot simply be put back.
+    expect(await scheduler.discard("junk", 1)).toEqual({ ok: false, code: "not_found" });
+
+    // A lost reply that committed is gone; one that met a newer record holds that record instead.
+    store.failNext({ code: "indeterminate", commit: true });
+    expect(await scheduler.discard("stale", 1)).toEqual({ ok: true });
+    expect(scheduler.unreadable()).toEqual([]);
+    expect((await store.list()).map((e) => e.id)).toEqual(["good"]);
+  });
+
+  test("discard of a record rewritten since it was read is a conflict, and the record is held as it now reads", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    store.plant("junk", "unopenable");
+    await scheduler.load();
+    store.plant("junk", "unopenable", 2);
+    expect(await scheduler.discard("junk", 1)).toEqual({ ok: false, code: "conflict" });
+    expect(scheduler.unreadable()).toEqual([{ id: "junk", version: 2, reason: "unopenable" }]);
+    expect(await scheduler.discard("junk", 2)).toEqual({ ok: true });
+  });
+
   test("a lost reply after its write committed is read back as written, and the spawn still goes", async () => {
     const { store, fleet, scheduler } = setup();
     await store.put("t", 0, queued("t"));

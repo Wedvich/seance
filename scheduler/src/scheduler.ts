@@ -94,6 +94,12 @@ export type CancelResult =
       readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
     };
 
+/**
+ * `discard`: `not_found` when no record by that id is held unreadable,
+ * `conflict` when it is held at another version — the caller re-reads first.
+ */
+export type DiscardResult = { readonly ok: true } | { readonly ok: false; readonly code: "not_found" | "conflict" };
+
 type CancelFailure = { readonly ok: false; readonly code: "despawn_failed" };
 
 interface Held {
@@ -251,6 +257,36 @@ export class Scheduler {
   /** What the store holds that this scheduler cannot read, and why — for the host to report. */
   unreadable(): readonly UnreadableTask[] {
     return [...this.#unreadable.values()];
+  }
+
+  /**
+   * Deletes a record held as unreadable (`unreadable`), at the version it was
+   * read at: junk a token holder planted, or a record sealed under an old PSK.
+   * Nothing else ever deletes one, and each holds a slot of the store's cap.
+   * A readable task is never `discard`ed, nor one that changed since the caller
+   * saw it. A lost reply or a conflict is read back, as prune reads it: gone
+   * is done, otherwise the record is held as it now reads. A refusal throws,
+   * as the pause's does: no race to retry.
+   */
+  async discard(taskId: string, version: number): Promise<DiscardResult> {
+    return this.#serial(taskId, async (): Promise<DiscardResult> => {
+      const held = this.#unreadable.get(taskId);
+      if (held === undefined) return { ok: false, code: "not_found" };
+      if (held.version !== version) return { ok: false, code: "conflict" };
+      const write = await this.#store.delete(taskId, version);
+      if (write.ok) {
+        this.#unreadable.delete(taskId);
+        return { ok: true };
+      }
+      if (write.code !== "version_conflict" && write.code !== "indeterminate") {
+        throw new Error(`store refused delete of task ${taskId}: ${write.code}`);
+      }
+      const fresh = await this.#store.get(taskId);
+      this.#unreadable.delete(taskId);
+      if (fresh === null) return { ok: true };
+      this.#keep(fresh);
+      return { ok: false, code: "conflict" };
+    });
   }
 
   /**
