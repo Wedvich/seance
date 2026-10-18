@@ -5,7 +5,7 @@ import { describeDecision } from "../decision-view.ts";
 import type { QueueRow, QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
-import { RelayDot } from "./relay-dot.tsx";
+import { RelayDot, RelaySettings } from "./relay-dot.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
@@ -23,12 +23,15 @@ export function QueueScreen(props: {
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
   pausing: boolean;
-  onDismiss: () => void;
+  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
+  onDismiss?: () => void;
   onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
   onPause: () => void;
   onResume: (account?: string) => void;
+  /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
+  onOpenSettings?: () => void;
 }): JSX.Element {
   const { view, relayState, machines, now, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
@@ -56,9 +59,11 @@ export function QueueScreen(props: {
     <>
       <header className="header">
         <div className="header-lead">
-          <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-            ‹
-          </button>
+          {onDismiss !== undefined && (
+            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
+              ‹
+            </button>
+          )}
           <div>
             <h1 className="header-title">Queue</h1>
             <p className="header-meta header-status">
@@ -67,9 +72,12 @@ export function QueueScreen(props: {
             </p>
           </div>
         </div>
-        <button type="button" className="queue-refresh" onClick={onRefresh} aria-label="Refresh the queue">
-          ↻
-        </button>
+        <div className="header-actions">
+          <button type="button" className="queue-refresh" onClick={onRefresh} aria-label="Refresh the queue">
+            ↻
+          </button>
+          {props.onOpenSettings !== undefined && <RelaySettings state={relayState} onClick={props.onOpenSettings} />}
+        </div>
       </header>
 
       <div className="fleet">
@@ -157,7 +165,7 @@ export function QueueScreen(props: {
       <footer className="footer">
         <button
           type="button"
-          className="primary"
+          className="primary queue-pause"
           disabled={!view.available || pausing}
           onClick={view.paused ? () => props.onResume() : props.onPause}
         >

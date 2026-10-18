@@ -30,6 +30,7 @@ export function App(props: { store: Store }): JSX.Element {
   const shown = (screen: Depth): boolean => screen === depth || screen === anim?.from;
   const exit = useVerdictExit(state.verdict);
   const actions = useSpawnActions(store);
+  const wide = useWide(store);
 
   useEffect(() => store.attach(), [store]);
 
@@ -47,6 +48,97 @@ export function App(props: { store: Store }): JSX.Element {
   const rendered = exit.rendered;
   const view = deriveView(state, now);
 
+  const formOrVerdict =
+    rendered !== null ? (
+      <VerdictView
+        key={rendered}
+        verdict={rendered}
+        machineName={view.machine?.name ?? "that machine"}
+        machines={state.relay.machines}
+        now={now}
+        closing={exit.closing}
+        onExited={exit.onExited}
+        onQueue={actions.openQueue}
+        waitingNote={view.autoAvailability.note}
+        onRetry={() => store.retrySpawn(rendered)}
+        onAnother={() => store.startAnother()}
+        onReuse={() => store.reusePrompt(rendered)}
+        onBack={() => store.dismissLayer()}
+      />
+    ) : (
+      <SpawnScreen
+        actions={actions}
+        view={view}
+        form={state.form}
+        promptUndo={state.promptUndo}
+        sheet={state.sheet}
+        machines={state.relay.machines}
+        now={now}
+        rescan={state.rescan}
+        preview={state.preview}
+        columns={wide}
+      />
+    );
+  const queue = (onDismiss?: () => void, onOpenSettings?: () => void): JSX.Element => (
+    <QueueScreen
+      view={deriveQueue(state, now)}
+      relayState={view.relayState}
+      machines={state.relay.machines}
+      now={now}
+      notice={state.queueNotice}
+      pausing={state.pausing}
+      onDismiss={onDismiss}
+      onRefresh={() => void store.refreshQueue()}
+      onCancel={(id) => void store.cancelTask(id)}
+      onMarkDone={(id) => void store.markDone(id)}
+      onPause={() => void store.pauseQueue()}
+      onResume={(account) => void store.resumeQueue(account)}
+      onOpenSettings={onOpenSettings}
+    />
+  );
+  const settings = (onOpenMachines?: () => void): JSX.Element => (
+    <Settings
+      relayUrl={readRelayUrl()}
+      relayLine={view.relayLine}
+      relayState={view.relayState}
+      connected={state.relay.status === "open"}
+      machinesLine={view.meta}
+      onDismiss={actions.dismissLayer}
+      onReconnect={() => store.reconnect()}
+      onOpenMachines={onOpenMachines}
+    />
+  );
+  const machines = (onDismiss?: () => void): JSX.Element => (
+    <MachinesScreen
+      view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
+      relayLine={view.relayLine}
+      relayState={view.relayState}
+      settled={state.relay.registrySettled}
+      history={state.history}
+      onDismiss={onDismiss}
+      onShowHistory={(target, range) => void store.showHistory(target, range)}
+      onHideHistory={() => store.hideHistory()}
+    />
+  );
+
+  // Settings stays a layer, over the first column; queue and machines no
+  // longer need to be one.
+  if (wide) {
+    return (
+      <div className="desk">
+        <main key="form" className={`screen desk-col${exit.entering ? " form-enter" : ""}`}>
+          {state.settings ? settings() : formOrVerdict}
+        </main>
+        <main key="machines" className="screen desk-col">
+          {machines()}
+        </main>
+        <main key="queue" className="screen desk-col">
+          {queue(undefined, actions.openSettings)}
+        </main>
+      </div>
+    );
+  }
+
   // Both ends of a transition stay mounted while it plays; push and pop are
   // mirrored full-width slides.
   return (
@@ -58,87 +150,45 @@ export function App(props: { store: Store }): JSX.Element {
     >
       {shown(0) && (
         <main key="form" className={`${panelClass(anim, 0)}${exit.entering ? " form-enter" : ""}`}>
-          {rendered !== null ? (
-            <VerdictView
-              key={rendered}
-              verdict={rendered}
-              machineName={view.machine?.name ?? "that machine"}
-              machines={state.relay.machines}
-              now={now}
-              closing={exit.closing}
-              onExited={exit.onExited}
-              onQueue={actions.openQueue}
-              waitingNote={view.autoAvailability.note}
-              onRetry={() => store.retrySpawn(rendered)}
-              onAnother={() => store.startAnother()}
-              onReuse={() => store.reusePrompt(rendered)}
-              onBack={() => store.dismissLayer()}
-            />
-          ) : (
-            <SpawnScreen
-              actions={actions}
-              view={view}
-              form={state.form}
-              promptUndo={state.promptUndo}
-              sheet={state.sheet}
-              machines={state.relay.machines}
-              now={now}
-              rescan={state.rescan}
-              preview={state.preview}
-            />
-          )}
+          {formOrVerdict}
+        </main>
+      )}
+      {shown(1) && depthOne === "queue" && (
+        <main key="queue" className={panelClass(anim, 1)}>
+          {queue(actions.dismissLayer)}
         </main>
       )}
       {/* Kept mounted, hidden, under machines: its credential fields hold
           unsaved drafts that a remount would drop on the way back. */}
-      {shown(1) && depthOne === "queue" && (
-        <main key="queue" className={panelClass(anim, 1)}>
-          <QueueScreen
-            view={deriveQueue(state, now)}
-            relayState={view.relayState}
-            machines={state.relay.machines}
-            now={now}
-            notice={state.queueNotice}
-            pausing={state.pausing}
-            onDismiss={actions.dismissLayer}
-            onRefresh={() => void store.refreshQueue()}
-            onCancel={(id) => void store.cancelTask(id)}
-            onMarkDone={(id) => void store.markDone(id)}
-            onPause={() => void store.pauseQueue()}
-            onResume={(account) => void store.resumeQueue(account)}
-          />
-        </main>
-      )}
       {((shown(1) && depthOne === "settings") || depth === 2) && (
         <main key="settings" className={panelClass(anim, 1)} hidden={!shown(1) || depthOne !== "settings"}>
-          <Settings
-            relayUrl={readRelayUrl()}
-            relayLine={view.relayLine}
-            relayState={view.relayState}
-            connected={state.relay.status === "open"}
-            machinesLine={view.meta}
-            onDismiss={actions.dismissLayer}
-            onReconnect={() => store.reconnect()}
-            onOpenMachines={() => store.openMachines()}
-          />
+          {settings(() => store.openMachines())}
         </main>
       )}
       {shown(2) && (
         <main key="machines" className={panelClass(anim, 2)}>
-          <MachinesScreen
-            view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
-            relayLine={view.relayLine}
-            relayState={view.relayState}
-            settled={state.relay.registrySettled}
-            history={state.history}
-            onDismiss={actions.dismissLayer}
-            onShowHistory={(target, range) => void store.showHistory(target, range)}
-            onHideHistory={() => store.hideHistory()}
-          />
+          {machines(actions.dismissLayer)}
         </main>
       )}
     </div>
   );
+}
+
+/** Room for three phone-width columns side by side. */
+const WIDE_QUERY = "(min-width: 1200px)";
+
+/** Tracks the desktop breakpoint and tells the store, which then reads the queue for a column nobody opened. */
+function useWide(store: Store): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia(WIDE_QUERY).matches);
+  useLayoutEffect(() => {
+    const media = window.matchMedia(WIDE_QUERY);
+    const sync = (): void => setWide(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+  useEffect(() => store.setWide(wide), [store, wide]);
+  return wide;
 }
 
 /**

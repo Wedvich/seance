@@ -3633,6 +3633,15 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   relevant `QUEUE_MAX_TASKS`. Authoring a batch or a dependency from the PWA has no UI yet
   (docs/scheduler.md, M3 item 6): the app client enforces the batch-index bound at
   `createTask`, which is the only place an app could set it.
+- **Desktop shows three columns instead of a stack** (2026-10-18). From 1200px wide — room for
+  three phone-width columns, the one breakpoint, in `app.tsx` — the form, the Machines screen and
+  the Queue screen sit side by side, each scrolling on its own; below it the app is the phone stack
+  unchanged. The queue is the rightmost column, so the settings pill moves to its header, and the
+  form header loses its queue chip (nothing left to open). Settings stays a layer, over the form
+  column. The queue's pause button drops to an outline: spawn stays the one filled call to action
+  on screen. Columns are not layers, so they carry no back button and push no history entry. The
+  store keeps the queue read while it is on screen without its layer (`AppState.wide`), since the
+  column is never opened.
 - **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
   header only once there is something to clear — an always-present greyed control
   is noise — and empties the field on the first tap. It is replaced in the same

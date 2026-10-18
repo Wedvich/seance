@@ -209,6 +209,7 @@ export class Store {
       preview: null,
       sessions: {},
       queue: false,
+      wide: false,
       queueView: null,
       taskAction: null,
       queueNotice: null,
@@ -347,7 +348,9 @@ export class Store {
    * with the screen closed too, whenever a verified leader could answer.
    */
   #watchesQueue(): boolean {
-    return this.#state.queue || (this.#state.relay.status === "open" && this.#state.relay.scheduler.kind === "ready");
+    return (
+      this.#queueOnScreen() || (this.#state.relay.status === "open" && this.#state.relay.scheduler.kind === "ready")
+    );
   }
 
   /** Debounced: each change restarts the wait. */
@@ -620,6 +623,20 @@ export class Store {
     this.#patch({ settings: true });
   }
 
+  /**
+   * Flips the desktop layout. Turning wide reads the queue at once — its column
+   * appears without the `openQueue` that would otherwise have asked.
+   */
+  setWide(wide: boolean): void {
+    if (wide === this.#state.wide) return;
+    this.#patch({ wide });
+    if (wide) void this.refreshQueue();
+  }
+
+  #queueOnScreen(): boolean {
+    return this.#state.queue || this.#state.wide;
+  }
+
   /** Stacked over settings, its own entry: back returns to settings, not the form. */
   openMachines(): void {
     if (!this.#state.machines) this.#pushLayer();
@@ -628,6 +645,11 @@ export class Store {
 
   /** The Queue screen is a layer like settings: one entry, popped by back. */
   openQueue(): void {
+    // Already a column beside the form: a layer there would be an invisible back stop.
+    if (this.#state.wide) {
+      void this.refreshQueue();
+      return;
+    }
     if (!this.#state.queue) this.#pushLayer();
     this.#patch({ queue: true });
     void this.refreshQueue();
@@ -681,7 +703,7 @@ export class Store {
   /** Only while the screen is open and has no list to show: a read nobody sees leaves no `loading` behind. */
   #showQueueLoading(): void {
     const view = this.#state.queueView;
-    if (!this.#state.queue || (view !== null && view.kind !== "failed")) return;
+    if (!this.#queueOnScreen() || (view !== null && view.kind !== "failed")) return;
     this.#queuePrior = view;
     this.#patch({ queueView: { kind: "loading" } });
   }
@@ -722,7 +744,7 @@ export class Store {
     }
     const view = this.#state.queueView;
     // A read nobody is looking at has no one to tell, and leaves the view as it was.
-    if (next === null || !this.#state.queue) {
+    if (next === null || !this.#queueOnScreen()) {
       if (view?.kind === "loading") this.#patch({ queueView: this.#queuePrior });
       return;
     }
