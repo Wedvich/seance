@@ -47,15 +47,15 @@ export function MachinesScreen(props: {
             <h1 className="header-title">Machines</h1>
             <p className="header-meta header-status">
               <RelayDot state={relayState} />
-              {relayLine}
+              {/* One text node: the flex gap would otherwise split the " · ". Unsettled, the scheduler is still its initial "none"; offline, it is stale. */}
+              {settled && relayState === "connected" ? `${relayLine} · ${view.scheduler}` : relayLine}
             </p>
           </div>
         </div>
       </header>
 
       <div className="fleet">
-        {/* Unsettled, the scheduler is still its initial "none" and an empty list means "no push yet", not "no machines" — the store's rule too. */}
-        {settled && <p className="fleet-scheduler">{view.scheduler}</p>}
+        {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
         {view.cards.length === 0 && (
           <p className="fleet-empty">{settled ? "No machines to show." : "Waiting for the relay…"}</p>
         )}

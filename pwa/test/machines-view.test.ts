@@ -160,19 +160,19 @@ describe("deriveMachines", () => {
   test("the leader is named and badged only once verified; an unverified nominee is named as such", () => {
     const fleet = [machine({ deviceId: "a", name: "mac" }), machine({ deviceId: "b", name: "box" })];
     const ready = deriveMachines(fleet, NOW, { kind: "ready", deviceId: "b", term: 4 });
-    expect(ready.scheduler).toBe("Scheduler: box leads (term 4).");
+    expect(ready.scheduler).toBe("scheduler on box · term 4");
     expect(ready.cards.map((card) => card.role)).toEqual([null, "leader"]);
 
     const unverified = deriveMachines(fleet, NOW, { kind: "unverified", deviceId: "b", term: 4 });
-    expect(unverified.scheduler).toStartWith("Scheduler nominee box is unverified");
+    expect(unverified.scheduler).toBe("scheduler box unverified");
     expect(unverified.cards.map((card) => card.role)).toEqual([null, "unverified"]);
     // Its entry did not open: only the id can say which seed it is.
     const unlisted = deriveMachines(fleet, NOW, { kind: "unverified", deviceId: "zzzzzzzzzzzz", term: 4 });
-    expect(unlisted.scheduler).toStartWith("Scheduler nominee device zzzzzzzz is unverified");
+    expect(unlisted.scheduler).toBe("scheduler device zzzzzzzz unverified");
     expect(unlisted.cards.map((card) => card.role)).toEqual([null, null]);
 
     const none = deriveMachines(fleet, NOW, NO_LEADER);
-    expect(none.scheduler).toStartWith("No scheduler is leading");
+    expect(none.scheduler).toBe("no scheduler");
     expect(none.cards.map((card) => card.role)).toEqual([null, null]);
   });
 

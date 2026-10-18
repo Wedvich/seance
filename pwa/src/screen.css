@@ -1217,12 +1217,6 @@
   color: var(--warn);
 }
 
-.fleet-scheduler {
-  margin: 0 2px;
-  font-size: 13px;
-  color: var(--fg2);
-}
-
 .fleet-name-row {
   display: flex;
   align-items: center;
