@@ -1214,6 +1214,7 @@ describe("cancel_task", () => {
     const big = await callCancel(() => ({ ok: false, code: "too_large", message: "big" }));
     expect(big.error).toBe(true);
     expect(big.text).toContain("the leader took the cancel");
+    expect(big.text).toContain("check get_queue");
     for (const { text } of [crashed, long, big]) expect(text).not.toContain("may have landed");
   });
 });
