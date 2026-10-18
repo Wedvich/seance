@@ -211,10 +211,17 @@ describe("taskHeadline", () => {
 
   test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
     const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
-    // dispatch_unconfirmed has its own headline: it may have reached a machine.
-    for (const code of TASK_FAILURE_CODES.filter((c) => c !== "dispatch_unconfirmed")) {
+    // These have their own headlines: the task may have reached a machine, or did and ran.
+    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired"]);
+    for (const code of TASK_FAILURE_CODES.filter((c) => !own.has(c))) {
       expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
     }
+    expect(taskHeadline({ ...failed("lost_expired"), assignment: at }, machines, NOW)).toBe(
+      "Given up on Mac · default — its session may still be running there.",
+    );
+    expect(taskHeadline(failed("merge_expired"), machines, NOW)).toBe(
+      "No merge seen for its PR — the scheduler gave up waiting.",
+    );
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",
     );

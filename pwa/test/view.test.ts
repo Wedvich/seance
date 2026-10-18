@@ -543,5 +543,9 @@ describe("failedBody", () => {
     expect(failedBody("repo_not_found")).toBe("The machine refused the spawn. Nothing is running.");
     expect(failedBody(undefined)).toBe("The machine refused the spawn. Nothing is running.");
     expect(failedBody("dispatch_unconfirmed")).toContain("will not start it again");
+    // It did run: "Nothing is running." would be false.
+    expect(failedBody("lost_expired")).toContain("may still be running");
+    expect(failedBody("lost_expired")).not.toEndWith("Nothing is running.");
+    expect(failedBody("merge_expired")).toContain("No merge of its pull request was seen");
   });
 });

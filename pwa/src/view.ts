@@ -519,6 +519,12 @@ export function failedBody(code: string | undefined): string {
   if (code === "dispatch_unconfirmed") {
     return "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another.";
   }
+  if (code === "lost_expired") {
+    return "Its machine stayed away too long, so the scheduler stopped waiting for it. Its session may still be running there — end it on that machine once it is back.";
+  }
+  if (code === "merge_expired") {
+    return "No merge of its pull request was seen in time, so the scheduler stopped waiting for one, and tasks waiting on it failed with it. If it did merge, mark the work done by hand. Its session had already ended.";
+  }
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
   const scheduler = code === undefined ? null : taskFailureText(code);
   return scheduler === null
