@@ -30,7 +30,8 @@ export function Settings(props: {
   machinesLine: string;
   onDismiss: () => void;
   onReconnect: () => void;
-  onOpenMachines: () => void;
+  /** Absent in the desktop layout, where the machines are already a column on screen. */
+  onOpenMachines?: () => void;
 }): JSX.Element {
   const { relayLine, relayState, connected, machinesLine, onDismiss, onReconnect, onOpenMachines } = props;
   // Both secrets are known to exist: the app only mounts once they load.
@@ -94,15 +95,17 @@ export function Settings(props: {
       >
         {/* First, above credentials: until the redesign this is the app's only
             way to the machines screen, and it is visited far more often. */}
-        <button type="button" className="nav-card card" onClick={onOpenMachines}>
-          <span>
-            <span className="theme-title">Machines</span>
-            <span className="nav-card-meta">{machinesLine}</span>
-          </span>
-          <span className="nav-card-chevron" aria-hidden="true">
-            ›
-          </span>
-        </button>
+        {onOpenMachines !== undefined && (
+          <button type="button" className="nav-card card" onClick={onOpenMachines}>
+            <span>
+              <span className="theme-title">Machines</span>
+              <span className="nav-card-meta">{machinesLine}</span>
+            </span>
+            <span className="nav-card-chevron" aria-hidden="true">
+              ›
+            </span>
+          </button>
+        )}
 
         <div className="setup-card card">
           <CredentialFields creds={creds} />

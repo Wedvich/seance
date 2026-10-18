@@ -63,6 +63,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     preview: null,
     sessions: {},
     queue: false,
+    wide: false,
     queueView: null,
     taskAction: null,
     queueNotice: null,

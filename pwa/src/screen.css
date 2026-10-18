@@ -1793,3 +1793,39 @@
   align-items: center;
   gap: 8px;
 }
+
+/* ---- desktop: form, queue and machines as columns ---- */
+
+.desk {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  height: 100%;
+  min-height: 0;
+}
+
+.desk-col {
+  min-width: 0;
+  background: var(--bg);
+}
+
+.desk-col + .desk-col {
+  border-left: 1px solid var(--line);
+}
+
+/* Spawn is the one call to action on screen; pausing steps down to an outline. */
+.desk .queue-pause {
+  padding: 13.5px;
+  border: 1.5px solid var(--acc);
+  background: transparent;
+  color: var(--acc);
+}
+
+.desk .queue-pause:disabled {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--fg2);
+}
+
+.desk .queue-pause:enabled:active {
+  background: color-mix(in oklab, var(--acc) 14%, transparent);
+}

@@ -15,9 +15,9 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, skillIndex, skillQuery, skillTokenLength } from "../skills.ts";
-import { abbreviatePaths, formatSeen, type ConnectionState, type Tile, type ViewModel } from "../view.ts";
+import { abbreviatePaths, formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
-import { RelayDot } from "./relay-dot.tsx";
+import { RelaySettings } from "./relay-dot.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
@@ -57,43 +57,6 @@ export interface SpawnActions {
   readonly rescan: () => void;
   readonly setModel: (model: Model) => void;
   readonly setEffort: (effort: Effort) => void;
-}
-
-/**
- * Segmented pill: the flat track carries passive relay status, the raised face
- * is the settings action. One button, so the whole pill is the hit target —
- * 4px of padding around a 36px face clears 44px without a hit-area hack.
- */
-function RelaySettings(props: { state: ConnectionState; onClick: () => void }): JSX.Element {
-  const { state, onClick } = props;
-  return (
-    <button
-      type="button"
-      className="relay-group"
-      onClick={onClick}
-      aria-label="Relay settings"
-      title={`Relay: ${state}`}
-    >
-      <span className="relay-status">
-        <RelayDot state={state} />
-      </span>
-      <span className="relay-cog" aria-hidden="true">
-        <svg
-          viewBox="0 0 24 24"
-          width="17"
-          height="17"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <circle cx="12" cy="12" r="3.2" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
-      </span>
-    </button>
-  );
 }
 
 /**
@@ -378,8 +341,10 @@ export function SpawnScreen(props: {
   now: number;
   rescan: RescanState;
   preview: PreviewState | null;
+  /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
+  columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview } = props;
+  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview, columns } = props;
   const offline = view.auto === null && view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
@@ -464,13 +429,15 @@ export function SpawnScreen(props: {
           <h1 className="header-title">Séance</h1>
           <p className="header-meta">{view.meta}</p>
         </div>
-        <div className="header-actions">
-          <button type="button" className="queue-chip" onClick={actions.openQueue}>
-            Queue
-            {view.queueAttention && <span className="queue-chip-dot dot dot-err" role="img" aria-label="needs you" />}
-          </button>
-          <RelaySettings state={view.relayState} onClick={actions.openSettings} />
-        </div>
+        {!columns && (
+          <div className="header-actions">
+            <button type="button" className="queue-chip" onClick={actions.openQueue}>
+              Queue
+              {view.queueAttention && <span className="queue-chip-dot dot dot-err" role="img" aria-label="needs you" />}
+            </button>
+            <RelaySettings state={view.relayState} onClick={actions.openSettings} />
+          </div>
+        )}
       </header>
 
       <div className="column">
