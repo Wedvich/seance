@@ -332,19 +332,22 @@ function PreviewCard(props: {
 }): JSX.Element | null {
   const { preview, machines, now, onRefresh } = props;
   if (preview === null) return null;
+  const pending = preview.kind === "loading";
   const refresh = (
-    <button type="button" className="preview-refresh" onClick={onRefresh} aria-label="Preview again">
+    <button type="button" className="preview-refresh" onClick={onRefresh} disabled={pending} aria-label="Preview again">
       ↻
     </button>
   );
-  if (preview.kind === "ok") {
+  const decision = preview.kind === "ok" ? preview.decision : pending ? preview.previous : undefined;
+  if (decision !== undefined) {
+    // Same tree for a re-ask as for its answer, so the card neither collapses nor closes its candidates.
     return (
-      <div className="preview">
+      <div className={pending ? "preview preview-pending" : "preview"} aria-busy={pending}>
         <DecisionCard
-          summary={describeDecision(preview.decision, machines, now, "would")}
+          summary={describeDecision(decision, machines, now, "would")}
           title="PLACEMENT PREVIEW"
           quota={false}
-          age={formatSeen(preview.decision.at, now)}
+          age={formatSeen(decision.at, now)}
         />
         {refresh}
       </div>
@@ -355,7 +358,7 @@ function PreviewCard(props: {
       <section className="decision card" aria-label="PLACEMENT PREVIEW">
         <span className="label">PLACEMENT PREVIEW</span>
         <p className={preview.kind === "failed" ? "decision-headline decision-failed" : "decision-headline"}>
-          {preview.kind === "loading" ? "Asking the scheduler…" : preview.message}
+          {preview.kind === "failed" ? preview.message : "Asking the scheduler…"}
         </p>
       </section>
       {refresh}

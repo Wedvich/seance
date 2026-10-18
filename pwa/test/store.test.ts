@@ -540,6 +540,22 @@ describe("auto's error paths", () => {
     expect(store.getState().form.auto).toBe(false);
   });
 
+  test("a re-ask keeps the last decision on screen until its answer lands", async () => {
+    const client = new ScriptedClient();
+    client.onPreview = async () => ({ decision: DECISION });
+    const store = new Store(client);
+    store.selectAuto();
+    await until(() => store.getState().preview?.kind === "ok", "the first preview");
+
+    const late = Promise.withResolvers<RoutePreviewReply | null>();
+    client.onPreview = () => late.promise;
+    void store.refreshPreview();
+    expect(store.getState().preview).toMatchObject({ kind: "loading", previous: DECISION });
+
+    late.resolve({ ok: false, code: "not_leader", message: "moved" });
+    await until(() => store.getState().preview?.kind === "failed", "the answer replaces it");
+  });
+
   test("a presence or repo change asks the preview again once its burst settles; a status beat does not", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, auto: true });

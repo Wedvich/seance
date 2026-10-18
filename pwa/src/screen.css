@@ -1557,6 +1557,22 @@
   cursor: pointer;
 }
 
+.preview-pending .decision {
+  opacity: 0.55;
+  transition: opacity 120ms;
+}
+
+.preview-pending .preview-refresh {
+  animation: preview-spin 0.9s linear infinite;
+  cursor: default;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
 .decision {
   display: flex;
   flex-direction: column;
