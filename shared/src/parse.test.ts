@@ -642,7 +642,11 @@ describe("scheduler ops", () => {
       { ...junk, reason: "" },
       { ...junk, reason: "r".repeat(TASK_FAILURE_LIMITS.code + 1) },
     ]) {
-      expect(parseQueueReply({ tasks: [], at: 5, unreadable: [junk, bad] })?.unreadable).toEqual([junk]);
+      expect(parseQueueReply({ tasks: [], at: 5, unreadable: [junk, bad] })).toEqual({
+        tasks: [],
+        at: 5,
+        unreadable: [junk],
+      });
     }
     expect(parseQueueReply({ tasks: [], at: 5, unreadable: [{ ...junk, version: 0 }] })).toEqual({ tasks: [], at: 5 });
     expect(parseQueueReply({ tasks: [], at: 5, unreadable: junk })).toBeNull();
