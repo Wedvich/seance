@@ -101,8 +101,9 @@ const SWEEP_SILENCE_LIMIT_MS = HEARTBEAT_MISSES_TO_SWEEP * HEARTBEAT_INTERVAL_MS
 
 /**
  * How long a daemon socket owes a reply for an app request the relay delivered
- * it as the scheduler: the app's own deadline for the slowest scheduler op, so
- * a reply the app could still use is never logged for lateness alone. The cap
+ * it as the scheduler (to a socket of the leader's device): the app's own
+ * deadline for the slowest scheduler op, counted from the bank's first credit,
+ * so a reply the app could still use is never logged for lateness alone. The cap
  * bounds what a burst can bank; past either, replies log as any other.
  */
 const SCHEDULER_REPLY_WINDOW_MS = Math.max(...SCHEDULER_OPS.map((op) => OP_TIMEOUT_MS[op]));
@@ -134,7 +135,9 @@ interface SocketAttachment {
   readonly status?: SocketStatus;
   /**
    * Scheduler replies this socket owes: one per app request delivered to it as
-   * the leader, spent by its next `to: APP_ID` send, which then logs no line.
+   * the leader (to a socket of the leader's device), spent by its next `to: APP_ID`
+   * `msg`, which then logs no line. A re-register on this socket rewrites the
+   * attachment and drops held credit — fails toward logging.
    * A blind relay cannot read `re`, so this pairs by count, not identity — a
    * reply to the machine's own ops can take the slot, and the scheduler reply
    * logs instead (DESIGN.md, threat model item 3). Every miss logs.
@@ -700,10 +703,12 @@ export class Hub implements DurableObject {
       // `queue`, so a line per nudge or per answer would be a timeline of queue
       // activity (DESIGN.md, threat model item 3). Only a failed send is logged
       // for them; zero apps is the lost-reply case DESIGN.md reconciles from
-      // the session list, and stays logged for everything else. Credit is spent
-      // even on a failed send: the socket did answer.
+      // the session list, so a credited reply that reached nobody logs too (a
+      // nudge reaching nobody is the idle steady state and stays quiet). Credit
+      // is spent even on a failed send: the socket did answer. Only a routed
+      // `msg` here spends credit; `status` and `lead-proof` take other paths.
       const scheduler = env.from === SCHEDULER_ID || (senderRole === "daemon" && this.#spendCredit(sender));
-      if (scheduler && failures.length === 0) return;
+      if (scheduler && failures.length === 0 && (env.from === SCHEDULER_ID || fanned > 0)) return;
       wireLog("fanout", env, ` apps=${fanned}${failSuffix(failures)}`);
       return;
     }
@@ -789,9 +794,16 @@ export class Hub implements DurableObject {
   /** Synchronous read-modify-write: an `await` between the two could lose a concurrent update. */
   #credit(ws: WebSocket): void {
     const now = Date.now();
-    const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
-    const held = attachment.owed !== undefined && now <= attachment.owed.until ? attachment.owed.n : 0;
-    const owed: SocketOwed = { n: Math.min(held + 1, OWED_MAX), until: now + this.#schedulerReplyWindowMs };
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    // Inventing one would reset the sweep's liveness floor (`connectedAt`).
+    if (attachment === null) return;
+    const live = attachment.owed !== undefined && now <= attachment.owed.until ? attachment.owed : null;
+    // A held bank keeps its expiry: extending it per grant would let an
+    // unanswered request's leftover credit outlive its window under steady traffic.
+    const owed: SocketOwed =
+      live === null
+        ? { n: 1, until: now + this.#schedulerReplyWindowMs }
+        : { n: Math.min(live.n + 1, OWED_MAX), until: live.until };
     ws.serializeAttachment({ ...attachment, owed } satisfies SocketAttachment);
   }
 

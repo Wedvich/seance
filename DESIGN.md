@@ -263,14 +263,20 @@ Séance's noise is cover for a real intruder.
    reply is the hard part — sealed `to: "app"` on its daemon socket, it is
    wire-identical to that machine's replies to its own `sessions` or `spawn`, and a
    blind relay cannot read `re`. So the relay credits a daemon socket, on its
-   attachment, for each app request it delivers it as the scheduler, and that socket's
-   next `to: "app"` send spends one credit and logs no `wire fanout` line (a failed
-   send still does). A credit lasts the app's deadline for the slowest scheduler op
-   (`OP_TIMEOUT_MS`), at most 16 are banked, and an expired, missing or capped credit
+   attachment, for each app request it delivers to a socket of the leader's device
+   (newest first, falling through failures — not necessarily the term-holding socket),
+   and that socket's next routed `to: "app"` `msg` spends one credit and logs no `wire
+fanout` line (a failed send, or a reply that reaches no app, still does; `status`
+   and `lead-proof` frames spend nothing). A credit bank lasts the app's deadline for
+   the slowest scheduler op (`OP_TIMEOUT_MS`), counted from the bank's first credit — a
+   later request adds to the bank but does not extend it. At most 16 are banked, a
+   re-register on the socket drops them, and an expired, missing or capped credit
    logs: every miss fails toward a line. It pairs by count, not identity — a reply to
    the leader machine's own ops inside a window can take the quiet slot, and the
-   scheduler reply then logs instead; the count of lines is right, only which shows is
-   off. Rejected: quieting every `to: "app"` from the term holder's socket (hides that
+   scheduler reply then logs instead. The count of lines is right only when every
+   delivered request is answered: an unanswered one (a dropped or replayed envelope,
+   an app session event the leader drops) leaves its credit, which can quiet one later
+   ordinary reply until the bank's window lapses. Rejected: quieting every `to: "app"` from the term holder's socket (hides that
    machine's ordinary replies, a per-machine hole); the request's `iv` in plaintext on
    the reply frame (precise, but a frame change across the client, the leader and the
    wire spec, and still nothing the relay can verify); sampling (a sampled timeline is

@@ -962,7 +962,7 @@ describe("scheduler leadership", () => {
   beforeAll(async () => {
     // Same settle as the sweep suite: the previous suite's dispose() just ran.
     await Bun.sleep(500);
-    listed.push(...(await Promise.all(Array.from({ length: 19 }, () => newDeviceId()))));
+    listed.push(...(await Promise.all(Array.from({ length: 22 }, () => newDeviceId()))));
     padded = await newDeviceId();
     const junk = ["", "  ", "not an id!", "x".repeat(65), SCHEDULER_ID, APP_ID];
     hub = await startRelay(TOKEN, {
@@ -1175,6 +1175,83 @@ describe("scheduler leadership", () => {
     await leave(app, leader.daemon, leaderId);
     app.close();
   }, 15_000);
+
+  test("a later request does not extend an earlier one's credit: past the first's window the answer logs", async () => {
+    const app = await connectApp(hub);
+    const leaderId = listedId();
+    const leader = await join(app, leaderId, { roles: SCHEDULER });
+    await leader.daemon.waitFor<LeadFrame>("lead");
+
+    app.send({ t: "msg", env: envelope(SCHEDULER_ID, APP_ID) });
+    await leader.daemon.waitFor<DaemonMsg>("msg");
+    // Not a wait for an event: the bank's window runs from its first credit.
+    await Bun.sleep(REPLY_WINDOW_MS - 1_000);
+    app.send({ t: "msg", env: envelope(SCHEDULER_ID, APP_ID) });
+    await leader.daemon.waitFor<DaemonMsg>("msg");
+    await Bun.sleep(1_500);
+    const late = envelope(APP_ID, leaderId);
+    leader.daemon.send({ t: "msg", env: late });
+    expect((await app.waitFor<MsgFrame>("msg")).env).toEqual(late);
+    const linesFor = (iv: string): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${iv}"`));
+    await pollUntil(() => linesFor(late.iv).length > 0, "the late answer's fanout line");
+    expect(linesFor(late.iv)).toEqual([expect.stringContaining("wire fanout")]);
+
+    await leave(app, leader.daemon, leaderId);
+    app.close();
+  }, 15_000);
+
+  test("a credited answer that reaches no app still logs, with apps=0", async () => {
+    const watcher = await connectApp(hub);
+    const asker = await connectApp(hub);
+    const leaderId = listedId();
+    const leader = await join(watcher, leaderId, { roles: SCHEDULER });
+    await leader.daemon.waitFor<LeadFrame>("lead");
+
+    asker.send({ t: "msg", env: envelope(SCHEDULER_ID, APP_ID) });
+    await leader.daemon.waitFor<DaemonMsg>("msg");
+    // No app is left to hear it. A socket the relay still lists fails its send,
+    // which also logs `apps=0`, so the close race does not matter.
+    asker.close();
+    watcher.close();
+    const answer = envelope(APP_ID, leaderId);
+    const lines = (): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${answer.iv}"`));
+    leader.daemon.send({ t: "msg", env: answer });
+    await pollUntil(() => lines().length > 0, "the lost answer's fanout line");
+    expect(lines()).toEqual([expect.stringContaining("apps=0")]);
+
+    quiet(leader.daemon);
+    leader.daemon.close();
+  });
+
+  test("past the credit cap the surplus answers log: 17 requests, 17 answers, one line — the last", async () => {
+    // Mirrors OWED_MAX in relay/src/hub.ts (the module needs the workers runtime, so a test can't import it).
+    const OWED_MAX = 16;
+    const app = await connectApp(hub);
+    const leaderId = listedId();
+    const leader = await join(app, leaderId, { roles: SCHEDULER });
+    await leader.daemon.waitFor<LeadFrame>("lead");
+
+    for (let i = 0; i < OWED_MAX + 1; i += 1) {
+      app.send({ t: "msg", env: envelope(SCHEDULER_ID, APP_ID) });
+      // oxlint-disable-next-line no-await-in-loop -- each request is delivered before the next is sent
+      await leader.daemon.waitFor<DaemonMsg>("msg");
+    }
+    const answers = Array.from({ length: OWED_MAX + 1 }, () => envelope(APP_ID, leaderId));
+    for (const answer of answers) {
+      leader.daemon.send({ t: "msg", env: answer });
+      // oxlint-disable-next-line no-await-in-loop -- in order, so the credit is spent in order
+      expect((await app.waitFor<MsgFrame>("msg")).env).toEqual(answer);
+    }
+    const linesFor = (iv: string): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${iv}"`));
+    const last = answers[OWED_MAX];
+    if (last === undefined) throw new Error("no last answer");
+    await pollUntil(() => linesFor(last.iv).length > 0, "the over-cap answer's fanout line");
+    expect(linesFor(last.iv)).toEqual([expect.stringContaining("wire fanout")]);
+    for (const answer of answers.slice(0, OWED_MAX)) expect(linesFor(answer.iv)).toEqual([]);
+
+    await leave(app, leader.daemon, leaderId);
+    app.close();
+  });
 
   test("the leader leg's dispatch to another machine is delivered with no deliver line", async () => {
     const app = await connectApp(hub);
