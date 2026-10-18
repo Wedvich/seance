@@ -3437,7 +3437,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   only on a visibility change, so a new build lands like a cold launch instead of
   yanking the screen mid-use.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
-  verdict, the Settings screen and the Machines screen stacked over it all push on open and are cleared by
+  verdict, the Settings dialog and the phone's Queue screen all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with
@@ -3477,16 +3477,17 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Settings is a native modal `<dialog>`, shaped by width.** Below the 1200px desktop
   breakpoint it fills the screen and slides in exactly as a pushed screen does — the form
   still gives way and dims beneath it — with a back chevron; at and above it, it is a
-  centred modal over the untouched form, closed by an × at the header's right, Escape or a
+  centred modal over the three columns, closed by an × at the header's right, Escape or a
   backdrop click. The top layer makes the page behind it inert for free, and Chrome on
   Android routes back to an open modal's `cancel` before history; that event is
   cancelled and sent through the store as a history pop, so every way out takes the
   one path and the layer's history entry never strands.
-- **Machines is a layer over Settings, not a route** (scheduler M1). Until the app's
-  redesign it is reached from a row at the top of Settings, pushed as a second layer, so back
-  returns to Settings; the stage animates between any two depths. Rejected for now: URL routes
-  (`/machines`), which would need boot-time path parsing and a rethink of entry depth for deep
-  links — a separate change if links are wanted.
+- **Machines is a screen, not a route** (scheduler M1). On a desk it is a column (below).
+  Settings no longer links to it: Machines is meant to be always on screen, not a layer reached
+  through Settings, and the phone's way to it is not built yet — until it is, the store's
+  depth-2 layer (`openMachines`) has no caller. Rejected for now: URL routes (`/machines`),
+  which would need boot-time path parsing and a rethink of entry depth for deep links — a
+  separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
   machine, so it sits on account cards: one per `accountId` across the fleet, named by the
