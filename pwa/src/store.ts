@@ -512,12 +512,15 @@ export class Store {
       this.#patch({ preview: null });
       return;
     }
-    // A retry keeps showing the loading card it already shows.
+    // A retry keeps showing the loading card it already shows; a re-ask for the same repo keeps
+    // the decision on screen, so the card holds its height instead of collapsing to one line.
     const current = this.#state.preview;
+    const same = current?.repo === repo.origin ? current : null;
+    const previous = same?.kind === "ok" ? same.decision : same?.kind === "loading" ? same.previous : undefined;
     const asked: PreviewState =
-      attempt > 0 && current?.kind === "loading" && current.repo === repo.origin
-        ? current
-        : { kind: "loading", repo: repo.origin };
+      attempt > 0 && same?.kind === "loading"
+        ? same
+        : { kind: "loading", repo: repo.origin, ...(previous === undefined ? {} : { previous }) };
     this.#patch({ preview: asked });
     let result: PreviewState;
     try {

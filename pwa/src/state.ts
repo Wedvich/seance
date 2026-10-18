@@ -168,7 +168,8 @@ export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly
 
 /** The form's `route-preview`: what the scheduler would decide now, for the repo it was asked about. */
 export type PreviewState =
-  | { readonly kind: "loading"; readonly repo: string }
+  /** `previous` is the decision a re-ask for the same repo replaces, shown until the answer lands. */
+  | { readonly kind: "loading"; readonly repo: string; readonly previous?: Decision }
   | { readonly kind: "ok"; readonly repo: string; readonly decision: Decision }
   | { readonly kind: "failed"; readonly repo: string; readonly message: string };
 
