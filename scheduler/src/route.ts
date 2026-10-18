@@ -312,7 +312,8 @@ export function accountResetAt(
   );
   const { capacity } = seatOf(config, seatTierOf(machines, accountId));
   const windows = account.windows.filter((w) => w.model === undefined);
-  const over = windows.filter((w) => overLine([w], estimate(config, capacity, sharing + 1), now, config) !== null);
+  const added = estimate(config, capacity, sharing + 1);
+  const over = windows.filter((w) => overLine([w], added, now, config) !== null);
   if (over.length > 0) {
     const resets = over.flatMap(resetMs);
     return resets.length === over.length ? Math.max(...resets) : null;

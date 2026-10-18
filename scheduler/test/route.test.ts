@@ -462,13 +462,14 @@ describe("filter", () => {
       expect(only(decide([standardSeat(obs(0, { h: 41 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
         { code: "quota_over_line", window: "5h", projectedPct: 103.5 },
       ]);
+      // 80% + 2 × 6.25% crosses only if the 7d estimate is scaled too; unscaled it would be 82%.
+      expect(only(decide([standardSeat(obs(0, { d: 80 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
+        { code: "quota_over_line", window: "7d", projectedPct: 92.5 },
+      ]);
     });
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
-      const standard = machine("a", {
-        exclaves: [exclave("main", "org:a", { seatTier: "team_standard" })],
-        status: status({ quota: [obs(0, { h: 10 })] }),
-      });
+      const standard = standardSeat(obs(0, { h: 10 }));
       // 10% + 2 × 31.25% is under; one more in flight makes it 103.75%.
       expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
@@ -487,9 +488,15 @@ describe("filter", () => {
 
 describe("score", () => {
   test("account_pressure: the convex cost at projected usage, worst window wins", () => {
-    // 45% + 5% = 50% → (0.5/0.5)² = 1; the 7d window at 20% + 5% costs (0.25/0.75)² ≈ 0.11.
+    // 45% + 5% = 50% → (0.5/0.5)² = 1; the 7d window at 20% + 1% costs (0.21/0.79)² ≈ 0.07.
     const candidate = only(decide([machine("a", { status: status({ quota: [obs(0, { h: 45, d: 20 })] }) })]));
     expect(candidate.score?.components.accountPressure).toBeCloseTo(1, 10);
+  });
+
+  test("account_pressure: a weekly adds the 7d estimate, scaled to the seat", () => {
+    // 7d: 80% + 6.25% = 86.25% outweighs 5h's 0% + 31.25%; the 5h estimate there would cap at 99% and cost 9801.
+    const candidate = only(decide([standardSeat(obs(0, { h: 0, d: 80 }))]));
+    expect(candidate.score?.components.accountPressure).toBeCloseTo((0.8625 / 0.1375) ** 2, 10);
   });
 
   test("account_pressure: discounted by the share of the window still to run", () => {
