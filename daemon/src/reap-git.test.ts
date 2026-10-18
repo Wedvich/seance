@@ -32,6 +32,11 @@ describe("parseWorktreeList", () => {
     expect(parseWorktreeList(raw)[0]?.branch).toBe("feat/nested/name");
   });
 
+  test("a HEAD on a ref outside refs/heads/ is no branch, not one named like the ref", () => {
+    const raw = porcelain(["worktree /r/x", "HEAD aaa", "branch refs/tags/v1"]);
+    expect(parseWorktreeList(raw)[0]?.branch).toBeNull();
+  });
+
   test("empty output is no worktrees, not a phantom one", () => {
     expect(parseWorktreeList("")).toEqual([]);
   });

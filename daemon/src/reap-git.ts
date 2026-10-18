@@ -79,7 +79,7 @@ export async function resolveRemoteHead(repoPath: string, terminal?: TerminalPro
 export interface WorktreeRecord {
   readonly path: string;
   readonly head: string;
-  /** Short name; null when detached. */
+  /** Short name; null when detached, or on a symbolic ref outside `refs/heads/`, which no branch name can spell. */
   readonly branch: string | null;
   readonly locked: boolean;
   readonly prunable: boolean;
@@ -101,7 +101,7 @@ export function parseWorktreeList(raw: string): readonly WorktreeRecord[] {
       records.push({
         path,
         head: fields.find((field) => field.startsWith("HEAD "))?.slice("HEAD ".length) ?? "",
-        branch: branchRef?.replace(/^refs\/heads\//u, "") ?? null,
+        branch: branchRef?.startsWith("refs/heads/") === true ? branchRef.slice("refs/heads/".length) : null,
         locked: fields.some((field) => field === "locked" || field.startsWith("locked ")),
         prunable: fields.some((field) => field === "prunable" || field.startsWith("prunable ")),
       });

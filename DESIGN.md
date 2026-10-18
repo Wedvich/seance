@@ -2282,7 +2282,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   never again. Tasks launched before this landed have no site and are not watched. They are M2
   tasks with no `after:` dependents, so nothing waits on them.
 - **Quiet tasks stop being checked an hour after their session ends** (added 2026-10-17). A
-  pass costs a few git runs per task, slow ones on WSL's `/mnt/c`, and most tasks never leave
+  task still costs its own-work check (up to three git runs) whenever the default branch moves,
+  slow ones on WSL's `/mnt/c`, and most tasks never leave
   their fresh branch. So a task never seen ahead, never pushed and with no PR URL is skipped,
   before any git, once no live session has carried it for `BRANCH_ENDED_GRACE_MS` (an hour).
   "Live" is the rule the `sessions` reply's `ended` uses: a task id some listed session carries
@@ -2311,12 +2312,17 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   nothing new off that pass and does not hold the pass up. A task ever seen ahead or pushed, or
   with a PR URL, is checked as before, whatever its session does: a missed `merged` costs a
   manual mark-done. None of the gates below change.
-- **The branch is read live.** Each pass asks the worktree what it has checked out
-  (`git -C <worktree> symbolic-ref`, run with the main clone as cwd because `Bun.spawn` throws
-  on a cwd that is gone), so a `git branch -m` shows up on the next pass. The last-seen name
-  is used only once the worktree no longer belongs to the repo (removed, or its directory
-  reused by another repo, or `HEAD` is not under `refs/heads/`: `symbolic-ref --short` would
-  print `heads/<b>` beside a tag of the same name). When several tasks share a worktree path, the
+- **The branch is read live, once per repo.** Each pass asks the clone what every worktree has
+  checked out (one `git worktree list --porcelain -z`, by canonical path), so a `git branch -m`
+  shows up on the next pass. It is not a read of each worktree's `HEAD` file: a reftable clone's
+  names no branch (`ref: refs/heads/.invalid`), and git is then the only reader anyway. A
+  detached `HEAD`, or one on a ref outside `refs/heads/`, reads as no branch, and the task is
+  not judged that pass. The last-seen name is used only once the worktree no longer belongs
+  to the repo (removed, or its directory reused by another repo). Every task's branch, local
+  and `origin/`, is then read in one `for-each-ref` naming all of them, and the default branch's
+  commit and tree in one `rev-parse`: a steady pass costs three git runs per repo however many
+  tasks it holds (40 pushed tasks: 3 runs and about 9 ms against 82 runs and 130 ms before,
+  measured on Linux), and a task's own runs are only what its changed inputs call for. When several tasks share a worktree path, the
   newest site (`siteAt`) owns the live read, merged ones counted: `freeWorktreeName` frees a slug
   only when the directory and the branch `worktree-<slug>` are both gone, so a reused path is a
   reused branch name, and a newer launch's fresh local ref would otherwise be read as the older

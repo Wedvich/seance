@@ -4,7 +4,15 @@ import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import type { LaunchLedger, NotedTask } from "./launch-ledger.ts";
 import { log } from "./log.ts";
-import { classifyTip, fetchIfStale, isMerged, patchIndex, type FetchOutcome, type PatchIndex } from "./reap-git.ts";
+import {
+  classifyTip,
+  fetchIfStale,
+  isMerged,
+  listWorktrees,
+  patchIndex,
+  type FetchOutcome,
+  type PatchIndex,
+} from "./reap-git.ts";
 
 /**
  * Watches every task branch this daemon launched in worktree mode and tells the
@@ -61,6 +69,10 @@ export interface BranchStates {
   readonly stop: () => void;
 }
 
+/**
+ * What a pass reads once per repo, not once per task: a task's git runs are then only what its own inputs
+ * changing calls for (DESIGN.md, "Branch state").
+ */
 interface RepoContext {
   readonly repo: RepoEntry;
   readonly commonDir: string;
@@ -108,53 +120,74 @@ function isQuiet(note: NotedTask): boolean {
 }
 
 const HEADS = "refs/heads/";
+const REMOTES = "refs/remotes/origin/";
 
-/** `for-each-ref` matches prefixes, so a sibling branch (`b-2` for `b`) is filtered out by exact refname. */
-async function readRefs(repoPath: string, branch: string): Promise<Refs | null> {
-  const local = `${HEADS}${branch}`;
-  const remote = `refs/remotes/origin/${branch}`;
-  const result = await hardenedGit(repoPath, ["for-each-ref", "--format=%(refname)%00%(objectname)", local, remote]);
+/**
+ * Every named branch's local and origin ref, refname → sha, in one `for-each-ref` per repo. Its patterns match
+ * prefixes, so a sibling branch (`b-2` for `b`) is filtered out by exact refname.
+ */
+async function readRefs(repoPath: string, branches: ReadonlySet<string>): Promise<ReadonlyMap<string, string> | null> {
+  if (branches.size === 0) return new Map();
+  const wanted = new Set([...branches].flatMap((branch) => [`${HEADS}${branch}`, `${REMOTES}${branch}`]));
+  const result = await hardenedGit(repoPath, ["for-each-ref", "--format=%(refname)%00%(objectname)", ...wanted]);
   if (result.exitCode !== 0) return null;
-  let localSha: string | undefined;
-  let remoteSha: string | undefined;
+  const shas = new Map<string, string>();
   for (const line of result.stdout.split("\n")) {
     const [name, sha] = line.split("\0");
-    if (sha === undefined || sha === "") continue;
-    if (name === local) localSha = sha;
-    if (name === remote) remoteSha = sha;
+    if (name !== undefined && sha !== undefined && sha !== "" && wanted.has(name)) shas.set(name, sha);
   }
-  return {
-    ...(localSha === undefined ? {} : { local: localSha }),
-    ...(remoteSha === undefined ? {} : { remote: remoteSha }),
-  };
+  return shas;
+}
+
+/** A name the wire can carry; anything else is never read, nor reported. */
+function usable(branch: string): boolean {
+  return branch !== "" && branch.length <= BRANCH_MAX_LENGTH;
+}
+
+function refsOf(shas: ReadonlyMap<string, string>, branch: string): Refs {
+  const local = shas.get(`${HEADS}${branch}`);
+  const remote = shas.get(`${REMOTES}${branch}`);
+  return { ...(local === undefined ? {} : { local }), ...(remote === undefined ? {} : { remote }) };
 }
 
 /**
- * The branch a task's worktree has checked out now, so a rename shows up. The
- * last-seen one only when the worktree no longer belongs to the repo. `-C` with
- * the main clone as cwd: `Bun.spawn` throws on a cwd that is gone.
+ * The branch each of a clone's worktrees has checked out, by canonical path: one `worktree list` per repo rather
+ * than a `symbolic-ref` per task, and right for a reftable clone, whose `HEAD` file names no branch. Null for a
+ * detached HEAD (or one off `refs/heads/`), and the whole map null when git failed.
  */
-async function liveBranch(ctx: RepoContext, note: NotedTask, owner: boolean): Promise<string | undefined> {
+async function worktreeHeads(repoPath: string): Promise<ReadonlyMap<string, string | null> | null> {
+  const records = await listWorktrees(repoPath);
+  if (records === null) return null;
+  return new Map(
+    await Promise.all(records.map(async (record) => [await canonical(record.path), record.branch] as const)),
+  );
+}
+
+/**
+ * The branch a task's worktree has checked out now, so a rename shows up. The last-seen one only when the
+ * worktree no longer belongs to the repo. `heads` is read once per repo pass, and only when a task asks.
+ */
+async function liveBranch(
+  ctx: RepoContext,
+  note: NotedTask,
+  owner: boolean,
+  heads: () => Promise<ReadonlyMap<string, string | null> | null>,
+): Promise<string | undefined> {
   if (!owner || note.path === undefined) return note.branch;
   const checkout = await inspectCheckout(note.path);
   if (checkout.kind !== "linked" || (await canonical(checkout.commonDir)) !== ctx.commonDir) return note.branch;
-  // Not `--short`: with a tag of the same name it prints `heads/<branch>`.
-  const head = await hardenedGit(ctx.repo.path, ["-C", note.path, "symbolic-ref", "--quiet", "HEAD"]);
-  const ref = head.stdout.trim();
-  return head.exitCode === 0 && ref.startsWith(HEADS) ? ref.slice(HEADS.length) : undefined;
+  return (await heads())?.get(await canonical(note.path)) ?? undefined;
 }
 
+/** One `rev-parse` for both: the trailing `--` makes each a revision, never a path. */
 async function repoBase(repo: RepoEntry): Promise<RepoContext["base"]> {
   if (repo.defaultBranch === null) return null;
-  const ref = `refs/remotes/origin/${repo.defaultBranch}`;
-  const [sha, tree] = await Promise.all([
-    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]),
-    hardenedGit(repo.path, ["rev-parse", "--verify", "--quiet", `${ref}^{tree}`]),
-  ]);
-  if (sha.exitCode !== 0 || tree.exitCode !== 0) return null;
+  const ref = `${REMOTES}${repo.defaultBranch}`;
+  const resolved = await hardenedGit(repo.path, ["rev-parse", `${ref}^{commit}`, `${ref}^{tree}`, "--"]);
+  const [commit = "", tree = ""] = resolved.stdout.split("\n");
+  if (resolved.exitCode !== 0 || commit === "" || tree === "") return null;
   // The sha, not the ref: the ref can move mid-pass, and a verdict and its memo key must be one snapshot.
-  const commit = sha.stdout.trim();
-  return { sha: commit, tree: tree.stdout.trim(), patches: patchIndex(repo.path, commit) };
+  return { sha: commit, tree, patches: patchIndex(repo.path, commit) };
 }
 
 /**
@@ -251,13 +284,19 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     return own;
   };
 
-  /** True when the pass judged the task: a default branch to compare with, and the own-work question answered. */
-  const checkTask = async (ctx: RepoContext, note: NotedTask, owner: boolean): Promise<boolean> => {
-    const branch = await liveBranch(ctx, note, owner);
-    if (branch === undefined || branch === "" || branch.length > BRANCH_MAX_LENGTH) return false;
-
-    const refs = await readRefs(ctx.repo.path, branch);
-    if (refs === null) return false;
+  /**
+   * True when the pass judged the task: a default branch to compare with, and the own-work question answered.
+   * `branch` is `liveBranch`'s answer and `shas` the repo's `readRefs`, both read before the first task is checked.
+   */
+  const checkTask = async (
+    ctx: RepoContext,
+    note: NotedTask,
+    owner: boolean,
+    branch: string | undefined,
+    shas: ReadonlyMap<string, string> | null,
+  ): Promise<boolean> => {
+    if (branch === undefined || !usable(branch) || shas === null) return false;
+    const refs = refsOf(shas, branch);
     // The branch can be deleted (claude's worktree-exit) before its PR merges; the commit outlives the ref until gc.
     // A non-owner's name now belongs to a newer launch (a freed worktree name frees its branch too): that local ref is
     // not this task's, so it is judged by its recorded tip alone.
@@ -356,10 +395,19 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     }
     // After the fetch, which may have moved origin.
     const judged: RepoContext = { repo, commonDir, base: await repoBase(repo) };
-    for (const task of tasks) {
+    const owned = tasks.map((task) => task.path !== undefined && owners.get(task.path) === task.taskId);
+    let heads: Promise<ReadonlyMap<string, string | null> | null> | undefined;
+    const readHeads = (): Promise<ReadonlyMap<string, string | null> | null> => {
+      heads ??= worktreeHeads(repo.path);
+      return heads;
+    };
+    const branches = await Promise.all(tasks.map((task, i) => liveBranch(judged, task, owned[i] === true, readHeads)));
+    const named = new Set(branches.filter((branch): branch is string => branch !== undefined && usable(branch)));
+    const shas = await readRefs(repo.path, named);
+    for (const [i, task] of tasks.entries()) {
       if (stopped) return;
       // oxlint-disable-next-line no-await-in-loop -- one task at a time within a repo; repos run in parallel
-      const done = await checkTask(judged, task, task.path !== undefined && owners.get(task.path) === task.taskId);
+      const done = await checkTask(judged, task, owned[i] === true, branches[i], shas);
       if (done) judgedIds.add(task.taskId);
     }
   };

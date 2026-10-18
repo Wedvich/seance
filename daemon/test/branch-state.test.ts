@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseBranchState, parseTaskProgressList, type BranchState, type RepoEntry } from "@seance/shared";
@@ -1060,6 +1060,73 @@ describe("branch-state emitter: the cut-off for ended, quiet tasks", () => {
     await fastForwardOnOrigin(w, "worktree-x");
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ merged: true });
+    stopAll(w);
+  });
+});
+
+describe("branch-state emitter: what a steady pass costs", () => {
+  let shimDir: string;
+  let calls: string;
+
+  beforeAll(async () => {
+    shimDir = join(base, "shim");
+    calls = join(base, "git-calls");
+    const real = Bun.which("git");
+    if (real === null) throw new Error("no git on PATH");
+    await mkdir(shimDir, { recursive: true });
+    await writeFile(join(shimDir, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${real}' "$@"\n`);
+    await chmod(join(shimDir, "git"), 0o755);
+    // First exec outside any timed window (CLAUDE.md, "Testing").
+    await exec([join(shimDir, "git"), "--version"]);
+  });
+
+  /** The git processes one pass spawns, through a counting shim first on PATH. */
+  async function gitCalls(emitter: BranchStates): Promise<readonly string[]> {
+    await rm(calls, { force: true });
+    const path = process.env["PATH"];
+    process.env["PATH"] = `${shimDir}:${path ?? ""}`;
+    try {
+      await emitter.check();
+    } finally {
+      process.env["PATH"] = path;
+    }
+    const text = await readFile(calls, "utf8").catch(() => "");
+    return text.split("\n").filter((line) => line !== "");
+  }
+
+  test("ten pushed tasks in one repo cost three git processes a pass once nothing changes", async () => {
+    const w = await world();
+    for (let i = 0; i < 10; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one worktree after another in one clone
+      const path = await launch(w, `t${i}`, `x${i}`);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await commitAndPush(path, `f${i}.txt`, `worktree-x${i}`);
+    }
+    // A fetch only when stale: the first pass fetches, the steady ones do not.
+    const emitter = start(w, { fetchStaleMs: 3_600_000 });
+    await emitter.check();
+    expect(w.states.filter((s) => s.pushed)).toHaveLength(10);
+    const steady = await gitCalls(emitter);
+    expect(steady).toHaveLength(3);
+    expect(w.states).toHaveLength(10);
+    stopAll(w);
+  });
+
+  test("a reftable clone reads each worktree's branch, a rename included", async () => {
+    const w = await world();
+    // Older gits (Apple's 2.39) have no reftable: nothing to prove there.
+    const migrated = await exec(["git", "refs", "migrate", "--ref-format=reftable"], { cwd: w.fixture.repoPath });
+    if (migrated.exitCode !== 0) return;
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await emitter.check();
+    await git(path, "branch", "-m", "worktree-renamed");
+    await commitAndPush(path, "a.txt", "worktree-renamed");
+    await emitter.check();
+    expect(w.states.map((s) => [s.branch, s.pushed])).toEqual([
+      ["worktree-x", false],
+      ["worktree-renamed", true],
+    ]);
     stopAll(w);
   });
 });
