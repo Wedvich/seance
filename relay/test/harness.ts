@@ -359,6 +359,11 @@ export async function newDeviceId(): Promise<string> {
   return identity.deviceId;
 }
 
+/** Lets `register()` sign for an identity minted elsewhere: e2e's stand-in for a stopped daemon, from its state's seed. */
+export function adoptIdentity(identity: Identity): void {
+  identities.set(identity.deviceId, identity);
+}
+
 export function identityOf(deviceId: string): Identity {
   const identity = identities.get(deviceId);
   if (identity === undefined) throw new Error(`no identity minted for ${deviceId} — use newDeviceId()`);

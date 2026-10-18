@@ -37,7 +37,18 @@ import {
   type LeaderRecord,
   type LeaderSocket,
 } from "./leadership.ts";
-import { actOf, admitCreate, authorize, RelayStore, ruleFor, type CreateWindow, type WriteResult } from "./store.ts";
+import {
+  actOf,
+  admitCreate,
+  admitList,
+  authorize,
+  RelayStore,
+  ruleFor,
+  takeList,
+  type ListBucket,
+  type RateWindow,
+  type WriteResult,
+} from "./store.ts";
 import { isStoreRequest, parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
@@ -149,14 +160,17 @@ interface SocketAttachment {
    * nothing back into it, and it keeps no status (`#leftBy`).
    */
   readonly superseded?: true;
+  /** The `store-list` floor's window (`admitList`); a re-register keeps it, so it cannot reset the floor. */
+  readonly listWindow?: RateWindow;
 }
 
 /**
- * What an app socket carries: only the create floor's window, written on its
- * first create. On the attachment rather than a field so it survives hibernation.
+ * What an app socket carries: the create and list floors' windows, each written
+ * on its first use. On the attachment rather than a field so they survive hibernation.
  */
 interface AppAttachment {
-  readonly createWindow?: CreateWindow;
+  readonly createWindow?: RateWindow;
+  readonly listWindow?: RateWindow;
 }
 
 interface DaemonSocket {
@@ -207,6 +221,13 @@ export class Hub implements DurableObject {
    * "Self-update").
    */
   readonly #registering = new WeakMap<WebSocket, Promise<void>>();
+  /**
+   * The DO-wide `store-list` bucket, per prefix so a prefix M4 adds cannot
+   * throttle another's. In memory: storing it would write a row per list to
+   * guard the rows a list reads. Eviction resets it, but a DO is evicted only
+   * after an idle spell, so a client looping fast enough to matter keeps it.
+   */
+  readonly #listBuckets = new Map<string, ListBucket>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
@@ -567,6 +588,7 @@ export class Hub implements DurableObject {
     ws.serializeAttachment({
       connectedAt: attachment.connectedAt,
       identity: { deviceId, roles: knownRoles(frame.roles ?? []), ...rate },
+      ...(attachment.listWindow === undefined ? {} : { listWindow: attachment.listWindow }),
     } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other === ws || this.#deviceIdOf(other) !== deviceId) continue;
@@ -602,11 +624,13 @@ export class Hub implements DurableObject {
   }
 
   /**
-   * Answers one store frame. The order of checks is the contract: rule
-   * (`forbidden` / `not_leader`), then tombstone and version, then the app
-   * create floor, then the caps, then the write. The floor sits behind the
-   * version check so an enqueue retried after it landed reads `version_conflict`,
-   * not `rate_limited`, and only creates that land count toward it.
+   * Answers one store frame. A list meets its floors first (`#admitList`). For
+   * a write the order of checks is the contract: rule (`forbidden` /
+   * `not_leader`), then tombstone and version, then the app create floor, then
+   * the caps (records on a create, tombstones on a delete), then the write. The
+   * floor sits behind the version check so an enqueue retried after it landed
+   * reads `version_conflict`, not `rate_limited`, and only creates that land
+   * count toward it.
    *
    * No line for an accepted read or write — that would be the queue's activity
    * timeline — and never an `env`, a `ct` or its length.
@@ -619,6 +643,10 @@ export class Hub implements DurableObject {
    */
   async #onStoreFrame(ws: WebSocket, leg: Role, frame: StoreRequestFrame): Promise<void> {
     if (frame.t === "store-list") {
+      if (!(await this.#admitList(ws, leg, frame.prefix, Date.now()))) {
+        this.#refuseStore(ws, leg, frame.id, frame.t, undefined, "rate_limited");
+        return;
+      }
       this.#storeReply(ws, { t: "store-listed", re: frame.id, records: await this.#store.list(frame.prefix) });
       return;
     }
@@ -643,9 +671,9 @@ export class Hub implements DurableObject {
 
     // Tentative: only a create that lands is written back to the attachment, so
     // a refusal of any kind leaves the window as it was. No floor on the daemon
-    // leg: every write there is term-fenced, so only the leader writes, bounded
-    // by `MAX_TASKS`. The attachment is an `AppAttachment` only on an app
-    // socket, so it is read only when the floor applies.
+    // leg: every write there is term-fenced and none creates a task, so the
+    // leader's creates are its own `queue:` singletons. The attachment is an
+    // `AppAttachment` only on an app socket, so it is read only when the floor applies.
     const floored = leg === "app" && act === "create";
     const attachment = floored ? (ws.deserializeAttachment() as AppAttachment | null) : null;
     const window = floored ? admitCreate(attachment?.createWindow, now) : null;
@@ -667,6 +695,29 @@ export class Hub implements DurableObject {
     if (window !== null) ws.serializeAttachment({ ...attachment, createWindow: window } satisfies AppAttachment);
     this.#storeReply(ws, { t: "store-written", re: frame.id, version: result.version });
     if (leg === "app") await this.#nudgeLeader(frame.key, frame.t === "store-put" ? result.version : 0);
+  }
+
+  /**
+   * The `store-list` floors (`admitList`, `takeList`): false past either.
+   * Exempt is the socket the current term was issued to — a list carries no
+   * term — so a takeover is never refused; anyone else, a follower or an older
+   * socket of the leader's own id included, spends both. A refusal spends
+   * neither, as the create floor's does not.
+   */
+  async #admitList(ws: WebSocket, leg: Role, prefix: string, now: number): Promise<boolean> {
+    if (leg === "daemon") {
+      const record = await this.#leaderRecord();
+      if (holdsTerm(record, record.term, this.#leaderSocketOf(ws))) return true;
+    }
+    // Either leg's attachment: each carries its own `listWindow`, and the spread keeps the rest as it was.
+    const attachment = ws.deserializeAttachment() as AppAttachment | SocketAttachment | null;
+    const window = admitList(attachment?.listWindow, now);
+    if (window === null) return false;
+    const bucket = takeList(this.#listBuckets.get(prefix), now);
+    if (bucket === null) return false;
+    this.#listBuckets.set(prefix, bucket);
+    ws.serializeAttachment({ ...attachment, listWindow: window });
+    return true;
   }
 
   #refuseStore(ws: WebSocket, leg: Role, re: string, t: string, key: string | undefined, code: string): void {

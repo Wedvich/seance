@@ -25,6 +25,7 @@ import {
   type Client,
   type TestRelay,
 } from "./harness.ts";
+import { LIST_BURST, MAX_LISTS_PER_WINDOW } from "../src/store.ts";
 
 const TOKEN = "test-bearer-token";
 const SCHEDULER = ["scheduler"];
@@ -276,7 +277,8 @@ describe("relay store: rules, versions and tombstones", () => {
     expect((await list(app, "task:")).some((record) => record.key === key)).toBe(false);
     expect(await put(app, key, 0, first)).toMatchObject(refused("version_conflict"));
     expect(await put(leader.daemon, key, 3, first, leader.term)).toMatchObject(refused("version_conflict"));
-    expect(await put(leader.daemon, key, 0, first, leader.term)).toMatchObject(refused("version_conflict"));
+    // The leader creates no task at all, so its re-create is refused before the tombstone is read.
+    expect(await put(leader.daemon, key, 0, first, leader.term)).toMatchObject(refused("forbidden"));
     expect(await del(leader.daemon, key, 3, leader.term)).toMatchObject(refused("version_conflict"));
     // A key that never existed is the same answer, whatever `expect` says.
     expect(await del(leader.daemon, taskKey(), 0, leader.term)).toMatchObject(refused("version_conflict"));
@@ -312,23 +314,27 @@ describe("relay store: rules, versions and tombstones", () => {
     const one = await rigA.join(observer, oneId);
     const { term } = await one.waitFor<LeadFrame>("lead", 5_000);
     const two = await rigA.join(observer, twoId);
+    const app = await connectApp(rigA.relay());
     const key = taskKey();
+    expect(await put(app, key, 0, sealed())).toMatchObject(written(1));
 
-    expect(await put(one, key, 0, sealed())).toMatchObject(refused("not_leader"));
+    expect(await put(one, key, 1, sealed())).toMatchObject(refused("not_leader"));
     // Listed, registered and capable, but not the socket the term was issued to.
-    expect(await put(two, key, 0, sealed(), term)).toMatchObject(refused("not_leader"));
-    expect(await put(one, key, 0, sealed(), term - 1)).toMatchObject(refused("not_leader"));
-    expect(await put(one, key, 0, sealed(), term)).toMatchObject(written(1));
+    expect(await put(two, key, 1, sealed(), term)).toMatchObject(refused("not_leader"));
+    expect(await put(one, key, 1, sealed(), term - 1)).toMatchObject(refused("not_leader"));
+    expect(await put(two, taskKey(), 0, sealed(), term)).toMatchObject(refused("not_leader"));
+    expect(await put(one, key, 1, sealed(), term)).toMatchObject(written(2));
 
     // One resigns with a roleless register; two takes the term.
     one.send(await register(oneId, { roles: [] }));
     await one.waitFor("follow", 5_000);
     const next = await two.waitFor<LeadFrame>("lead", 5_000);
     expect(next.term).toBe(term + 1);
-    expect(await put(one, key, 1, sealed(), term)).toMatchObject(refused("not_leader"));
-    expect(await put(one, key, 1, sealed(), next.term)).toMatchObject(refused("not_leader"));
-    expect(await put(two, key, 1, sealed(), next.term)).toMatchObject(written(2));
+    expect(await put(one, key, 2, sealed(), term)).toMatchObject(refused("not_leader"));
+    expect(await put(one, key, 2, sealed(), next.term)).toMatchObject(refused("not_leader"));
+    expect(await put(two, key, 2, sealed(), next.term)).toMatchObject(written(3));
 
+    app.close();
     await rigA.leave(observer, one, oneId);
     await rigA.leave(observer, two, twoId);
     observer.close();
@@ -337,8 +343,10 @@ describe("relay store: rules, versions and tombstones", () => {
   test("a leader that redials gets a new term, and the old term from the new socket is not_leader", async () => {
     const observer = await connectApp(rigA.relay());
     const leader = await rigA.lead(observer);
+    const app = await connectApp(rigA.relay());
     const key = taskKey();
-    expect(await put(leader.daemon, key, 0, sealed(), leader.term)).toMatchObject(written(1));
+    expect(await put(app, key, 0, sealed())).toMatchObject(written(1));
+    app.close();
 
     const redialed = await connectDaemon(rigA.relay());
     redialed.send(await register(leader.id, { roles: SCHEDULER }));
@@ -447,7 +455,7 @@ describe("relay store: rules, versions and tombstones", () => {
     observer.close();
   });
 
-  test("the create floor: sixty creates per socket per window, a fresh socket starts over, the leader has none", async () => {
+  test("the create floor: sixty creates per socket per window, a fresh socket starts over, the leader creates none", async () => {
     const observer = await connectApp(rigA.relay());
     const leader = await rigA.lead(observer);
     const created: string[] = [];
@@ -464,11 +472,10 @@ describe("relay store: rules, versions and tombstones", () => {
     const other = taskKey("f");
     created.push(other);
     expect(await put(fresh, other, 0, sealed())).toMatchObject(written(1));
-    const own = taskKey("f");
-    created.push(own);
-    expect(await put(leader.daemon, own, 0, sealed(), leader.term)).toMatchObject(written(1));
+    // Only apps enqueue: the term holder meets no floor, so it gets no creates to churn.
+    expect(await put(leader.daemon, taskKey("f"), 0, sealed(), leader.term)).toMatchObject(refused("forbidden"));
 
-    // Room for the next test: deletes leave tombstones, which count toward no cap.
+    // Room for the next test: deletes leave tombstones, which count toward no record cap.
     for (const key of created) {
       // oxlint-disable-next-line no-await-in-loop -- each delete is matched to its own reply
       expect(await del(leader.daemon, key, 1, leader.term)).toMatchObject(written(1));
@@ -541,22 +548,25 @@ describe("relay store: caps", () => {
     }
   });
 
-  /** `task:` filled to `MAX_TASKS` by the leader, at version 1 and the default size. */
-  async function fillTasks(leader: { daemon: Client; term: number }): Promise<void> {
-    for (let i = 0; i < MAX_TASKS; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the cap
-      const reply = await put(leader.daemon, capKey(i), 0, sealed(), leader.term);
-      expect(reply).toMatchObject(written(1));
+  /** `task:` filled to `MAX_TASKS` by apps, at version 1 and the default size: a socket per create window's worth. */
+  async function fillTasks(): Promise<void> {
+    for (let start = 0; start < MAX_TASKS; start += MAX_STORE_CREATES_PER_WINDOW) {
+      // oxlint-disable-next-line no-await-in-loop -- a fresh socket once the last one's floor is spent
+      const app = await connectApp(rigB.relay());
+      for (let i = start; i < Math.min(MAX_TASKS, start + MAX_STORE_CREATES_PER_WINDOW); i += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential fill to the cap
+        expect(await put(app, capKey(i), 0, sealed())).toMatchObject(written(1));
+      }
+      app.close();
     }
   }
 
-  test("a full task: prefix refuses creates on both legs, but a retried create still reads version_conflict", async () => {
+  test("a full task: prefix refuses creates, but a retried create still reads version_conflict", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
     const app = await connectApp(rigB.relay());
-    await fillTasks(leader);
+    await fillTasks();
     expect(await put(app, "task:x-1", 0, sealed())).toMatchObject(refused("store_full"));
-    expect(await put(leader.daemon, "task:x-2", 0, sealed(), leader.term)).toMatchObject(refused("store_full"));
     // The version check comes before the caps: the retry of a create that landed is not a full-store answer.
     expect(await put(app, "task:c-000", 0, sealed())).toMatchObject(refused("version_conflict"));
 
@@ -573,7 +583,7 @@ describe("relay store: caps", () => {
   test("a full prefix lists as one frame, ascending by key", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
-    await fillTasks(leader);
+    await fillTasks();
     // Creates are capped below `STORE_MAX_CT_LENGTH`, so each record reaches it by an overwrite.
     for (let i = 0; i < MAX_TASKS; i += 1) {
       // oxlint-disable-next-line no-await-in-loop -- sequential: 128 records at the largest size
@@ -592,7 +602,7 @@ describe("relay store: caps", () => {
   test("MAX_RECORDS bounds the total across prefixes: queue: keys count with the tasks", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
-    await fillTasks(leader);
+    await fillTasks();
     for (let i = 0; i < MAX_RECORDS - MAX_TASKS; i += 1) {
       // oxlint-disable-next-line no-await-in-loop -- sequential fill to the total
       expect(await put(leader.daemon, queueKey(i), 0, sealed(), leader.term)).toMatchObject(written(1));
@@ -614,17 +624,84 @@ describe("relay store: tombstone expiry", () => {
   test("a deleted key refuses a put until its tombstone expires, then a create lands at version 1", async () => {
     const observer = await connectApp(rigC.relay());
     const leader = await rigC.lead(observer);
+    const app = await connectApp(rigC.relay());
     const key = taskKey("e");
-    expect(await put(leader.daemon, key, 0, sealed(), leader.term)).toMatchObject(written(1));
+    expect(await put(app, key, 0, sealed())).toMatchObject(written(1));
     expect(await del(leader.daemon, key, 1, leader.term)).toMatchObject(written(1));
-    expect(await put(leader.daemon, key, 0, sealed(), leader.term)).toMatchObject(refused("version_conflict"));
+    expect(await put(app, key, 0, sealed())).toMatchObject(refused("version_conflict"));
 
-    await until(
-      async () => (await put(leader.daemon, key, 0, sealed(), leader.term)).t === "store-written",
-      "the tombstone to expire",
-    );
-    expect(await get(leader.daemon, key)).toMatchObject({ key, version: 1 });
+    await until(async () => (await put(app, key, 0, sealed())).t === "store-written", "the tombstone to expire");
+    expect(await get(app, key)).toMatchObject({ key, version: 1 });
+    app.close();
     await rigC.dismiss(observer, leader);
+    observer.close();
+  }, 30_000);
+});
+
+// A relay per test: the DO-wide bucket is the object's, so each test starts it full.
+describe("relay store: list floors", () => {
+  const rigD = rig();
+
+  beforeEach(() => rigD.boot({ leaders: 3 }));
+  afterEach(() => rigD.stop());
+
+  const listReply = (client: Client): Promise<StoreReplyFrame> => ask(client, { t: "store-list", prefix: "task:" });
+
+  test("one socket looping lists is rate_limited past its floor, a re-register resets nothing, the term holder is never", async () => {
+    const observer = await connectApp(rigD.relay());
+    const leader = await rigD.lead(observer);
+    const followerId = rigD.leaderId();
+    const follower = await rigD.join(observer, followerId);
+    const app = await connectApp(rigD.relay());
+
+    for (const client of [app, follower]) {
+      for (let i = 0; i < MAX_LISTS_PER_WINDOW; i += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: the floor counts lists in order
+        expect((await listReply(client)).t).toBe("store-listed");
+      }
+      // oxlint-disable-next-line no-await-in-loop -- one socket at a time
+      expect(await listReply(client)).toMatchObject(refused("rate_limited"));
+    }
+    follower.send(await register(followerId, { roles: SCHEDULER }));
+    await registryWhere(observer, connectedIs(followerId, true));
+    expect(await listReply(follower)).toMatchObject(refused("rate_limited"));
+
+    // Past both floors, as a takeover retried in a loop would be.
+    for (let i = 0; i < 2 * LIST_BURST; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential, as above
+      expect((await listReply(leader.daemon)).t).toBe("store-listed");
+    }
+    expect(rigD.relay().logs()).toContain("store refused t=store-list leg=app code=rate_limited");
+
+    app.close();
+    await rigD.leave(observer, follower, followerId);
+    await rigD.dismiss(observer, leader);
+    observer.close();
+  }, 30_000);
+
+  test("ten sockets spend the DO-wide bucket between them, and the next term's takeover list still lands", async () => {
+    const observer = await connectApp(rigD.relay());
+    const apps = await Promise.all(Array.from({ length: 10 }, () => connectApp(rigD.relay())));
+    const replies: StoreReplyFrame[] = [];
+    for (let i = 0; i < MAX_LISTS_PER_WINDOW; i += 1) {
+      for (const app of apps) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential, so the bucket's count is the test's
+        replies.push(await listReply(app));
+      }
+    }
+    const landed = replies.filter((reply) => reply.t === "store-listed").length;
+    // Each socket stays under its own floor, so only the bucket refuses: it holds LIST_BURST, plus a refill or two.
+    expect(landed).toBeGreaterThanOrEqual(LIST_BURST);
+    expect(landed).toBeLessThan(LIST_BURST + 3);
+    const refusals = replies.filter((reply) => reply.t === "store-refused");
+    expect(refusals).toHaveLength(replies.length - landed);
+    for (const refusal of refusals) expect(refusal).toMatchObject(refused("rate_limited"));
+
+    const leader = await rigD.lead(observer);
+    expect((await listReply(leader.daemon)).t).toBe("store-listed");
+
+    for (const app of apps) app.close();
+    await rigD.dismiss(observer, leader);
     observer.close();
   }, 30_000);
 });
