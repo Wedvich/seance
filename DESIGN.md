@@ -3296,7 +3296,14 @@ relay state unnecessary).
   silently, and nothing re-fires an announce, so the machine that missed one
   would sit stale until an unrelated later wave. The announce itself is marked
   spent only once it is on the wire — a socket that drops during the seal must
-  not burn the single announce a process makes. Accepted gap: an announce
+  not burn the single announce a process makes — and it leaves only after
+  that socket's register: the relay drops a msg from a socket with no identity
+  yet, and signing a register is slower than sealing the announce, so an
+  announce fired on `open` overtook it and reached no machine (lost from
+  signed registers, 2026-10-15, until 2026-10-18). The relay in turn holds a
+  socket's frames behind its pending register, whose verify awaits WebCrypto
+  that no input gate covers. A register the relay refuses takes the announce
+  behind it down too, so a refusal re-arms it for the redial. Accepted gap: an announce
   landing during a sleep shorter than the sweep window (~60–90s, socket
   survives but the buffered frame goes stale past the replay window) is lost
   until the next real reconnect or restart.

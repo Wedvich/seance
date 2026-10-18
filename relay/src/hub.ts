@@ -198,6 +198,15 @@ export class Hub implements DurableObject {
   readonly #leaders: ReadonlySet<string>;
   readonly #store: RelayStore;
   readonly #schedulerReplyWindowMs: number;
+  /**
+   * A socket's register still being verified. Not routing state — nothing
+   * survives in it past the verify, so hibernation loses nothing — but the
+   * verify awaits WebCrypto, which no input gate holds, so the frame a daemon
+   * sends right behind its register could otherwise be judged against a
+   * socket with no identity yet and dropped (the announce, DESIGN.md
+   * "Self-update").
+   */
+  readonly #registering = new WeakMap<WebSocket, Promise<void>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
@@ -328,9 +337,17 @@ export class Hub implements DurableObject {
       return;
     }
     if (frame.t === "register") {
-      await this.#register(ws, frame);
+      const pending = this.#register(ws, frame);
+      this.#registering.set(ws, pending);
+      try {
+        await pending;
+      } finally {
+        if (this.#registering.get(ws) === pending) this.#registering.delete(ws);
+      }
       return;
     }
+    // A failed register already logged itself; this frame just meets its outcome.
+    await this.#registering.get(ws)?.catch(() => undefined);
     const deviceId = this.#deviceIdOf(ws);
     if (deviceId === null) {
       console.log("wire dropped reason=unregistered-daemon");

@@ -263,6 +263,26 @@ describe("routing", () => {
     app.close();
   });
 
+  test("a broadcast sent right behind its socket's register still fans out", async () => {
+    const senderId = await newDeviceId();
+    const receiverId = await newDeviceId();
+    const app = await connectApp(relay);
+    const receiver = await registeredDaemon(app, receiverId);
+    const sender = await connectDaemon(relay);
+
+    // What a restarted daemon does: the announce follows the register on the
+    // wire without waiting for any answer, while the relay is still verifying
+    // the signature. It must not be judged against a socket with no identity yet.
+    const env = envelope(MACHINES_ID, senderId);
+    sender.send(await register(senderId));
+    sender.send({ t: "msg", env });
+
+    expect((await receiver.waitFor<DaemonMsg>("msg")).env).toEqual(env);
+    sender.close();
+    receiver.close();
+    app.close();
+  });
+
   test("an app-sent broadcast reaches daemons, with no undeliverable either way", async () => {
     const deviceId = await newDeviceId();
     const app = await connectApp(relay);
