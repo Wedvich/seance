@@ -2800,8 +2800,27 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   (docs/scheduler.md keys tasks by it): `remote.origin.url` read from the common
   dir's config — the same file `git remote get-url` reads, no process — with
   scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
-  `host/path`, and the whole lowercased (the hosts we route to compare
+  `host/path`, and the whole lowercased (GitHub and Azure DevOps compare
   case-insensitively; a key that differed by case would split one repo in two).
+  A typed origin is keyed the same way: `auto`'s `repo` in `seanced mcp` goes
+  through `originQuery` (`scan.ts`), so the remote URL as `git remote -v`
+  prints it, a repo's root page URL, or the key in another case finds the key
+  — a deeper page (`/tree/main`) does not, and a key with a port is tried as
+  itself first, since scp parsing would read the port as path (added 2026-10-18 after
+  `github.com/Wedvich/seance` was refused beside a listed
+  `github.com/wedvich/seance`). Clone names still match exactly, since they are
+  directory names. The leader matches keys exactly and never normalizes:
+  apps send keys (the PWA picks from `RepoEntry.origin`), and its request parser
+  stays a bounds check. The key is never a git URL — dispatch spawns by clone
+  name, PR links come from the session — so folding costs only display case.
+  Accepted collision: on a case-sensitive host (self-hosted git over ssh, like
+  `venus.lan/srv/git/…`) two repos differing only by case share one key, and
+  the scheduler could route one's task to the other's clone. Rejected until such
+  a pair exists: folding only for known case-insensitive hosts (an allow-list,
+  and a key change that splits repos across a mixed-version fleet and strands
+  queued tasks under the old key), and case-insensitive matching that refuses
+  case-only twins (lowercased keys cannot have twins, so the refusal is dead
+  without the former).
   Basename when there is no remote, or only a local, `file://` or drive-letter
   one (a Windows `C:\…` or UNC `\\…` path, which the scp rule would otherwise
   key as host `c`) — some machine's mirror is not an identity. Re-read every scan, not carried

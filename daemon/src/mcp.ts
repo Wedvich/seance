@@ -52,6 +52,7 @@ import {
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
+import { originQuery } from "./scan.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -285,10 +286,12 @@ const LEADER_SAYS_IF_CANCELLED =
 
 /**
  * `auto`'s `repo` as the scheduler keys it, `RepoEntry.origin`. Callers hold
- * clone names from `list_machines`, so either is accepted: an origin exactly,
- * or a clone name whose clones all share one origin. Clone names are
- * machine-local, so two unrelated repos can share one — picking between them
- * would run the task in the wrong repo, so that is an error naming each.
+ * clone names from `list_machines`, so either is accepted: an origin in any
+ * form `originQuery` keys (a pasted URL, mixed case), or a clone name —
+ * matched exactly, since it is a directory name — whose clones all share one
+ * origin. Clone names are machine-local, so two unrelated repos can share one
+ * — picking between them would run the task in the wrong repo, so that is an
+ * error naming each.
  */
 export function resolveOrigin(
   machines: readonly Machine[],
@@ -312,7 +315,8 @@ export function resolveOrigin(
       named.set(entry.origin, on);
     }
   }
-  if (origins.has(repo)) return { origin: repo };
+  const key = originQuery(repo).find((candidate) => origins.has(candidate));
+  if (key !== undefined) return { origin: key };
   const [only, ...rest] = named.keys();
   if (only !== undefined && rest.length === 0) return { origin: only };
   if (only !== undefined) {
@@ -707,7 +711,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         repo: z
           .string()
           .describe(
-            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin (host/path) when it does not",
+            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter)",
           ),
         prompt: z.string().optional().describe("The task for the spawned session"),
         title: z
