@@ -1,12 +1,12 @@
 # Séance scheduler — plan
 
-**Status: plan, M1 and M2 done.** Drafted 2026-10-14 from a planning transcript, a task-router
+**Status: plan, M1, M2 and M3 done.** Drafted 2026-10-14 from a planning transcript, a task-router
 heuristics note, and an interview; placement revised 2026-10-15 (below). Folds into DESIGN.md
 (new section "Scheduler") as each milestone lands; until then this file is the working record and
 DESIGN.md describes what exists. M1 (visibility: exclaves, telemetry, the `status` frame, the
-`metrics` op, the PWA's Machines screen) folded in on 2026-10-15, and M2 (routing, leadership,
-`auto`) on 2026-10-16; their plan text is gone from here — DESIGN.md is the record for anything
-either built.
+`metrics` op, the PWA's Machines screen) folded in on 2026-10-15, M2 (routing, leadership,
+`auto`) on 2026-10-16, and M3 (the durable queue) on 2026-10-18; their plan text is gone from
+here — DESIGN.md is the record for anything they built. What is left ahead of code is M4.
 
 ## Glossary
 
@@ -246,11 +246,9 @@ what the _relay_ must read; `capabilities` is sealed, read by apps today — the
   class as the service-delivered PSK. Failure is quiet and non-fatal (unofficial endpoint).
 - Local socket `session-event` and `claude-mods/session-events` (M2; DESIGN.md Local op socket,
   "Session events"). The mod is also the phase-2 bus.
-- **`leader.ts`, the scheduler role** (M2; DESIGN.md _Scheduler_, "The leader"). `QueueStore` is
-  still the library's in-memory one, fenced by the term; M3 swaps in the relay's `store-*` ops
-  behind the port as the store port left it (2026-10-17: unreadable records as values, every
-  write failure but a revoked term as a value, the pause slot, `refresh`) — so the adapter maps
-  the relay's answers onto it rather than widening it.
+- **`leader.ts`, the scheduler role** (M2; DESIGN.md _Scheduler_, "The leader"). Since M3 item 3
+  its `QueueStore` is `daemon/src/queue-store.ts` on the relay's `store-*` ops, mapping the
+  relay's answers onto the port rather than widening it (DESIGN.md, "The queue store").
 
 ## Scheduler (`scheduler/`)
 
@@ -298,14 +296,14 @@ key — as the PWA skips registry entries, never fatal — before the reconcile 
 its leg's machine list, after each app's create (`store-changed`), and on a 30s timer that runs for the whole term
 whether or not anything is ready; reservation TTLs and `lost` are checked only inside a pass. A
 task's decision is written with its reservation (one store write) — never after the spawn —
-and an unplaced task's stays in memory. M3 and M4 add:
+and an unplaced task's stays in memory. M4 adds:
 
 - Filters (the per-account cap and the per-batch bound landed with M3 items 5 and 4a, DESIGN.md
   "Caps" and "Batches"): `skill absent` (M4,
   _Skills_: a hard filter when declared or the prompt starts with `/name`, and only for a name the
   fleet's inventory knows); stacked base
   unpushed and not on this exclave (M4, _Stacking_).
-- Score: `dependencyDistance` gets an input once M3's deps fill `TaskSpec.base`. The Proxmox
+- Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The Proxmox
   node view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
@@ -425,265 +423,35 @@ The gaps cited by label elsewhere (A and B were item 3's):
   way to give up on it; it can now be cancelled (DESIGN.md "`lost`"), and since 2026-10-18 it
   fails `lost_expired` after 7 days lost (Settled defaults 14).
 
-### M3 — durable queue
+### M3 — durable queue (done 2026-10-18)
 
-**Goal.** Queue a block of work with dependencies and leave; it runs, survives leader changes,
-and finishes without anyone watching.
+Queue a block of work with dependencies and leave: it runs, survives leader changes, and
+finishes without anyone watching. Landed by item ("M3 item N" in commits and code comments):
 
-**Gate (done 2026-10-16).** Leader capture reopens and is settled with a relay-side guard (Risks,
-_Leader capture_) before the store lands — under M2's reader-only check a squatter's term would
-delete the queue. Settled with the `SCHEDULER_LEADERS` allowlist, a Worker secret the relay
-filters nomination through (unset nominates nobody), with M2's reader check kept as its tripwire;
-recorded in DESIGN.md _Scheduler_ ("Leadership") and _Threat model_ (item 3). Exit, as tests: a
-bearer-token holder's self-minted daemon with signed roles and the oldest socket is never
-nominated while a listed one is, an unset list nominates nobody (`scheduler: null`, the address
-`offline`), and junk entries are ignored (relay); a current leader taken off the list loses the
-role (`leadership.test.ts`); and end to end, a squatter is never nominated while a listed seed
-without the PSK reads "leader unverified" and is sent nothing (e2e).
+| Item  | What                                                                                                      | PR         |
+| ----- | --------------------------------------------------------------------------------------------------------- | ---------- |
+| Gate  | `SCHEDULER_LEADERS`: the relay nominates only listed daemons                                              | #124       |
+| 0, 0b | The schema: store frames, task records, the M3 ops, dependency semantics, record bounds                   | #130, #135 |
+| Port  | The store port: unreadable records as values, write failures named, the pause slot, `refresh`             | #149       |
+| 1     | The relay store: term-fenced writes, tombstones, caps, `store-changed`                                    | #165       |
+| 2     | Task records sealed at rest, version binding, the app's store leg                                         | #161       |
+| 4a    | The library's M3 states: admission, deps, batches, done detection, pruning                                | #164, #166 |
+| 4b    | The daemon's `branch-state` emitter and `sessions` progress                                               | #168, #172 |
+| Split | `leader.ts` split into adapters, requests and the term lifecycle                                          | #174       |
+| 5     | Caps, `pause`/`resume`, `needs-input` escalation, credits-spill alerts                                    | #177       |
+| 3     | The `QueueStore` adapter on the relay store, takeover over sealed records; expiry and the leader-kill e2e | #179, #180 |
+| 6     | The PWA's Queue screen, enqueue by `store-put` from the PWA and MCP, M2's `submit` removed                | #183       |
 
-**Lands as** (cut approved by the owner, 2026-10-16): a schema PR, then three waves. Each
-wave's PRs run in parallel; a wave starts once the one before it has merged.
+After it: MCP's `cancel_task` wording (#181), the leader and builds in `list_machines` and the
+PWA (#184), and the relay logging only failures for scheduler traffic (#186). Recorded in
+DESIGN.md _Scheduler_ ("Leadership", "The store", "Task records and the app's store leg", "The
+queue store", "The leader", "The library": states, deps, batches, caps, pause, done detection,
+expiry, "Branch state"), _Wire protocol_ (the store frames, Layer 2's scheduler ops), _PWA_ ("The Queue screen"), _MCP server_, _Security model_ and _Threat model_ (the
+leader allowlist, the bearer token's store acts, prompts at rest, the term fence that is not a
+PSK check, rollback closed by version binding and tombstones).
 
-- **PR 0 — schema.** Every M3 wire and record shape in `shared/src/types.ts`, with its
-  `parse.ts` validator and tests, and no behaviour change. What it decided where this plan was
-  silent is in the type comments; the ones that shape later PRs:
-  - Store frames are Layer 1 plaintext (the relay answers them), so each carries a client `id`
-    and the reply echoes it as `re`: `store-listed`, `store-record`, `store-written`,
-    `store-refused` with a `STORE_ERROR_CODES` code.
-  - `store-listed` is one frame, unpaged: records are small (Settled defaults 11), so a full
-    `task:` prefix lists in one frame (checked in production 2026-10-18 on the daemon leg and the app leg from Bun, and in headless Chromium and Firefox; the iOS WKWebView leg is open; DESIGN.md "The store"). Paging stays possible without a break — `after` on the request,
-    which an older relay ignores and answers whole, and `next` on the reply, which today's
-    clients refuse rather than read a page as the whole queue.
-  - A write's `term` exists on the daemon leg only. On the app leg the term is public (every
-    registry push carries it), so no app frame has one: overwrite and delete are the leader's
-    verified socket's, never a token holder's who copied the term.
-  - `store-changed { key, version }`: the relay nudges the leader's daemon socket after any write
-    the leader did not make, so an app's enqueue reaches a running leader without the leader
-    polling the store.
-  - A second prefix, `queue:` (one key, `queue:pause`, leader-only and term-fenced), so a pause
-    survives leader changes, which are routine. `account:` stays reserved for M4.
-  - A reader binds a task record to its key twice: the sealed `version` to the relay's, and the
-    sealed `task.id` to the key's id — without the second, a token holder could re-file a task's
-    version-1 blob under a fresh key and have it run twice.
-  - **Tombstones** (owner, 2026-10-17). Version binding cannot see a deleted key re-created from
-    its own authentic version-1 blob, so a finished task the leader pruned could be put back and
-    run again. A delete under a prefix apps may create into leaves the key and its last version
-    for `STORE_TOMBSTONE_MS` (30 days); a put there is `version_conflict`, and tombstones count
-    toward no cap. They expire, so the leader also admits no `queued` task whose sealed
-    `createdAt` is older than the same 30 days. Normal use leaves ~2 MB of tombstones a year;
-    junk deleted at the create floor is bounded by that floor over 30 days.
-  - An app creates a task only as `queued`; the leader admits it to `blocked` or `ready`.
-- **PR 0b — the schema's review follow-up** (2026-10-17, from the review of M2). What the waves
-  would otherwise each have decided alone, in `types.ts` and `parse.ts`, shapes only:
-  - `SessionsResponse.progress` (Wire changes, _Daemon → scheduler_): the takeover's source for
-    a task's PR, branch, `pushed` and `merged`, so a leader gap loses none of them.
-  - One routing-id bound, `ROUTING_ID_PATTERN`, that `TASK_ID_PATTERN` (no `:` now),
-    `STORE_KEY_PATTERN` and the relay's id checks derive from: a task id is a key part as it stands.
-  - Record headroom: creates cap at `STORE_CREATE_MAX_CT_LENGTH` (28 KiB) under a 40 KiB record,
-    every field the leader writes is bounded (`TARGET_LIMITS`, `TASK_FAILURE_LIMITS`), and a write
-    that would not fit cuts the decision first, marked `Decision.trimmed`.
-  - Dependency semantics (`TaskDep`, `DEP_AFTER`): a `failed` or `cancelled` predecessor fails its
-    dependents, cascading (`dependency_failed`); one the store does not hold past
-    `DEP_MISSING_GRACE_MS` fails them too (`dependency_missing`) — so pruning never deletes a task
-    an unfinished one names; a cycle fails every member at admission (`dependency_cycle`); a
-    `lost` predecessor is waited on until it expires; `done` releases every edge, whatever settled it; a `here`
-    predecessor has no task branch, so `opened` releases on its PR and `merged` only at `done`.
-  - `cap_reached` scope `batch` (a batch at its strategy's bound, `lost` members counted;
-    `sequential` is 1 and also holds a member until every held lower `index` is over —
-    `batch_order`, its own reason, since the 4a follow-up).
-  - `bindTaskRecord` (Wire changes, _Version binding_), `QueueRequest.tasks` and
-    `QueueChanged.tasks`.
-- **Before wave 1: the store port** (the M2 review's store PR; DESIGN.md _Scheduler_, "The
-  library", is its record): `QueueStore.list`/`get` return an unreadable record as
-  `{ id, version, reason }`, so "skipped and reported" is tested in the library; every write
-  failure is a value but `StoreRevoked`; the `queue:pause` slot; `Scheduler.refresh(id)` for
-  `store-changed`; `MemoryQueueStore` with tombstones and fault hooks. The writer bounds 0b set
-  (failure message, window, decision cap) are applied where the library writes, and the pause
-  hold's `Reason` (`paused`) and raw scheduler error codes ride along, now that the PWA's and
-  MCP's wording is one module (`shared/src/scheduler-text.ts`).
-- **Wave 1**, in parallel:
-  - **1. Relay store — done 2026-10-17** (DESIGN.md _Scheduler_, "The store"). `relay/src/store.ts`,
-    with `hub.ts` and `wire.ts`: the four frames, the
-    per-prefix rules, term-fenced writes, `expect: 0` creates on the app leg, `MAX_TASKS` /
-    `MAX_RECORDS`, `STORE_MAX_CT_LENGTH` and the create cap, the create rate floor, tombstones and
-    their expiry, `store-changed`. The only M3 PR that touches `hub.ts`. It starts by moving the
-    term's state out of `hub.ts` into `leadership.ts` behind `holdsTerm(term, socket)`: a store
-    write is the leader's only from the socket the term was issued to, which today's term-only
-    `#holdsTerm` cannot say. Tombstones get a key range of their own, so a `task:` list and the
-    caps never walk them; counts are kept rather than listed — `#entryCount` reads every value,
-    which for a full `task:` prefix is 5 MiB per create; app sockets get an attachment (only
-    daemon sockets have one today) to hold the create floor's window.
-    `relay/test/layering.test.ts` admits shared values by name, constants free: `STORE_KEY_PATTERN`
-    passes, `isStoreKey` or a parser does not. `STORE_TOMBSTONE_MS` takes an env override so
-    `relay/test/harness.ts` can expire a tombstone inside a test.
-    **The term fence is not a PSK check.** The relay hands the term to whichever listed machine
-    is earliest connected, and a listed machine's seed copied out of `state.json` without the
-    PSK still gets it — it cannot seal a `lead-proof`, so readers call that leader unverified and
-    send it nothing, but the relay cannot read the proof and still accepts its term-fenced writes. Such a thief cannot
-    forge or read a record, so an overwrite fails `bindTaskRecord` and is skipped; a delete,
-    though, loses the task. Decided in item 1: a delete's tombstone keeps no `env`, and the loss
-    is accepted — what is lost is a pointer to work, never the work or the repo — recorded in
-    DESIGN.md _Threat model_ item 3 (an overwrite destroys the env anyway, restoring one would
-    need shape changes, and uncapped tombstones holding 28–40 KiB envs would blow DO storage).
-    The relay also refuses every delete under `queue:`, since no client deletes the pause.
-    Version binding and tombstones stop a token holder, not the relay itself: a
-    compromised relay can still roll a record back or resurrect one.
-    **Enqueue is idempotent by construction** (M2's gap 3, decided 2026-10-16): the app mints the
-    task id, so a retry after a lost reply re-puts the same `task:<id>` at `expect: 0`, and a
-    `version_conflict` there means the first put landed — the client reads it as queued, never as
-    a failure, and never mints a second id for the same submission. That is why M2's `submit`
-    got no interim fix; item 6 landed the retry ("Try again" in the PWA, three tries in MCP).
-  - **2. The at-rest `task` op and version binding** — sealing in `shared/src/crypto.ts`, the
-    app-client's store methods in `shared/src/app-client.ts`; readers open without the
-    `ReplayGuard` and keep a record only through `bindTaskRecord`. A create checks its sealed
-    length against the create cap before sending. **Landed 2026-10-17** (DESIGN.md _Scheduler_,
-    "Task records and the app's store leg"): `sealAtRest` in `crypto.ts`, the record helpers in
-    `shared/src/task-record.ts` for item 3 to reuse, and `listTasks` / `getTask` / `createTask`.
-  - **4a. The library's M3 states** (landed 2026-10-17; DESIGN.md _Scheduler_, "The library",
-    is the record): admission, batches, hand-declared deps with PR 0b's semantics, done
-    detection — `branch-state` live (`Scheduler.onBranchState`), `progress` on takeover, the
-    sweep and when a machine holding a waiting task comes back — and `awaiting-merge`, against
-    `MemoryQueueStore`. `task-phase.ts` already carried the three states (PR 0). Pruning moved
-    into the library (`keepFinished`, Settled defaults 13). It runs after takeover and at the end
-    of a pass, but only once the store holds `pruneAt` records, (and, until item 6, unconditionally on `submit`'s
-    own `store_full`). Per pass, because an app's `store_full` never reaches the leader; gated,
-    because a prune can race a create naming the finished task it deletes, and leader changes
-    are routine (a deviation from "after takeover"; the gate narrows that race, it does not close
-    it). Its schema follow-up landed beside it: `queue_expired` fails a task `queued` past
-    `STORE_TOMBSTONE_MS` (and its dependents), and `batch_order` words a `sequential` order
-    hold. Left open: M2's `submit` still creates `ready`, which
-    `bindTaskRecord` refuses at version 1 (`created_unqueued`): item 3's adapter must not meet
-    a `submit` create, so `submit` goes or creates `queued` before it lands (a precondition
-    on item 3's own bullet).
-  - **4b. The daemon's `branch-state` emitter and `progress`.** Resized from S to M–L: merges show
-    only after a fetch, and `reap` — the one thing that fetches — is off by default, so the
-    emitter fetches on a cadence of its own; the launch ledger holds ids and times, no worktree
-    path, branch or PR URL, and `progress` must survive a restart, so it gains them; `claude
---worktree` branches `--no-track`, so `pushed` compares with the remote ref, not an upstream;
-    and a session can rename its branch, so the branch is read from the worktree each time, never
-    remembered from the spawn. The leader's own machine hands its `branch-state` over in process,
-    as `run.ts` already does its session events, to `leader.onBranchState`, which item 3 feeds to
-    the library. **Landed** (2026-10-17): DESIGN.md, "Branch state".
-- **Before wave 2: split `leader.ts` — landed 2026-10-17**, no behaviour change, so items 3 and
-  5 can run in parallel: `daemon/src/leader-adapters.ts` (`fencedStore`, `termFleet`),
-  `daemon/src/leader-requests.ts` (`requestHandler` — the app-only check, `not_ready`, the
-  reply — with `answer`, `Asked` and `boundedQueue`), and `daemon/src/leader.ts` keeping the
-  term lifecycle and `createLeader`. `requestHandler` builds `Asked` from what the term hands it
-  (`TermRequests`), so a handler needing more of the `Scheduler` changes only its own file.
-  `scheduler/test/layering.test.ts` takes the set (`LEADER_MODULES`), which item 3's
-  `queue-store.ts` then joins.
-- **Wave 2**, in parallel:
-  - **3. The `QueueStore` adapter** on the store ops (new `daemon/src/queue-store.ts`, wired in
-    the term lifecycle); takeover reconciliation over opened, `bindTaskRecord`-checked bodies.
-    Also, unowned until now: the store frames' send and correlate on the daemon leg
-    (`daemon/src/relay-client.ts`; item 2 does the app leg); `store-changed` driving the
-    one-record refresh; the leader handling `branch-state` (item 4b's handler parses it into a no-op sink and drops
-    every other op but `session-event`) and the PR URL reaching the library (`run.ts`'s in-process forward and the
-    leader's handler both drop `prUrl` before `onSession`), and feeding the in-process
-    `branch-state` hand-off in `run.ts`'s emitter `emit` (item 4b's `leader.onBranchState`
-    sink, a no-op until then) to the library; `e2e/harness.ts` no longer injecting
-    `MemoryQueueStore`; and a store double in `daemon/test/harness.ts` — term fence, tombstones,
-    `store-changed` — for the adapter's daemon tests.
-    **Precondition: `submit` must not create `ready` through this adapter.** M2's
-    `Scheduler.submit` creates its task `ready`, and `bindTaskRecord` refuses a version-1
-    record that is not `queued` (`created_unqueued`), so once the adapter backs the leader every
-    `submit` would write a record no reader keeps. Item 6 removes `submit`, but it lands after
-    this item; so this item makes `submit` create `queued` (admission moves it on in the same
-    pass), as part of itself rather than in a PR of its own (owner, 2026-10-17). The edit is
-    `Scheduler.submit` in `scheduler/src/scheduler.ts` and its tests only — item 3's one
-    sanctioned touch of a file item 5 owns (Who edits what); item 5 leaves `submit` alone.
-    **Production check first:** the takeover reconcile lists the whole queue in one `store-list`,
-    and no Cloudflare limit on a message a Durable Object _sends_ is documented (DESIGN.md, "The
-    store", _Send size_, which holds the arithmetic). Item 2's `RelayClient.listTasks` already
-    lists `task:` in one frame on the app leg, so verify against the deployed relay that a full
-    prefix lists in one `store-listed` and arrives intact at the daemon (the Bun client) and at an
-    app-leg client: at least the PWA in a browser, ideally also the iOS WKWebView. A refused send
-    is a client timeout plus a `store reply not sent` relay log line, or a closed socket. If it
-    does not arrive, page with the reserved `after`/`next`.
-    **Landed 2026-10-18** (DESIGN.md _Scheduler_, "The queue store", "The leader"). The
-    production check above passed on 2026-10-18 for the daemon leg and the app leg from Bun (128
-    records at 40 KiB listed intact as one 5.26 MB frame, DESIGN.md "The store", _Send size_);
-    checked in headless Chromium and Firefox on 2026-10-18; the iOS WKWebView app leg is still
-    open, and paging stays the fallback. Its follow-up (2026-10-18) added the 'kill the leader between spawn and verdict' e2e, removed the
-    leader's per-submit prune, added `lost`/`awaiting-merge` expiry (Settled defaults 14, 15) and
-    reworded MCP's transport-code answer to `submit`. `submit`
-    admits inside its call rather than in the next pass, so its reply still carries `ready` for
-    MCP's placement follow and the PWA's `auto` verdict.
-  - **5. Caps** (global, per account), `pause` / `resume`, `needs-input` + 30-min escalation,
-    credits-spill detection (logged and shown in the PWA; the push alert is M4). **Landed
-    2026-10-17** (DESIGN.md _Scheduler_, "The library": "Caps", "Pause", "Needs input", "Credits
-    spill"; "The leader" for the ops and the alert log line). What it adds surfaces as data its
-    own requests return (`queue`'s `holds`, `paused` and `cap_reached` scope `account` reasons)
-    and as one hook, `onAlert`, in `startTerm`'s `Scheduler` options; `run.ts` untouched, the
-    caps being `DEFAULT_CONFIG`'s. Decided here: `accountMax` 4 (Settled defaults 8); an
-    unreadable `queue:pause` fails closed; a reset hold lifts at the latest reset among the
-    windows over the line, else the earliest ahead; spill alerts de-dupe per account per window
-    in memory.
-- **Wave 3. 6. PWA queue** — enqueue by `store-put`, cancel, mark-done, pause; `queue-changed`.
-  Batch creation must refuse a spec whose `batch.index` is past `TASK_SPEC_LIMITS.batchIndex`
-  (= `MAX_TASKS`) at submit time: `parseBatch` bounds it, and a spec past it makes the whole record
-  unreadable. **Removes M2's `submit`**: the op in `SCHEDULER_OPS` and `OP_TIMEOUT_MS`, `SubmitResponse`,
-  `SubmitReply`, `MAX_ACTIVE_TASKS`, the `queue_full` code and its wording, `parseSubmitReply`,
-  the `submit` methods on `RelayClient`, `AppRelay` and `daemon/src/fleet.ts`'s scheduler, the
-  leader's `submit` case, and `Scheduler.submit` (with `newId` unless
-  something else mints ids). Moved here from item 1, where the plan
-  first put it: the PWA's `auto` sends `submit` until this item gives it `store-put`, so dropping
-  the op with the store would leave `auto` broken for every PR in between. **Also moves MCP's
-  `auto`** (`spawn_session { machine: "auto" }` and `get_queue`, built on M2's `submit` on
-  2026-10-17 — DESIGN.md "MCP server") to `store-put`, in `daemon/src/mcp.ts`: it is the
-  other `submit` caller, so it must move in the same PR that drops the op. Its verdict then
-  becomes "queued" plus the task id, and its tool descriptions lose the in-memory caveat.
-  **Ships after item 1's relay store is deployed**: a relay without store ops drops the app's
-  store frames as `malformed-app-frame`, unanswered, so every call ends in a 10 s `timeout`
-  (`STORE_TIMEOUT_MS`), not a clear refusal. `failureReasonText` words a `timeout` as "the machine
-  may be asleep", wrong for a frame the relay itself answers; reword it when this item surfaces
-  store failures.
-  **Gaps item 5 left for this item** (owner, 2026-10-17): `pwa/src/decision-view.ts`'s
-  `spillText` words a spill as "would spend credits" even on a task already placed or running —
-  tense it by the task's state; the PWA shows neither an escalated `needs-input` task
-  (`Task.escalated`) nor `QueueResponse.holds` (a hold reaches it only as a candidate's `paused`
-  reason). MCP's `get_queue` (`daemon/src/mcp.ts`) has the same gap: it returns only `at` and the
-  tasks, so `holds` is dropped and a pause shows only through `paused` reasons
-  (`reasonText`) — add the holds when this item moves `get_queue` to the store. The queue view
-  also words `lost_expired` and `merge_expired` as the verdict already does (`failedBody`,
-  `taskHeadline`; item 3's follow-up, 2026-10-18).
-  **Landed 2026-10-18** (DESIGN.md _Wire protocol_, Layer 2's scheduler ops; _Scheduler_, "The
-  leader"; _PWA_, "The Queue screen"; _MCP server_). `submit` and everything listed above is gone;
-  the PWA's `auto` and MCP's enqueue through `createTask`; the leader answers `mark-done` and the
-  `queue {tasks}` filter and sends the coalesced `queue-changed`; the PWA has a Queue screen
-  (cancel, mark done, pause, resume, holds, escalation) and follows a verdict on the nudge with a
-  poll as fallback. Owner's decisions made on the way:
-  - **Auto needs only an open relay socket.** Queue on auto (and MCP's `auto`) enqueue with no
-    leader or an unverified one and say the task waits; only `route-preview` still needs a
-    verified leader. `deriveAutoAvailability` gains a `note` for that.
-  - **The Queue screen reads `queue` from the leader, with no store-listing fallback.** With no
-    leader it says so and keeps a list it had already read.
-  - **A pending enqueue is not persisted across a reload**; the task is in the store and shows on
-    the Queue screen.
-  - **Batch creation has no UI.** The `batch.index` bound is enforced in `createTask`, the only
-    place an app could set it. Authoring batches and hand-declared deps from a surface (PWA, MCP)
-    is still open: the library, the record and the leader support them, nothing writes them.
-  - The `hub.ts` log change above.
-
-**Who edits what** — the collision map that makes the waves parallel. `shared/src/types.ts` and
-`parse.ts` are PR 0's and 0b's: a later PR that finds a shape missing changes it in a PR of its
-own, not inside its wave. The one exception is item 6, which deletes M2's `submit` shapes from
-both — a deletion in the last wave, so it races nothing. `relay/src/hub.ts` and `leadership.ts`
-are item 1's alone. `daemon/src/leader.ts` (the term lifecycle) and `leader-adapters.ts` are item 3's, with
-`scheduler/test/layering.test.ts` (`leader.ts` then goes to 6 for `queue-changed`); `leader-requests.ts` (the request handlers) goes 5 → 6. `scheduler/src/scheduler.ts` goes
-4a → 5, but for item 3's `submit` edit. Each item crosses the other's line once, by name: item
-3 at `Scheduler.submit` (its precondition), item 5 at `startTerm`'s `Scheduler` options and
-`run.ts`'s `config` (item 5's bullet). `daemon/src/run.ts` goes 4b → 3, `shared/src/app-client.ts` 2 → 6,
-`daemon/src/relay-client.ts` and both test harnesses' store doubles are item 3's (the relay
-harness's TTL override is item 1's), and `daemon/src/launch-ledger.ts` is 4b's. Item 6
-also touched `relay/src/hub.ts`, item 1's alone until then: one line in `#route`, so an accepted
-`from: "scheduler"` → `"app"` envelope logs no `wire fanout` line (DESIGN.md _Threat model_,
-item 3). It is the only relay change in item 6. A follow-up in the same file quieted the
-residual that left: an app's request to the scheduler, the leader's reply to it (by a
-per-socket reply credit) and the leader's dispatch to a machine log only failures. PR 0 touched
-`leader.ts` (a `not supported yet` answer for the four new ops, so they are refused rather than
-met with silence), `task.ts` (the three states with no edges) and the PWA's state wording, only
-as the widened types forced.
+Every exit criterion below has a test, with the tier named in each; the takeover's merged half
+and the verified leader running an unverified-era task were added at close-out.
 
 **Exit.**
 
@@ -712,13 +480,18 @@ as the widened types forced.
   show as `holds` in `queue` (e2e). A leader's nudge, an app's `queue`
   fetch it prompts, the leader's answer and its dispatch log no `wire` line (relay).
 
-**Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until
-M4's Web Push. Linear is not consulted; done comes from local merge detection, the session
-ending, or manual marking. Quota is still session-reported.
+**Gaps.** No stacking: every task starts from the default branch, and `TaskSpec.base` stays
+unset. Alerts are PWA-only until M4's Web Push. Linear is not consulted; done comes from local
+merge detection, the session ending, or manual marking. Quota is still session-reported.
+Batches and hand-declared deps have no authoring surface: the library, the record and the leader
+support them, but neither the PWA nor MCP writes them. A full `task:` listing in one frame is
+unchecked on the iOS WKWebView app leg (DESIGN.md, "The store", _Send size_); paging through the
+reserved `after`/`next` is the fallback.
 
 **Record.** DESIGN.md _Scheduler_ (store, states, takeover), _Security model_ and _Threat
-model_ (the bearer token's one new act, prompts at rest, rollback closed by version binding),
-_Wire protocol_ rows, _Presence & identity_ if the registry push changes shape.
+model_ (the bearer token's app-leg store access, prompts at rest, rollback closed by version
+binding), _Wire protocol_ rows, _Presence & identity_ (each machine's build and last update
+report now reach apps, #184; the registry push's shape is otherwise unchanged).
 
 ### M4 — refinement
 

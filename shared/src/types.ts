@@ -1374,7 +1374,7 @@ export interface TaskSpec extends TaskRequest {
   readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
-  /** Where the work this task builds on lives (M3 fills it from deps); drives `dependency_distance`. */
+  /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
   readonly base?: Placement;
   readonly batch?: BatchMembership;
   /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */

@@ -46,7 +46,7 @@ including what this deliberately does not defend against.
 
 | Component | Where it runs                                                            | What it does                                                                                                                                                                                            |
 | --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists machine registry (presence = discovery)                                                                                                            |
+| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists the machine registry (presence = discovery) and the scheduler's sealed queue                                                                       |
 | `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session, reports load and quota every 30s and keeps its history; `seanced mcp` serves the same reach to a local Claude Code |
 | `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions; a Machines screen with load, quota and history                                                            |
 
@@ -404,7 +404,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` with `machine: "auto"` queues the task in the relay, as the app's
@@ -458,7 +458,8 @@ component), so deploying either by hand would race that.
 
 The relay that brought in the leader allowlist (October 2026) nominates nobody
 until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that
-deploy lands; set after, **Auto** is unavailable in between, and nothing else is.
+deploy lands; set after, **Auto** still queues in between but no leader runs the
+queue until the secret is set, and nothing else is affected.
 
 The Raycast extension does not self-propagate: it is a built copy, so a machine
 that has it needs `seanced raycast install` re-run after the pull. `seanced
