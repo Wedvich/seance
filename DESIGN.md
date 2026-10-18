@@ -90,15 +90,19 @@ its Tailscale lockdown defeats the relay's purpose).
   doesn't have). The one signature in the system, a daemon's register, is
   ML-DSA-65 for the same reason: an Ed25519 identity would be the single
   thing a quantum adversary could forge.
-- **The relay is blind**: it routes opaque blobs and stores encrypted
-  machine info it cannot read. Relay compromise cannot spawn anything or
-  read prompts/repo names.
+- **The relay is blind**: it routes opaque blobs and stores what it cannot
+  read — each machine's sealed info and, since M3, the scheduler's sealed task
+  records and pause (_Scheduler_, "The store"). Relay compromise cannot spawn
+  anything or read prompts/repo names.
 - **Structured payloads only**: daemons accept the `SpawnRequest` fields
   (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.
 - **Relay-level bearer token** (shared, in daemon config + PWA) gates
-  registration. Anti-junk hygiene only — the PSK is the trust boundary; the
-  PWA ignores registry entries that don't decrypt.
+  registration and, since M3, the app leg of the store: a holder can list and
+  read every record and create a `task:` one (`STORE_PREFIXES`), never
+  overwrite or delete. Anti-junk hygiene only — the PSK is the trust boundary;
+  readers skip registry entries and records that don't decrypt or bind
+  (`bindTaskRecord`).
 
 ## Threat model
 
@@ -112,7 +116,13 @@ recorded as invariants below.
 on four dev machines; prompts and repo names; presence and telemetry metadata —
 each machine's pressure, sessions per exclave and quota (the `status` beat), the
 hourly history in `metrics.sqlite` kept forever, account ids, skill names and
-repo origins, sealed in transit and plaintext at rest on the machine. The bearer
+repo origins, sealed in transit and plaintext at rest on the machine. Since M3,
+prompts and repo names also sit at rest in the relay's Durable Object, sealed in
+each `task:` record. No clock bounds that: a record stays until the leader
+deletes it, which for a finished task means pruning down to `keepFinished` (50)
+once the store holds `pruneAt` (96) records, and never for an unfinished one. A
+deleted record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS`
+(30 days) but no envelope. The bearer
 token is not an asset in the same sense — see its blast radius above.
 
 **Séance's own footprint.** The daemon is structurally a remote access tool and
@@ -1188,7 +1198,9 @@ together (re-sends registry data on every poll, useless offline).
 The scheduler (docs/scheduler.md is the plan; this section takes over each part as it lands) runs
 on one daemon at a time, the one the relay nominates. Nothing else about that daemon changes: it
 is an ordinary daemon with extra legs. M2 — routing, leadership and the PWA's `auto` — is complete
-(2026-10-16); what it leaves for M3 and M4 is docs/scheduler.md's M2 "Gaps".
+(2026-10-16), and so is M3 — the durable queue in the relay's store, deps, batches, caps, pause and
+the PWA's Queue screen (2026-10-18); what they leave for M4 is docs/scheduler.md's M2 and M3
+"Gaps".
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 
@@ -1691,7 +1703,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `(u/(1-u))²` at projected usage, worst window (5h, 7d, each per-model weekly),
   multiplied by the share of the window still to run; `machinePressure` is
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
-  0.5 from `TaskSpec.base` (absent until M3's deps fill it); `queuePressure` the
+  0.5 from `TaskSpec.base` (absent until M4's stacking fills it); `queuePressure` the
   in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
   `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
@@ -1982,7 +1994,7 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   `lostExpiryMs` ago (`absentSince`, else `createdAt`) fails `lost_expired`; an `awaiting-merge`
   one more than `mergeExpiryMs` past `endedAt` (else `createdAt`) fails `merge_expired`. Both
   are 7 days (docs/scheduler.md, Settled defaults 14 and 15), the owner's decision. Why: neither
-  is ever pruned, both count toward M2's `MAX_ACTIVE_TASKS` (every unfinished task does) and
+  is ever pruned, both count toward the store's `MAX_TASKS` (pruning frees only finished tasks) and
   both outlive every term, so a machine that never returns would pin queue room for good. Where:
   `#expire`, in the pass after the `sessions` checks, so a machine back in time settles its task
   first, and before admission, so dependents fail `dependency_failed` in the same pass, for

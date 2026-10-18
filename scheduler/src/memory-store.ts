@@ -34,9 +34,9 @@ export interface MemoryQueueStoreOptions {
  * `expect: 0` creates, every put increments, a mismatch is `version_conflict`,
  * a create past `maxTasks` is `store_full`, a delete leaves a tombstone that
  * refuses any put for `tombstoneMs`, and a
- * body that does not name its record's version reads `version_mismatch`. M2's
- * leader runs on this — its queue is in memory until M3's store lands — and the
- * suite tests on it, through the fault hooks below for what only a real store
+ * body that does not name its record's version reads `version_mismatch`. The
+ * leader runs on the relay's store (`daemon/src/queue-store.ts`); the suite
+ * tests on this, through the fault hooks below for what only a real store
  * or an attacker would do.
  */
 export class MemoryQueueStore implements QueueStore {
