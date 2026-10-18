@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { METRIC_NAMES, type ExclaveInfo, type Machine, type MetricsSeries } from "@seance/shared";
+import {
+  METRIC_NAMES,
+  type ExclaveInfo,
+  type Machine,
+  type MetricsSeries,
+  type SchedulerAvailability,
+} from "@seance/shared";
 import { accountSeries, chartLines } from "../src/chart.ts";
 import { deriveMachines } from "../src/machines-view.ts";
 
 const NOW = 1_800_000_000_000;
 const S = NOW / 1000;
 const ACCOUNT = "org-1:acct-aaaaaaaa-1111";
+const NO_LEADER: SchedulerAvailability = { kind: "none" };
 
 function exclave(id: string, accountId: string | null): ExclaveInfo {
   return { id, accountId, extraUsageEnabled: null, authOk: accountId !== null, skills: [] };
@@ -29,7 +36,7 @@ function machine(overrides: Partial<Machine> = {}): Machine {
 describe("deriveMachines", () => {
   test("a daemon that predates exclaves still renders, marked as such", () => {
     const { exclaves: _, ...old } = machine();
-    const [card] = deriveMachines([old], NOW).cards;
+    const [card] = deriveMachines([old], NOW, NO_LEADER).cards;
     expect(card?.name).toBe("mac");
     expect(card?.note).toContain("predates exclaves");
     expect(card?.exclaves).toEqual([]);
@@ -38,7 +45,7 @@ describe("deriveMachines", () => {
   // Disk is in the status for the scheduler's free-space floor, never on the card.
   test("pressure renders from the status alone, indexed sessions land on their exclave", () => {
     const status = { at: S - 10, scan: 1, cpu: 95, mem: 80, disk: 99, free: 10, sess: [2] };
-    const [card] = deriveMachines([machine({ status })], NOW).cards;
+    const [card] = deriveMachines([machine({ status })], NOW, NO_LEADER).cards;
     expect(card?.gauges.map((gauge) => [gauge.label, gauge.level])).toEqual([
       ["CPU", "err"],
       ["Memory", "warn"],
@@ -61,6 +68,7 @@ describe("deriveMachines", () => {
     const { cards, accounts } = deriveMachines(
       [machine({ connected: false, lastSeen: NOW - 17 * 60_000, status })],
       NOW,
+      NO_LEADER,
     );
     expect(cards[0]?.meta).toStartWith("asleep · last seen");
     expect(cards[0]?.gauges).toEqual([]);
@@ -82,7 +90,7 @@ describe("deriveMachines", () => {
       exclaves: [exclave("work", ACCOUNT)],
       status: { at: S, scan: 1, quota: [{ x: 0, h: 50, s: "cache", at: S - 60 }] },
     });
-    const { accounts } = deriveMachines([older, newer], NOW);
+    const { accounts } = deriveMachines([older, newer], NOW, NO_LEADER);
     expect(accounts).toHaveLength(1);
     expect(accounts[0]?.title).toBe("default · work");
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([50]);
@@ -103,7 +111,7 @@ describe("deriveMachines", () => {
       name: "c",
       exclaves: [{ ...exclave("default", ACCOUNT), email: "me@example.com" }],
     });
-    const { cards, accounts } = deriveMachines([first, old, named], NOW);
+    const { cards, accounts } = deriveMachines([first, old, named], NOW, NO_LEADER);
     expect(accounts.map((account) => account.detail)).toEqual(["me@example.com · on a, b, c", "acct acct-bbb · on a"]);
     expect(cards[2]?.exclaves[0]?.account).toBe("me@example.com");
     expect(cards[0]?.exclaves[0]?.account).toBe("acct acct-aaa");
@@ -122,7 +130,7 @@ describe("deriveMachines", () => {
         w: [{ m: "Fable", p: 27, r: S - 1 }],
       },
     ];
-    const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW).accounts;
+    const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
     expect(account?.bars.map((bar) => [bar.label, bar.pct, bar.level, bar.resets])).toEqual([
       ["5h", 0, "ok", "reset"],
       ["7d", 43, "ok", "resets in 5d"],
@@ -142,10 +150,47 @@ describe("deriveMachines", () => {
     });
     const serving = machine({ deviceId: "a", status: quota(S - 600) });
     const old = machine({ deviceId: "b", capabilities: [], status: quota(S - 60) });
-    expect(deriveMachines([serving, old], NOW).accounts[0]?.historyFrom).toBe("a");
+    expect(deriveMachines([serving, old], NOW, NO_LEADER).accounts[0]?.historyFrom).toBe("a");
 
     const asleep = machine({ deviceId: "a", connected: false });
-    expect(deriveMachines([asleep, old], NOW).accounts[0]?.historyFrom).toBeNull();
+    expect(deriveMachines([asleep, old], NOW, NO_LEADER).accounts[0]?.historyFrom).toBeNull();
+  });
+
+  // An unverified nominee is never drawn as the leader (DESIGN.md, Leadership).
+  test("the leader is named and badged only once verified; an unverified nominee is named as such", () => {
+    const fleet = [machine({ deviceId: "a", name: "mac" }), machine({ deviceId: "b", name: "box" })];
+    const ready = deriveMachines(fleet, NOW, { kind: "ready", deviceId: "b", term: 4 });
+    expect(ready.scheduler).toBe("Scheduler: box leads (term 4).");
+    expect(ready.cards.map((card) => card.role)).toEqual([null, "leader"]);
+
+    const unverified = deriveMachines(fleet, NOW, { kind: "unverified", deviceId: "b", term: 4 });
+    expect(unverified.scheduler).toStartWith("Scheduler nominee box is unverified");
+    expect(unverified.cards.map((card) => card.role)).toEqual([null, "unverified"]);
+    // Its entry did not open: only the id can say which seed it is.
+    const unlisted = deriveMachines(fleet, NOW, { kind: "unverified", deviceId: "zzzzzzzzzzzz", term: 4 });
+    expect(unlisted.scheduler).toStartWith("Scheduler nominee device zzzzzzzz is unverified");
+    expect(unlisted.cards.map((card) => card.role)).toEqual([null, null]);
+
+    const none = deriveMachines(fleet, NOW, NO_LEADER);
+    expect(none.scheduler).toStartWith("No scheduler is leading");
+    expect(none.cards.map((card) => card.role)).toEqual([null, null]);
+  });
+
+  test("a card shows the build its daemon runs, and a note only when its last self-update left it behind", () => {
+    const source = { sha: "0123456789abcdef0123456789abcdef01234567", commitTs: NOW - 3 * 86_400_000, branch: "main" };
+    const behind = machine({ source, lastUpdate: { at: NOW - 2 * 3_600_000, outcome: "skipped_dirty" } });
+    const [card] = deriveMachines([behind], NOW, NO_LEADER).cards;
+    expect(card?.build).toBe("0123456789ab · committed 3d ago · main");
+    expect(card?.updateNote).toBe("Last self-update (2h ago) skipped: the checkout has local changes.");
+
+    const detached = machine({ source: { ...source, branch: null }, lastUpdate: { at: NOW, outcome: "ok" } });
+    const [fine] = deriveMachines([detached], NOW, NO_LEADER).cards;
+    expect(fine?.build).toEndWith("· detached");
+    expect(fine?.updateNote).toBeNull();
+
+    const [old] = deriveMachines([machine()], NOW, NO_LEADER).cards;
+    expect(old?.build).toBeNull();
+    expect(old?.updateNote).toBeNull();
   });
 });
 

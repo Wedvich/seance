@@ -229,6 +229,15 @@ export type SchedulerAvailability =
 
 const NO_SCHEDULER: SchedulerAvailability = { kind: "none" };
 
+/** Where one machine stands with the scheduler, for display: only a `ready` nominee is ever shown as leading. */
+export type SchedulerRole = "leader" | "unverified";
+
+/** Null for every machine but the relay's nominee. */
+export function schedulerRole(deviceId: string, scheduler: SchedulerAvailability): SchedulerRole | null {
+  if (scheduler.kind === "none" || scheduler.deviceId !== deviceId) return null;
+  return scheduler.kind === "ready" ? "leader" : "unverified";
+}
+
 export interface RelayState {
   readonly status: RelayStatus;
   /** Set only for a permanent close; the client stops reconnecting. */

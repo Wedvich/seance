@@ -54,6 +54,7 @@ export function MachinesScreen(props: {
       </header>
 
       <div className="fleet">
+        <p className="fleet-scheduler">{view.scheduler}</p>
         {/* Unsettled, an empty list means "no push yet", not "no machines" — the store's rule too. */}
         {view.cards.length === 0 && (
           <p className="fleet-empty">{settled ? "No machines to show." : "Waiting for the relay…"}</p>
@@ -99,8 +100,16 @@ function MachineCardView(props: {
       <div className="fleet-card-head">
         <span className={card.connected ? "dot dot-ok" : "dot"} aria-hidden="true" />
         <div className="fleet-card-title">
-          <h2 className="fleet-name">{card.name}</h2>
+          <div className="fleet-name-row">
+            <h2 className="fleet-name">{card.name}</h2>
+            {card.role !== null && (
+              <span className={card.role === "leader" ? "fleet-badge" : "fleet-badge fleet-badge-unverified"}>
+                {card.role === "leader" ? "SCHEDULER" : "UNVERIFIED"}
+              </span>
+            )}
+          </div>
           <p className="fleet-meta">{card.meta}</p>
+          {card.build !== null && <p className="fleet-meta">{card.build}</p>}
         </div>
         <HistoryToggle
           available={card.charts}
@@ -119,6 +128,7 @@ function MachineCardView(props: {
       )}
 
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
+      {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
 
       {card.exclaves.length > 0 && (
         <ul className="exclaves">

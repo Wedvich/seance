@@ -139,8 +139,12 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(status.mem).toBeLessThanOrEqual(100);
       expect(status.sess?.length).toBeGreaterThan(0);
       // The machines screen renders pressure and the exclave rows from that push alone.
-      const card = deriveMachines(state.relay.machines, Date.now()).cards.find((c) => c.deviceId === stack.deviceId);
+      const card = deriveMachines(state.relay.machines, Date.now(), state.relay.scheduler).cards.find(
+        (c) => c.deviceId === stack.deviceId,
+      );
       expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");
+      // The daemon runs from this checkout, so its register blob names the build.
+      expect(card?.build).toMatch(/^[0-9a-f]{12} · committed /u);
       expect(card?.exclaves.map((row) => row.id)).toContain("default");
     } finally {
       app.stop();
@@ -176,7 +180,7 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(machine.status?.quota).toBeDefined();
       expect(liveStatus(machine)).toBeUndefined();
       expect(newestQuotaByAccount(asleep.relay.machines).get(E2E_ACCOUNT_ID)?.deviceId).toBe(stack.deviceId);
-      const view = deriveMachines(asleep.relay.machines, Date.now());
+      const view = deriveMachines(asleep.relay.machines, Date.now(), asleep.relay.scheduler);
       expect(view.cards.find((c) => c.deviceId === stack.deviceId)?.gauges).toEqual([]);
       const account = view.accounts.find((a) => a.accountId === E2E_ACCOUNT_ID);
       expect(account?.observed).toEndWith("on TestMac, asleep");
@@ -659,7 +663,7 @@ describe("two daemons ↔ relay ↔ app", () => {
       }
       expect(ownMachine(state, second.deviceId)?.exclaves?.map((exclave) => exclave.id)).toEqual(["default", "work"]);
 
-      const view = deriveMachines(state.relay.machines, Date.now());
+      const view = deriveMachines(state.relay.machines, Date.now(), state.relay.scheduler);
       for (const id of ids) {
         const card = view.cards.find((c) => c.deviceId === id);
         expect(card?.gauges.map((gauge) => gauge.label)).toContain("Memory");

@@ -12,6 +12,7 @@ import {
   QUEUE_MAX_TASKS,
   schedulerErrorText,
   schedulerRefusal,
+  schedulerRole,
   storeErrorText,
   taskFailureText,
   TASK_FAILURE_LIMITS,
@@ -124,23 +125,13 @@ interface ToolResult {
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
-/**
- * `"leader"` only for a nominee whose lead proof opened — an app believes a
- * nominee on nothing less (DESIGN.md, Leadership); `"unverified"` names one
- * the relay nominated that has not shown it holds the key. Null: no view of
- * the scheduler at all (the broker path).
- */
-function schedulerRole(machine: Machine, scheduler: SchedulerAvailability | null): "leader" | "unverified" | null {
-  if (scheduler === null || scheduler.kind === "none" || scheduler.deviceId !== machine.deviceId) return null;
-  return scheduler.kind === "ready" ? "leader" : "unverified";
-}
-
 function describeMachine(
   machine: Machine,
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
 ): Record<string, unknown> {
-  const role = schedulerRole(machine, scheduler);
+  // Null when this transport has no view of the scheduler at all (the broker path).
+  const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
   const { source, lastUpdate } = machine;
   return {
     name: machine.name,
