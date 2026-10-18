@@ -553,10 +553,10 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * Request ops an app sends `to: SCHEDULER_ID`, answered by the leader rather
  * than by a daemon's handlers (DESIGN.md, Scheduler, "The leader"). Only from
  * `APP_ID`: anything else sent the scheduler is an event, never a request.
- * The leader answers all five. Enqueue is not among them — an app
+ * The leader answers every one. Enqueue is not among them — an app
  * `store-put`s the task itself.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview", "cancel", "mark-done", "pause", "resume"] as const;
+export const SCHEDULER_OPS = ["queue", "route-preview", "cancel", "mark-done", "pause", "resume", "discard"] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -579,6 +579,7 @@ export const OP_TIMEOUT_MS = {
   "mark-done": 10_000,
   pause: 10_000,
   resume: 10_000,
+  discard: 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -982,6 +983,13 @@ export const SPAWN_CLIENTS = ["pwa", "mcp", "raycast"] as const;
 
 export type SpawnClient = (typeof SPAWN_CLIENTS)[number];
 
+/**
+ * The `client` every scheduler spawn and despawn carries: it audits as
+ * `origin=relay client=scheduler` on another machine, `origin=leader` on the
+ * leader's own, and it is what `task_launched` refuses on.
+ */
+export const SCHEDULER_CLIENT = "scheduler";
+
 export interface SpawnRequest {
   readonly repo: string;
   readonly mode: SpawnMode;
@@ -1025,6 +1033,14 @@ export const SPAWN_ERROR_CODES = [
   "repo_not_found",
   /** A session already carries the request's `taskId`; the reply's `id` names it. */
   "task_running",
+  /**
+   * A scheduler spawn (`client: SCHEDULER_CLIENT`) whose `taskId` this machine's
+   * launch ledger holds as launched, with no session carrying it: the task ran
+   * here once, and a leader re-dispatches one only on the ledger's proof that it
+   * never landed — so this is a replay, a relay serving an old record (DESIGN.md,
+   * threat model). Audited; nothing runs.
+   */
+  "task_launched",
   "fetch_failed",
   "no_default_branch",
   "launch_error",
@@ -1367,6 +1383,7 @@ export interface LinearLink {
  * held at once has more members, and inclusive admits 1-based numbering.
  */
 export const TASK_SPEC_LIMITS = {
+  client: 64,
   deps: 16,
   parallel: 16,
   linearIssue: 64,
@@ -1386,6 +1403,12 @@ export interface TaskSpec extends TaskRequest {
   /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */
   readonly deps?: readonly TaskDep[];
   readonly linear?: LinearLink;
+  /**
+   * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
+   * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
+   * from older clients.
+   */
+  readonly client?: string;
 }
 
 /**
@@ -1621,9 +1644,12 @@ export interface TaskRecord extends VersionBound {
  * `op` was not the slot's (`openAtRest`) or it was not sealed to SCHEDULER_ID
  * (`openTaskRecord`); `malformed`, its body failed the parser; `key_mismatch`
  * also covers a listing key outside `task:` or listed twice
- * (`openTaskListing`); the rest are `bindTaskRecord`'s rules. A reader skips
- * and reports such a record and never deletes it on its own: after a PSK rotation every
- * record is `unopenable`, and deleting them would wipe the queue.
+ * (`openTaskListing`); `version_regressed` is the leader's alone, a record
+ * at a version below the highest it has seen at that key — an authentic old
+ * blob a relay put back; the rest are `bindTaskRecord`'s rules.
+ * A reader skips and reports such a record and never deletes it on its own:
+ * after a PSK rotation every record is `unopenable`, and deleting them would
+ * wipe the queue. A person may (`discard`).
  */
 export const RECORD_UNREADABLE_REASONS = [
   "unopenable",
@@ -1632,6 +1658,7 @@ export const RECORD_UNREADABLE_REASONS = [
   "key_mismatch",
   "created_unqueued",
   "created_ahead",
+  "version_regressed",
 ] as const;
 
 export type RecordUnreadable = (typeof RECORD_UNREADABLE_REASONS)[number];
@@ -1712,7 +1739,7 @@ export const SCHEDULER_ERROR_CODES = [
   "not_leader",
   "not_ready",
   "invalid_request",
-  /** `cancel`, `mark-done`: the leader holds no task by that id. */
+  /** `cancel`, `mark-done`: the leader holds no task by that id. `discard`: no unreadable record by that id. */
   "task_not_found",
   /** `cancel`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
   "dispatching",
@@ -1720,7 +1747,11 @@ export const SCHEDULER_ERROR_CODES = [
   "finished",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
-  /** `cancel`, `mark-done`, `pause`, `resume`: the record changed under the request (a lost store race); ask again. */
+  /**
+   * `cancel`, `mark-done`, `pause`, `resume`: the record changed under the
+   * request (a lost store race); ask again. `discard`: the unreadable record is
+   * at another version than the one asked for — re-read the queue first.
+   */
   "conflict",
   /** `pause` with `until: "reset"`: no quota reading says when that account resets. */
   "reset_unknown",
@@ -1762,6 +1793,39 @@ export interface QueueResponse {
   readonly at: number;
   /** What holds dispatch now (M3). Absent from M2's leaders, which have no pause. */
   readonly holds?: readonly PauseHold[];
+  /**
+   * Every `task:` record the leader cannot read, at most `MAX_TASKS`, whatever
+   * `QueueRequest.tasks` asked for: what fills the store without ever running,
+   * and what `discard` takes. Absent from older leaders, and when there are none.
+   */
+  readonly unreadable?: readonly UnreadableTaskRef[];
+}
+
+/** A `task:` record the leader holds as unreadable: its id, the relay's version, and why. */
+export interface UnreadableTaskRef {
+  readonly taskId: string;
+  readonly version: number;
+  /**
+   * A `RecordUnreadable` from a leader of this build; raw as read, as
+   * `SchedulerError.code` is, so a reason minted later still lists the record.
+   */
+  readonly reason: string;
+}
+
+/**
+ * `op: "discard"`: delete one record the leader holds as unreadable, at the
+ * version a `queue` reply listed it under — never a readable task, and never
+ * one that changed since. The person's remedy for junk and for records sealed
+ * under an old PSK, which no reader deletes on its own (`RECORD_UNREADABLE_REASONS`).
+ */
+export interface DiscardRequest {
+  readonly taskId: string;
+  readonly version: number;
+}
+
+/** `discard` → the record's id, deleted. */
+export interface DiscardResponse {
+  readonly taskId: string;
 }
 
 /** `op: "cancel"` and `op: "mark-done"`: the task, by id. */
@@ -1817,3 +1881,4 @@ export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
 export type TaskReply = TaskResponse | SchedulerError;
 export type PauseReply = PauseResponse | SchedulerError;
+export type DiscardReply = DiscardResponse | SchedulerError;

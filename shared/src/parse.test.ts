@@ -8,6 +8,8 @@ import {
   isTerm,
   parseBranchState,
   parseDecision,
+  parseDiscardReply,
+  parseDiscardRequest,
   parseExclaveList,
   parseMachineInfo,
   parseMachineStatus,
@@ -398,6 +400,7 @@ describe("parseTaskSpec", () => {
       { task: "t-2", after: "merged" },
     ],
     linear: { issue: "ENG-123", url: "https://linear.app/acme/issue/ENG-123" },
+    client: "pwa",
   };
 
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
@@ -426,6 +429,9 @@ describe("parseTaskSpec", () => {
       { ...full, linear: { issue: "" } },
       { ...full, linear: { issue: "ENG-1", url: "http://linear.app/x" } },
       { ...full, repo: "" },
+      { ...full, client: "" },
+      { ...full, client: "c".repeat(TASK_SPEC_LIMITS.client + 1) },
+      { ...full, client: 7 },
     ]) {
       expect(parseTaskSpec(bad)).toBeNull();
     }
@@ -622,6 +628,47 @@ describe("scheduler ops", () => {
     expect(parseQueueRequest([])).toBeNull();
   });
 
+  test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
+    const junk = { taskId: "t-9", version: 3, reason: "unopenable" };
+    const later = { taskId: "t-8", version: 1, reason: "sealed_elsewhere" };
+    expect(parseQueueReply({ tasks: [], at: 5, unreadable: [junk, later] })).toEqual({
+      tasks: [],
+      at: 5,
+      unreadable: [junk, later],
+    });
+    for (const bad of [
+      { ...junk, taskId: "t:9" },
+      { ...junk, version: 0 },
+      { ...junk, reason: "" },
+      { ...junk, reason: "r".repeat(TASK_FAILURE_LIMITS.code + 1) },
+    ]) {
+      expect(parseQueueReply({ tasks: [], at: 5, unreadable: [junk, bad] })?.unreadable).toEqual([junk]);
+    }
+    expect(parseQueueReply({ tasks: [], at: 5, unreadable: [{ ...junk, version: 0 }] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, unreadable: junk })).toBeNull();
+    expect(
+      parseQueueReply({ tasks: [], at: 5, unreadable: Array.from({ length: MAX_TASKS }, () => junk) }),
+    ).not.toBeNull();
+    expect(
+      parseQueueReply({ tasks: [], at: 5, unreadable: Array.from({ length: MAX_TASKS + 1 }, () => junk) }),
+    ).toBeNull();
+  });
+
+  test("discard names one record at one version and carries nothing else on; its reply is the id, or a refusal", () => {
+    expect(parseDiscardRequest({ taskId: "t-1", version: 4, reason: "unopenable" })).toEqual({
+      taskId: "t-1",
+      version: 4,
+    });
+    expect(parseDiscardRequest({ taskId: "t-1" })).toBeNull();
+    expect(parseDiscardRequest({ taskId: "t-1", version: 0 })).toBeNull();
+    expect(parseDiscardRequest({ taskId: "t-1", version: 1.5 })).toBeNull();
+    expect(parseDiscardRequest({ taskId: "task:t-1", version: 1 })).toBeNull();
+    expect(parseDiscardReply({ taskId: "t-1" })).toEqual({ taskId: "t-1" });
+    const refusal: SchedulerError = { ok: false, code: "conflict", message: "changed" };
+    expect(parseDiscardReply(refusal)).toEqual(refusal);
+    expect(parseDiscardReply({})).toBeNull();
+  });
+
   test("a queue reply holds at most QUEUE_MAX_TASKS", () => {
     const many = (n: number) => ({ tasks: Array.from({ length: n }, () => task), at: 5 });
     expect(parseQueueReply(many(QUEUE_MAX_TASKS))).not.toBeNull();
@@ -693,6 +740,7 @@ describe("store", () => {
         issue: "E".repeat(TASK_SPEC_LIMITS.linearIssue),
         url: `https://linear.app/acme/issue/${"s".repeat(80)}`,
       },
+      client: "ø".repeat(TASK_SPEC_LIMITS.client),
     },
   };
   const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };
