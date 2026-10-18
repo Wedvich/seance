@@ -314,46 +314,92 @@ describe("a finished task keeps no prompt", () => {
     expect((await read(store, "t")).version).toBe(4);
   });
 
-  test("a sweep strips at most eight records a pass, oldest first, and never delays a dispatch", async () => {
-    const { store, fleet, scheduler } = setup();
+  test("a sweep strips at most eight records a pass, the oldest by createdAt first", async () => {
+    const { store, scheduler } = setup();
+    // createdAt runs against both the id order and the order the records go in: d00 is the newest, d19 the oldest.
     const ids = Array.from({ length: 20 }, (_, i) => `d${String(i).padStart(2, "0")}`);
     for (const [i, id] of ids.entries()) {
       // oxlint-disable-next-line no-await-in-loop -- one record each
-      await seed(store, queued(id, { state: "done", doneBy: "session", createdAt: NOW - 100_000 + i }));
+      await seed(store, queued(id, { state: "done", doneBy: "session", createdAt: NOW - 100_000 - i }));
     }
-    await store.put("r", 0, queued("r", { createdAt: NOW }));
     await scheduler.takeover();
 
-    async function versions(): Promise<number[]> {
-      return Promise.all(ids.map(async (id) => (await read(store, id)).version));
+    async function stripped(): Promise<string[]> {
+      const held = await Promise.all(ids.map(async (id) => [id, (await read(store, id)).version] as const));
+      return held.filter(([, version]) => version === 2).map(([id]) => id);
     }
     await pass(scheduler);
-    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["r"]);
-    expect(await versions()).toEqual(ids.map((_, i) => (i < 8 ? 2 : 1)));
+    expect(await stripped()).toEqual(ids.slice(12));
 
     await pass(scheduler);
     await pass(scheduler);
-    expect(await versions()).toEqual(ids.map(() => 2));
+    expect(await stripped()).toEqual(ids);
     for (const id of ids) expect((await read(store, id)).body.spec.prompt).toBeUndefined();
   });
 
-  test("a refused cleanup write is reported, not fatal, and the next pass strips the record", async () => {
+  test("a sweep leaves a ready task dispatched in the same tick", async () => {
+    const { store, fleet, scheduler } = setup();
+    for (let i = 0; i < 20; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one record each
+      await seed(store, queued(`d${i}`, { state: "done", doneBy: "session", createdAt: NOW - 100_000 + i }));
+    }
+    await store.put("r", 0, queued("r", { createdAt: NOW }));
+    await scheduler.takeover();
+    await pass(scheduler);
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["r"]);
+  });
+
+  test("a refused cleanup write is reported without the prompt, and not retried in the term", async () => {
     const { store, scheduler, errors } = setup();
-    await seed(store, queued("t", { state: "done", doneBy: "session" }), 3);
+    await seed(store, queued("bad", { state: "done", doneBy: "session", createdAt: NOW - 3 }), 3);
+    for (const id of ["a", "b"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one record each
+      await seed(store, queued(id, { state: "done", doneBy: "session", createdAt: NOW - 2 }), 3);
+    }
     await scheduler.takeover();
     store.failNext({ code: "refused" });
     await pass(scheduler);
     expect(errors).toHaveLength(1);
     expect(String(errors[0])).toContain("refused");
     expect(String(errors[0])).not.toContain("do it");
-    const refused = await read(store, "t");
+    const refused = await read(store, "bad");
     expect(refused.version).toBe(3);
     expect(refused.body.spec.prompt).toBe("do it");
+    // The records after it went through in the same pass.
+    for (const id of ["a", "b"]) expect((await read(store, id)).body.spec.prompt).toBeUndefined();
 
+    // A record the store keeps refusing is not selected again: no write, no second report.
+    store.failNext({ code: "refused" });
     await pass(scheduler);
-    const stripped = await read(store, "t");
-    expect(stripped.version).toBe(4);
-    expect(stripped.body.spec.prompt).toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect((await read(store, "bad")).version).toBe(3);
+    await pass(scheduler);
+    expect((await read(store, "bad")).version).toBe(3);
+  });
+
+  test("a refused cleanup write does not take the slots of the others, and a new term tries it again", async () => {
+    const { store, scheduler, errors } = setup();
+    await seed(store, queued("bad", { state: "done", doneBy: "session", createdAt: NOW - 100 }), 3);
+    const ids = Array.from({ length: 9 }, (_, i) => `d${i}`);
+    for (const [i, id] of ids.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- one record each
+      await seed(store, queued(id, { state: "done", doneBy: "session", createdAt: NOW - 50 + i }));
+    }
+    await scheduler.takeover();
+    store.failNext({ code: "refused" });
+    await pass(scheduler);
+    expect(errors).toHaveLength(1);
+    // "bad" was first and took a slot; the next pass skips it, so all of the remaining records go in two.
+    await pass(scheduler);
+    for (const id of ids) expect((await read(store, id)).body.spec.prompt).toBeUndefined();
+    expect((await read(store, "bad")).body.spec.prompt).toBe("do it");
+
+    await scheduler.takeover();
+    await pass(scheduler);
+    const retried = await read(store, "bad");
+    expect(retried.version).toBe(4);
+    expect(retried.body.spec.prompt).toBeUndefined();
+    expect(errors).toHaveLength(1);
   });
 
   test("a revoked term ends the sweep and leaves the record as it was", async () => {

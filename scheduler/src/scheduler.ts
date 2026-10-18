@@ -143,6 +143,12 @@ export class Scheduler {
    * to no one, and `progress` holds it.
    */
   #returned = new Set<string>();
+  /**
+   * Finished records whose prompt-stripping write did not land this term: a
+   * refusal repeats, so retrying would take a slot of every pass and log every
+   * time. Cleared on takeover.
+   */
+  readonly #forgetFailed = new Set<string>();
   /** Task id → the tail of its writes (`#serial`). */
   readonly #chains = new Map<string, Promise<void>>();
   /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
@@ -250,6 +256,7 @@ export class Scheduler {
   async takeover(): Promise<void> {
     await this.load();
     this.#sweptAt = this.#now();
+    this.#forgetFailed.clear();
     await this.#check(
       this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
     );
@@ -562,18 +569,20 @@ export class Scheduler {
    * older leader, still hold one: rewrite them without it, oldest first and at
    * most `FORGET_PROMPTS_PER_PASS` per pass, each its own fenced CAS'd put.
    * `#update` strips at the boundary, so handing back `current` is enough. A
-   * refused write is reported by `#update` and the record keeps its prompt
-   * until a later pass selects it again. `StoreRevoked` propagates: the term is
-   * over. Not in `takeover`: a throw there fails the takeover and blocks the term.
+   * write that did not land is reported by `#update`, and the record keeps its
+   * prompt and is skipped until the next term (`#forgetFailed`). `StoreRevoked`
+   * propagates: the term is over. Not in `takeover`: a throw there fails the
+   * takeover and blocks the term.
    */
   async #forgetPrompts(): Promise<void> {
     const stale = this.tasks()
-      .filter((t) => forgetPrompt(t) !== t)
+      .filter((t) => forgetPrompt(t) !== t && !this.#forgetFailed.has(t.id))
       .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id))
       .slice(0, FORGET_PROMPTS_PER_PASS);
     for (const task of stale) {
       // oxlint-disable-next-line no-await-in-loop -- one CAS'd write at a time, as `prune` does
-      await this.#update(task.id, (current) => (forgetPrompt(current) === current ? null : current));
+      const written = await this.#update(task.id, (current) => (forgetPrompt(current) === current ? null : current));
+      if (written === null) this.#forgetFailed.add(task.id);
     }
   }
 

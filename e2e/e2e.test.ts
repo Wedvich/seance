@@ -1281,7 +1281,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         "the enqueued task to run",
         20_000,
       );
-      window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
+      const running = (await stack.queue().get(id))?.body;
+      window = running?.assignment?.window ?? null;
+      expect(running?.spec.prompt).toBe("mark me done");
 
       const marked = await app.client.markDone(id);
       expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });

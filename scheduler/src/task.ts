@@ -55,9 +55,10 @@ export const IN_FLIGHT: readonly TaskState[] = ["reserved", "running", "needs-in
 export const FINISHED: readonly TaskState[] = statesIn("finished");
 
 /**
- * A finished task keeps no prompt: nothing left reads it, and the transcript on
- * the machine that ran it has it (DESIGN.md, Threat model, "Assets"). Returns
- * `task` itself when there is nothing to drop, so callers can tell.
+ * A finished task keeps no prompt: nothing left reads it. The transcript on
+ * the machine is the copy from when the task ran; one that never ran has none
+ * (DESIGN.md, Threat model, "Assets"). Returns `task` itself when there is
+ * nothing to drop, so callers can tell.
  */
 export function forgetPrompt(task: Task): Task {
   if (!FINISHED.includes(task.state) || task.spec.prompt === undefined) return task;

@@ -690,8 +690,10 @@ same PR, with the reason.
     it needs mark-done before then.
 16. **A finished task keeps no prompt** (owner, 2026-10-18). The leader drops it on the write
     that finishes the task (`forgetPrompt` in `#update`), and strips finished records that still
-    hold one in its next passes (`#forgetPrompts`, 8 a pass). The transcript on the machine that
-    ran the task is the copy kept; slugs derived from it (window, branch) stay as labels
+    hold one in its next passes (`#forgetPrompts`, 8 a pass). Nothing keeps a finished
+    prompt: the transcript on the machine is the copy from when the task ran, and a task that
+    never ran (cancelled or marked done while waiting, expired, a failed dependency, a spawn
+    refused before launch) has none. Slugs derived from it (window, branch) stay as labels
     (DESIGN.md, Scheduler, "The library").
 
 ## Risks / unknowns

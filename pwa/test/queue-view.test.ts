@@ -140,7 +140,7 @@ describe("deriveQueue", () => {
     }
   });
 
-  test("a row's title is the task's, else its prompt's first line cut to 80, else its window, else its repo", () => {
+  test("a row's title is the task's, else its prompt's first line cut to 80, else its window (unless it is the daemon's `session` fallback), else its repo", () => {
     const rows = deriveQueue(
       state(
         ok([
@@ -150,6 +150,9 @@ describe("deriveQueue", () => {
           task("d"),
           task("e", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "fix-the-flaky-test" } }),
           task("f", { state: "cancelled" }),
+          task("g", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session" } }),
+          task("h", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session-12" } }),
+          task("i", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session-notes" } }),
         ]),
       ),
       NOW,
@@ -161,6 +164,9 @@ describe("deriveQueue", () => {
       ["d", "acme/app"],
       ["e", "fix-the-flaky-test"],
       ["f", "acme/app"],
+      ["g", "acme/app"],
+      ["h", "acme/app"],
+      ["i", "session-notes"],
     ]);
   });
 

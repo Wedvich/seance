@@ -636,7 +636,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (the session's transcript on its machine has it). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>

@@ -128,12 +128,16 @@ any finished record that still holds one, so a record finished earlier, or by an
 older leader, does not keep it. No clock bounds an unfinished task's prompt as a
 whole. `queued` is bounded by `queue_expired` (`STORE_TOMBSTONE_MS`), and `lost`
 and `awaiting-merge` by 7-day expiry (`lost_expired`, `merge_expired`). `ready`,
-`blocked`, `reserved`, `running` and `needs-input` have no clock: the prompt
+`blocked`, `running` and `needs-input` have no clock, and `reserved` only the
+reservation TTL, which returns it to `ready`, never finishes it: the prompt
 stays while the task waits, or while its session lives. What a finished record
-may still carry is the prompt's slug — the session window, branch and worktree
-names (at most 40 characters), and a `failure.message` that names one (`too many
-worktrees named <slug>-*`) — as labels, not the prompt. The prompt's record
-after finishing is the Claude transcript on the machine that ran it. A deleted
+may still carry is the prompt's slug (at most 40 characters) — the session
+window, branch and worktree names built from it (`<slug>-<n>`, `worktree-<slug>-<n>`),
+and a `failure.message` that names one (`too many worktrees named <slug>-*`) —
+as labels, not the prompt. A finished prompt is not kept anywhere by Séance:
+the Claude transcript on the machine is the copy from when the task ran, and a
+task that never ran (cancelled or marked done while waiting, `queue_expired`,
+`dependency_failed`, a spawn refused before launch) has no copy at all. A deleted
 record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days)
 but no envelope. Residual: Cloudflare's point-in-time recovery can restore an
 earlier store state for up to 30 days, so a stripped prompt stays recoverable
@@ -1985,13 +1989,15 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   finished before this, or by an older leader, are stripped by `#forgetPrompts` at the end of
   a pass: oldest first, at most 8 a pass (an uncapped sweep of up to `pruneAt` − 1 records would
   delay the next admission and dispatch, and nudge every app per write), sequential, one fenced
-  CAS'd put each; a refusal is reported through `onError` and the record is retried by a later pass,
+  CAS'd put each; a write that did not land is reported through `onError` and the record is left
+  alone for the rest of the term (`#forgetFailed`: a record the store refuses every time would
+  otherwise take a slot of every pass and log every time), tried again by the next leader,
   `StoreRevoked` ends the pass. It is not in `takeover`, where a throw would fail the takeover.
   Mixed versions are safe: `parseTaskRequest` has made `prompt` optional since M2 item 6, so every
   reader parses a finished record without one; an older leader still writes a finished record with its
   prompt, and the next leader on this build strips it. Apps cannot write a finished record
-  (`bindTaskRecord` refuses a version-1 record that is not `queued`, and `task:` is not
-  app-writable), and no transition leaves a finished state, so nothing re-adds one. The surfaces:
+  (`bindTaskRecord` refuses a version-1 record that is not `queued`; apps create `task:`
+  records, only overwrites and deletes are the leader's), and no transition leaves a finished state, so nothing re-adds one. The surfaces:
   the PWA titles a finished task with neither title nor prompt by its session's window name, else
   its repo; MCP `get_queue` lists it without a `prompt` key, `placement.window` still naming it.
   The slugs (`assignment.window`, `branch`) stay as labels; git and the launch ledger hold the
