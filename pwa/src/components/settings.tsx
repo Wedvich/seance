@@ -26,14 +26,12 @@ export function Settings(props: {
   relayLine: string;
   relayState: ConnectionState;
   connected: boolean;
-  /** The machines row's subtitle — the same counts the spawn screen's header shows. */
-  machinesLine: string;
+  /** A full-screen layer goes back; a centred modal closes from the far corner. */
+  closeStyle: "back" | "close";
   onDismiss: () => void;
   onReconnect: () => void;
-  /** Absent in the desktop layout, where the machines are already a column on screen. */
-  onOpenMachines?: () => void;
 }): JSX.Element {
-  const { relayLine, relayState, connected, machinesLine, onDismiss, onReconnect, onOpenMachines } = props;
+  const { relayLine, relayState, connected, closeStyle, onDismiss, onReconnect } = props;
   // Both secrets are known to exist: the app only mounts once they load.
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
@@ -72,9 +70,11 @@ export function Settings(props: {
     <>
       <header className="header">
         <div className="header-lead">
-          <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-            ‹
-          </button>
+          {closeStyle === "back" && (
+            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
+              ‹
+            </button>
+          )}
           <div>
             <h1 className="header-title">Settings</h1>
             <p className="header-meta header-status">
@@ -83,6 +83,13 @@ export function Settings(props: {
             </p>
           </div>
         </div>
+        {closeStyle === "close" && (
+          <button type="button" className="header-close" onClick={onDismiss} aria-label="Close">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+        )}
       </header>
 
       <form
@@ -93,20 +100,6 @@ export function Settings(props: {
           void submit();
         }}
       >
-        {/* First, above credentials: until the redesign this is the app's only
-            way to the machines screen, and it is visited far more often. */}
-        {onOpenMachines !== undefined && (
-          <button type="button" className="nav-card card" onClick={onOpenMachines}>
-            <span>
-              <span className="theme-title">Machines</span>
-              <span className="nav-card-meta">{machinesLine}</span>
-            </span>
-            <span className="nav-card-chevron" aria-hidden="true">
-              ›
-            </span>
-          </button>
-        )}
-
         <div className="setup-card card">
           <CredentialFields creds={creds} />
         </div>

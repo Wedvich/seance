@@ -339,10 +339,10 @@ what finished, with **Cancel** (ends a running session, so it takes a second tap
 **Resume** for the whole queue or one account. Picking a machine directly always
 works, with or without a scheduler.
 
-**Settings → Machines** shows every machine with its exclaves and accounts, current
-CPU and memory pressure, the newest quota reading per account, and history
-charts drawn from each daemon's own store — an asleep machine's history waits until
-it wakes.
+**Machines**, a column on desktop (not yet reachable on a phone), shows every
+machine with its exclaves and accounts, current CPU and memory pressure, the newest
+quota reading per account, and history charts drawn from each daemon's own store —
+an asleep machine's history waits until it wakes.
 
 <p align="center">
   <img src="docs/images/machine-sheet.png" width="260"
