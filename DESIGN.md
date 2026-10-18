@@ -1653,7 +1653,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   replies with the `QUEUE_MAX_TASKS` most relevant tasks, unfinished first (or the ids a `tasks` filter names), prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task), each with
   its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
   3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
-  against a plaintext budget (`QUEUE_REPLY_BUDGET`, 44 000 bytes, about 59 000 sealed against
+  against a plaintext budget (`REPLY_JSON_BUDGET`, 44 000 bytes, about 59 000 sealed against
   65 536): `ready` and `reserved` tasks first, whose decision says why they wait or where they are
   going, then the rest newest first. A decision past the budget goes out as `chosen` plus the
   winner's candidate alone, its cut added to `Decision.trimmed` — still "placed on X, and why",
@@ -1677,7 +1677,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `reset_unknown` (a reset hold on an account no reading gives a reset for), `conflict` (the
   record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS - 1` account holds. `queue`
   carries the holds in force (`QueueResponse.holds`, absent only from M2's leaders); they come
-  off `QUEUE_REPLY_BUDGET` before any task, since a reader refuses a reply whose holds do not
+  off `REPLY_JSON_BUDGET` before any task, since a reader refuses a reply whose holds do not
   parse — 32 at every bound still seal under the envelope. **All four are audited** (`queueAudit`
   in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
@@ -2487,7 +2487,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   PR URL, branch, pushed or merged, without paths or tips; an entry that would not pass
   `parseTaskProgressList` is left out, since one bad entry nulls the leader's whole list.
   `at` is the last change, never refreshed by an unchanged pass, so an idle branch costs no ledger
-  write per minute. The reply is held to 44 000 bytes of JSON (`SESSIONS_REPLY_BUDGET`, the queue
+  write per minute. The reply is held to 44 000 bytes of JSON (`REPLY_JSON_BUDGET`, the queue
   reply's 4/3 sealing headroom against the 64 KiB envelope), because a reply that seals past it
   becomes `too_large` and loses `ended` and `ledgerSince` too. Over it, entries are dropped and
   `progressTrimmed` says how many: merged ones first, oldest `at` first, then the rest by ascending
@@ -4459,7 +4459,10 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   reply carries: `ended` events (in memory, 30 min, capped at 128), and every task it
   launched, from a **launch ledger** (`daemon/src/launch-ledger.ts`, added 2026-10-16).
   The ledger is a small file in `stateDir()` (`launched.json`: task id and launch time,
-  never prompt text), written temp-fsync-rename **before** the spawn runs; a spawn whose
+  never prompt text), written temp-fsync-rename and its directory synced (`writeDurable`, since
+  2026-10-18: without that a power cut could bring back the file before the rename) **before**
+  the spawn runs. On macOS `fsync` stops at the drive's cache (`F_FULLFSYNC`, which Node does not
+  expose), so there it outlasts a crash, not every power cut. A spawn whose
   id cannot be recorded is refused `launch_error`, since launched unrecorded a lost reply
   could later read as proof it never ran. A spawn refused for any reason but
   `task_running` launched nothing and leaves the ledger again. A scheduler spawn

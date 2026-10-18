@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   BRANCH_MAX_LENGTH,
@@ -9,6 +9,7 @@ import {
   parseTaskProgressList,
   type TaskProgress,
 } from "@seance/shared";
+import { writeDurable } from "./durable-write.ts";
 import { log } from "./log.ts";
 import { stateDir } from "./paths.ts";
 
@@ -153,7 +154,6 @@ async function freshSince(path: string, now: () => number): Promise<number> {
   return Math.max(now(), dirMtime);
 }
 
-let tempSeq = 0;
 let warnedDropped = false;
 
 function warnProgressDropped(): void {
@@ -420,13 +420,13 @@ export class LaunchLedger {
     }
   }
 
-  /** Serialized, each write the whole ledger as it stands then; temp, fsync, rename. */
+  /** Serialized, each write the whole ledger as it stands then, durably (`writeDurable`). */
   #persist(): Promise<void> {
     const path = this.#path;
     if (path === null) return Promise.resolve();
     const run = this.#writing
       .catch(() => undefined)
-      .then(async () => {
+      .then(() => {
         // Only when there are notes, so an untouched ledger stays byte-identical to the old v1.
         const progress = [...this.#notes.values()];
         const file: LedgerFile = {
@@ -435,22 +435,10 @@ export class LaunchLedger {
           tasks: [...this.#tasks],
           ...(progress.length === 0 ? {} : { progress }),
         };
-        await mkdir(dirname(path), { recursive: true });
-        const temp = `${path}.${process.pid}.${tempSeq++}.tmp`;
-        try {
-          const handle = await open(temp, "w", LEDGER_MODE);
-          try {
-            await handle.writeFile(`${JSON.stringify(file)}\n`);
-            // Write-ahead means on disk before the launch, not in a page cache a power cut drops.
-            await handle.sync();
-          } finally {
-            await handle.close();
-          }
-          await rename(temp, path);
-        } catch (err) {
-          await unlink(temp).catch(() => {});
-          throw err;
-        }
+        // Write-ahead means on disk before the launch, the rename included: synced without its
+        // directory, a power cut can bring back the file before it, and `since` then "proves"
+        // the launch it lacks never happened.
+        return writeDurable(path, `${JSON.stringify(file)}\n`, LEDGER_MODE);
       });
     this.#writing = run;
     return run;

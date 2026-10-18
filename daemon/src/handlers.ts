@@ -15,7 +15,15 @@ import type {
   TaskProgress,
   UpdateAvailable,
 } from "@seance/shared";
-import { isMetricsRequest, isRecord, isTaskId, quote, SCHEDULER_CLIENT, SCHEDULER_ID } from "@seance/shared";
+import {
+  isMetricsRequest,
+  isRecord,
+  isTaskId,
+  quote,
+  REPLY_JSON_BUDGET,
+  SCHEDULER_CLIENT,
+  SCHEDULER_ID,
+} from "@seance/shared";
 import {
   despawnAudit,
   spawnAudit,
@@ -303,14 +311,6 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   return fitProgress(base, ctx.tasks.progress());
 }
 
-/**
- * UTF-8 bytes of payload JSON one scheduler `sessions` reply may carry. The
- * same 4/3 sealing headroom as `QUEUE_REPLY_BUDGET` in `leader-requests.ts`: against
- * `ENVELOPE_MAX_CT_LENGTH`'s 65 536, 44 000 seals to about 58 900. Over it,
- * `RelayClient` answers `too_large` instead, losing `ended` and `ledgerSince`.
- */
-export const SESSIONS_REPLY_BUDGET = 44_000;
-
 const PROGRESS_KEY_BYTES = Buffer.byteLength(',"progress":[]', "utf8");
 const TRIMMED_KEY_BYTES = Buffer.byteLength(',"progressTrimmed":', "utf8");
 
@@ -324,7 +324,7 @@ const TRIMMED_KEY_BYTES = Buffer.byteLength(',"progressTrimmed":', "utf8");
 export function fitProgress(
   base: SessionsResponse,
   progress: readonly TaskProgress[],
-  budget: number = SESSIONS_REPLY_BUDGET,
+  budget: number = REPLY_JSON_BUDGET,
 ): SessionsResponse {
   if (progress.length === 0) return base;
   const sized = progress.map((entry, index) => ({
