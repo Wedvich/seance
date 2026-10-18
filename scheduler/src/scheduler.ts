@@ -31,7 +31,7 @@ import {
 import { codeUnitOrder } from "./order.ts";
 import { prunable } from "./prune.ts";
 import { accountResetAt, route, windowResetOf, type Decision } from "./route.ts";
-import { asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
+import { answerable, asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
@@ -300,7 +300,8 @@ export class Scheduler {
    * session is gone ended while no leader was listening: `awaiting-merge` if its
    * machine's `progress` (or its record) shows a PR, `done` if the branch merged
    * meanwhile or there was none. An `awaiting-merge` task is read back the same
-   * way, for a merge the gap hid. An unanswered machine leaves everything else
+   * way, for a merge the gap hid — what a pass checks, by the same rule
+   * (`answerable`). An unanswered machine leaves everything else
    * as it was. Expiry, pruning and leaning finished records (`#leanFinished`)
    * run in the first pass after it, which the host ticks right away, so the
    * term answers after one list and one round of `sessions`.
@@ -311,9 +312,7 @@ export class Scheduler {
     this.#leanFailed.clear();
     this.#unansweredSince.clear();
     this.#quiet.clear();
-    await this.#check(
-      this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
-    );
+    await this.#check(this.tasks().filter(answerable));
   }
 
   /**
@@ -905,14 +904,11 @@ export class Scheduler {
     this.#returned = new Set([...returned].filter(skipped));
     return this.tasks().filter((t) => {
       const deviceId = deviceOf(t);
-      if (deviceId === undefined || skipped(deviceId)) return false;
+      if (!answerable(t) || deviceId === undefined || skipped(deviceId)) return false;
       if (t.state === "reserved") {
         return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
       }
       if (!connected.has(deviceId)) return false;
-      // A `here` task's merge is never read from a machine (`trusted`): no reply can change it.
-      if (t.state === "awaiting-merge") return t.spec.mode !== "here" && (sweep || returned.has(deviceId));
-      if (!PLACED.includes(t.state)) return false;
       return t.state === "lost" || sweep || returned.has(deviceId);
     });
   }

@@ -1063,6 +1063,22 @@ describe("takeover", () => {
     expect(successor.task(ended.id)?.state).toBe("running");
     expect(fleet.spawns).toEqual([]);
   });
+
+  test("asks only what a pass would: a `here` task awaiting its merge costs its machine no sessions", async () => {
+    const { fleet, store, scheduler } = setup(new FakeFleet([machine("a"), machine("b")]));
+    const prUrl = "https://github.com/acme/app/pull/1";
+    const awaiting = { state: "awaiting-merge", createdAt: NOW, prUrl } as const;
+    const at = { exclave: "main", clone: "app", pane: "%1" };
+    await store.put("h", 0, {
+      id: "h",
+      spec: spec({ mode: "here" }),
+      assignment: { deviceId: "a", ...at },
+      ...awaiting,
+    });
+    await store.put("w", 0, { id: "w", spec: spec(), assignment: { deviceId: "b", ...at }, ...awaiting });
+    await scheduler.takeover();
+    expect(fleet.sessionCalls).toEqual(["b"]);
+  });
 });
 
 describe("store", () => {

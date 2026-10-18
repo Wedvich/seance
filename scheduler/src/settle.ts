@@ -70,6 +70,16 @@ export function deviceOf(task: Task): string | undefined {
   return (task.reservation ?? task.assignment)?.deviceId;
 }
 
+/**
+ * Whether its machine's `sessions` can move it (`settle`): a reservation, a
+ * placed task, or one `awaiting-merge` on a task branch. A `here` task's merge
+ * is never read from a machine (`trusted`), so no reply can change it.
+ */
+export function answerable(task: Task): boolean {
+  if (task.state === "awaiting-merge") return task.spec.mode !== "here";
+  return task.state === "reserved" || PLACED.includes(task.state);
+}
+
 /** Still reserved under exactly `at`: not resolved by an event, nor released and reserved again. */
 export function holds(task: Task, at: Reservation): boolean {
   const { reservation } = task;
