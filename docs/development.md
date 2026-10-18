@@ -83,7 +83,9 @@ a production change.
   a double. `SCHEDULER_LEADERS` is fixed at boot as a deploy fixes it, so a suite that
   needs a leader mints its ids (`newDeviceId`) before `startRelay({ leaders })`; left
   out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
-  `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire. A new suite file in
+  `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
+  `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
+  scheduler reply credit lapse. A new suite file in
   the relay shard, which shares one process with `relay.test.ts`, settles 500 ms before
   booting and after disposing (as `store.test.ts` does), because workerd booted soon after
   a dispose breaks its stdio.
