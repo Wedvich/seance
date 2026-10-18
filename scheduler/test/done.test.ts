@@ -41,7 +41,7 @@ function progress(taskId: string, fields: Partial<TaskProgress> = {}): TaskProgr
 
 describe("a session that ends", () => {
   test("with a PR open is awaiting-merge, and frees its slot for the next task", async () => {
-    const { fleet, scheduler } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const { fleet, clock, scheduler } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
     const first = await scheduler.submit(spec());
     const second = await scheduler.submit(spec());
     await pass(scheduler);
@@ -52,7 +52,7 @@ describe("a session that ends", () => {
     });
 
     await scheduler.onSession(first.id, "ended", FROM_A, PR);
-    expect(scheduler.task(first.id)).toMatchObject({ state: "awaiting-merge", prUrl: PR });
+    expect(scheduler.task(first.id)).toMatchObject({ state: "awaiting-merge", prUrl: PR, endedAt: clock.now });
     await pass(scheduler);
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual([first.id, second.id]);
   });
@@ -268,6 +268,24 @@ describe("the sweep", () => {
     expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task("live")).toMatchObject({ state: "running", prUrl: PR, branch: "live", pushed: true });
     expect(scheduler.task("waiting")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+});
+
+describe("the merge clock", () => {
+  test("is stamped on entering awaiting-merge only: a record an older leader left there is never given one by a later write", async () => {
+    const { fleet, clock, scheduler, put } = setup();
+    await put("legacy", { state: "awaiting-merge", assignment: ON_A, prUrl: PR });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      progress: [progress("legacy", { prUrl: PR, branch: "fresh" })],
+    });
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    await pass(scheduler);
+    const task = scheduler.task("legacy");
+    expect(task).toMatchObject({ state: "awaiting-merge", branch: "fresh" });
+    expect(task?.endedAt).toBeUndefined();
   });
 });
 

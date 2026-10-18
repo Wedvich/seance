@@ -33,6 +33,21 @@ export interface SchedulerConfig {
    */
   readonly lostAfterMs: number;
   /**
+   * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
+   * longer ago than this is `failed` `lost_expired`. Never pruned while `lost`,
+   * it would otherwise count toward M2's `MAX_ACTIVE_TASKS` and outlive every term.
+   */
+  readonly lostExpiryMs: number;
+  /**
+   * An `awaiting-merge` task this long past `endedAt` (else `createdAt`) is
+   * `failed` `merge_expired`, for the same reason. Its `after: "merged"`
+   * dependents fail with it. Seven days because that is as long as a machine can
+   * report the merge at all: its launch ledger evicts a task after 7 days or 128
+   * launches (`LEDGER_MAX_AGE_MS` in the daemon's launch ledger), and a `here`
+   * task is never read back, so past it nothing waits on a signal that can still arrive.
+   */
+  readonly mergeExpiryMs: number;
+  /**
    * How often a pass also reads `sessions` from each connected machine holding
    * a running or `awaiting-merge` task: the backstop for an `ended` event that
    * never arrived (its task would read `running` and hold its slot for good) and
@@ -70,6 +85,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   needsInputEscalateMs: 30 * 60_000,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
+  lostExpiryMs: 7 * 24 * 60 * 60_000,
+  mergeExpiryMs: 7 * 24 * 60 * 60_000,
   sweepIntervalMs: 120_000,
   keepFinished: 50,
   pruneAt: 96,

@@ -101,6 +101,9 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
   dependency_failed: "a task it depends on failed or was cancelled",
   dependency_missing: "a task it depends on is not in the queue",
   dependency_cycle: "its dependencies wait on each other in a loop",
+  lost_expired:
+    "its machine stayed away too long, so the scheduler stopped waiting for it — its session may still be running there",
+  merge_expired: "no merge of its pull request was seen in time, so the scheduler stopped waiting for one",
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 

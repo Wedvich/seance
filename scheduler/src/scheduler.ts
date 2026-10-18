@@ -14,6 +14,7 @@ import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
 import { branchChange } from "./done.ts";
+import { endClock, expiry } from "./expiry.ts";
 import { activeHolds, sameHolds, withHold, withoutHold } from "./pause.ts";
 import {
   StoreRevoked,
@@ -227,7 +228,8 @@ export class Scheduler {
    * meanwhile or there was none. An `awaiting-merge` task is read back the same
    * way, for a merge the gap hid. An unanswered machine leaves everything else
    * as it was. Then finished tasks past the keep are pruned, if the store holds
-   * `pruneAt` records.
+   * `pruneAt` records. Expiry runs in the first pass after it, which the host
+   * ticks right away.
    */
   async takeover(): Promise<void> {
     await this.load();
@@ -480,9 +482,28 @@ export class Scheduler {
     return this.#fleet.machines().some((m) => m.deviceId === deviceId && m.connected);
   }
 
+  /**
+   * `lost` and `awaiting-merge` are never pruned yet count toward M2's
+   * `MAX_ACTIVE_TASKS` and outlive every term: past their bound they fail
+   * (`expiry`). After the checks, so a machine back in time settles its task
+   * first; before admission, so dependents fail in the same pass. A `lost` task
+   * whose machine is connected now is left to the next pass's check: it may have
+   * reconnected while this pass's check waited on a slower peer.
+   */
+  async #expire(): Promise<void> {
+    const now = this.#now();
+    await Promise.all(
+      this.tasks()
+        .filter((t) => expiry(t, now, this.#config) !== null)
+        .filter((t) => t.state !== "lost" || t.assignment === undefined || !this.#connected(t.assignment.deviceId))
+        .map((seen) => this.#update(seen.id, (current) => expiry(current, now, this.#config))),
+    );
+  }
+
   async #pass(): Promise<void> {
     await this.#markAbsent();
     await this.#check(this.#due());
+    await this.#expire();
     await this.#escalate();
     // After the checks, so a predecessor they settled releases or fails its dependents in this pass.
     await this.#admit();
@@ -833,7 +854,7 @@ export class Scheduler {
    * past the store's bound is written again with its decision cut to the
    * winner, never the task cut. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
-   * without it. Null when `change` declines (it returns null
+   * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way. Null when `change` declines (it returns null
    * for a task no longer in the state it acts on), the task is gone or
    * unreadable, the store refused the write, or the conflicts outlast
    * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
@@ -846,7 +867,8 @@ export class Scheduler {
         if (held === undefined) return null;
         const proposed = change(held.task);
         if (proposed === null) return null;
-        const changed = inputClock(proposed, this.#now());
+        const now = this.#now();
+        const changed = endClock(held.task, inputClock(proposed, now), now);
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);

@@ -414,6 +414,7 @@ describe("tasks and their records", () => {
     pushed: true,
     needsInputSince: 1_700_000_100_000,
     escalated: true,
+    endedAt: 1_700_000_200_000,
   };
 
   test("M3's states and progress fields round-trip", () => {
@@ -431,6 +432,7 @@ describe("tasks and their records", () => {
       { ...task, escalated: 1 },
       { ...task, doneBy: "linear" },
       { ...task, needsInputSince: "soon" },
+      { ...task, endedAt: "later" },
       { ...task, id: "task/with-slash" },
       { ...task, state: "paused" },
     ]) {
@@ -663,6 +665,7 @@ describe("store", () => {
     reservedAt: 1_760_000_000_000,
     needsInputSince: 1_760_000_000_000,
     escalated: true,
+    endedAt: 1_760_000_000_000,
     leftRunning: true,
   };
   const candidate: Candidate = {
