@@ -272,6 +272,56 @@ export function queueAudit(sink: AuditSink): QueueAudit {
 }
 
 /**
+ * The leader taking an app's create into the queue — its first write to the
+ * record, which leaves it `ready`, `blocked`, or `failed` at admission. The only
+ * line an enqueue leaves on the leader: an app's create is a store write the
+ * relay answers, never a request. `client` is the record's own (`TaskSpec.client`),
+ * a PSK holder's word; `createdAt` is the app's clock. Never the prompt.
+ */
+export function admitAudit(
+  sink: AuditSink,
+): (task: {
+  readonly id: string;
+  readonly createdAt: number;
+  readonly state: string;
+  readonly spec: { readonly client?: string };
+}) => Promise<void> {
+  return async (task) => {
+    const client = task.spec.client === undefined ? "" : ` client=${quote(task.spec.client)}`;
+    await sink(
+      `audit queue origin=leader op=admit task=${quote(task.id)}${client} createdAt=${task.createdAt} state=${task.state}`,
+    );
+  };
+}
+
+/** How an MCP enqueue ended: stored, refused by the relay with a code, or unanswered after every try. */
+export type EnqueueOutcome =
+  | { readonly kind: "queued"; readonly landedEarlier: boolean }
+  | { readonly kind: "refused"; readonly code: string }
+  | { readonly kind: "unanswered" };
+
+/**
+ * `seanced mcp` enqueuing on `auto` with the key itself (`relayFleet`): a store
+ * write that reaches no daemon, so this line, under its own origin, is the
+ * enqueuing box's only record of it; the leader's `op=admit` is the other end.
+ * Never the prompt.
+ */
+export function enqueueAudit(
+  sink: AuditSink,
+): (task: { readonly id: string; readonly createdAt: number }, outcome: EnqueueOutcome) => Promise<void> {
+  return async (task, outcome) => {
+    const how =
+      outcome.kind === "queued"
+        ? `queued${outcome.landedEarlier ? " landedEarlier=true" : ""}`
+        : outcome.kind === "refused"
+          ? // The relay's word, so quoted: a line it shaped could otherwise read as more fields.
+            `refused code=${quote(outcome.code)}`
+          : "unanswered";
+    await sink(`audit enqueue origin=mcp client=mcp task=${quote(task.id)} createdAt=${task.createdAt} ${how}`);
+  };
+}
+
+/**
  * Something on this box asked the daemon to reach *another* machine for it over
  * the op socket — a keyless `seanced mcp`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches

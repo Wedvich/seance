@@ -556,6 +556,39 @@ describe("leader requests", () => {
     }
   });
 
+  // S5 of the M3 review: an enqueue is a store write the relay answers, so admission is the leader's only line of it.
+  test("admitting an app's create is audited once, with its client and createdAt, never its prompt", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store, 50);
+    const createdAt = Date.now();
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await enqueueQueued(store, leader, "from-phone", {
+          createdAt,
+          spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "the secret plan", client: "pwa" },
+        });
+        await pollUntil(async () => (await store.get("from-phone"))?.body?.state === "ready", "the create's admission");
+        // Later writes to it are no admission: cancelled here, it was written a second time.
+        leader.deliver(await appRequest("cancel", { taskId: "from-phone" }));
+        expect((await replies.next()).response.payload).toMatchObject({ task: { state: "cancelled" } });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const admits = lines.filter((line) => line.includes("op=admit"));
+    expect(admits).toEqual([
+      expect.stringContaining(
+        `audit queue origin=leader op=admit task="from-phone" client="pwa" createdAt=${createdAt} state=ready`,
+      ),
+    ]);
+    expect(lines.join("\n")).not.toContain("the secret plan");
+  });
+
   test("pause holds dispatch and queue shows the hold; resume places the task; each is audited, refusals too", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
