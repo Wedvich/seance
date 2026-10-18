@@ -489,8 +489,9 @@ unchecked on the iOS WKWebView app leg (DESIGN.md, "The store", _Send size_); pa
 reserved `after`/`next` is the fallback.
 
 **Record.** DESIGN.md _Scheduler_ (store, states, takeover), _Security model_ and _Threat
-model_ (the bearer token's one new act, prompts at rest, rollback closed by version binding),
-_Wire protocol_ rows, _Presence & identity_ if the registry push changes shape.
+model_ (the bearer token's app-leg store access, prompts at rest, rollback closed by version
+binding), _Wire protocol_ rows, _Presence & identity_ (each machine's build and last update
+report now reach apps, #184; the registry push's shape is otherwise unchanged).
 
 ### M4 — refinement
 

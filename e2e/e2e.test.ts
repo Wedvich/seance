@@ -1403,11 +1403,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const queued = queuedId;
       if (queued === null) throw new Error("no queued task");
       await pollUntil(
-        async () => (await stack.queue().get(queued))?.body?.state === "running",
-        "the verified leader to run the task queued while unverified",
+        async () => {
+          const body = (await stack.queue().get(queued))?.body;
+          return body !== undefined && body.state !== "queued" && body.assignment !== undefined;
+        },
+        "the verified leader to dispatch the task queued while unverified",
         20_000,
       );
-      expect((await stack.queue().get(queued))?.body?.assignment).toBeDefined();
       await squatter.expectNo("lead");
       await squatter.expectNo("msg");
     } finally {

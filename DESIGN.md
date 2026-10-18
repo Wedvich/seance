@@ -119,10 +119,15 @@ hourly history in `metrics.sqlite` kept forever, account ids, skill names and
 repo origins, sealed in transit and plaintext at rest on the machine. Since M3,
 prompts and repo names also sit at rest in the relay's Durable Object, sealed in
 each `task:` record. No clock bounds that: a record stays until the leader
-deletes it, which for a finished task means pruning down to `keepFinished` (50)
-once the store holds `pruneAt` (96) records, and never for an unfinished one. A
-deleted record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS`
-(30 days) but no envelope. The bearer
+deletes it, and the leader deletes only a finished task, and only once the store
+holds `pruneAt` (96) records, then down to `keepFinished` (50). Below `pruneAt`
+nothing is pruned, so every finished task's prompt stays in the DO indefinitely
+— the normal state for a small fleet. An unfinished task is kept until expiry
+settles it as failed (`queue_expired` after `STORE_TOMBSTONE_MS`, `lost_expired`
+and `merge_expired` after 7 days), and from then it is prunable like any other;
+a finished task an unfinished one still names is kept too. A deleted record's
+tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days) but no
+envelope. The bearer
 token is not an asset in the same sense — see its blast radius above.
 
 **Séance's own footprint.** The daemon is structurally a remote access tool and
@@ -1375,6 +1380,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
   carries 1 + 2 × 32 keys (the counts row goes in the `put`). The relay logs nothing for a purge:
   after the expiry nearly every leader delete purges, so a line would be a timeline of the
   leader's deletes. The tombstone keeps no env on purpose; the cost is on Threat model item 3.
+  Sizing: normal use (a few finished tasks pruned a day) leaves ~2 MB of tombstones a year,
+  and 30-day expiry caps it; junk deleted at the create floor is bounded by that floor over the
+  same 30 days.
 - **The create floor is the app leg's alone**: 60 creates per socket per 60 s
   (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the app socket's
   attachment (written on its first create, so it survives hibernation) and a fresh socket starting
