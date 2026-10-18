@@ -207,6 +207,44 @@ describe("mcp tools", () => {
     lazy.stop();
   });
 
+  // A leader on an older build is what made the queue look wrong; this is how it shows.
+  test("list_machines names each machine's build and marks the scheduler leader only once its proof verified", async () => {
+    const source = { sha: "0123456789abcdef".repeat(2) + "01234567", commitTs: 1_700_000_000_000, branch: "main" };
+    const lastUpdate = { at: 1_700_000_500_000, outcome: "skipped_dirty" as const, detail: "1 file" };
+    const machines = [machine({ source, lastUpdate }), machine({ deviceId: "device-2", name: "Linux Box" })];
+    const cases = [
+      [{ kind: "ready", deviceId: "device-1", term: 3 }, ["leader", undefined]],
+      [{ kind: "unverified", deviceId: "device-2", term: 4 }, [undefined, "unverified"]],
+      [{ kind: "none" }, [undefined, undefined]],
+    ] as const;
+    for (const [scheduler, marks] of cases) {
+      const fake = fakeRelay(machines);
+      fake.setState({ scheduler });
+      const lazy = new LazyRelay({ create: () => fake });
+      // oxlint-disable-next-line no-await-in-loop -- one client per leader state
+      const client = await connectedClient(lazy);
+      // oxlint-disable-next-line no-await-in-loop -- one client per leader state
+      const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as Record<
+        string,
+        unknown
+      >[];
+      expect(listed.map((entry) => entry["scheduler"])).toEqual([...marks]);
+      expect(listed[0]?.["source"]).toEqual({
+        sha: source.sha.slice(0, 12),
+        committed: new Date(source.commitTs).toISOString(),
+        branch: "main",
+      });
+      expect(listed[0]?.["lastUpdate"]).toEqual({
+        at: new Date(lastUpdate.at).toISOString(),
+        outcome: "skipped_dirty",
+        detail: "1 file",
+      });
+      expect(listed[1]).not.toHaveProperty("source");
+      expect(listed[1]).not.toHaveProperty("lastUpdate");
+      lazy.stop();
+    }
+  });
+
   test("get_sessions resolves the machine by name and returns its sessions", async () => {
     const sessions = [{ window: "fix-bug", repo: "seance", path: "/repos/seance" }];
     const fake = fakeRelay([machine()], (op) => (op === "sessions" ? { sessions, at: 3_000 } : {}));

@@ -25,6 +25,7 @@ import {
   type PauseHold,
   type RepoEntry,
   type RequestOp,
+  type SchedulerAvailability,
   type SessionsResponse,
   type SpawnClient,
   type SpawnRequest,
@@ -123,7 +124,24 @@ interface ToolResult {
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
-function describeMachine(machine: Machine, local: LocalMachine | null): Record<string, unknown> {
+/**
+ * `"leader"` only for a nominee whose lead proof opened — an app believes a
+ * nominee on nothing less (DESIGN.md, Leadership); `"unverified"` names one
+ * the relay nominated that has not shown it holds the key. Null: no view of
+ * the scheduler at all (the broker path).
+ */
+function schedulerRole(machine: Machine, scheduler: SchedulerAvailability | null): "leader" | "unverified" | null {
+  if (scheduler === null || scheduler.kind === "none" || scheduler.deviceId !== machine.deviceId) return null;
+  return scheduler.kind === "ready" ? "leader" : "unverified";
+}
+
+function describeMachine(
+  machine: Machine,
+  local: LocalMachine | null,
+  scheduler: SchedulerAvailability | null,
+): Record<string, unknown> {
+  const role = schedulerRole(machine, scheduler);
+  const { source, lastUpdate } = machine;
   return {
     name: machine.name,
     deviceId: machine.deviceId,
@@ -134,6 +152,25 @@ function describeMachine(machine: Machine, local: LocalMachine | null): Record<s
     // Named so the model knows which target costs nothing to reach; spawning
     // there goes straight to the daemon on this box.
     local: local !== null && machine.deviceId === local.deviceId,
+    ...(role === null ? {} : { scheduler: role }),
+    ...(source === undefined
+      ? {}
+      : {
+          source: {
+            sha: source.sha.slice(0, 12),
+            committed: new Date(source.commitTs).toISOString(),
+            branch: source.branch,
+          },
+        }),
+    ...(lastUpdate === undefined
+      ? {}
+      : {
+          lastUpdate: {
+            at: new Date(lastUpdate.at).toISOString(),
+            outcome: lastUpdate.outcome,
+            ...(lastUpdate.detail === undefined ? {} : { detail: lastUpdate.detail }),
+          },
+        }),
   };
 }
 
@@ -544,7 +581,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time.",
+        'List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time. `source` is the build a machine\'s daemon runs (sha, commit time, branch) and `lastUpdate` its last self-update that did more than find itself current (a skipped_* or *_failed outcome means it is stuck on that build). `scheduler: "leader"` marks the verified scheduler leader that `auto` tasks go through; `"unverified"` marks a nominee that has not proven it holds this fleet\'s key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.',
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -566,7 +603,8 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
         );
       }
       try {
-        const machines = lease.machines.map((machine) => describeMachine(machine, local));
+        const scheduler = lease.scheduler?.availability() ?? null;
+        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler));
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
         lease.release();

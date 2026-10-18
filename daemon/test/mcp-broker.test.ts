@@ -20,7 +20,13 @@ import { fakeRelay, machine, type FakeRelay } from "./fake-app-relay.ts";
  */
 
 const LOCAL = machine();
-const REMOTE = machine({ deviceId: "device-2", name: "Linux Box" });
+// A build and an update report, so the parity check covers the broker carrying them.
+const REMOTE = machine({
+  deviceId: "device-2",
+  name: "Linux Box",
+  source: { sha: "c".repeat(40), commitTs: 1_700_000_000_000, branch: null },
+  lastUpdate: { at: 1_700_000_100_000, outcome: "fetch_failed" },
+});
 const ASLEEP = machine({ deviceId: "device-3", name: "Sleeper", connected: false });
 
 let failNextSpawn = false;
