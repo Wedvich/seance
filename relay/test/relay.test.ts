@@ -960,7 +960,7 @@ describe("scheduler leadership", () => {
   beforeAll(async () => {
     // Same settle as the sweep suite: the previous suite's dispose() just ran.
     await Bun.sleep(500);
-    listed.push(...(await Promise.all(Array.from({ length: 16 }, () => newDeviceId()))));
+    listed.push(...(await Promise.all(Array.from({ length: 17 }, () => newDeviceId()))));
     padded = await newDeviceId();
     const junk = ["", "  ", "not an id!", "x".repeat(65), SCHEDULER_ID, APP_ID];
     hub = await startRelay(TOKEN, {
@@ -1109,6 +1109,29 @@ describe("scheduler leadership", () => {
 
     await leave(app, leader.daemon, leaderId);
     await leave(app, other.daemon, otherId);
+    app.close();
+  });
+
+  test("a leader leg's envelope to the apps is delivered with no fanout line; a daemon's reply to them still logs one", async () => {
+    const app = await connectApp(hub);
+    const leaderId = listedId();
+    const leader = await join(app, leaderId, { roles: SCHEDULER });
+    const { term } = await leader.daemon.waitFor<LeadFrame>("lead");
+
+    const nudge = envelope(APP_ID, SCHEDULER_ID);
+    app.send({ t: "msg", env: nudge, term });
+    expect((await app.waitFor<MsgFrame>("msg")).env).toEqual(nudge);
+
+    // Sent last: its line proves the nudge's would have been written by now.
+    const reply = envelope(APP_ID, leaderId);
+    leader.daemon.send({ t: "msg", env: reply });
+    expect((await app.waitFor<MsgFrame>("msg")).env).toEqual(reply);
+    const linesFor = (iv: string): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${iv}"`));
+    await pollUntil(() => linesFor(reply.iv).length > 0, "the reply's fanout line");
+    expect(linesFor(reply.iv)).toEqual([expect.stringContaining("wire fanout")]);
+    expect(linesFor(nudge.iv)).toEqual([]);
+
+    await leave(app, leader.daemon, leaderId);
     app.close();
   });
 

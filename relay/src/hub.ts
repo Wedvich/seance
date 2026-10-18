@@ -668,7 +668,12 @@ export class Hub implements DurableObject {
         if (err === null) fanned += 1;
         else failures.push(err);
       }
-      // Zero apps is the lost-reply case DESIGN.md reconciles from the session list.
+      // The leader's `queue-changed` nudges are sealed `from: SCHEDULER_ID` and
+      // fan to apps whenever a task changes, so a line each would be a timeline
+      // of queue activity (DESIGN.md, threat model item 3). Only a failed send
+      // is logged for them; zero apps is the lost-reply case DESIGN.md
+      // reconciles from the session list, and stays logged for everything else.
+      if (env.from === SCHEDULER_ID && failures.length === 0) return;
       wireLog("fanout", env, ` apps=${fanned}${failSuffix(failures)}`);
       return;
     }
