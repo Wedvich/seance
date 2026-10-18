@@ -17,10 +17,14 @@ import { startDaemon } from "../daemon/src/run.ts";
 const home = process.argv[2];
 if (home === undefined) throw new Error("remote-daemon.ts takes the fixture home as its argument");
 
+// A test that holds a spawn mid-flight needs a registration budget longer than the stub's hold.
+const waitOverride = Number(process.env["SEANCE_E2E_SPAWN_WAIT_MS"]);
+const waitMs = Number.isFinite(waitOverride) && waitOverride > 0 ? waitOverride : 1_500;
+
 const config = await loadConfig();
 const daemon = await startDaemon({
   config,
-  backend: createBackend(config, { home, waitMs: 1_500 }),
+  backend: createBackend(config, { home, waitMs }),
   home,
   pingIntervalMs: 60_000,
   pongTimeoutMs: 1_000,

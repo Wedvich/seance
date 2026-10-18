@@ -523,9 +523,9 @@ export interface StoreChangedFrame {
  * guard, and never accepted on a live routing path — one op per kind, so a
  * stored record can stand in neither for a request nor for another kind of
  * record. `task` and `pause-state` are sealed to SCHEDULER_ID: `task` by
- * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by nobody yet:
- * the library writes the pause through `QueueStore.putPause`, and sealing it
- * is M3 item 3's store adapter.
+ * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by the leader's
+ * queue-store adapter (`daemon/src/queue-store.ts`, `putPause`), which the
+ * library writes the pause through (`QueueStore.putPause`).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -1240,12 +1240,14 @@ export interface ErrorResponse {
  * a task whose machine stopped answering for it — a running one absent past
  * `lostAfterMs`, or a reservation whose spawn was never confirmed and whose
  * machine was gone at its TTL: held, never dispatched again without proof,
- * until that machine's own `sessions` says what became of it.
+ * until that machine's own `sessions` says what became of it, or `lostExpiryMs`
+ * fails it `lost_expired`.
  *
  * M3 adds three. `queued`: stored, not yet admitted by a leader — the only
  * state an app creates a task in. `blocked`: admitted, waiting on its `deps`.
  * `awaiting-merge`: its session ended with a PR open; it frees its slot but
- * keeps `after: "merged"` dependents blocked.
+ * keeps `after: "merged"` dependents blocked until the merge is seen, or
+ * `mergeExpiryMs` fails it `merge_expired` and them with it.
  */
 export const TASK_STATES = [
   "queued",
@@ -1335,7 +1337,8 @@ export const DEP_MISSING_GRACE_MS = 5 * 60_000;
  * dependent with a `TaskFailureCode`, never holds it `blocked` for good:
  * - `dependency_failed`: the predecessor ended `failed` or `cancelled`. It
  *   cascades, so nothing runs on work that is not there. A `lost` predecessor
- *   is waited on, since it may still finish.
+ *   is waited on, since it may still finish, until it expires (`lost_expired`),
+ *   which fails its dependents.
  * - `dependency_missing`: no task by that id past `DEP_MISSING_GRACE_MS` — a
  *   typo, junk, or a task pruned before it was named. Pruning never deletes a
  *   task an unfinished one names.
@@ -1554,6 +1557,12 @@ export interface Task {
   readonly needsInputSince?: number;
   /** The needs-input escalation fired for this stay — once, never a kill. */
   readonly escalated?: true;
+  /**
+   * When it entered `awaiting-merge`, ms, the leader's clock — what merge expiry
+   * (`SchedulerConfig.mergeExpiryMs`) ages from. Kept once it leaves. Absent on a
+   * record an older leader moved there, which ages from `createdAt` instead.
+   */
+  readonly endedAt?: number;
 }
 
 /**
@@ -1636,7 +1645,7 @@ export interface PauseHold {
 /** Holds at most: one for the queue plus one per account. */
 export const MAX_PAUSE_HOLDS = 32;
 
-/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; the library writes it through `QueueStore.putPause`, sealed once M3 item 3's store adapter lands). */
+/** Payload of the `queue:pause` record (`op: "pause-state"`, sealed to SCHEDULER_ID by the leader; sealed and opened by `daemon/src/queue-store.ts`). */
 export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
 }
@@ -1650,7 +1659,12 @@ export interface PauseRecord extends VersionBound {
  * `dependency_cycle`: an edge that can never release (`TaskDep`), set at
  * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be
  * a pruned task's blob put back (`TaskRecord`); failed rather than held, so
- * its dependents fail too and it can be pruned.
+ * its dependents fail too and it can be pruned. `lost_expired`: `lost` past
+ * `SchedulerConfig.lostExpiryMs` since its machine went away, while that machine
+ * is disconnected. Failed so it
+ * stops counting toward `MAX_ACTIVE_TASKS` and can be pruned. Its session may
+ * still be running there. `merge_expired`: `awaiting-merge` past `mergeExpiryMs`
+ * with no merge. Its `after: "merged"` dependents fail with it.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -1658,6 +1672,8 @@ export const TASK_FAILURE_CODES = [
   "dependency_missing",
   "dependency_cycle",
   "queue_expired",
+  "lost_expired",
+  "merge_expired",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
@@ -1668,6 +1684,14 @@ export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
  * and by a reader too, so an older leader's long one costs its tail, not the task.
  */
 export const TASK_FAILURE_LIMITS = { code: 64, message: 512 } as const;
+
+/**
+ * How long a machine's launch ledger keeps a task: a week covers a laptop shut
+ * for one, and past it the machine can no longer prove a spawn never landed or
+ * report the task's merge. Shared because the scheduler's `mergeExpiryMs` is
+ * derived from it — past it nothing waits on a signal that can still arrive.
+ */
+export const LAUNCH_LEDGER_MAX_AGE_MS = 7 * 24 * 3_600_000;
 
 /**
  * `not_leader`: the daemon the relay routed the request to runs no term — it

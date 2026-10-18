@@ -728,16 +728,21 @@ function isOptionalFinite(value: unknown): value is number | undefined {
   return value === undefined || isFiniteNumber(value);
 }
 
-/** The PR, branch and done fields M3 adds, checked as one group; null when any is malformed. */
+/** The PR, branch, done and clock (`needsInputSince`, `endedAt`) fields M3 adds, checked as one group; null when any is malformed. */
 function parseProgressFields(value: Record<string, unknown>): Partial<Task> | null {
-  const { prUrl, branch, pushed, doneBy, needsInputSince, escalated } = value;
+  const { prUrl, branch, pushed, doneBy, needsInputSince, escalated, endedAt } = value;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
   if (branch !== undefined && (!isBoundedString(branch, BRANCH_MAX_LENGTH) || branch === "")) return null;
   if (pushed !== undefined && pushed !== true) return null;
   const signal = doneBy === undefined ? undefined : DONE_SIGNALS.find((s) => s === doneBy);
   if (doneBy !== undefined && signal === undefined) return null;
-  if (!isOptionalFinite(needsInputSince) || (escalated !== undefined && escalated !== true)) return null;
+  if (
+    !isOptionalFinite(needsInputSince) ||
+    !isOptionalFinite(endedAt) ||
+    (escalated !== undefined && escalated !== true)
+  )
+    return null;
   return {
     ...(url === undefined ? {} : { prUrl: url }),
     ...(branch === undefined ? {} : { branch }),
@@ -745,6 +750,7 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
     ...(signal === undefined ? {} : { doneBy: signal }),
     ...(needsInputSince === undefined ? {} : { needsInputSince }),
     ...(escalated === undefined ? {} : { escalated }),
+    ...(endedAt === undefined ? {} : { endedAt }),
   };
 }
 

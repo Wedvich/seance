@@ -11,6 +11,7 @@ import {
   QUEUE_MAX_TASKS,
   schedulerErrorText,
   taskFailureText,
+  TASK_FAILURE_LIMITS,
   TASK_PHASES,
   TASK_REQUEST_LIMITS,
   type Candidate,
@@ -230,8 +231,27 @@ function keylessText(op: SchedulerTool): string {
   return `${op} needs this machine's own key; unavailable through the broker${instead}`;
 }
 
-/** A lost reply must never read as a failure: the task may be queued, and a blind retry would run it twice. */
+/** Nothing answered (a timeout, a socket dropped after the send, an answer that would not parse): the task may be queued, and a blind retry would run it twice. */
 const MAY_HAVE_QUEUED = "the task may have queued anyway — check get_queue and get_sessions before retrying";
+
+/**
+ * A transport-code answer carries the leader's own message, which may say the task
+ * was not stored, or may have been: never contradict it with "may have queued".
+ */
+const LEADER_SAYS_IF_STORED =
+  "the leader's message says whether the task was stored — if it does not, check get_queue and get_sessions before retrying";
+
+/**
+ * The leader's message is its own `String(err)` — any length, any lines — and a tool result is
+ * one line for a person: control characters collapse to spaces, and it is cut at the bound a
+ * task's failure message already has.
+ */
+function oneLine(message: string): string {
+  return message
+    .replaceAll(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .trim()
+    .slice(0, TASK_FAILURE_LIMITS.message);
+}
 
 /** Likewise for a cancel: its session may already be ended, and the queue says. */
 const MAY_HAVE_CANCELLED = "the cancel may have landed anyway — check get_queue";
@@ -509,9 +529,15 @@ async function spawnAuto(
     );
   }
   if ("ok" in reply) {
-    // `too_large` judges the reply, not the submit; a crashed handler may have got as far as queueing.
-    const landed = isTransportError(reply.code) ? ` — ${MAY_HAVE_QUEUED}` : "";
-    return errorResult(`auto failed (${reply.code}): ${schedulerErrorText(reply.code)}${landed}`);
+    // `too_large` comes from the leader's transport after the handler returned a stored task that would not seal.
+    if (reply.code === "too_large") {
+      return errorResult(
+        "auto: the task was queued, but the leader's answer was too large to send — check get_queue for it",
+      );
+    }
+    // A transport code judges the reply, not the submit; the leader's message is the one that knows what landed.
+    const said = isTransportError(reply.code) ? `: ${oneLine(reply.message)} — ${LEADER_SAYS_IF_STORED}` : "";
+    return errorResult(`auto failed (${reply.code}): ${schedulerErrorText(reply.code)}${said}`);
   }
   let task = reply.task;
   const { id } = task;

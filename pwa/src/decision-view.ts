@@ -208,6 +208,8 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       return `It finished${place}.`;
     case "failed":
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
+      if (task.failure?.code === "lost_expired") return `Given up${place} — its session may still be running there.`;
+      if (task.failure?.code === "merge_expired") return "No merge seen for its PR — the scheduler gave up waiting.";
       // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
       return task.failure !== undefined && taskFailureText(task.failure.code) !== null
         ? "It won't run."

@@ -8,6 +8,7 @@ import {
   QUEUE_MAX_TASKS,
   RequestFailure,
   SCHEDULER_ID,
+  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   taskFailureText,
   type Decision,
@@ -956,21 +957,50 @@ describe("spawn_session on auto", () => {
     }
   });
 
-  test("the leader's refusals are worded, and only an unreadable answer says it may have queued", async () => {
+  test("the leader's refusals are worded; a transport code shows the leader's message, never 'may have queued'", async () => {
     const cases = [
-      [{ ok: false, code: "not_ready", message: "taking over" }, "still taking over", false],
-      [{ ok: false, code: "queue_full", message: "64" }, "as many unfinished tasks as it will take", false],
-      [{ ok: false, code: "too_large", message: "big" }, "may have queued anyway", true],
+      [{ ok: false, code: "not_ready", message: "taking over" }, "still taking over", "auto failed (not_ready): "],
+      [
+        { ok: false, code: "queue_full", message: "64" },
+        "as many unfinished tasks as it will take",
+        "auto failed (queue_full): ",
+      ],
+      // The leader's transport refused the reply to a submit that had stored its task.
+      [
+        { ok: false, code: "too_large", message: "big" },
+        "the task was queued, but the leader's answer was too large to send — check get_queue",
+        "auto: ",
+      ],
+      [
+        { ok: false, code: "internal_error", message: "Error: task t9 was not stored (store_full)" },
+        "Error: task t9 was not stored (store_full) — the leader's message says whether the task was stored — if it does not, check get_queue",
+        "auto failed (internal_error): ",
+      ],
+      [
+        { ok: false, code: "internal_error", message: "Error: task t9 may have been stored: the store went away" },
+        "Error: task t9 may have been stored: the store went away",
+        "auto failed (internal_error): ",
+      ],
     ] as const;
-    for (const [reply, wording, mayHaveQueued] of cases) {
+    for (const [reply, wording, start] of cases) {
       const fake = leaderRelay(() => reply);
       // oxlint-disable-next-line no-await-in-loop -- one fake each
       const { text, error } = await callAuto(fake);
       expect(error).toBe(true);
-      expect(text).toStartWith(`auto failed (${reply.code}): `);
+      expect(text).toStartWith(start);
       expect(text).toContain(wording);
-      expect(text.includes("may have queued")).toBe(mayHaveQueued);
+      expect(text).not.toContain("may have queued");
     }
+  });
+
+  test("a leader's long, multi-line message is cut to one bounded line", async () => {
+    const message = `Error: first line\n${"x".repeat(2000)}\r\n\tat stack frame\u2028end`;
+    const { text, error } = await callAuto(leaderRelay(() => ({ ok: false, code: "internal_error", message })));
+    expect(error).toBe(true);
+    expect(text).not.toMatch(/[\n\r\t\u2028]/u);
+    expect(text).toContain("Error: first line xxx");
+    expect(text).not.toContain("x".repeat(TASK_FAILURE_LIMITS.message + 1));
+    expect(text).not.toContain("stack frame");
   });
 
   test("a lost reply may have queued: it says to look before retrying, and never submits twice", async () => {

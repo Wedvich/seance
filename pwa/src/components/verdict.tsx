@@ -30,9 +30,9 @@ function queuedBody(task: Task): string {
     case "needs-input":
       return "Open Claude on your phone and continue the session from there.";
     case "lost":
-      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back.";
+      return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back, or is given up on after a week.";
     case "awaiting-merge":
-      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does.";
+      return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
     case "done":
       return "The session ended.";
     case "failed":

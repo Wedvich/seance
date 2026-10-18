@@ -131,6 +131,22 @@ describe("round trip", () => {
       expect(opened.payload).toEqual({ version: 1, task: body });
     });
   });
+
+  test("an awaiting-merge record keeps endedAt: the adapter seals the parsed copy, which parseTask builds field by field", async () => {
+    await withRig(async ({ store, deviceId }) => {
+      const body = task("e");
+      expect(await store.put("e", 0, body)).toEqual({ ok: true, version: 1 });
+      const ended: Task = {
+        ...body,
+        state: "awaiting-merge",
+        prUrl: "https://github.com/acme/app/pull/1",
+        assignment: { deviceId, exclave: "default", clone: "app" },
+        endedAt: 1_760_000_000_000,
+      };
+      expect(await store.put("e", 1, ended)).toEqual({ ok: true, version: 2 });
+      expect((await store.get("e"))?.body).toEqual(ended);
+    });
+  });
 });
 
 describe("reader rules", () => {

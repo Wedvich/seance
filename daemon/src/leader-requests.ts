@@ -17,6 +17,7 @@ import {
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
+  TASK_FAILURE_LIMITS,
   type Decision,
   type PauseHold,
   type PauseResponse,
@@ -40,9 +41,6 @@ import { log } from "./log.ts";
  */
 
 const audit = queueAudit(daemonSink);
-
-/** The queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
-const KEEP_FINISHED = 50;
 
 function schedulerError(code: SchedulerErrorCode, message: string): SchedulerError {
   return { ok: false, code, message };
@@ -209,8 +207,8 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
     case "submit": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed submit request");
+      // No prune here: the library prunes at `pruneAt` and on its own `store_full`, and an unconditional one would delete a finished task an app may be naming in `deps` (each delete also leaves a tombstone).
       return asked.admit(async () => {
-        await scheduler.prune(KEEP_FINISHED);
         const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
         if (active >= MAX_ACTIVE_TASKS) {
           await audit.refused("submit", id, "queue_full");
@@ -310,7 +308,8 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
         payload = schedulerError("not_leader", "this daemon's term has ended");
       } else {
         log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
-        payload = schedulerError("internal_error", String(err));
+        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code on a submit must mean "stored" (the task's own reply was too big), and a crash is not.
+        payload = schedulerError("internal_error", String(err).slice(0, TASK_FAILURE_LIMITS.message));
       }
     }
     await ctx.reply(from, { id: crypto.randomUUID(), ts: Date.now(), op, re: plain.id, payload });

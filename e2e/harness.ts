@@ -97,6 +97,18 @@ async function makeHome(dir: string, exclaves: readonly ExclaveFixture[]): Promi
   return dir;
 }
 
+export interface SecondDaemonOpts {
+  readonly name: string;
+  readonly exclaves?: readonly ExclaveFixture[];
+  /**
+   * Extra environment for the daemon process, spread last: its claude stub
+   * (`SEANCE_CLAUDE_BIN`), or `SEANCE_E2E_SPAWN_WAIT_MS` for its spawn registration budget.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+  /** Runs with its state dir (created) before the process boots: pre-seeded state, a launch ledger say. */
+  readonly beforeBoot?: (stateDir: string) => Promise<void>;
+}
+
 /** A second real daemon on the stack's relay and tmux server, in its own process (`remote-daemon.ts`). */
 export interface SecondDaemon {
   readonly deviceId: string;
@@ -148,10 +160,7 @@ export interface Stack {
    * daemons in one process would share a deviceId and an op socket. Resolves
    * once B has minted its identity; dispose stops any still running.
    */
-  readonly startSecondDaemon: (opts: {
-    readonly name: string;
-    readonly exclaves?: readonly ExclaveFixture[];
-  }) => Promise<SecondDaemon>;
+  readonly startSecondDaemon: (opts: SecondDaemonOpts) => Promise<SecondDaemon>;
   readonly dispose: () => Promise<void>;
 }
 
@@ -240,10 +249,7 @@ export async function startStack(
   const { deviceId } = (await Bun.file(join(stateDir, "state.json")).json()) as { deviceId: string };
 
   const secondProcs = new Set<Subprocess>();
-  const startSecondDaemon = async (opts: {
-    readonly name: string;
-    readonly exclaves?: readonly ExclaveFixture[];
-  }): Promise<SecondDaemon> => {
+  const startSecondDaemon = async (opts: SecondDaemonOpts): Promise<SecondDaemon> => {
     const dir = secondDir(base, opts.name);
     const secondState = join(dir, "state");
     const configDir = join(dir, "config");
@@ -252,8 +258,12 @@ export async function startStack(
     await writeFile(join(configDir, "config.json"), JSON.stringify({ ...config, name: opts.name, tmuxSession }));
     const secondHome = await makeHome(join(dir, "home"), opts.exclaves ?? []);
     const log = join(dir, "daemon.log");
+    if (opts.beforeBoot !== undefined) {
+      await mkdir(secondState, { recursive: true });
+      await opts.beforeBoot(secondState);
+    }
     const proc = Bun.spawn([process.execPath, join(import.meta.dir, "remote-daemon.ts"), secondHome], {
-      env: { ...process.env, SEANCE_STATE_DIR: secondState, SEANCE_CONFIG_DIR: configDir },
+      env: { ...process.env, SEANCE_STATE_DIR: secondState, SEANCE_CONFIG_DIR: configDir, ...opts.env },
       stdin: "pipe",
       stdout: Bun.file(log),
       stderr: Bun.file(join(dir, "daemon.err")),
