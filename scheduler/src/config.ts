@@ -1,5 +1,13 @@
 import { LAUNCH_LEDGER_MAX_AGE_MS } from "@seance/shared";
 
+/** One seat tier's size and the gated models its quota covers (docs/scheduler.md, Settled defaults 17). */
+export interface SeatProfile {
+  /** Quota relative to the largest seat; the per-task estimate there is `taskEstimatePct / capacity`. */
+  readonly capacity: number;
+  /** `gatedModels` families this seat's quota covers; any other gated one is billed to credits. */
+  readonly includes: readonly string[];
+}
+
 /**
  * Every tunable the routing reads. Defaults are docs/scheduler.md's "Settled
  * defaults"; changing one there is changing it here, and the reverse.
@@ -18,8 +26,21 @@ export interface SchedulerConfig {
   readonly quotaLinePct: number;
   /** A window resetting within this counts as empty for the filter: a task started now runs mostly after it. */
   readonly resetGraceMs: number;
-  /** Fixed per-task usage estimate, whole percent per window (v1; tuned later from observed deltas). */
+  /**
+   * Fixed per-task usage estimate, percent per window on a capacity-1 seat (v1;
+   * tuned later from observed deltas). A smaller seat's is scaled up by its `capacity`.
+   */
   readonly taskEstimatePct: number;
+  /** By `ExclaveInfo.seatTier`. */
+  readonly seats: Readonly<Record<string, SeatProfile>>;
+  /**
+   * A tier `seats` doesn't name, or none reported (older daemon, non-Team
+   * account): estimated as today, but including no gated model — an unknown
+   * seat may bill one to credits, so it never gets one.
+   */
+  readonly unknownSeat: SeatProfile;
+  /** Model families a seat bills to credits unless it `includes` them; found case-insensitively in the task's model. */
+  readonly gatedModels: readonly string[];
   /** Disk floor, MiB free; above it disk adds nothing to the score. */
   readonly minFreeMib: number;
   /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
@@ -82,6 +103,13 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: 5,
+  // Premium seats have 6.25× a standard seat's limits, and only they cover Fable from quota.
+  seats: {
+    team_tier_1: { capacity: 1, includes: ["fable"] },
+    team_standard: { capacity: 1 / 6.25, includes: [] },
+  },
+  unknownSeat: { capacity: 1, includes: [] },
+  gatedModels: ["fable"],
   minFreeMib: 1024,
   globalMax: 8,
   // Half the fleet's slots: one account's sessions draw on its 5h window together.

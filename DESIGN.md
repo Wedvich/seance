@@ -1705,7 +1705,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   bills; an empty list reads the same, since a real daemon always lists `default`, and
   stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
-  `quota_over_line`, `cap_reached` (global; `scope: "account"`, "Caps" below; or `scope:
+  `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
+  to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Caps" below; or `scope:
 "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). Skill and
   stacked-base filters are M4's. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
@@ -1722,8 +1723,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   that status does. A candidate rejected so has no score at all, rather than one
   computed at zero — the case where 0% would have won is in the suite.
 - **Score** (lower wins, weights in `SchedulerConfig`): `accountPressure` is
-  `(u/(1-u))²` at projected usage, worst window (5h, 7d, each per-model weekly),
-  multiplied by the share of the window still to run; `machinePressure` is
+  `(u/(1-u))²` at projected usage, worst window (5h, 7d, and the per-model weekly of the
+  task's own model — "Seats" below), multiplied by the share of the window still to run; `machinePressure` is
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
   0.5 from `TaskSpec.base` (absent until M4's stacking fills it); `queuePressure` the
   in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
@@ -1733,6 +1734,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   empty. An exclave with extra usage on is scored past the line and its candidate
   carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
+- **Seats** (2026-10-18, docs/scheduler.md Settled defaults 17). `SchedulerConfig.seats`
+  maps `ExclaveInfo.seatTier` to a `capacity` (quota relative to the largest seat) and the
+  `gatedModels` families its quota covers. A task whose model names a gated family
+  (case-insensitive substring: `fable`, `claude-fable-5-1[1m]`) rejects every exclave whose
+  seat doesn't include it with `model_not_included`, never a spill — the point is that it
+  would bill credits. The per-task estimate is `taskEstimatePct / capacity`, for this task
+  and each in-flight one on the account, in the filter, the score and `accountResetAt`
+  alike. A tier missing from the table, or no tier, is `unknownSeat`: capacity 1, no gated
+  model, so an older daemon's exclave routes as before except that it gets no Fable task.
+  Tiers are looked up by own key only (`Object.hasOwn`), since the string is daemon-reported.
+  A per-model weekly (`7d Fable`) binds only a task on that model, matched on its display
+  name's first word in the task's model: until 2026-10-18 every window bound every task, so a
+  full Fable week refused Opus work on an account with room. A task whose account's newest
+  reading holds only other models' weeklies is `quota_unknown` (`unobserved`), never 0%.
 - **Caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
@@ -1753,8 +1768,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   every candidate, an account hold `paused { scope: "account" }` on that account's, so the
   decision says why a task waits, and `route-preview` says it too; running sessions are never
   touched. `until: "reset"` needs an account and stores `resumeAt`, resolved at the pause from
-  the account's newest reading (`accountResetAt`): over the line in any window (judged as
-  routing judges it, in-flight tasks and reset grace included), the latest
+  the account's newest reading (`accountResetAt`): over the line in any all-models window
+  (judged as routing judges it, in-flight tasks and reset grace included; a full per-model
+  weekly holds only that model's tasks, through routing, never the account), the latest
   reset among those windows — an earlier one would lift the hold into a window still full —
   else the earliest reset still ahead; with no such reading, `reset_unknown`. A reset hold past
   its `resumeAt` lifts with no write and no resume; the next pause or resume drops it from the
@@ -2800,7 +2816,8 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   The daemon reports which exclave each clone sits in (`RepoEntry.exclave`,
   longest named root by path prefix, `default` for the rest of `~` and anything
   outside it) and, per exclave, what its config dir says (`MachineInfo.exclaves`:
-  `accountId` = `organizationUuid:accountUuid`, `email` and the extra-usage flag from
+  `accountId` = `organizationUuid:accountUuid`, `email`, the extra-usage flag and
+  `seatTier` (what the scheduler's seat table reads; _Scheduler_, "Seats") from
   `.claude.json`'s `oauthAccount`, `authOk` = that object's presence, `skills` =
   the entries under `skills/` that hold a `SKILL.md` — directories, or symlinks
   resolving to one, dotfiles skipped; tightened 2026-10-17, since a sync folder or

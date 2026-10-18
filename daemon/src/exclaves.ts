@@ -101,11 +101,19 @@ export async function describeExclave(exclave: Exclave, previous?: ExclaveInfo):
     listSkills(join(exclave.configDir, "skills")),
   ]);
   if (account !== UNPARSABLE) return { id: exclave.id, ...account, skills };
-  const { accountId, email, extraUsageEnabled, authOk } = previous ?? SIGNED_OUT;
-  return { id: exclave.id, accountId, ...(email === undefined ? {} : { email }), extraUsageEnabled, authOk, skills };
+  const { accountId, email, extraUsageEnabled, seatTier, authOk } = previous ?? SIGNED_OUT;
+  return {
+    id: exclave.id,
+    accountId,
+    ...(email === undefined ? {} : { email }),
+    extraUsageEnabled,
+    ...(seatTier === undefined ? {} : { seatTier }),
+    authOk,
+    skills,
+  };
 }
 
-type Account = Pick<ExclaveInfo, "accountId" | "email" | "extraUsageEnabled" | "authOk">;
+type Account = Pick<ExclaveInfo, "accountId" | "email" | "extraUsageEnabled" | "seatTier" | "authOk">;
 
 const SIGNED_OUT: Account = { accountId: null, extraUsageEnabled: null, authOk: false };
 const UNPARSABLE = Symbol("unparsable");
@@ -130,10 +138,12 @@ async function readAccount(file: string): Promise<Account | typeof UNPARSABLE> {
   const acct = account["accountUuid"];
   const extra = account["hasExtraUsageEnabled"];
   const email = account["emailAddress"];
+  const seatTier = account["seatTier"];
   return {
     accountId: typeof org === "string" && typeof acct === "string" ? `${org}:${acct}` : null,
     ...(typeof email === "string" && email !== "" ? { email } : {}),
     extraUsageEnabled: typeof extra === "boolean" ? extra : null,
+    ...(typeof seatTier === "string" && seatTier !== "" ? { seatTier } : {}),
     authOk: true,
   };
 }

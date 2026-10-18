@@ -201,6 +201,8 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   if (!isOptionalString(email)) return null;
   const extraUsageEnabled = value["extraUsageEnabled"];
   if (extraUsageEnabled !== null && typeof extraUsageEnabled !== "boolean") return null;
+  const seatTier = value["seatTier"];
+  if (!isOptionalString(seatTier)) return null;
   if (typeof value["authOk"] !== "boolean") return null;
   const skills = value["skills"];
   if (!isStringArray(skills)) return null;
@@ -209,6 +211,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
     accountId,
     ...(email === undefined || email === "" ? {} : { email }),
     extraUsageEnabled,
+    ...(seatTier === undefined || seatTier === "" ? {} : { seatTier }),
     authOk: value["authOk"],
     skills,
   };
@@ -647,6 +650,10 @@ function parseReason(value: unknown): Reason | null {
       return isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) && isFiniteNumber(projectedPct)
         ? { code, window, projectedPct }
         : null;
+    }
+    case "model_not_included": {
+      const { model } = value;
+      return isName(model, TASK_REQUEST_LIMITS.model) ? { code, model } : null;
     }
     case "cap_reached": {
       const { inFlight, max, scope } = value;

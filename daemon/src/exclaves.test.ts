@@ -39,6 +39,7 @@ async function writeClaudeJson(configDir: string, content: unknown): Promise<voi
 }
 
 const account = { organizationUuid: "org-1", accountUuid: "acct-1", hasExtraUsageEnabled: true, emailAddress: "x@y" };
+const seated = { ...account, seatTier: "team_tier_1" };
 
 describe("listExclaves", () => {
   test("default is always first, then the file's names in order, canonical roots", async () => {
@@ -77,9 +78,9 @@ function named(home: string, name: string): { id: string; root: string; configDi
 }
 
 describe("describeExclave", () => {
-  test("reads account ids, email and the extra-usage flag, never the rest", async () => {
+  test("reads account ids, email, the extra-usage flag and the seat tier, never the rest", async () => {
     const home = await makeHome();
-    await writeClaudeJson(join(home, ".claude-work"), { oauthAccount: account, cachedUsageUtilization: {} });
+    await writeClaudeJson(join(home, ".claude-work"), { oauthAccount: seated, cachedUsageUtilization: {} });
     await skill(join(home, ".claude-work"), "dataviz");
     await skill(join(home, ".claude-work"), "alpha");
     const info = await describeExclave(named(home, "work"));
@@ -88,6 +89,7 @@ describe("describeExclave", () => {
       accountId: "org-1:acct-1",
       email: "x@y",
       extraUsageEnabled: true,
+      seatTier: "team_tier_1",
       authOk: true,
       skills: ["alpha", "dataviz"],
     });
@@ -134,7 +136,7 @@ describe("describeExclave", () => {
 
   test("a torn read keeps the previous account, skills read fresh; a missing file does not", async () => {
     const home = await makeHome("busy\n");
-    await writeClaudeJson(join(home, ".claude-busy"), { oauthAccount: account });
+    await writeClaudeJson(join(home, ".claude-busy"), { oauthAccount: seated });
     const first = await scanExclaves(home);
     await writeClaudeJson(join(home, ".claude-busy"), '{"oauthAccount": {"organizationUuid": "or');
     await skill(join(home, ".claude-busy"), "alpha");
@@ -144,6 +146,7 @@ describe("describeExclave", () => {
       accountId: "org-1:acct-1",
       email: "x@y",
       extraUsageEnabled: true,
+      seatTier: "team_tier_1",
       authOk: true,
       skills: ["alpha"],
     });
@@ -158,9 +161,9 @@ describe("describeExclave", () => {
     });
   });
 
-  test("an account with ids missing is signed in with no id, and extra usage unknown", async () => {
+  test("an account with ids missing is signed in with no id, extra usage unknown, a mistyped tier left out", async () => {
     const home = await makeHome();
-    await writeClaudeJson(join(home, ".claude-partial"), { oauthAccount: { emailAddress: "x@y" } });
+    await writeClaudeJson(join(home, ".claude-partial"), { oauthAccount: { emailAddress: "x@y", seatTier: 7 } });
     const info = await describeExclave(named(home, "partial"));
     expect(info).toEqual({
       id: "partial",
