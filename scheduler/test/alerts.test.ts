@@ -160,7 +160,9 @@ describe("needs-input escalation", () => {
   });
 
   test("an escalation write that fails alerts nothing; the next pass retries it", async () => {
-    const { alerts, clock, errors, fleet, scheduler, store } = setup();
+    // No sweep: its check's own tick would retry the write before the assertion.
+    const config = { ...DEFAULT_CONFIG, sweepIntervalMs: 24 * 60 * MINUTE };
+    const { alerts, clock, errors, fleet, scheduler, store } = setup(undefined, undefined, config);
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const pane = scheduler.task(task.id)?.assignment?.pane ?? "";

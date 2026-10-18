@@ -18,11 +18,13 @@ import { endClock, expiry } from "./expiry.ts";
 import { activeHolds, sameHolds, withHold, withoutHold } from "./pause.ts";
 import {
   StoreRevoked,
+  UNREACHABLE,
   type Fleet,
   type QueueStore,
   type StoredPause,
   type StoreEntry,
   type StoreWrite,
+  type TaskSessionsReply,
   type UnreadablePause,
   type UnreadableTask,
 } from "./ports.ts";
@@ -44,12 +46,12 @@ export const SCHEDULER_CLIENT = "scheduler";
 const WRITE_ATTEMPTS = 3;
 
 /**
- * Legacy finished records stripped of their prompt per pass. Sequential
+ * Legacy finished records rewritten lean (`lean`) per pass. Sequential
  * round-trips inside `#pass` delay the next admission and dispatch and nudge
  * every app per write, so the backlog (up to `pruneAt` - 1 records, once) is
  * worked off a few at a time.
  */
-const FORGET_PROMPTS_PER_PASS = 8;
+const LEAN_PER_PASS = 8;
 
 export interface SchedulerOptions {
   readonly store: QueueStore;
@@ -150,15 +152,24 @@ export class Scheduler {
    */
   #returned = new Set<string>();
   /**
-   * Finished records whose prompt-stripping write did not land this term: a
-   * refusal repeats, so retrying would take a slot of every pass and log every
-   * time. Cleared on takeover.
+   * Finished records whose leaning write (`#leanFinished`) did not land this
+   * term: a refusal repeats, so retrying would take a slot of every pass and
+   * log every time. Cleared on takeover.
    */
-  readonly #forgetFailed = new Set<string>();
+  readonly #leanFailed = new Set<string>();
   /** Task id → the tail of its writes (`#serial`). */
   readonly #chains = new Map<string, Promise<void>>();
   /** Task id → its spawn, still out. No pass awaits one; `drain` does. */
   readonly #dispatches = new Map<string, Promise<void>>();
+  /** deviceId → its `sessions` check, still out (`#checkOut`): one per machine. No pass awaits one; `drain` does. */
+  readonly #checks = new Map<string, Promise<void>>();
+  /**
+   * deviceId → whether it was connected when its `sessions` went unanswered:
+   * not asked again until the next sweep, unless that changes. A hung peer
+   * would otherwise cost a timed-out call every pass, and passes run on every
+   * registry push. Memory only.
+   */
+  readonly #quiet = new Map<string, boolean>();
   #sweptAt: number;
   #fault: { readonly err: unknown } | null = null;
   #ticking: Promise<void> | null = null;
@@ -254,56 +265,57 @@ export class Scheduler {
    * machine's `progress` (or its record) shows a PR, `done` if the branch merged
    * meanwhile or there was none. An `awaiting-merge` task is read back the same
    * way, for a merge the gap hid. An unanswered machine leaves everything else
-   * as it was. Then finished tasks past the keep are pruned, if the store holds
-   * `pruneAt` records. Expiry runs in the first pass after it, which the host
-   * ticks right away — and so does stripping the prompt from finished records
-   * that still hold one (`#forgetPrompts`).
+   * as it was. Expiry, pruning and leaning finished records (`#leanFinished`)
+   * run in the first pass after it, which the host ticks right away, so the
+   * term answers after one list and one round of `sessions`.
    */
   async takeover(): Promise<void> {
     await this.load();
     this.#sweptAt = this.#now();
-    this.#forgetFailed.clear();
+    this.#leanFailed.clear();
     this.#unansweredSince.clear();
+    this.#quiet.clear();
     await this.#check(
       this.tasks().filter((t) => t.state === "reserved" || t.state === "awaiting-merge" || PLACED.includes(t.state)),
     );
-    await this.#pruneDue();
   }
 
   /**
    * The store caps `task:` (`MAX_TASKS`), so past `keep` the oldest finished
    * tasks are deleted (`prunable`) — never one with anything left to happen,
-   * nor one an unfinished task names. Runs after takeover and at the end of a
-   * pass once the store holds `pruneAt` records — an app's create meeting
-   * `store_full` is never seen here.
+   * nor one an unfinished task names. Runs at the end of a pass once the store
+   * holds `pruneAt` records — an app's create meeting `store_full` is never
+   * seen here. The deletes go out together: each is its own CAS on its own
+   * task's chain, so crossing `pruneAt` costs one round trip, not one per record.
    */
   async prune(keep = this.#config.keepFinished): Promise<void> {
-    for (const task of prunable(this.tasks(), keep)) {
-      // oxlint-disable-next-line no-await-in-loop -- a handful at a time, and each delete is its own CAS
-      await this.#serial(task.id, async () => {
-        const held = this.#held.get(task.id);
-        if (held === undefined || !FINISHED.includes(held.task.state) || named(this.tasks()).has(task.id)) return;
-        const write = await this.#store.delete(task.id, held.version);
-        if (write.ok) {
+    await Promise.all(
+      prunable(this.tasks(), keep).map((task) =>
+        this.#serial(task.id, async () => {
+          const held = this.#held.get(task.id);
+          if (held === undefined || !FINISHED.includes(held.task.state) || named(this.tasks()).has(task.id)) return;
+          const write = await this.#store.delete(task.id, held.version);
+          if (write.ok) {
+            this.#held.delete(task.id);
+            this.#decisions.delete(task.id);
+            return;
+          }
+          if (write.code !== "version_conflict" && write.code !== "indeterminate") {
+            this.#refused(task.id, "delete", write);
+            return;
+          }
+          // A lost reply may be our delete landing, a conflict another write: the store says which,
+          // and a record held after it is gone would take a slot of every later prune.
+          const fresh = await this.#store.get(task.id);
           this.#held.delete(task.id);
-          this.#decisions.delete(task.id);
-          return;
-        }
-        if (write.code !== "version_conflict" && write.code !== "indeterminate") {
-          this.#refused(task.id, "delete", write);
-          return;
-        }
-        // A lost reply may be our delete landing, a conflict another write: the store says which,
-        // and a record held after it is gone would take a slot of every later prune.
-        const fresh = await this.#store.get(task.id);
-        this.#held.delete(task.id);
-        if (fresh === null) {
-          this.#decisions.delete(task.id);
-          return;
-        }
-        this.#keep(fresh);
-      });
-    }
+          if (fresh === null) {
+            this.#decisions.delete(task.id);
+            return;
+          }
+          this.#keep(fresh);
+        }),
+      ),
+    );
   }
 
   tasks(): readonly Task[] {
@@ -355,12 +367,16 @@ export class Scheduler {
   }
 
   /**
-   * Resolves once no tick runs and no spawn is out, rejecting with the first
-   * dispatch fault no `onError` took. For tests, and a host that wants quiet.
+   * Resolves once no tick runs and no spawn or check is out, rejecting with the
+   * first fault no `onError` took. For tests, and a host that wants quiet.
    */
   async drain(): Promise<void> {
     for (;;) {
-      const out = [...this.#dispatches.values(), ...(this.#ticking === null ? [] : [this.#ticking])];
+      const out = [
+        ...this.#dispatches.values(),
+        ...this.#checks.values(),
+        ...(this.#ticking === null ? [] : [this.#ticking]),
+      ];
       if (out.length === 0) break;
       // oxlint-disable-next-line no-await-in-loop -- a settled spawn's verdict can start no other, but a tick can
       await Promise.allSettled(out);
@@ -520,36 +536,34 @@ export class Scheduler {
 
   /**
    * `lost` and `awaiting-merge` are never pruned, hold no slot and outlive
-   * every term: past their bound they fail
-   * (`expiry`). After the checks, so a machine back in time settles its task
-   * first; before admission, so dependents fail in the same pass. A `lost` task
-   * whose machine is connected now is left to the next pass's check: it may have
-   * reconnected while this pass's check waited on a slower peer. Judged again
-   * inside the write, since the machine may reconnect between the two.
+   * every term: past their bound they fail (`expiry`). Before admission, so
+   * dependents fail in the same pass. A task whose machine's check is out is
+   * left to it, so a machine back in time settles its task first; so is a
+   * `lost` task whose machine is connected now, for the next check. Judged
+   * again inside the write, since either may change between the two.
    */
   async #expire(): Promise<void> {
     const now = this.#now();
+    const spared = (t: Task): boolean => {
+      const deviceId = deviceOf(t);
+      if (deviceId === undefined) return false;
+      return this.#checks.has(deviceId) || (t.state === "lost" && this.#connected(deviceId));
+    };
     await Promise.all(
       this.tasks()
-        .filter((t) => expiry(t, now, this.#config) !== null)
-        .filter((t) => t.state !== "lost" || t.assignment === undefined || !this.#connected(t.assignment.deviceId))
+        .filter((t) => expiry(t, now, this.#config) !== null && !spared(t))
         .map((seen) =>
-          this.#update(seen.id, (current) =>
-            // Again at the write: the machine may have reconnected since the filter, and its own `sessions` is about to settle the task.
-            current.state === "lost" && current.assignment !== undefined && this.#connected(current.assignment.deviceId)
-              ? null
-              : expiry(current, now, this.#config),
-          ),
+          this.#update(seen.id, (current) => (spared(current) ? null : expiry(current, now, this.#config))),
         ),
     );
   }
 
   async #pass(): Promise<void> {
     await this.#markAbsent();
-    await this.#check(this.#due());
+    this.#checkOut(this.#due());
     await this.#expire();
     await this.#escalate();
-    // After the checks, so a predecessor they settled releases or fails its dependents in this pass.
+    // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
@@ -582,28 +596,28 @@ export class Scheduler {
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
-    await this.#forgetPrompts();
+    await this.#leanFinished();
   }
 
   /**
-   * Finished records written before a finished task kept no prompt, or by an
-   * older leader, still hold one: rewrite them without it, oldest first and at
-   * most `FORGET_PROMPTS_PER_PASS` per pass, each its own fenced CAS'd put.
-   * `#update` strips at the boundary, so handing back `current` is enough. A
-   * write that did not land is reported by `#update`, and the record keeps its
-   * prompt and is skipped until the next term (`#forgetFailed`). `StoreRevoked`
-   * propagates: the term is over. Not in `takeover`: a throw there fails the
-   * takeover and blocks the term.
+   * Finished records written before a finished task was kept lean (`lean`), or
+   * by an older leader, still hold a prompt or a full decision: rewrite them
+   * lean, oldest first and at most `LEAN_PER_PASS` per pass, each its own
+   * fenced CAS'd put. `#update` leans at the boundary, so handing back
+   * `current` is enough. A write that did not land is reported by `#update`,
+   * and the record stays as it was and is skipped until the next term
+   * (`#leanFailed`). `StoreRevoked` propagates: the term is over. Not in
+   * `takeover`: a throw there fails the takeover and blocks the term.
    */
-  async #forgetPrompts(): Promise<void> {
+  async #leanFinished(): Promise<void> {
     const stale = this.tasks()
-      .filter((t) => forgetPrompt(t) !== t && !this.#forgetFailed.has(t.id))
+      .filter((t) => lean(t) !== t && !this.#leanFailed.has(t.id))
       .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id))
-      .slice(0, FORGET_PROMPTS_PER_PASS);
+      .slice(0, LEAN_PER_PASS);
     for (const task of stale) {
-      // oxlint-disable-next-line no-await-in-loop -- one CAS'd write at a time, as `prune` does
-      const written = await this.#update(task.id, (current) => (forgetPrompt(current) === current ? null : current));
-      if (written === null) this.#forgetFailed.add(task.id);
+      // oxlint-disable-next-line no-await-in-loop -- one CAS'd write at a time
+      const written = await this.#update(task.id, (current) => (lean(current) === current ? null : current));
+      if (written === null) this.#leanFailed.add(task.id);
     }
   }
 
@@ -742,8 +756,8 @@ export class Scheduler {
 
   /**
    * Gated, not unconditional: a create naming a finished task may be in flight
-   * at any pass or takeover, and pruning only past `pruneAt` narrows that race
-   * (it does not close it).
+   * at any pass, and pruning only past `pruneAt` narrows that race (it does not
+   * close it).
    */
   async #pruneDue(): Promise<void> {
     if (this.#held.size + this.#unreadable.size >= this.#config.pruneAt) await this.prune();
@@ -836,21 +850,30 @@ export class Scheduler {
    * `awaiting-merge` task on a machine back from an absence, whose
    * `branch-state`s went nowhere meanwhile; and, once per `sweepIntervalMs`,
    * every running or `awaiting-merge` task on a connected machine — the only
-   * way a task whose `ended` or `merged` event was lost ever finishes.
+   * way a task whose `ended` or `merged` event was lost ever finishes. None on
+   * a machine whose check is still out, or that went unanswered since the last
+   * sweep (`#quiet`); a machine skipped keeps its return for the pass that asks it.
    */
   #due(): readonly Task[] {
     const now = this.#now();
     const connected = this.#connectedIds();
     const sweep = now - this.#sweptAt >= this.#config.sweepIntervalMs;
-    if (sweep) this.#sweptAt = now;
+    if (sweep) {
+      this.#sweptAt = now;
+      this.#quiet.clear();
+    }
+    // Dropped the moment it differs, so a machine that leaves and comes back between two checks is asked.
+    for (const [deviceId, was] of this.#quiet) if (was !== connected.has(deviceId)) this.#quiet.delete(deviceId);
+    const skipped = (deviceId: string): boolean => this.#checks.has(deviceId) || this.#quiet.has(deviceId);
     const returned = this.#returned;
-    this.#returned = new Set();
+    this.#returned = new Set([...returned].filter(skipped));
     return this.tasks().filter((t) => {
+      const deviceId = deviceOf(t);
+      if (deviceId === undefined || skipped(deviceId)) return false;
       if (t.state === "reserved") {
         return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
       }
-      const deviceId = t.assignment?.deviceId;
-      if (deviceId === undefined || !connected.has(deviceId)) return false;
+      if (!connected.has(deviceId)) return false;
       // A `here` task's merge is never read from a machine (`trusted`): no reply can change it.
       if (t.state === "awaiting-merge") return t.spec.mode !== "here" && (sweep || returned.has(deviceId));
       if (!PLACED.includes(t.state)) return false;
@@ -858,27 +881,37 @@ export class Scheduler {
     });
   }
 
-  /**
-   * One `sessions` per machine the tasks name, then each settled from its
-   * machine's answer (`settle`) — unless it moved while the call was out, since
-   * an answer read before an event landed could undo it.
-   */
+  /** Every machine's check at once, awaited: takeover's, before the term's first pass. */
   async #check(tasks: readonly Task[]): Promise<void> {
-    const devices = new Set(tasks.flatMap((t) => deviceOf(t) ?? []));
-    const replies = new Map(
-      await Promise.all([...devices].map(async (id) => [id, await this.#fleet.sessions(id)] as const)),
-    );
-    const now = this.#now();
-    for (const [deviceId, reply] of replies) {
-      if (reply.ok) this.#unansweredSince.delete(deviceId);
-      else if (!this.#unansweredSince.has(deviceId)) this.#unansweredSince.set(deviceId, now);
+    await Promise.all([...byDevice(tasks)].map(([deviceId, mine]) => this.#checkDevice(deviceId, mine)));
+  }
+
+  /**
+   * A pass's checks, not awaited: one slow `sessions` must not hold every
+   * admission and dispatch behind it. Each ticks again once its answer is
+   * settled, while still counted out, so that tick asks the machine nothing.
+   */
+  #checkOut(tasks: readonly Task[]): void {
+    for (const [deviceId, mine] of byDevice(tasks)) {
+      const run = this.#checkDevice(deviceId, mine)
+        .then(() => this.tick())
+        .catch(this.#onError)
+        .finally(() => this.#checks.delete(deviceId));
+      this.#checks.set(deviceId, run);
     }
+  }
+
+  /**
+   * One `sessions` to a machine, then each of its tasks settled from the answer
+   * (`settle`) — unless it moved while the call was out, since an answer read
+   * before an event landed could undo it.
+   */
+  async #checkDevice(deviceId: string, tasks: readonly Task[]): Promise<void> {
+    const reply = await this.#fleet.sessions(deviceId);
+    this.#heard(deviceId, reply);
     await Promise.all(
-      tasks.map(async (seen) => {
-        const deviceId = deviceOf(seen);
-        const reply = deviceId === undefined ? undefined : replies.get(deviceId);
-        if (deviceId === undefined || reply === undefined) return;
-        await this.#update(seen.id, (current) =>
+      tasks.map((seen) =>
+        this.#update(seen.id, (current) =>
           asSeen(current, seen)
             ? settle(current, reply, {
                 now: this.#now(),
@@ -888,9 +921,20 @@ export class Scheduler {
                 lostAfterMs: this.#config.lostAfterMs,
               })
             : null,
-        );
-      }),
+        ),
+      ),
     );
+  }
+
+  /** What a `sessions` answer says of its machine: since when it has failed (`#unansweredSince`), and whether to stop asking (`#quiet`). */
+  #heard(deviceId: string, reply: TaskSessionsReply): void {
+    if (reply.ok) {
+      this.#unansweredSince.delete(deviceId);
+      this.#quiet.delete(deviceId);
+      return;
+    }
+    if (!this.#unansweredSince.has(deviceId)) this.#unansweredSince.set(deviceId, this.#now());
+    if (reply.code === UNREACHABLE) this.#quiet.set(deviceId, this.#connected(deviceId));
   }
 
   #connectedIds(): ReadonlySet<string> {
@@ -929,8 +973,8 @@ export class Scheduler {
    * winner, never the task cut. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
    * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
-   * A finished task's prompt is dropped on the same write (`forgetPrompt`), so
-   * none reaches the store with one. Null when `change` declines (it returns null
+   * A finished task is kept lean on the same write (`lean`), so none reaches
+   * the store with a prompt or the losers of its decision. Null when `change` declines (it returns null
    * for a task no longer in the state it acts on), the task is gone or
    * unreadable, the store refused the write, or the conflicts outlast
    * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
@@ -944,7 +988,7 @@ export class Scheduler {
         const proposed = change(held.task);
         if (proposed === null) return null;
         const now = this.#now();
-        const changed = forgetPrompt(endClock(held.task, inputClock(proposed, now), now));
+        const changed = lean(endClock(held.task, inputClock(proposed, now), now));
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);
@@ -1006,6 +1050,17 @@ function capped(decision: Decision): Decision {
 }
 
 /**
+ * A finished task as it is kept: no prompt (`forgetPrompt`), and its decision
+ * cut to the winner (`trimmed`) — nothing re-routes it, and the losers of a
+ * large fleet's decision would otherwise ride every listing and re-seal until
+ * it is pruned. Returns `task` itself when there is nothing to drop.
+ */
+function lean(task: Task): Task {
+  if (!FINISHED.includes(task.state)) return task;
+  return trimmed(forgetPrompt(task));
+}
+
+/**
  * A task whose record would not fit: its decision cut to the candidate it chose,
  * the rest counted in `trimmed`. Everything else a record holds is bounded, so
  * this is the one cut that can make it fit (`STORE_MAX_CT_LENGTH`).
@@ -1030,6 +1085,16 @@ export function winnerOnly(decision: Decision): Decision {
   const cut = decision.candidates.length - kept.length;
   if (cut === 0) return decision;
   return { ...decision, candidates: kept, trimmed: (decision.trimmed ?? 0) + cut };
+}
+
+/** Tasks grouped by the machine they are reserved or placed on; one with neither is left out. */
+function byDevice(tasks: readonly Task[]): ReadonlyMap<string, readonly Task[]> {
+  const out = new Map<string, Task[]>();
+  for (const task of tasks) {
+    const deviceId = deviceOf(task);
+    if (deviceId !== undefined) out.set(deviceId, [...(out.get(deviceId) ?? []), task]);
+  }
+  return out;
 }
 
 function cancelRefusal(task: Task): CancelResult | null {
