@@ -320,7 +320,7 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
         payload = schedulerError("not_leader", "this daemon's term has ended");
       } else {
         log.error(`scheduler: ${quote(op)} crashed: ${String(err)}`);
-        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code means the reply was too big after the work was done, and a crash is not that.
+        // Cut so a crash reply never outgrows the frame and gets swapped for `too_large` by `#sealReply`: that code on a cancel or mark-done must mean it ran (the task's own reply was too big), and a crash is not.
         payload = schedulerError("internal_error", String(err).slice(0, TASK_FAILURE_LIMITS.message));
       }
     }

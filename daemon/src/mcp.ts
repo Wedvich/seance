@@ -14,6 +14,7 @@ import {
   schedulerRefusal,
   storeErrorText,
   taskFailureText,
+  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   type Candidate,
   type Decision,
@@ -235,8 +236,24 @@ function keylessText(op: SchedulerTool): string {
   return `${op} needs this machine's own key; unavailable through the broker${instead}`;
 }
 
+/**
+ * The leader's message is its own `String(err)` — any length, any lines — and a tool result is
+ * one line for a person: control characters collapse to spaces, and it is cut at the bound a
+ * task's failure message already has.
+ */
+function oneLine(message: string): string {
+  return message
+    .replaceAll(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .trim()
+    .slice(0, TASK_FAILURE_LIMITS.message);
+}
+
 /** A cancel's answer lost: its session may already be ended, and the queue says. */
 const MAY_HAVE_CANCELLED = "the cancel may have landed anyway — check get_queue";
+
+/** A transport-code answer carries the leader's own message, never contradicted: an `unrecorded` cancel's already says its session may have ended. */
+const LEADER_SAYS_IF_CANCELLED =
+  "the leader's message says whether the cancel landed — if it does not, check get_queue";
 
 /**
  * `auto`'s `repo` as the scheduler keys it, `RepoEntry.origin`. Callers hold
@@ -635,9 +652,15 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
           );
         }
         if ("ok" in reply) {
-          // As on submit: `too_large` judges the reply, and a crashed handler may have got as far as the despawn.
-          const landed = isTransportError(reply.code) ? ` — ${MAY_HAVE_CANCELLED}` : "";
-          return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${landed}`);
+          // As on submit, only a successful reply is swapped for `too_large`: the cancel ran, though the task may have finished first.
+          if (reply.code === "too_large") {
+            return errorResult(
+              "cancel_task: the leader took the cancel, but its answer was too large to send — check get_queue for how the task stands",
+            );
+          }
+          // A crashed handler may have got as far as the despawn; its message is the one that knows.
+          const said = isTransportError(reply.code) ? `: ${oneLine(reply.message)} — ${LEADER_SAYS_IF_CANCELLED}` : "";
+          return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${said}`);
         }
         return renderCancelled(reply.task, lease.machines);
       }),

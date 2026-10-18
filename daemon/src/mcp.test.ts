@@ -7,6 +7,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   RequestFailure,
   SCHEDULER_ID,
+  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   storeErrorText,
   taskFailureText,
@@ -1139,5 +1140,26 @@ describe("cancel_task", () => {
     expect(lost.text).toBe(
       "cancel_task: no answer from the scheduler (no reply within 10000ms) — the cancel may have landed anyway — check get_queue",
     );
+    const dropped = await callCancel(() => new RequestFailure("dropped", "the relay socket closed"));
+    expect(dropped.text).toContain("the cancel may have landed anyway — check get_queue");
+  });
+
+  test("a transport code shows the leader's message on one line, never 'may have landed'", async () => {
+    const unrecorded = "its session may already have ended, but the cancel was not recorded";
+    const crashed = await callCancel(() => ({ ok: false, code: "internal_error", message: unrecorded }));
+    expect(crashed.error).toBe(true);
+    expect(crashed.text).toStartWith("cancel_task failed (internal_error): ");
+    expect(crashed.text).toContain(`${unrecorded} — the leader's message says whether the cancel landed`);
+    const message = `Error: first line\n${"x".repeat(2000)}\r\n\tat stack frame\u2028end`;
+    const long = await callCancel(() => ({ ok: false, code: "internal_error", message }));
+    expect(long.text).not.toMatch(/[\n\r\t\u2028]/u);
+    expect(long.text).toContain("Error: first line xxx");
+    expect(long.text).not.toContain("x".repeat(TASK_FAILURE_LIMITS.message + 1));
+    // Only a successful reply is swapped for `too_large`, so the cancel ran.
+    const big = await callCancel(() => ({ ok: false, code: "too_large", message: "big" }));
+    expect(big.error).toBe(true);
+    expect(big.text).toContain("the leader took the cancel");
+    expect(big.text).toContain("check get_queue");
+    for (const { text } of [crashed, long, big]) expect(text).not.toContain("may have landed");
   });
 });
