@@ -946,6 +946,23 @@ describe("the queue screen", () => {
     expect(fake.index()).toBe(0);
   });
 
+  test("as a desktop column the queue is read without opening, never becomes a layer, and shows its failures", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 1 });
+    const store = new Store(client);
+    store.setWide(true);
+    await until(() => store.getState().queueView?.kind === "ok", "the column's read");
+
+    // The verdict's queue button asks again rather than stacking an invisible layer.
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    store.openQueue();
+    expect(store.getState().queue).toBe(false);
+    expect(fake.entries()).toHaveLength(1);
+    // On screen, so the refusal is told — not dropped as a read nobody sees.
+    await until(() => store.getState().queueNotice !== null, "the refusal");
+    expect(client.queueRequests).toHaveLength(2);
+  });
+
   test("a leader that answers with a refusal fails the screen; one with no leader says so", async () => {
     const client = new ScriptedClient();
     client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });

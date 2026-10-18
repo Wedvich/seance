@@ -30,7 +30,8 @@ export function MachinesScreen(props: {
   /** The registry is authoritative (`RelayState.registrySettled`). */
   settled: boolean;
   history: HistoryView | null;
-  onDismiss: () => void;
+  /** Absent in the desktop layout, where the screen is a column rather than a layer. */
+  onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
@@ -40,9 +41,11 @@ export function MachinesScreen(props: {
     <>
       <header className="header">
         <div className="header-lead">
-          <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
-            ‹
-          </button>
+          {onDismiss !== undefined && (
+            <button type="button" className="header-back" onClick={onDismiss} aria-label="Back">
+              ‹
+            </button>
+          )}
           <div>
             <h1 className="header-title">Machines</h1>
             <p className="header-meta header-status">

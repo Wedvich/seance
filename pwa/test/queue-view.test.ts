@@ -61,6 +61,7 @@ function state(
     preview: null,
     sessions: {},
     queue: true,
+    wide: false,
     queueView,
     taskAction: null,
     queueNotice: null,

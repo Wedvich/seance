@@ -1,4 +1,4 @@
-import type { JSX } from "preact";
+import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { MachinesScreen } from "./components/machines.tsx";
 import { QueueScreen } from "./components/queue.tsx";
@@ -30,6 +30,7 @@ export function App(props: { store: Store }): JSX.Element {
   const shown = (screen: Depth): boolean => screen === depth || screen === anim?.from;
   const exit = useVerdictExit(state.verdict);
   const actions = useSpawnActions(store);
+  const wide = useWide(store);
 
   useEffect(() => store.attach(), [store]);
 
@@ -47,6 +48,108 @@ export function App(props: { store: Store }): JSX.Element {
   const rendered = exit.rendered;
   const view = deriveView(state, now);
 
+  const formOrVerdict =
+    rendered !== null ? (
+      <VerdictView
+        key={rendered}
+        verdict={rendered}
+        machineName={view.machine?.name ?? "that machine"}
+        machines={state.relay.machines}
+        now={now}
+        closing={exit.closing}
+        onExited={exit.onExited}
+        onQueue={actions.openQueue}
+        waitingNote={view.autoAvailability.note}
+        onRetry={() => store.retrySpawn(rendered)}
+        onAnother={() => store.startAnother()}
+        onReuse={() => store.reusePrompt(rendered)}
+        onBack={() => store.dismissLayer()}
+      />
+    ) : (
+      <SpawnScreen
+        actions={actions}
+        view={view}
+        form={state.form}
+        promptUndo={state.promptUndo}
+        sheet={state.sheet}
+        machines={state.relay.machines}
+        now={now}
+        rescan={state.rescan}
+        preview={state.preview}
+        columns={wide}
+      />
+    );
+  const queue = (onDismiss?: () => void, onOpenSettings?: () => void): JSX.Element => (
+    <QueueScreen
+      view={deriveQueue(state, now)}
+      relayState={view.relayState}
+      machines={state.relay.machines}
+      now={now}
+      notice={state.queueNotice}
+      pausing={state.pausing}
+      onDismiss={onDismiss}
+      onRefresh={() => void store.refreshQueue()}
+      onCancel={(id) => void store.cancelTask(id)}
+      onMarkDone={(id) => void store.markDone(id)}
+      onPause={() => void store.pauseQueue()}
+      onResume={(account) => void store.resumeQueue(account)}
+      onOpenSettings={onOpenSettings}
+    />
+  );
+  // A modal dialog rather than a screen: full-screen on a phone, centred over
+  // the columns on a desk.
+  const settings = shown(1) && depthOne === "settings" && (
+    <SettingsDialog key="settings" wide={wide} anim={anim} onDismiss={actions.dismissLayer}>
+      <main className={wide ? "screen stage-panel" : panelClass(anim, 1)}>
+        <Settings
+          relayUrl={readRelayUrl()}
+          relayLine={view.relayLine}
+          relayState={view.relayState}
+          connected={state.relay.status === "open"}
+          closeStyle={wide ? "close" : "back"}
+          onDismiss={actions.dismissLayer}
+          onReconnect={() => store.reconnect()}
+        />
+      </main>
+    </SettingsDialog>
+  );
+  const machines = (onDismiss?: () => void): JSX.Element => (
+    <MachinesScreen
+      view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
+      relayLine={view.relayLine}
+      relayState={view.relayState}
+      settled={state.relay.registrySettled}
+      history={state.history}
+      onDismiss={onDismiss}
+      onShowHistory={(target, range) => void store.showHistory(target, range)}
+      onHideHistory={() => store.hideHistory()}
+    />
+  );
+
+  // Settings stays a layer, a dialog over the columns; queue and machines no
+  // longer need to be one.
+  if (wide) {
+    return (
+      <div
+        className="desk"
+        onAnimationEnd={(event) => {
+          if (event.animationName.startsWith("screen-")) clearAnim();
+        }}
+      >
+        <main key="form" className={`screen desk-col${exit.entering ? " form-enter" : ""}`}>
+          {formOrVerdict}
+        </main>
+        <main key="machines" className="screen desk-col">
+          {machines()}
+        </main>
+        <main key="queue" className="screen desk-col">
+          {queue(undefined, actions.openSettings)}
+        </main>
+        {settings}
+      </div>
+    );
+  }
+
   // Both ends of a transition stay mounted while it plays; push and pop are
   // mirrored full-width slides.
   return (
@@ -58,86 +161,82 @@ export function App(props: { store: Store }): JSX.Element {
     >
       {shown(0) && (
         <main key="form" className={`${panelClass(anim, 0)}${exit.entering ? " form-enter" : ""}`}>
-          {rendered !== null ? (
-            <VerdictView
-              key={rendered}
-              verdict={rendered}
-              machineName={view.machine?.name ?? "that machine"}
-              machines={state.relay.machines}
-              now={now}
-              closing={exit.closing}
-              onExited={exit.onExited}
-              onQueue={actions.openQueue}
-              waitingNote={view.autoAvailability.note}
-              onRetry={() => store.retrySpawn(rendered)}
-              onAnother={() => store.startAnother()}
-              onReuse={() => store.reusePrompt(rendered)}
-              onBack={() => store.dismissLayer()}
-            />
-          ) : (
-            <SpawnScreen
-              actions={actions}
-              view={view}
-              form={state.form}
-              promptUndo={state.promptUndo}
-              sheet={state.sheet}
-              machines={state.relay.machines}
-              now={now}
-              rescan={state.rescan}
-              preview={state.preview}
-            />
-          )}
+          {formOrVerdict}
         </main>
       )}
-      {/* Kept mounted, hidden, under machines: its credential fields hold
-          unsaved drafts that a remount would drop on the way back. */}
       {shown(1) && depthOne === "queue" && (
         <main key="queue" className={panelClass(anim, 1)}>
-          <QueueScreen
-            view={deriveQueue(state, now)}
-            relayState={view.relayState}
-            machines={state.relay.machines}
-            now={now}
-            notice={state.queueNotice}
-            pausing={state.pausing}
-            onDismiss={actions.dismissLayer}
-            onRefresh={() => void store.refreshQueue()}
-            onCancel={(id) => void store.cancelTask(id)}
-            onMarkDone={(id) => void store.markDone(id)}
-            onPause={() => void store.pauseQueue()}
-            onResume={(account) => void store.resumeQueue(account)}
-          />
+          {queue(actions.dismissLayer)}
         </main>
       )}
-      {((shown(1) && depthOne === "settings") || depth === 2) && (
-        <main key="settings" className={panelClass(anim, 1)} hidden={!shown(1) || depthOne !== "settings"}>
-          <Settings
-            relayUrl={readRelayUrl()}
-            relayLine={view.relayLine}
-            relayState={view.relayState}
-            connected={state.relay.status === "open"}
-            machinesLine={view.meta}
-            onDismiss={actions.dismissLayer}
-            onReconnect={() => store.reconnect()}
-            onOpenMachines={() => store.openMachines()}
-          />
-        </main>
-      )}
+      {settings}
       {shown(2) && (
         <main key="machines" className={panelClass(anim, 2)}>
-          <MachinesScreen
-            view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
-            relayLine={view.relayLine}
-            relayState={view.relayState}
-            settled={state.relay.registrySettled}
-            history={state.history}
-            onDismiss={actions.dismissLayer}
-            onShowHistory={(target, range) => void store.showHistory(target, range)}
-            onHideHistory={() => store.hideHistory()}
-          />
+          {machines(actions.dismissLayer)}
         </main>
       )}
     </div>
+  );
+}
+
+/** Room for three phone-width columns side by side. */
+const WIDE_QUERY = "(min-width: 1200px)";
+
+/** Tracks the desktop breakpoint and tells the store, which then reads the queue for a column nobody opened. */
+function useWide(store: Store): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia(WIDE_QUERY).matches);
+  useLayoutEffect(() => {
+    const media = window.matchMedia(WIDE_QUERY);
+    const sync = (): void => setWide(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+  useEffect(() => store.setWide(wide), [store, wide]);
+  return wide;
+}
+
+/**
+ * Settings' layer in a native modal dialog: the top layer makes the page behind
+ * it inert and turns Escape — and Android's back, which Chrome routes to an open
+ * modal before history — into `cancel`. That is cancelled and sent through the
+ * store as a history pop, so every way out takes the same path. Stays open while
+ * its panel is still on stage, so the close animation plays in it.
+ */
+function SettingsDialog(props: {
+  wide: boolean;
+  anim: ScreenAnim | null;
+  onDismiss: () => void;
+  children: ComponentChildren;
+}): JSX.Element {
+  const { wide, anim, onDismiss, children } = props;
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    if (node === null) return;
+    node.showModal();
+    // Before removal, so focus goes back to the cog that opened it.
+    return () => node.close();
+  }, []);
+
+  const motion = wide && anim !== null ? (anim.to === 0 ? " layer-modal-out" : " layer-modal-in") : "";
+  return (
+    <dialog
+      ref={dialog}
+      className={`layer-dialog ${wide ? "layer-modal" : "layer-full"}${motion}`}
+      aria-label="Settings"
+      onCancel={(event) => {
+        event.preventDefault();
+        onDismiss();
+      }}
+      onClick={(event) => {
+        // The panel fills the dialog, so only a backdrop click lands on it.
+        if (wide && event.target === event.currentTarget) onDismiss();
+      }}
+    >
+      {children}
+    </dialog>
   );
 }
 

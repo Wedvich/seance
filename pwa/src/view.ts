@@ -115,6 +115,8 @@ export interface AppState {
   readonly sessions: Readonly<Record<string, SessionsView | "unknown">>;
   /** The Queue screen, a layer like settings. */
   readonly queue: boolean;
+  /** Desktop layout: the Queue and Machines screens sit beside the form, so they are always on screen. */
+  readonly wide: boolean;
   /** What the screen last read; null until it was opened. */
   readonly queueView: QueueState | null;
   /** The cancel or mark-done in flight, if any. */
