@@ -47,7 +47,7 @@ stay as they are; the table says which word each one means.
 | Skills            | Hard filter on a declared or `/name` skill the fleet's inventory knows (unknown names pass); PWA autocompletes from it                                                                                                                                                                                                                                                                      |
 | Clients           | PWA in v1; op set designed so MCP, Raycast and CLI attach later without protocol change                                                                                                                                                                                                                                                                                                     |
 | Manual spawn      | Both: `auto` → scheduler; picking a machine → direct to daemon (works with no leader)                                                                                                                                                                                                                                                                                                       |
-| Handoff           | Dependent task gets a preamble: predecessor title, branch, PR URL, transcript path (same machine only)                                                                                                                                                                                                                                                                                      |
+| Handoff           | Dependent task gets a preamble: predecessor title (else its window or branch slug — its prompt is gone once it finishes, Settled defaults 16), branch, PR URL, transcript path (same machine only)                                                                                                                                                                                          |
 | AI dep classifier | Later; dependency sources are pluggable                                                                                                                                                                                                                                                                                                                                                     |
 | Slicing           | M1 visibility → M2 routing + leadership → M3 durable queue → M4 refinement (independent items)                                                                                                                                                                                                                                                                                              |
 
@@ -688,6 +688,11 @@ same PR, with the reason.
     `after: "merged"` dependents fail with it. Seven days is the launch ledger's own age bound:
     past it no machine can report the merge, and a `here` task's merge is never read back, so
     it needs mark-done before then.
+16. **A finished task keeps no prompt** (owner, 2026-10-18). The leader drops it on the write
+    that finishes the task (`forgetPrompt` in `#update`), and strips finished records that still
+    hold one in its next passes (`#forgetPrompts`, 8 a pass). The transcript on the machine that
+    ran the task is the copy kept; slugs derived from it (window, branch) stay as labels
+    (DESIGN.md, Scheduler, "The library").
 
 ## Risks / unknowns
 
@@ -750,7 +755,8 @@ same PR, with the reason.
   (_Scheduler_, "Leadership"; _Threat model_, item 3).
 
 - **Prompts at rest on Cloudflare.** Sealed under the PSK like `info`, and ciphertext length is
-  unpadded, so the relay bounds prompt length — the same concession as live frames.
+  unpadded, so the relay bounds prompt length — the same concession as live frames. At rest
+  only while the task is unfinished (Settled defaults 16).
 - **OAuth usage endpoint** is unofficial; reading tokens per config dir differs by platform
   (macOS keychain entry naming per config dir is unverified). Session reports are the floor.
 - **Session `rate_limits` cadence** (was: statusline cadence). The tap is `session.measure`,

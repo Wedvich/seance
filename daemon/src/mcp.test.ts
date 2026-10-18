@@ -1048,6 +1048,23 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
+  test("a finished task has no prompt key, and its placement's window still names it", async () => {
+    const finished = task({
+      id: "t-9",
+      state: "done",
+      doneBy: "session",
+      assignment: { deviceId: "device-2", exclave: "work", clone: "seance", window: "fix-the-flaky-test" },
+    });
+    const fake = leaderRelay([{ tasks: [finished], at: 6_000 }]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "get_queue", arguments: {} });
+    const [listed] = JSON.parse(toolText(result)).tasks;
+    expect(listed).not.toHaveProperty("prompt");
+    expect(listed.placement.window).toBe("fix-the-flaky-test");
+    lazy.stop();
+  });
+
   test("a failed task's line words a scheduler code and keeps a daemon refusal's own message", async () => {
     const failed = (id: string, code: string, message: string) =>
       task({ id, state: "failed", failure: { code, message } });

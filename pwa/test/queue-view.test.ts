@@ -140,7 +140,7 @@ describe("deriveQueue", () => {
     }
   });
 
-  test("a row's title is the task's, else its prompt's first line cut to 80, else its repo", () => {
+  test("a row's title is the task's, else its prompt's first line cut to 80, else its window, else its repo", () => {
     const rows = deriveQueue(
       state(
         ok([
@@ -148,11 +148,20 @@ describe("deriveQueue", () => {
           task("b", { spec: { repo: ORIGIN, mode: "worktree", prompt: `\n${"x".repeat(100)}\nsecond` } }),
           task("c", { spec: { repo: ORIGIN, mode: "worktree", prompt: "first\nsecond" } }),
           task("d"),
+          task("e", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "fix-the-flaky-test" } }),
+          task("f", { state: "cancelled" }),
         ]),
       ),
       NOW,
-    ).sections[0]?.rows;
-    expect(rows?.map((r) => r.title)).toEqual(["Fix the thing", `${"x".repeat(79)}…`, "first", "acme/app"]);
+    ).sections.flatMap((section) => section.rows);
+    expect(rows.map((r) => [r.id, r.title])).toEqual([
+      ["a", "Fix the thing"],
+      ["b", `${"x".repeat(79)}…`],
+      ["c", "first"],
+      ["d", "acme/app"],
+      ["e", "fix-the-flaky-test"],
+      ["f", "acme/app"],
+    ]);
   });
 
   test("cancel and mark done are offered unless the task is dispatching or finished; only a placed one's cancel ends a session", () => {

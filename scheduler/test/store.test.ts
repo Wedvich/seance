@@ -189,3 +189,182 @@ describe("the scheduler over a store", () => {
     expect(scheduler.preview(spec()).candidates).toHaveLength(DECISION_MAX_CANDIDATES);
   });
 });
+
+/** What a store holds for `id`: its version and body, which must be there. */
+async function read(store: MemoryQueueStore, id: string): Promise<{ version: number; body: Task }> {
+  const entry = await store.get(id);
+  if (entry === null || entry.body === undefined) throw new Error(`${id} is not readable`);
+  return { version: entry.version, body: entry.body };
+}
+
+/** A record at `version`, as an earlier leader left it: the same body written `version` times. */
+async function seed(store: MemoryQueueStore, task: Task, version = 1): Promise<void> {
+  for (let at = 0; at < version; at += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- each put follows the version before it
+    const write = await store.put(task.id, at, task);
+    if (!write.ok) throw new Error(`seed ${task.id}: ${write.code}`);
+  }
+}
+
+describe("a finished task keeps no prompt", () => {
+  const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as const;
+  const FROM_A = { deviceId: "a", pane: "%1" } as const;
+
+  test("the write that ends a session without a PR drops the prompt, in the one version it costs", async () => {
+    const { store, scheduler } = setup();
+    await store.put("t", 0, queued("t", { spec: spec({ title: "fix it" }) }));
+    await scheduler.load();
+    await pass(scheduler);
+    const running = await read(store, "t");
+    expect(running.body.state).toBe("running");
+    expect(running.body.spec.prompt).toBe("do it");
+
+    await scheduler.onSession("t", "ended", FROM_A);
+    const done = await read(store, "t");
+    expect(done.body.state).toBe("done");
+    expect(done.version).toBe(running.version + 1);
+    expect(done.body.spec).toEqual({ repo: running.body.spec.repo, mode: "worktree", title: "fix it" });
+    expect(scheduler.task("t")?.spec.prompt).toBeUndefined();
+  });
+
+  test("every failing path leaves none: a refused spawn, an expired lost task, a failed dependency", async () => {
+    const refused = setup();
+    refused.fleet.scripts.set("a", () => ({ ok: false, code: "repo_not_found", message: "gone" }));
+    await refused.store.put("t", 0, queued("t"));
+    await refused.scheduler.load();
+    await pass(refused.scheduler);
+    const failed = await read(refused.store, "t");
+    expect(failed.body).toMatchObject({ state: "failed", failure: { code: "repo_not_found" } });
+    expect(failed.body.spec.prompt).toBeUndefined();
+
+    const expired = setup(new FakeFleet([machine("a", { connected: false })]));
+    await expired.store.put("l", 0, queued("l", { state: "lost", assignment: ON_A, absentSince: NOW }));
+    await expired.scheduler.takeover();
+    expired.clock.now += 8 * 86_400_000;
+    await pass(expired.scheduler);
+    const lost = await read(expired.store, "l");
+    expect(lost.body).toMatchObject({ state: "failed", failure: { code: "lost_expired" } });
+    expect(lost.body.spec.prompt).toBeUndefined();
+    expect(lost.version).toBe(2);
+
+    const dependent = setup();
+    await dependent.store.put(
+      "p",
+      0,
+      queued("p", { state: "failed", failure: { code: "repo_not_found", message: "x" } }),
+    );
+    await dependent.store.put(
+      "d",
+      0,
+      queued("d", { state: "queued", spec: spec({ deps: [{ task: "p", after: "merged" }] }) }),
+    );
+    await dependent.scheduler.takeover();
+    await pass(dependent.scheduler);
+    const blocked = await read(dependent.store, "d");
+    expect(blocked.body).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+    expect(blocked.body.spec.prompt).toBeUndefined();
+    expect(blocked.version).toBe(2);
+  });
+
+  test("cancel and mark-done leave none, and the task they return has none", async () => {
+    const { store, scheduler } = setup();
+    await store.put("c", 0, queued("c", { state: "queued" }));
+    await store.put("m", 0, queued("m", { state: "ready" }));
+    await scheduler.load();
+
+    const cancelled = await scheduler.cancel("c");
+    expect(cancelled).toMatchObject({ ok: true, task: { state: "cancelled" } });
+    expect(cancelled.ok && cancelled.task.spec.prompt).toBeUndefined();
+    expect((await read(store, "c")).body.spec.prompt).toBeUndefined();
+
+    const done = await scheduler.markDone("m");
+    expect(done).toMatchObject({ ok: true, task: { state: "done" } });
+    expect(done.ok && done.task.spec.prompt).toBeUndefined();
+    expect((await read(store, "m")).body.spec.prompt).toBeUndefined();
+  });
+
+  test("an unfinished task keeps its prompt, spawns with it, and a pass does not rewrite it", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    fleet.running.set("a", [{ id: "%1", window: "w", repo: "app", path: "/wt/r", taskId: "r" }]);
+    const { store, scheduler } = setup(fleet);
+    await store.put("r", 0, queued("r", { state: "running", assignment: ON_A }));
+    await store.put("t", 0, queued("t"));
+    await scheduler.takeover();
+    await pass(scheduler);
+    expect(fleet.spawns.map((s) => s.request.prompt)).toEqual(["do it"]);
+    const running = await read(store, "r");
+    expect(running.version).toBe(1);
+    expect(running.body.spec.prompt).toBe("do it");
+  });
+
+  test("a finished record an earlier leader left with its prompt is rewritten once, in the first pass", async () => {
+    const { store, scheduler } = setup();
+    const legacy = queued("t", { state: "done", doneBy: "session" });
+    await seed(store, legacy, 3);
+    await scheduler.takeover();
+    expect((await read(store, "t")).body.spec.prompt).toBe("do it");
+
+    await pass(scheduler);
+    const stripped = await read(store, "t");
+    expect(stripped.version).toBe(4);
+    const { prompt: _prompt, ...rest } = legacy.spec;
+    expect(stripped.body).toEqual({ ...legacy, spec: rest });
+
+    await pass(scheduler);
+    expect((await read(store, "t")).version).toBe(4);
+  });
+
+  test("a sweep strips at most eight records a pass, oldest first, and never delays a dispatch", async () => {
+    const { store, fleet, scheduler } = setup();
+    const ids = Array.from({ length: 20 }, (_, i) => `d${String(i).padStart(2, "0")}`);
+    for (const [i, id] of ids.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- one record each
+      await seed(store, queued(id, { state: "done", doneBy: "session", createdAt: NOW - 100_000 + i }));
+    }
+    await store.put("r", 0, queued("r", { createdAt: NOW }));
+    await scheduler.takeover();
+
+    async function versions(): Promise<number[]> {
+      return Promise.all(ids.map(async (id) => (await read(store, id)).version));
+    }
+    await pass(scheduler);
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["r"]);
+    expect(await versions()).toEqual(ids.map((_, i) => (i < 8 ? 2 : 1)));
+
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(await versions()).toEqual(ids.map(() => 2));
+    for (const id of ids) expect((await read(store, id)).body.spec.prompt).toBeUndefined();
+  });
+
+  test("a refused cleanup write is reported, not fatal, and the next pass strips the record", async () => {
+    const { store, scheduler, errors } = setup();
+    await seed(store, queued("t", { state: "done", doneBy: "session" }), 3);
+    await scheduler.takeover();
+    store.failNext({ code: "refused" });
+    await pass(scheduler);
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0])).toContain("refused");
+    expect(String(errors[0])).not.toContain("do it");
+    const refused = await read(store, "t");
+    expect(refused.version).toBe(3);
+    expect(refused.body.spec.prompt).toBe("do it");
+
+    await pass(scheduler);
+    const stripped = await read(store, "t");
+    expect(stripped.version).toBe(4);
+    expect(stripped.body.spec.prompt).toBeUndefined();
+  });
+
+  test("a revoked term ends the sweep and leaves the record as it was", async () => {
+    const { store, scheduler } = setup();
+    await seed(store, queued("t", { state: "done", doneBy: "session" }), 3);
+    await scheduler.takeover();
+    store.failNext({ code: "revoked" });
+    await expect(scheduler.tick()).rejects.toBeInstanceOf(StoreRevoked);
+    await scheduler.drain().catch(() => undefined);
+    const record = await read(store, "t");
+    expect(record.version).toBe(3);
+    expect(record.body.spec.prompt).toBe("do it");
+  });
+});

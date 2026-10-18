@@ -147,6 +147,18 @@ describe("round trip", () => {
       expect((await store.get("e"))?.body).toEqual(ended);
     });
   });
+
+  test("a finished record with no prompt is sealed, bound and opened as any other: the reader accepts it", async () => {
+    await withRig(async ({ store }) => {
+      const body = task("p");
+      expect(await store.put("p", 0, body)).toEqual({ ok: true, version: 1 });
+      const { prompt: _prompt, ...spec } = body.spec;
+      const done: Task = { ...body, spec, state: "done", doneBy: "session" };
+      expect(await store.put("p", 1, done)).toEqual({ ok: true, version: 2 });
+      expect(await store.get("p")).toEqual({ id: "p", version: 2, body: done });
+      expect(await store.list()).toEqual([{ id: "p", version: 2, body: done }]);
+    });
+  });
 });
 
 describe("reader rules", () => {

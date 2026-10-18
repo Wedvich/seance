@@ -94,6 +94,8 @@ function titleOf(task: Task): string {
     .find((l) => l.trim() !== "")
     ?.trim();
   if (first !== undefined) return first.length > 80 ? `${first.slice(0, 79)}…` : first;
+  const window = task.assignment?.window;
+  if (window !== undefined && window !== "") return window;
   return originLabel(spec.repo);
 }
 

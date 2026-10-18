@@ -68,7 +68,7 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-/** A task as `queue` shows it before its decision is chosen: the prompt cut to a preview. */
+/** A task as `queue` shows it before its decision is chosen: the prompt cut to a preview (a finished task has none). */
 function undecided(task: Task): Task {
   const { decision: _, spec, ...rest } = task;
   const { prompt } = spec;
