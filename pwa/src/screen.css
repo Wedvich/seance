@@ -77,6 +77,7 @@
 }
 
 .relay-cog {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1835,24 +1836,85 @@
   color: var(--fg2);
 }
 
-/* The header's pill beside the relay group: same track, a label instead of a cog. */
-.queue-chip {
-  position: relative;
-  height: 44px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--sur2);
-  color: var(--fg);
-  font-size: 14.5px;
-  font-weight: 600;
-  flex: none;
+/* ---- phone header menu: queue, machines, settings ---- */
+
+/* An escalated task, on the closed menu's face. */
+.menu-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  box-shadow: 0 0 0 2px var(--sur3);
 }
 
-.queue-chip-dot {
-  position: absolute;
-  top: 8px;
-  right: 8px;
+/* Top-layer popover; `top`/`right` are set under the pill on open. */
+.header-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  min-width: 196px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--sur);
+  color: var(--fg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
+  transform-origin: top right;
+  transition:
+    opacity 0.14s ease,
+    transform 0.14s ease,
+    overlay 0.14s allow-discrete,
+    display 0.14s allow-discrete;
+}
+
+.header-menu:popover-open {
+  display: flex;
+  flex-direction: column;
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .header-menu:popover-open {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.header-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.header-menu-item .dot {
+  margin-left: auto;
+}
+
+.header-menu-icon {
+  display: flex;
+  color: var(--fg2);
+}
+
+@media (hover: hover) {
+  .header-menu-item:hover {
+    background: var(--sur2);
+  }
+}
+
+.header-menu-item:active,
+.header-menu-item:focus-visible {
+  background: var(--sur2);
 }
 
 .header-actions {

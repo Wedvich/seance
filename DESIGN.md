@@ -3456,7 +3456,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   only on a visibility change, so a new build lands like a cold launch instead of
   yanking the screen mid-use.
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
-  verdict, the Settings dialog and the phone's Queue screen all push on open and are cleared by
+  verdict, the Settings dialog and the phone's Queue and Machines screens all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.
   History outlives the document, though: a reload (a service-worker update, saving
   credentials) or Android restoring a discarded PWA resumes on a layer entry with
@@ -3486,7 +3486,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   global clamp, which would freeze it at full size over the dot. The settings
   header's own status line renders the same three dots from the same component:
   one state must never read two ways.
-- **Settings is one screen, reached straight from the header's relay pill.** It absorbed
+- **On a phone the pill's face is a menu.** Below the desktop breakpoint the raised face is a
+  hamburger opening Queue, Machines and Settings — the screens a desk shows as columns, plus
+  the one it doesn't — each with a feather-weight icon (list, server, the cog). The track and
+  its dot are unchanged; an escalated task puts the queue's attention dot on the closed face
+  and on the Queue row. A native `popover="auto"`, not a layer: outside taps, Escape and
+  Android back (Chrome routes back to an open popover before history) all close it, so it
+  pushes no history entry. Pinned under the pill from its rect on open, since CSS anchor
+  positioning is not in every browser the app runs in. Rejected: a bottom tab bar, which
+  would spend a phone's height on three destinations visited far less than the form.
+- **Settings is one screen, reached from the header's relay pill** (on a phone, through its menu). It absorbed
   what used to be a bottom-sheet drawer plus a separate Relay & keys screen:
   credentials, connection status and theme in one place. The drawer's
   entry-replacing history special case went with it, and its "Reconnect now" row
@@ -3503,8 +3512,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   one path and the layer's history entry never strands.
 - **Machines is a screen, not a route** (scheduler M1). On a desk it is a column (below).
   Settings no longer links to it: Machines is meant to be always on screen, not a layer reached
-  through Settings, and the phone's way to it is not built yet — until it is, the store's
-  depth-2 layer (`openMachines`) has no caller. Rejected for now: URL routes (`/machines`),
+  through Settings; on a phone it is a layer straight over the form, opened from the header
+  menu (`openMachines`). Rejected for now: URL routes (`/machines`),
   which would need boot-time path parsing and a rethink of entry depth for deep links — a
   separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
@@ -3642,8 +3651,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
   Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
   leader.
-- **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from a chip in
-  the header (an attention dot on it while a task is escalated). It reads `queue` from the leader
+- **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from the
+  phone's header menu (an attention dot on it while a task is escalated). It reads `queue` from the leader
   and so shows nothing while none leads — it says why ("No scheduler is leading right now") and
   keeps a list it had already read, marked possibly stale; there is deliberately no fallback that
   lists the store directly, since the leader's reply is where decisions, holds and the bounded,

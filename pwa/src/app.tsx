@@ -14,7 +14,10 @@ import type { Store } from "./store.ts";
 import { deriveView, type AppState } from "./view.ts";
 
 /** Pushed screens in stack order; the spawn form is depth 0. */
-type Depth = 0 | 1 | 2;
+type Depth = 0 | 1;
+
+/** The layers the phone's header menu opens, each straight over the form. */
+type DepthOne = "settings" | "queue" | "machines";
 
 interface ScreenAnim {
   readonly from: Depth;
@@ -24,7 +27,7 @@ interface ScreenAnim {
 export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
-  const depth: Depth = state.machines ? 2 : state.settings || state.queue ? 1 : 0;
+  const depth: Depth = state.settings || state.queue || state.machines ? 1 : 0;
   const depthOne = useDepthOne(state);
   const [anim, clearAnim] = useScreenTransition(depth);
   const shown = (screen: Depth): boolean => screen === depth || screen === anim?.from;
@@ -169,12 +172,12 @@ export function App(props: { store: Store }): JSX.Element {
           {queue(actions.dismissLayer)}
         </main>
       )}
-      {settings}
-      {shown(2) && (
-        <main key="machines" className={panelClass(anim, 2)}>
+      {shown(1) && depthOne === "machines" && (
+        <main key="machines" className={panelClass(anim, 1)}>
           {machines(actions.dismissLayer)}
         </main>
       )}
+      {settings}
     </div>
   );
 }
@@ -216,7 +219,7 @@ function SettingsDialog(props: {
     const node = dialog.current;
     if (node === null) return;
     node.showModal();
-    // Before removal, so focus goes back to the cog that opened it.
+    // Before removal, so focus goes back to the button that opened it.
     return () => node.close();
   }, []);
 
@@ -244,9 +247,9 @@ function SettingsDialog(props: {
  * Which depth-1 screen showed last, so a pop animation keeps rendering the one
  * that is leaving after its flag has already cleared.
  */
-function useDepthOne(state: AppState): "settings" | "queue" {
-  const [which, setWhich] = useState<"settings" | "queue">("settings");
-  const next = state.queue ? "queue" : state.settings ? "settings" : null;
+function useDepthOne(state: AppState): DepthOne {
+  const [which, setWhich] = useState<DepthOne>("settings");
+  const next = state.queue ? "queue" : state.machines ? "machines" : state.settings ? "settings" : null;
   useLayoutEffect(() => {
     if (next !== null && next !== which) setWhich(next);
   }, [next, which]);
@@ -301,6 +304,7 @@ function useSpawnActions(store: Store): SpawnActions {
       undoClear: () => store.undoClear(),
       openSettings: () => store.openSettings(),
       openQueue: () => store.openQueue(),
+      openMachines: () => store.openMachines(),
       openSheet: (sheet) => store.openSheet(sheet),
       toggleWorktree: () => store.toggleWorktree(),
       spawn: () => void store.spawn(),
