@@ -1150,17 +1150,9 @@
   gap: 10px;
 }
 
-/* The dot sits in the name row, centred on the name line; the gutter keeps the lines below aligned with the name. */
 .fleet-card-title {
-  --dot-gutter: 17px;
   flex: 1;
   min-width: 0;
-  padding-left: var(--dot-gutter);
-}
-
-.fleet-name-row .dot {
-  margin-left: calc(-1 * var(--dot-gutter));
-  margin-right: 2px;
 }
 
 .fleet-name {
@@ -1202,6 +1194,7 @@
   color: var(--warn);
 }
 
+/* The dot leads the name on the card's own left edge, so every row below starts where it does. */
 .fleet-name-row {
   min-height: var(--fleet-line);
   display: flex;
@@ -1213,19 +1206,32 @@
 /* `auto`'s colour: the badge marks the machine `auto` tasks go through. */
 .fleet-badge {
   flex: none;
-  padding: 1px 8px;
+  padding: 1px 8px 2px;
   border: 1px solid var(--auto);
   border-radius: 999px;
-  font-family: var(--mono);
-  font-variant-ligatures: none;
-  font-size: 10.5px;
+  /* The body face, not the mono one: Fira Code's glyphs sit high in their line box, so a
+     mono pill reads top-heavy beside the name. */
+  font-size: 11px;
   font-weight: 600;
+  line-height: 1.2;
   color: var(--auto);
 }
 
 .fleet-badge-unverified {
   border-color: var(--warn);
   color: var(--warn);
+}
+
+/*
+ * One table per card: gauges and exclaves share a label column and a trailing
+ * numeric column, so CPU / Memory / default / personal stack in one line and
+ * every percent and session count ends on the same edge. The label width is
+ * sized for "Memory" and "7d Fable"; an exclave id longer than that truncates
+ * rather than pushing its row out of line.
+ */
+.fleet-card {
+  --fleet-label: 68px;
+  --fleet-num: 36px;
 }
 
 .bars {
@@ -1236,10 +1242,18 @@
 
 .bar {
   display: grid;
-  grid-template-columns: 72px 1fr auto;
+  grid-template-columns: var(--fleet-label) minmax(0, 1fr) var(--fleet-num);
   align-items: center;
-  gap: 10px;
-  font-size: 13px;
+  column-gap: 12px;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+/* The reset is the fourth column where any bar in the list has one; `auto` keeps it as wide as the longest. */
+.bar-resets {
+  grid-template-columns: var(--fleet-label) minmax(0, 1fr) var(--fleet-num) auto;
 }
 
 .bar-label {
@@ -1276,17 +1290,23 @@
 }
 
 .bar-value {
-  font-family: var(--mono);
-  font-variant-ligatures: none;
-  font-size: 12px;
-  color: var(--fg2);
   text-align: right;
+  color: var(--fg);
+}
+
+.bar-reset {
+  min-width: 7.5em;
+  color: var(--fg2);
+  white-space: nowrap;
 }
 
 .exclaves {
   margin: 0;
-  padding: 0;
+  padding: 10px 0 0;
   list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border-top: 1px solid var(--line);
 }
 
@@ -1294,15 +1314,17 @@
   display: grid;
   /* The account (an email since `ExclaveInfo.email`) is what gives way: an exclave name is
      short by the `~/.exclaves` contract, and is the row's identity. */
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  padding: 9px 0 0;
-  font-size: 13px;
+  grid-template-columns: var(--fleet-label) minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 12px;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 
 .exclave-id {
-  font-family: var(--mono);
-  font-variant-ligatures: none;
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1312,15 +1334,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
+  color: var(--fg2);
 }
 
-.exclave-account,
+/* Count and unit in separate cells: "session" and "sessions" differ in length, and the digits are what the column is read by. */
 .exclave-sessions {
-  font-family: var(--mono);
-  font-variant-ligatures: none;
-  font-size: 12px;
+  display: grid;
+  grid-template-columns: 2ch 8ch;
+  column-gap: 0.6ch;
+  white-space: nowrap;
   color: var(--fg2);
+}
+
+.exclave-sessions b {
+  font-weight: inherit;
+  text-align: right;
+  color: var(--fg);
 }
 
 /* ---- history chart ---- */

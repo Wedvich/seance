@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useMemo } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
-import type { AccountCard, Gauge, MachineCard, MachinesView, QuotaBar } from "../machines-view.ts";
+import type { AccountCard, Gauge, MachineCard, MachinesView } from "../machines-view.ts";
 import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
@@ -125,7 +125,7 @@ function MachineCardView(props: {
       {card.gauges.length > 0 && (
         <div className="bars">
           {card.gauges.map((entry) => (
-            <Bar key={entry.label} gauge={entry} trailing={`${entry.pct}%`} />
+            <Bar key={entry.label} gauge={entry} />
           ))}
         </div>
       )}
@@ -142,7 +142,7 @@ function MachineCardView(props: {
                 {row.account}
               </span>
               <span className="exclave-sessions">
-                {row.sessions === null ? "–" : `${row.sessions} ${row.sessions === 1 ? "session" : "sessions"}`}
+                {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
               </span>
             </li>
           ))}
@@ -185,7 +185,7 @@ function AccountCardView(props: {
       {account.bars.length > 0 && (
         <div className="bars">
           {account.bars.map((bar) => (
-            <Bar key={bar.label} gauge={bar} trailing={quotaTrailing(bar)} />
+            <Bar key={bar.label} gauge={bar} resets={bar.resets} />
           ))}
         </div>
       )}
@@ -218,19 +218,33 @@ function HistoryToggle(props: {
   );
 }
 
-function quotaTrailing(bar: QuotaBar): string {
-  return bar.resets === null ? `${bar.pct}%` : `${bar.pct}% · ${bar.resets}`;
+/** The count carries the weight; its unit stays muted, so a column of rows scans by number. */
+function SessionCount(props: { count: number }): JSX.Element {
+  const { count } = props;
+  return (
+    <>
+      <b>{count}</b>
+      <span>{count === 1 ? "session" : "sessions"}</span>
+    </>
+  );
 }
 
-function Bar(props: { gauge: Gauge; trailing: string }): JSX.Element {
-  const { gauge, trailing } = props;
+/**
+ * A quota bar's reset is its own column, not part of the value: the percent
+ * then shares one edge with every other percent on the screen. `undefined`
+ * leaves the column out entirely (a pressure gauge); `null` keeps it, empty,
+ * so a window without a reset stamp stays in line with its siblings.
+ */
+function Bar(props: { gauge: Gauge; resets?: string | null }): JSX.Element {
+  const { gauge, resets } = props;
   return (
-    <div className="bar">
+    <div className={resets === undefined ? "bar" : "bar bar-resets"}>
       <span className="bar-label">{gauge.label}</span>
       <span className="bar-track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={gauge.pct}>
         <span className={`bar-fill bar-${gauge.level}`} style={{ width: `${gauge.pct}%` }} />
       </span>
-      <span className="bar-value">{trailing}</span>
+      <span className="bar-value">{gauge.pct}%</span>
+      {resets !== undefined && <span className="bar-reset">{resets ?? ""}</span>}
     </div>
   );
 }
