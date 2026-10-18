@@ -1111,12 +1111,13 @@ taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` fo
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
-- `queue { tasks? }` → `{ tasks, holds, at }` — the leader's newest `QUEUE_MAX_TASKS` tasks with their latest
+- `queue { tasks? }` → `{ tasks, holds, at }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
+  `needs-input` leading, newest first within each) with their latest
   decisions, prompts cut to `QUEUE_PROMPT_PREVIEW`; a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
   only (at most `QUEUE_MAX_TASKS`): what a `queue-changed` named, or the one task a verdict
   follows. An unreadable filter is `invalid_request`, never "everything"; an older leader
-  ignores it and answers the newest, so a reader filters the reply again.
+  ignores it and answers its own listing, so a reader filters the reply again.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
@@ -1131,11 +1132,14 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   `Scheduler.cancel`, so a running one is despawned on its machine first (Scheduler, "The
   leader").
 - `mark-done { taskId }` (`TaskRef`) → `{ task }`, `done` with `doneBy: "manual"`:
-  `Scheduler.markDone`. The task's session is left alone — this says the work is finished, it
-  does not end anything; `cancel` is the one that despawns. It is how a `here` task, or a PR
-  merged after its session was evicted, leaves `awaiting-merge`, and it releases an
+  `Scheduler.markDone`. A `running` or `needs-input` task has its session ended first, exactly
+  as `cancel` does: caps count task states only, so a `done` task frees its slot, and a session
+  left running past that would work beyond them. `lost`, `awaiting-merge` and the waiting
+  states settle as they stand (nothing to end, or nothing reachable). It is how a `here` task,
+  or a PR merged after its session was evicted, leaves `awaiting-merge`, and it releases an
   `after: "merged"` dependent. Refused `task_not_found`, `dispatching` (`reserved`: its spawn
-  is in flight) and `finished`, as `cancel` is.
+  is in flight), `finished`, `conflict`, and, for a live session, `despawn_failed` (its
+  machine refused; the task is unchanged), as `cancel` is.
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
@@ -1491,7 +1495,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   ran and the `cancelled` write was then revoked (`unrecorded` in the library: the session may
   already have ended, the term ends, and MCP adds its "may have landed anyway" because
   `internal_error` is a transport code), and `not_leader` (below). `queue`
-  replies with the newest `QUEUE_MAX_TASKS` tasks (or the ids a `tasks` filter names), prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
+  replies with the `QUEUE_MAX_TASKS` most relevant tasks, unfinished first (or the ids a `tasks` filter names), prompts cut to `QUEUE_PROMPT_PREVIEW`, each with
   its latest decision — placed or not. A decision grows with the fleet (about 5 KB at 3 machines ×
   3 exclaves, 20 KB at 10 × 5) and the reply must fit one envelope, so whole decisions are filled
   against a plaintext budget (`QUEUE_REPLY_BUDGET`, 44 000 bytes, about 59 000 sealed against
@@ -1511,8 +1515,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   frees its slot. Before 2026-10-17 it answered `invalid_request` with the M3 ops, so a `lost`
   task could not be cleared at all. `mark-done` is `Scheduler.markDone`, answered with the
   task as it now stands and ticking, since what waited on a merged dependency is released by it;
-  its refusals are `task_not_found`, `dispatching`, `finished` and `conflict`, never `despawn_failed`:
-  it ends nothing. `pause` and `resume` (M3 item 5) are `Scheduler.pause` and
+  its refusals are `task_not_found`, `dispatching`, `finished`, `conflict` and, where
+  it ends a live session first, `despawn_failed`, with a revoked write after the despawn `unrecorded`, as
+  for `cancel`. `pause` and `resume` (M3 item 5) are `Scheduler.pause` and
   `resume` (_The library_, "Pause"), answered with every hold in force after the change;
   `resume` ticks, so what the hold kept waiting is placed at once. Their refusals:
   `reset_unknown` (a reset hold on an account no reading gives a reset for), `conflict` (the
@@ -3498,7 +3503,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). **Cancel** is offered where the leader's `cancel` is allowed, and
   where it ends a live session it takes a second tap within four seconds; **Mark done** sets the
-  task `done` without touching its session. Holds show whole or per account, by the account's
+  task `done` by hand, ending its session first if it is running. Holds show whole or per account, by the account's
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
   relevant `QUEUE_MAX_TASKS`. Authoring a batch or a dependency from the PWA has no UI yet

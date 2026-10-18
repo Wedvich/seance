@@ -96,7 +96,8 @@ This first deploy is by hand; afterwards CI redeploys the relay on every push to
 `CLOUDFLARE_ACCOUNT_ID` repository variable. The bearer token stays a Worker secret
 and a CI deploy leaves it alone — as does `SCHEDULER_LEADERS`, the second secret,
 set in step 4 once your machines have ids. Until it is set no machine leads the
-scheduler and **Auto** stays greyed; direct spawns don't need it.
+scheduler, so **Auto** queues the task and it waits there until one does (no
+preview, no placement); direct spawns don't need it.
 
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
@@ -334,7 +335,7 @@ queues and waits there until one does; only the placement preview needs a leader
 Auto is greyed only when the app isn't connected to the relay. The **Queue** chip in
 the header opens everything queued: what needs you, what is running or waiting, and
 what finished, with **Cancel** (ends a running session, so it takes a second tap),
-**Mark done** (finishes the task and leaves its session alone), and **Pause** /
+**Mark done** (finishes the task, ending its session if it is running), and **Pause** /
 **Resume** for the whole queue or one account. Picking a machine directly always
 works, with or without a scheduler.
 

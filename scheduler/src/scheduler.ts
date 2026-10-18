@@ -71,7 +71,10 @@ export type PauseResult =
 
 export type MarkDoneResult =
   | { readonly ok: true; readonly task: Task }
-  | { readonly ok: false; readonly code: "not_found" | "dispatching" | "finished" | "conflict" };
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
+    };
 
 export type CancelResult =
   | { readonly ok: true; readonly task: Task }
@@ -79,6 +82,8 @@ export type CancelResult =
       readonly ok: false;
       readonly code: "not_found" | "dispatching" | "finished" | "despawn_failed" | "conflict" | "unrecorded";
     };
+
+type CancelFailure = { readonly ok: false; readonly code: "despawn_failed" };
 
 interface Held {
   readonly version: number;
@@ -371,22 +376,10 @@ export class Scheduler {
     const refused = cancelRefusal(task);
     if (refused !== null) return refused;
     const { assignment } = task;
-    let despawned = false;
     const leftRunning = task.state === "lost" && assignment !== undefined && !this.#connected(assignment.deviceId);
-    if (assignment !== undefined && !leftRunning && PLACED.includes(task.state)) {
-      // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
-      let pane = assignment.pane;
-      if (pane === undefined) {
-        const listed = await this.#fleet.sessions(assignment.deviceId);
-        if (!listed.ok) return { ok: false, code: "despawn_failed" };
-        pane = listed.sessions.find((s) => s.taskId === task.id)?.id;
-      }
-      if (pane !== undefined) {
-        const reply = await this.#fleet.despawn(assignment.deviceId, { id: pane, client: SCHEDULER_CLIENT });
-        if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
-        despawned = true;
-      }
-    }
+    const ended = leftRunning ? { ok: true as const, despawned: false } : await this.#endSession(task);
+    if (!ended.ok) return ended;
+    const { despawned } = ended;
     let outcome: CancelResult = { ok: false, code: "conflict" };
     const next = await this.#update(taskId, (current) => {
       if (FINISHED.includes(current.state)) {
@@ -415,18 +408,46 @@ export class Scheduler {
   }
 
   /**
+   * Ends the session of a placed task: whether it was despawned, or refused as
+   * `despawn_failed`. No pane to name and none listed is nothing to end.
+   */
+  async #endSession(task: Task): Promise<{ readonly ok: true; readonly despawned: boolean } | CancelFailure> {
+    const { assignment } = task;
+    if (assignment === undefined || !PLACED.includes(task.state)) return { ok: true, despawned: false };
+    // A `task_running` verdict may name no pane; the machine's sessions still carry the task id.
+    let pane = assignment.pane;
+    if (pane === undefined) {
+      const listed = await this.#fleet.sessions(assignment.deviceId);
+      if (!listed.ok) return { ok: false, code: "despawn_failed" };
+      pane = listed.sessions.find((s) => s.taskId === task.id)?.id;
+    }
+    if (pane === undefined) return { ok: true, despawned: false };
+    const reply = await this.#fleet.despawn(assignment.deviceId, { id: pane, client: SCHEDULER_CLIENT });
+    if (!reply.ok && reply.code !== "session_not_found") return { ok: false, code: "despawn_failed" };
+    return { ok: true, despawned: true };
+  }
+
+  /**
    * Settles an unfinished task `done` (`doneBy: "manual"`) as it stands: the
    * human says its work is over, so it wins over whatever else the task was
-   * waiting for. Nothing is despawned — a running session is left running, and
-   * a later event for a `done` task is ignored (`sessionChange` and
-   * `branchChange` touch placed tasks only). `reserved` is refused as
-   * `cancel` refuses it: its spawn is in flight.
+   * waiting for. A `running` or `needs-input` task has its session ended first,
+   * as `cancel` does, since a `done` task holds no slot and a session left
+   * running would keep working beyond the caps. `lost`, `awaiting-merge` and the
+   * waiting states are settled as they stand (their session is gone, or
+   * unreachable, or never was). A later event for a `done` task is ignored
+   * (`sessionChange` and `branchChange` touch placed tasks only). `reserved` is
+   * refused as `cancel` refuses it: its spawn is in flight. A despawn that ran
+   * and then lost the right to write `done` is `unrecorded`, as for `cancel`.
    */
   async markDone(taskId: string): Promise<MarkDoneResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
     if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    const { assignment } = task;
+    const live = task.state === "running" || task.state === "needs-input";
+    const ended = live ? await this.#endSession(task) : { ok: true as const, despawned: false };
+    if (!ended.ok) return ended;
     let outcome: MarkDoneResult = { ok: false, code: "conflict" };
     const next = await this.#update(taskId, (current) => {
       if (FINISHED.includes(current.state)) {
@@ -437,7 +458,14 @@ export class Scheduler {
         outcome = { ok: false, code: "dispatching" };
         return null;
       }
+      // What was despawned must still be what is settled.
+      if (live && current.assignment?.deviceId !== assignment?.deviceId) return null;
       return advance(current, "done", { doneBy: "manual" });
+    }).catch((err: unknown) => {
+      if (!ended.despawned || !(err instanceof StoreRevoked)) throw err;
+      this.#onError(err);
+      outcome = { ok: false, code: "unrecorded" };
+      return null;
     });
     if (next === null) return outcome;
     this.#decisions.delete(taskId);

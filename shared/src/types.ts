@@ -1704,7 +1704,7 @@ export const SCHEDULER_ERROR_CODES = [
   "dispatching",
   /** `cancel`, `mark-done`: the task is already `done`, `failed` or `cancelled`. */
   "finished",
-  /** `cancel`: its machine answered the despawn with a refusal; the task is unchanged. */
+  /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
   /** `cancel`, `mark-done`, `pause`, `resume`: the record changed under the request (a lost store race); ask again. */
   "conflict",
@@ -1726,17 +1726,17 @@ export interface SchedulerError {
   readonly message: string;
 }
 
-/** `queue` replies with at most this many tasks, newest first: each carries a decision, which grows with the fleet. */
+/** `queue` replies with at most this many tasks, unfinished first (a task waiting on a person leads), newest first within each: each carries a decision, which grows with the fleet. */
 export const QUEUE_MAX_TASKS = 20;
 
 /** A `queue` reply's prompts are cut to this many UTF-16 units — enough to name a task, not to re-read it. */
 export const QUEUE_PROMPT_PREVIEW = 120;
 
 /**
- * `op: "queue"` → the leader's newest tasks, each with its latest decision.
+ * `op: "queue"` → the leader's most relevant tasks (unfinished first), each with its latest decision.
  * `tasks` asks for those ids only (at most `QUEUE_MAX_TASKS`) — what a
  * `queue-changed` named, or the one task a verdict follows. Older leaders
- * ignore the payload and answer the newest, so a reader filters the reply again.
+ * ignore the payload and answer their own listing, so a reader filters the reply again.
  */
 export interface QueueRequest {
   readonly tasks?: readonly string[];

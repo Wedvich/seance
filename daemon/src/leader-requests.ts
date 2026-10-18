@@ -187,7 +187,13 @@ const MARK_DONE_REFUSALS: Record<Exclude<MarkDoneResult, { readonly ok: true }>[
   not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
   dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
   finished: schedulerError("finished", "the task has already finished"),
+  despawn_failed: schedulerError("despawn_failed", "its machine did not end the session; the task is unchanged"),
   conflict: schedulerError("conflict", "the task changed while it was marked done; ask again"),
+  // A transport code, so MCP adds its "may have landed anyway": the despawn did run. Asking again is safe.
+  unrecorded: schedulerError(
+    "internal_error",
+    "its session may already have ended, but marking it done was not recorded before this daemon's term ended; check the queue, then mark it done again if it still shows",
+  ),
 };
 
 const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code"], SchedulerError> = {

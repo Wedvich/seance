@@ -706,7 +706,7 @@ as the widened types forced.
 - An app enqueues by `store-put` with the leader unverified or absent, and the task shows
   `queued` and is run by the next verified leader; the leader's `queue-changed` reaches an app
   and one an app seals does not (e2e, pwa + relay).
-- `mark-done` finishes a running task as `manual` and leaves its session; `pause` and `resume`
+- `mark-done` finishes a running task as `manual` and ends its session first; `pause` and `resume`
   show as `holds` in `queue` (e2e). A leader's nudge logs no `wire fanout` line (relay).
 
 **Gaps.** No stacking: every task starts from the default branch. Alerts are PWA-only until

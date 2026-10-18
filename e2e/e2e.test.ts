@@ -8,6 +8,7 @@ import {
   SCHEDULER_ID,
   signRegister,
   newestQuotaByAccount,
+  type QueueChanged,
   type QueueReply,
   type RegistryView,
   type RelayToAppFrame,
@@ -995,7 +996,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
 
       // The leader nudges apps when its queue changes; the PWA's own read-back rides on it.
-      const nudges: unknown[] = [];
+      const nudges: QueueChanged[] = [];
       const stopNudges = app.client.onQueueChanged((change) => nudges.push(change));
       await app.store.spawn();
       const queued = await app.waitForApp(
@@ -1018,7 +1019,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       window = session?.window ?? null;
       // Nothing reached B: no spawn ever audited there.
       expect(await Bun.file(second.log).text()).not.toContain('op="spawn"');
-      await pollUntil(() => nudges.length > 0, "the leader's queue-changed nudge");
+      await pollUntil(() => nudges.some((n) => n.tasks?.includes(task.id)), "a queue-changed naming the task");
       stopNudges();
     } finally {
       if (window !== null) await killWindow(window);
@@ -1248,10 +1249,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // Mark done is the leader's, not the session's: the task finishes as `manual`
-  // while its session keeps running, and the daemon audits the request as the
+  // Mark done is the leader's, not the session's: the task finishes as `manual`,
+  // its session is ended first (a done task holds no slot, so a session left
+  // running would work past the caps), and the daemon audits the request as the
   // scheduler's.
-  test("mark-done finishes a running task as manual and leaves its session alone, audited", async () => {
+  test("mark-done finishes a running task as manual and ends its session, audited", async () => {
     const id = crypto.randomUUID();
     const app = startApp(stack, { auto: true });
     const audit = spyOn(console, "log");
@@ -1279,7 +1281,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       const marked = await app.client.markDone(id);
       expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });
-      expect(await listWindows()).toContain(window ?? "");
+      await pollUntil(async () => !(await listWindows()).includes(window ?? ""), "the marked task's session to end");
       const lines = audit.mock.calls.map((args) => args.join(" "));
       expect(
         lines.some((line) => line.includes("op=mark-done") && line.includes(`task="${id}"`) && line.endsWith("ok")),
@@ -1399,7 +1401,18 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       stolen?.close();
       if (down) await stack.restartDaemon();
       // The real leader runs what the squatter-era app queued; cancel ends that session too.
-      if (queuedId !== null) await app.client.cancel(queuedId).catch(() => null);
+      if (queuedId !== null) {
+        const id = queuedId;
+        // `dispatching` (spawn in flight) and a leader still taking over are asked again, never ignored: a task spawning after the test is a leak.
+        await pollUntil(
+          async () => {
+            const reply = await app.client.cancel(id).catch(() => null);
+            return reply !== null && ("task" in reply || reply.code === "finished");
+          },
+          "the leftover task to be cancelled or finished",
+          20_000,
+        );
+      }
       app.stop();
       watch.close();
     }

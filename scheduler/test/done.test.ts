@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { BranchState, TaskProgress } from "@seance/shared";
+import type { BranchState, DespawnResponse, TaskProgress } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -339,7 +339,7 @@ describe("a trimmed reply", () => {
 });
 
 describe("markDone", () => {
-  test("settles every unfinished, unreserved state as done by hand, despawning nothing", async () => {
+  test("settles every unfinished, unreserved state as done by hand, ending the session only of a running or needs-input one", async () => {
     const { fleet, scheduler, put } = setup();
     const states = ["queued", "blocked", "ready", "running", "needs-input", "lost", "awaiting-merge"] as const;
     for (const state of states) {
@@ -352,7 +352,24 @@ describe("markDone", () => {
       const result = await scheduler.markDone(state);
       expect(result).toMatchObject({ ok: true, task: { id: state, state: "done", doneBy: "manual" } });
     }
-    expect(fleet.despawns).toEqual([]);
+    // A done task holds no slot, so its session must not keep running past the caps.
+    expect(fleet.despawns).toEqual([
+      { deviceId: "a", id: "%1" },
+      { deviceId: "a", id: "%1" },
+    ]);
+  });
+
+  test("a running task whose machine refuses the despawn stays running: refused, never marked done over a live session", async () => {
+    class Refusing extends FakeFleet {
+      override async despawn(): Promise<DespawnResponse> {
+        return { ok: false, code: "internal_error", message: "refused" };
+      }
+    }
+    const { scheduler, put } = setup(new Refusing([machine("a")]));
+    await put("t", { state: "running", assignment: ON_A });
+    await scheduler.load();
+    expect(await scheduler.markDone("t")).toEqual({ ok: false, code: "despawn_failed" });
+    expect(scheduler.task("t")?.state).toBe("running");
   });
 
   test("refuses a reserved task as dispatching, a finished one as finished, an unknown id as not_found", async () => {
