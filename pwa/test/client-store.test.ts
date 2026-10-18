@@ -140,6 +140,14 @@ async function connect(double: StoreDouble, storeTimeoutMs = 5_000): Promise<Rel
   return client;
 }
 
+function batchSpec(index: number): Task["spec"] {
+  return {
+    repo: "git@github.com:m/seance.git",
+    mode: "worktree",
+    batch: { id: crypto.randomUUID(), index, strategy: { mode: "sequential" } },
+  };
+}
+
 function queued(overrides: Partial<Task> = {}): Task {
   return {
     id: crypto.randomUUID(),
@@ -189,17 +197,12 @@ describe("createTask", () => {
   test("refuses a batch index past the limit before any frame, and accepts one equal to it", async () => {
     const double = startDouble();
     const client = await connect(double);
-    const spec = (index: number): Task["spec"] => ({
-      repo: "git@github.com:m/seance.git",
-      mode: "worktree",
-      batch: { id: crypto.randomUUID(), index, strategy: { mode: "sequential" } },
-    });
-    expect(await client.createTask(queued({ spec: spec(TASK_SPEC_LIMITS.batchIndex + 1) }))).toEqual({
+    expect(await client.createTask(queued({ spec: batchSpec(TASK_SPEC_LIMITS.batchIndex + 1) }))).toEqual({
       ok: false,
       code: "invalid_request",
     });
     expect(double.received).toEqual([]);
-    expect(await client.createTask(queued({ spec: spec(TASK_SPEC_LIMITS.batchIndex) }))).toEqual({
+    expect(await client.createTask(queued({ spec: batchSpec(TASK_SPEC_LIMITS.batchIndex) }))).toEqual({
       ok: true,
       landedEarlier: false,
     });

@@ -39,7 +39,10 @@ function progress(taskId: string, fields: Partial<TaskProgress> = {}): TaskProgr
 
 describe("a session that ends", () => {
   test("with a PR open is awaiting-merge, and frees its slot for the next task", async () => {
-    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
+      ...DEFAULT_CONFIG,
+      globalMax: 1,
+    });
     const first = await enqueue(store, scheduler, spec());
     const second = await enqueue(store, scheduler, spec());
     await pass(scheduler);
@@ -354,7 +357,11 @@ describe("markDone", () => {
 
   test("refuses a reserved task as dispatching, a finished one as finished, an unknown id as not_found", async () => {
     const { scheduler, put } = setup();
-    await put("res", { state: "reserved", reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 60_000 }, reservedAt: NOW });
+    await put("res", {
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 60_000 },
+      reservedAt: NOW,
+    });
     for (const state of ["done", "failed", "cancelled"] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one record per state
       await put(state, { state });

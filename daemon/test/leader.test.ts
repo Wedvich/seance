@@ -395,7 +395,11 @@ describe("leader requests", () => {
   test("cancel and mark-done audit the request id with the task id, so an app's request joins the task's record", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
-    await store.put("c1", 0, task("c1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" } }));
+    await store.put(
+      "c1",
+      0,
+      task("c1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" } }),
+    );
     await store.put("m1", 0, task("m1", { state: "queued" }));
     const { leader, replies } = leaderOver(relay, store);
     const ids: Record<string, string> = {};
@@ -409,7 +413,9 @@ describe("leader requests", () => {
       try {
         leader.lead(1);
         await leader.settled();
-        expect(await ask("cancel", "cancel", { taskId: "c1" })).toMatchObject({ task: { id: "c1", state: "cancelled" } });
+        expect(await ask("cancel", "cancel", { taskId: "c1" })).toMatchObject({
+          task: { id: "c1", state: "cancelled" },
+        });
         expect(await ask("cancel2", "cancel", { taskId: "c1" })).toMatchObject({ ok: false, code: "finished" });
         expect(await ask("done", "mark-done", { taskId: "m1" })).toMatchObject({
           task: { id: "m1", state: "done", doneBy: "manual" },
@@ -429,7 +435,9 @@ describe("leader requests", () => {
     expect(audits).toContainEqual(expect.stringContaining(`op=cancel id="${ids["cancel"]}" task="c1" ok`));
     expect(audits).toContainEqual(expect.stringContaining(`task="c1" refused code=finished`));
     expect(audits).toContainEqual(expect.stringContaining(`op=mark-done id="${ids["done"]}" task="m1" ok`));
-    expect(audits).toContainEqual(expect.stringContaining(`op=mark-done id="${ids["done2"]}" task="m1" refused code=finished`));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=mark-done id="${ids["done2"]}" task="m1" refused code=finished`),
+    );
     expect(audits).toContainEqual(
       expect.stringContaining(`op=mark-done id="${ids["nobody"]}" task="nobody" refused code=not_found`),
     );
@@ -1278,7 +1286,8 @@ describe("leader in the daemon", () => {
     console.log = (...args: unknown[]): void => void lines.push(args.map(String).join(" "));
     const { daemon, deviceId } = await startLeaderDaemon(relay, store);
     try {
-      const audited = (): number => lines.filter((l) => l.includes("audit queue") && l.includes("op=cancel") && l.includes(" ok")).length;
+      const audited = (): number =>
+        lines.filter((l) => l.includes("audit queue") && l.includes("op=cancel") && l.includes(" ok")).length;
       const leading = async (term: number | null): Promise<void> => {
         await pollUntil(() => daemon.leader.term() === term, `term ${term ?? "none"}`);
         await daemon.leader.settled();

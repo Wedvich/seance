@@ -216,7 +216,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   const nudge = (() => {
     const ids = new Set<string>();
     let whole = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    let armed: ReturnType<typeof setTimeout> | null = null;
     const send = (tasks?: readonly string[]): void => {
       relay.queueChanged({ at: now(), ...(tasks === undefined ? {} : { tasks }) }).catch(report);
     };
@@ -225,8 +225,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         if (!live) return;
         if (id === null) whole = true;
         else ids.add(id);
-        timer ??= setTimeout(() => {
-          timer = null;
+        armed ??= setTimeout(() => {
+          armed = null;
           if (!live) return;
           const tasks = whole || ids.size > QUEUE_MAX_TASKS ? undefined : [...ids];
           ids.clear();
@@ -239,8 +239,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         if (live) send();
       },
       stop: (): void => {
-        if (timer !== null) clearTimeout(timer);
-        timer = null;
+        if (armed !== null) clearTimeout(armed);
+        armed = null;
       },
     };
   })();

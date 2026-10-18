@@ -7,7 +7,6 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   RequestFailure,
   SCHEDULER_ID,
-  TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   storeErrorText,
   taskFailureText,

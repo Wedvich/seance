@@ -294,7 +294,11 @@ function deriveMeta(state: AppState): string {
 export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
   if (relay.status !== "open") return { available: false, reason: "Not connected to the relay", note: null };
   if (relay.scheduler.kind === "none") {
-    return { available: true, reason: null, note: "No scheduler is leading right now — it waits in the queue until one does" };
+    return {
+      available: true,
+      reason: null,
+      note: "No scheduler is leading right now — it waits in the queue until one does",
+    };
   }
   if (relay.scheduler.kind === "unverified") {
     return {
@@ -536,7 +540,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
     autoAvailability: deriveAutoAvailability(state.relay),
     auto: auto ? { repo: autoRepo, repos } : null,
     queueAttention:
-      state.queueView?.kind === "ok" && state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+      state.queueView?.kind === "ok" &&
+      state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
   };
 }
 

@@ -147,12 +147,12 @@ describe("describeDecision", () => {
   test("a placed task's record says it is spending credits, not that it would", () => {
     const base = scored("mac", "Mac", 0.5);
     const spilling: Candidate = { ...base, spill: { window: "7d", projectedPct: 93.4 } };
-    const decision: Decision = {
+    const placedDecision: Decision = {
       at: NOW,
       chosen: { deviceId: "mac", exclave: "default", clone: "app" },
       candidates: [spilling, { ...scored("pc", "PC", 0.9), spill: { window: "5h", projectedPct: 101 } }],
     };
-    const placed = describeDecision(decision, [], NOW, "did");
+    const placed = describeDecision(placedDecision, [], NOW, "did");
     expect(placed.chosen?.why).toEndWith("— spending credits (7d projected at 93%)");
     expect(placed.others[0]?.why).toEndWith("— spending credits (5h projected at 101%)");
     expect(JSON.stringify(placed)).not.toContain("would spend");

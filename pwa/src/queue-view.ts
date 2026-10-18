@@ -1,5 +1,5 @@
 import { QUEUE_MAX_TASKS, TASK_PHASES, type Decision, type PauseHold, type Task } from "@seance/shared";
-import { describeDecision, taskHeadline } from "./decision-view.ts";
+import { taskHeadline } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
 
@@ -74,6 +74,14 @@ function holdText(hold: PauseHold, state: AppState, now: number): string {
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
   const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;
   return `${who} is paused until its quota resets${when}`;
+}
+
+function holdRow(hold: PauseHold, state: AppState, now: number): HoldRow {
+  return {
+    key: hold.account ?? "queue",
+    text: holdText(hold, state, now),
+    ...(hold.account === undefined ? {} : { account: hold.account }),
+  };
 }
 
 function titleOf(task: Task): string {
@@ -153,13 +161,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     return { title, rows: members.map(({ task }) => rowOf(task, state, now)) };
   }).filter((section) => section.rows.length > 0);
 
-  const holds = (ok?.holds ?? []).map(
-    (hold): HoldRow => ({
-      key: hold.account ?? "queue",
-      text: holdText(hold, state, now),
-      ...(hold.account === undefined ? {} : { account: hold.account }),
-    }),
-  );
+  const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, now));
 
   // A list already read stays up while the leader is away: the status line says it may be stale.
   let empty: string | null = null;

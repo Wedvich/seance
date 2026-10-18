@@ -75,6 +75,10 @@ function undecided(task: Task): Task {
   return { ...rest, spec: prompt === undefined ? spec : { ...spec, prompt: prompt.slice(0, QUEUE_PROMPT_PREVIEW) } };
 }
 
+function rank(t: Task): number {
+  return FINISHED.includes(t.state) ? 2 : t.escalated === true ? 0 : 1;
+}
+
 /**
  * What the reply keeps when the store holds more than `QUEUE_MAX_TASKS`: what
  * still needs someone first — an escalated `needs-input` task, then the rest of
@@ -83,7 +87,6 @@ function undecided(task: Task): Task {
  * fall off behind twenty newer finished ones.
  */
 function byRelevance(a: Task, b: Task): number {
-  const rank = (t: Task): number => (FINISHED.includes(t.state) ? 2 : t.escalated === true ? 0 : 1);
   return rank(a) - rank(b) || b.createdAt - a.createdAt;
 }
 
@@ -102,10 +105,7 @@ export function boundedQueue(
   now: number,
   holds: readonly PauseHold[] = [],
 ): QueueResponse {
-  const newest = all
-    .toSorted(byRelevance)
-    .slice(0, QUEUE_MAX_TASKS)
-    .map(undecided);
+  const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
   const sizes = new Map<string, number>();
   for (const task of newest) {

@@ -773,10 +773,11 @@ describe("auto's error paths", () => {
     expect(client.creates).toHaveLength(1);
 
     // More polls than the budget: none of them counted, so it never gives up.
+    const nextArmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
     for (let poll = 0; poll < QUEUE_POLLS + 3; poll += 1) {
       timers.fire(QUEUE_POLL_MS);
       // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
-      await until(() => timers.armed(QUEUE_POLL_MS) === 1, "the next poll armed");
+      await until(nextArmed, "the next poll armed");
     }
     expect(followEnd(store)).toBeUndefined();
 

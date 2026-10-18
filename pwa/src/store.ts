@@ -19,7 +19,6 @@ import {
   failureReasonText,
   isSettled,
   isTransportError,
-  QUEUE_MAX_TASKS,
   queuedTask,
   RequestFailure,
   schedulerErrorText,
@@ -673,7 +672,9 @@ export class Store {
   }
 
   async #setHolds(
-    send: () => Promise<{ readonly holds: readonly PauseHold[] } | { readonly ok: false; readonly code: string } | null>,
+    send: () => Promise<
+      { readonly holds: readonly PauseHold[] } | { readonly ok: false; readonly code: string } | null
+    >,
   ): Promise<void> {
     if (this.#state.pausing) return;
     this.#patch({ pausing: true, queueNotice: null });

@@ -240,9 +240,14 @@ describe("credits spill", () => {
   });
 
   test("a throwing onAlert goes to onError and the task still launches", async () => {
-    const { clock, errors, fleet, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]), undefined, WIDE, () => {
-      throw new Error("sink down");
-    });
+    const { clock, errors, fleet, scheduler, store } = setup(
+      new FakeFleet([spilling(NOW_S + 3600)]),
+      undefined,
+      WIDE,
+      () => {
+        throw new Error("sink down");
+      },
+    );
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     expect(scheduler.task(task.id)?.state).toBe("running");

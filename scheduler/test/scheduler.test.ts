@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  bindTaskRecord,
-  MAX_TASKS,
-  REPLAY_WINDOW_MS,
-  taskKey,
-  type DespawnRequest,
-  type DespawnResponse,
-} from "@seance/shared";
+import { MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -15,7 +8,6 @@ import {
   StoreRevoked,
   UNDELIVERED,
   type StoredTask,
-  type StoreWrite,
   type Task,
   type TaskSpawnReply,
 } from "../src/index.ts";
@@ -1130,7 +1122,10 @@ describe("a spawn the relay never delivered", () => {
 
 describe("a session whose ended event never came", () => {
   test("is done within one sweep, and its slot is free again", async () => {
-    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a")]), {
+      ...DEFAULT_CONFIG,
+      globalMax: 1,
+    });
     const first = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     expect(scheduler.task(first.id)?.state).toBe("running");
@@ -1152,7 +1147,11 @@ describe("a session whose ended event never came", () => {
 
   test("the sweep asks each machine once, only when due, and only machines holding running tasks", async () => {
     const { fleet, clock, scheduler, store } = setup(new FakeFleet([machine("a"), machine("b"), machine("c")]));
-    await Promise.all([enqueue(store, scheduler, spec()), enqueue(store, scheduler, spec()), enqueue(store, scheduler, spec())]);
+    await Promise.all([
+      enqueue(store, scheduler, spec()),
+      enqueue(store, scheduler, spec()),
+      enqueue(store, scheduler, spec()),
+    ]);
     fleet.scripts.set("c", () => ({ ok: false, code: "repo_not_found", message: "gone" }));
     await pass(scheduler);
     clock.now += DEFAULT_CONFIG.sweepIntervalMs - 1;
@@ -1208,4 +1207,3 @@ describe("writes to one task never race", () => {
     expect(fleet.spawns).toHaveLength(1);
   });
 });
-

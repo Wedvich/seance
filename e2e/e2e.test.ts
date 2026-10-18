@@ -973,7 +973,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
           return machine?.connected === true && machine.status !== undefined && machine.repos.length > 0;
         });
       await app.waitForApp(ready, "both machines live and the leader verified");
-      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({ available: true, reason: null, note: null });
+      expect(deriveView(app.store.getState(), Date.now()).autoAvailability).toEqual({
+        available: true,
+        reason: null,
+        note: null,
+      });
 
       // The preview first, as the form shows it: a dry run, nothing reserved.
       await app.store.refreshPreview();
@@ -1362,7 +1366,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(view.autoAvailability).toMatchObject({ available: true, reason: null });
       expect(view.autoAvailability.note).toContain("unverified");
       await app.store.refreshPreview();
-      expect(app.store.getState().preview).toBeNull();
+      expect(app.store.getState().preview).toMatchObject({
+        kind: "failed",
+        message: expect.stringContaining("nothing is sent"),
+      });
       await app.store.spawn();
       const verdict = app.store.getState().verdict;
       expect(verdict?.kind).toBe("queued");

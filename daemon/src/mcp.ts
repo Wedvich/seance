@@ -21,6 +21,7 @@ import {
   type DespawnResponse,
   type ErrorResponse,
   type Machine,
+  type PauseHold,
   type RepoEntry,
   type RequestOp,
   type SessionsResponse,
@@ -366,6 +367,15 @@ function failureMessage(failure: NonNullable<Task["failure"]>): string {
   return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
+function describeHold(hold: PauseHold): Record<string, unknown> {
+  return {
+    ...(hold.account === undefined ? {} : { account: hold.account }),
+    until: hold.until,
+    since: new Date(hold.at).toISOString(),
+    ...(hold.resumeAt === undefined ? {} : { resumeAt: new Date(hold.resumeAt).toISOString() }),
+  };
+}
+
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const { spec } = task;
@@ -447,7 +457,8 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
         err instanceof RequestFailure &&
         (err.reason === "timeout" || err.reason === "dropped" || err.reason === "disconnected");
       if (lost) continue;
-      const why = err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+      const why =
+        err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
       return errorResult(`auto failed: ${why}`);
     }
     if (reply === null) continue;
@@ -584,12 +595,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
         const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
-        const holds = (reply.holds ?? []).map((h) => ({
-          ...(h.account === undefined ? {} : { account: h.account }),
-          until: h.until,
-          since: new Date(h.at).toISOString(),
-          ...(h.resumeAt === undefined ? {} : { resumeAt: new Date(h.resumeAt).toISOString() }),
-        }));
+        const holds = (reply.holds ?? []).map(describeHold);
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
   );

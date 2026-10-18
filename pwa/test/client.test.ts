@@ -950,7 +950,12 @@ describe("queue ops", () => {
       leader.send({ t: "msg", env: await seal(key, { to: APP_ID, from: leaderId }, reply) });
       return plain;
     };
-    const task: Task = { id: "t", spec: { repo: "github.com/acme/app", mode: "worktree" }, state: "done", createdAt: 1 };
+    const task: Task = {
+      id: "t",
+      spec: { repo: "github.com/acme/app", mode: "worktree" },
+      state: "done",
+      createdAt: 1,
+    };
 
     try {
       await waitFor((s) => s.scheduler.kind === "ready", "the leader verified");
