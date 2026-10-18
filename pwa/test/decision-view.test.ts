@@ -143,6 +143,42 @@ describe("describeDecision", () => {
       "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00) — would spend credits (7d at 93%)",
     );
   });
+
+  test("a placed task's record says it is spending credits, not that it would", () => {
+    const base = scored("mac", "Mac", 0.5);
+    const spilling: Candidate = { ...base, spill: { window: "7d", projectedPct: 93.4 } };
+    const decision: Decision = {
+      at: NOW,
+      chosen: { deviceId: "mac", exclave: "default", clone: "app" },
+      candidates: [spilling, { ...scored("pc", "PC", 0.9), spill: { window: "5h", projectedPct: 101 } }],
+    };
+    const placed = describeDecision(decision, [], NOW, "did");
+    expect(placed.chosen?.why).toEndWith("— spending credits (7d projected at 93%)");
+    expect(placed.others[0]?.why).toEndWith("— spending credits (5h projected at 101%)");
+    expect(JSON.stringify(placed)).not.toContain("would spend");
+  });
+});
+
+describe("taskHeadline on a manual done", () => {
+  const task = (fields: Partial<Task>): Task => ({
+    id: "t",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "done",
+    createdAt: NOW,
+    ...fields,
+  });
+
+  test("reads as marked done, with where it ran if it did, and a session's own finish still reads as finished", () => {
+    const machines = [machine("mac", "Mac")];
+    const at = { deviceId: "mac", exclave: "default", clone: "app", window: "w" };
+    expect(taskHeadline(task({ doneBy: "manual", assignment: at }), machines, NOW)).toBe(
+      "Marked done on Mac · default.",
+    );
+    expect(taskHeadline(task({ doneBy: "manual" }), machines, NOW)).toBe("Marked done.");
+    expect(taskHeadline(task({ doneBy: "session", assignment: at }), machines, NOW)).toBe(
+      "It finished on Mac · default.",
+    );
+  });
 });
 
 test("every reason has its own words", () => {
