@@ -41,9 +41,6 @@ import { log } from "./log.ts";
 
 const audit = queueAudit(daemonSink);
 
-/** The queue keeps this many finished tasks for `queue` to show; older ones are pruned on submit. */
-const KEEP_FINISHED = 50;
-
 function schedulerError(code: SchedulerErrorCode, message: string): SchedulerError {
   return { ok: false, code, message };
 }
@@ -209,8 +206,8 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
     case "submit": {
       const request = parseTaskRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed submit request");
+      // No prune here: the library prunes at `pruneAt` and on its own `store_full`, and an unconditional one would delete a finished task an app may be naming in `deps` (each delete also leaves a tombstone).
       return asked.admit(async () => {
-        await scheduler.prune(KEEP_FINISHED);
         const active = scheduler.tasks().filter((t) => !FINISHED.includes(t.state)).length;
         if (active >= MAX_ACTIVE_TASKS) {
           await audit.refused("submit", id, "queue_full");

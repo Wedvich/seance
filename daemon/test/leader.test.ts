@@ -575,6 +575,28 @@ describe("leader requests", () => {
     }
   });
 
+  test("a submit prunes nothing: finished tasks past keepFinished stay until the library's own gates", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    for (let i = 0; i < 60; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- the store is filled before the term starts
+      await store.put(`f${i}`, 0, task(`f${i}`, { state: "done", createdAt: Date.now() - (60 - i) }));
+    }
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      leader.deliver(await appRequest("submit", { repo: "r", mode: "here" }));
+      expect((await replies.next()).response.payload).toMatchObject({ task: { spec: { repo: "r" } } });
+      const ids = (await store.list()).map((entry) => entry.id);
+      expect(ids).toHaveLength(61);
+      for (let i = 0; i < 60; i += 1) expect(ids).toContain(`f${i}`);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
   test("a request during takeover is answered not_ready, and none at all while following", async () => {
     const relay = startTestRelay(TOKEN);
     const inner = new MemoryQueueStore();
