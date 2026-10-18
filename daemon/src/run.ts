@@ -277,6 +277,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // read it late through this let. One announce per process: the wave must
   // not re-fire on every reconnect.
   let updater: Updater | null = null;
+  let announcedHere = false;
   let announcePending =
     opts.selfUpdate !== undefined && source !== null && previousSha !== undefined && previousSha !== source.sha;
 
@@ -397,18 +398,26 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     },
     onConnect: (): void => {
       updateRuntime(true);
+      announcedHere = false;
       if (announcePending && source !== null) {
         const notice: UpdateAvailable = { sha: source.sha, commitTs: source.commitTs };
         // Spent only once it is actually on the wire: a socket that dropped
         // during the seal would otherwise burn the single announce this
         // process ever makes, and no one would re-fire it.
         void client.broadcast("update-available", notice).then((sent) => {
-          if (sent) announcePending = false;
+          if (!sent) return;
+          announcePending = false;
+          announcedHere = true;
         });
       }
       // Every register, not just boot: the daemon survives sleep, and a woken
       // machine's redial is the only moment it can learn what it missed.
       updater?.check("register");
+    },
+    // On the wire is not delivered: the relay drops the announce along with a
+    // register it refuses, so the redial that registers sends it again.
+    onRefused: () => {
+      if (announcedHere) announcePending = true;
     },
     onDisconnect: () => {
       updateRuntime(false);

@@ -47,7 +47,13 @@ export interface RelayClientOpts {
   readonly buildInfo: () => Promise<Envelope>;
   /** Op dispatch, with the envelope's AAD-bound sealer; a returned Plain is sealed and sent back to it. */
   readonly handle: (plain: Plain, from: string) => Promise<Plain | null>;
+  /** Once per socket, after its first register frame has left. */
   readonly onConnect?: () => void;
+  /**
+   * The relay closed the socket over its register. Whatever left behind that
+   * register was dropped with it, so a one-shot send must be re-armed.
+   */
+  readonly onRefused?: () => void;
   /** After every register frame leaves — connect and re-register alike — with the blob it carried. */
   readonly onRegister?: (info: Envelope) => void;
   readonly onDisconnect?: () => void;
@@ -205,7 +211,7 @@ export class RelayClient {
     if (!this.connected || !this.#registered) return false;
     const sealed = await this.#sealReply(to, response);
     const ws = this.#ws;
-    if (ws === null || !this.connected) {
+    if (ws === null || !this.connected || !this.#registered) {
       log.warn(`wire unsent re=${quote(response.re ?? "")} op=${quote(response.op)} reason=disconnected`);
       return false;
     }
@@ -220,13 +226,13 @@ export class RelayClient {
    * announce a process makes must not be marked spent when it never went out.
    */
   async broadcast(op: OpName, payload: unknown): Promise<boolean> {
-    if (!this.connected) return false;
+    if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
     const sealed = await seal(this.#opts.key, { to: MACHINES_ID, from: this.#opts.identity.deviceId }, plain);
     // Re-checked after the await: sealing is async, and a socket that dropped
     // meanwhile would swallow the frame silently.
     const ws = this.#ws;
-    if (ws === null || !this.connected) return false;
+    if (ws === null || !this.connected || !this.#registered) return false;
     ws.send(JSON.stringify({ t: "msg", env: sealed } satisfies DaemonFrame));
     log.info(`wire send iv=${quote(sealed.iv)} id=${quote(plain.id)} op=${quote(op)} to=${quote(MACHINES_ID)}`);
     return true;
@@ -275,7 +281,7 @@ export class RelayClient {
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "status", payload: status };
     const sealed = await seal(this.#opts.key, { to: APP_ID, from: this.#opts.identity.deviceId }, plain);
     const ws = this.#ws;
-    if (ws === null || !this.connected || !current()) return false;
+    if (ws === null || !this.connected || !this.#registered || !current()) return false;
     ws.send(JSON.stringify({ t: "status", env: sealed } satisfies DaemonFrame));
     return true;
   }
@@ -358,7 +364,11 @@ export class RelayClient {
     return true;
   }
 
-  async #register(): Promise<void> {
+  /** Whether the frame left on the socket it was built for. */
+  async #register(): Promise<boolean> {
+    // Bound before the awaits: a redial meanwhile must not get this socket's
+    // register, nor `#registered` before its own one has left.
+    const ws = this.#ws;
     const { identity } = this.#opts;
     const info = await this.#opts.buildInfo();
     // Signed fresh each time: the relay bounds the timestamp, so a frame built
@@ -376,11 +386,11 @@ export class RelayClient {
       sig: await signRegister(identity, ts, roles),
       ...(roles === undefined ? {} : { roles }),
     };
-    const ws = this.#ws;
-    if (ws === null) return;
+    if (ws === null || this.#ws !== ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(frame));
     this.#registered = true;
     this.#opts.onRegister?.(info);
+    return true;
   }
 
   #dial(): void {
@@ -401,9 +411,17 @@ export class RelayClient {
     ws.addEventListener("open", () => {
       this.#opened = true;
       log.info(`connected to ${this.#opts.url}`);
-      void this.#register();
       this.#startHeartbeat();
-      this.#opts.onConnect?.();
+      // After the register has left, never alongside it: the relay drops any
+      // msg a socket sends before its register, and signing one is slower than
+      // sealing the announce `onConnect` sends — which raced ahead and reached
+      // no machine.
+      this.#register().then(
+        (sent) => {
+          if (sent) this.#opts.onConnect?.();
+        },
+        (err: unknown) => log.warn(`register not sent: ${String(err)}`),
+      );
     });
 
     ws.addEventListener("message", (event) => {
@@ -436,6 +454,7 @@ export class RelayClient {
     // per base interval, and the reason is logged because the close is the only
     // word the relay sends about it.
     const refused = reason === "register unverified";
+    if (refused) this.#opts.onRefused?.();
     this.#signV1 = refused ? !this.#signV1 : false;
     if (this.#opened && !refused) this.#attempt = 0;
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);

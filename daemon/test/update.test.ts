@@ -128,11 +128,38 @@ describe("self-update over the relay", () => {
     try {
       const env = await relay.messages.next(3_000);
       expect(env.to).toBe(MACHINES_ID);
+      // The real relay drops a msg from a socket that has not registered yet;
+      // this double doesn't, so the order on the wire is asserted instead.
+      // Signing the register is slower than sealing the announce, so an
+      // announce fired on `open` overtook it and reached no machine.
+      expect(relay.registerConnections).toEqual([1]);
       const plain = await open(appKey, env);
       expect(plain.op).toBe("update-available");
       const notice = plain.payload as UpdateAvailable;
       expect(notice.sha).toBe(await runGit(checkout, ["rev-parse", "HEAD"]));
       expect(notice.commitTs).toBeGreaterThan(0);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("an announce sent behind a refused register goes out again on the redial", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.refuseNextRegisters = 1;
+    const { checkout } = await makePair("announce-refused");
+    process.env["SEANCE_STATE_DIR"] = join(base, "announce-refused", "state");
+    await saveState({ deviceId: crypto.randomUUID(), repos: [], scannedAt: null, lastRunSha: "0".repeat(40) });
+
+    const { daemon } = await startTestDaemon(relay, "announce-refused", { root: checkout });
+    try {
+      // The refused socket's copy may or may not reach this double before its
+      // close; the real relay drops it either way. What counts is a copy
+      // behind the register that was admitted.
+      let env = await relay.messages.next(3_000);
+      if (relay.registerConnections.length < 2) env = await relay.messages.next(3_000);
+      expect(relay.registerConnections).toEqual([1, 2]);
+      expect((await open(appKey, env)).op).toBe("update-available");
     } finally {
       daemon.stop();
       relay.stop();
