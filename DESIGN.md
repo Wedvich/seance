@@ -266,9 +266,11 @@ Séance's noise is cover for a real intruder.
    firmware info — so the strict probe gates only _import_, and reads never
    consult it.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
-   above holds for Cloudflare itself, but the token also reaches Workers Trace
-   Events and any Logpush sink — enabling Logpush to a third party later moves
-   the blast radius off Cloudflare, so that choice is not free. It also buys a
+   above holds for Cloudflare itself, but the token also reached Workers Trace
+   Events and would reach any Logpush sink — enabling Logpush to a third party
+   later moves the blast radius off Cloudflare, so that choice is not free. The
+   relay's `observability` sets `redact_query_string` (2026-10-18, M3 review S7),
+   so the upgrade's URL is stored without it in Cloudflare's logs and traces. It also buys a
    passive feed: every `/app` socket receives every machine's `status` every
    30s. The payload is sealed, and padded to one length before sealing
    (Presence & identity, "Encoding"): unpadded, its ciphertext length varied
@@ -299,12 +301,26 @@ Séance's noise is cover for a real intruder.
    wire-identical to that machine's replies to its own `sessions` or `spawn`, and a
    blind relay cannot read `re`. So the relay pairs each delivered app request with
    one quiet reply from the leader's device, by count (a credit bank; Scheduler,
-   "Leadership", "Scheduler replies"), and every miss fails toward a line. All of this
-   governs the relay's own console lines only. Cloudflare's invocation logs and
-   traces are on (`observability` in `relay/wrangler.jsonc`), and every WebSocket
-   message and alarm is an invocation, so they may hold the same per-message
-   timeline these rules keep out of the console. What an invocation entry
-   carries is unverified (open, M3 review S7, 2026-10-18). Two more
+   "Leadership", "Scheduler replies"), and every miss fails toward a line. These rules
+   govern the relay's own console lines; Cloudflare's telemetry held the same
+   timeline until 2026-10-18 (M3 review S7). Every WebSocket message and alarm is
+   an invocation, and each left an invocation log — the time, the event type, the
+   Durable Object, outcome, CPU and wall time — and, with traces on, a trace whose
+   storage spans carry every key read or written (`store:task:<id>`,
+   `device:<id>`, the tombstone age keys with their times) beside the time:
+   per-task and per-machine activity, retained for the plan's log window (three
+   days on the free plan, seven on paid). The fetch that upgrades a socket logs its
+   URL, user agent and country besides. So `relay/wrangler.jsonc` turns invocation
+   logs off (`logs.invocation_logs: false`) and traces off explicitly (Cloudflare
+   plans to fold them into `observability.enabled` at a later compatibility date),
+   and leaves our console lines unsampled: failures and refusals still reach the
+   logs, each with its time, and nothing else does. Chasing latency means traces
+   on with a `head_sampling_rate` for a deploy, then off again — a sampled
+   timeline is still one, which is why it is not the standing setting. What the
+   dashboard shows for an entry is Cloudflare's to change; the decision rests on
+   its documented fields (Workers Logs, "Invocation logs"; Traces, "Spans and
+   attributes"), and the owner checks the stored entries on each change to
+   `observability`. Two more
    things ride the same feed in plaintext. Every push carries the leader's
    `deviceId` and `term` beside its sealed proof (Scheduler, "Leadership"): which
    machine leads, and — since every leader reconnect bumps the term — a counter
@@ -337,14 +353,17 @@ Séance's noise is cover for a real intruder.
    token stops new junk and removes none; Clear removes it. A PSK rotation does
    the same with no attacker: every record sealed under the old key reads
    `unopenable` and holds its slot (up to about 96, below `pruneAt`) until
-   cleared. The per-socket create floor bounds one
-   connection's rate, not the total. `store-list` costs the token holder nothing
-   either (open, M3 review S4): it is unrated, one full listing reads every
-   record (128 rows), and the free plan allows 5M rows read a day — about 39,000
-   listings, minutes of looping. Past a free limit Cloudflare fails every
-   operation of that type until 00:00 UTC, so every storage read fails,
-   registers and routing included (an estimate from Cloudflare's published
-   limits, not measured against them). The
+   cleared. The per-socket create floor bounds one connection's rate, not the
+   total. Listing cost the holder nothing until 2026-10-18 (M3 review S4): one
+   full listing reads 128 rows, and past the free plan's 5M rows read a day every
+   storage op fails until 00:00 UTC, registers and routing included — minutes of
+   looping (an estimate from Cloudflare's published limits). Lists now meet a
+   per-socket window and a DO-wide bucket that hold a day's listings to about
+   half that limit, and only the term holder's socket is exempt (Scheduler, "The
+   store", _List floors_). Rotating the token is still the remedy; the floors
+   keep a holder from taking the relay down before it. `store-get` is unrated,
+   one row a request, so a holder looping it fast enough still reaches the limit
+   — a residual. The
    relay also refuses every delete under `queue:`, the leader's included (why:
    Scheduler, "The store", "Who may write"). A term holder can still overwrite the
    pause with junk, which readers handle as an unreadable record (the
@@ -435,16 +454,20 @@ Séance's noise is cover for a real intruder.
    a replayed authentic blob even reaches `bindTaskRecord`, which refuses it under
    another key or version; either way the record is held apart and never read,
    which loses the task the same way — and, as junk, holds its slot (item 3).
-   Tombstones count toward no cap and the daemon leg has no create floor, so the
-   thief can also create and delete in a loop: each cycle leaves two rows for 30
-   days, about 2,800 cycles a second measured locally, against the free plan's
-   100,000 rows written a day (open, M3 review S4). **Accepted:** what is lost is a
+   Until 2026-10-18 it could also grow storage: tombstones counted toward no cap
+   and the daemon leg met no create floor, so a create-and-delete loop left two
+   rows for 30 days a cycle, about 2,800 cycles a second measured locally, against
+   the free plan's 100,000 rows written a day. Now the daemon leg creates no task,
+   and `MAX_TOMBSTONES` (4,096) refuses the delete past it (M3 review S4;
+   Scheduler, "The store"), so the thief's deletes stop at 4,096 tombstones and its
+   creates at none. Its overwrites stay unrated, a row each — the term's to spend,
+   like dispatch, and ended the same way. **Accepted:** what is lost is a
    pointer to work, never the work or the repo. Remedy: take the id off
    `SCHEDULER_LEADERS` and re-init that machine's identity (a new seed and
    deviceId, list the new one); rotate the bearer token and the PSK too if the
    config went with the seed. Why no env in the tombstone: an overwrite destroys
-   the env anyway; restoring one would need shape changes; and uncapped
-   tombstones holding 28–40 KiB envs would blow DO storage. It lasts until the thief's socket goes or its id leaves the list. The same
+   the env anyway; restoring one would need shape changes; and 4,096 tombstones
+   holding 28–40 KiB envs would be 160 MB of DO storage. It lasts until the thief's socket goes or its id leaves the list. The same
    registration also re-files the machine's own older `status` beats, which
    open and bind as the machine's (item 4). Daemons cannot check the proof — they never
    see the registry — but all they send the scheduler is fire-and-forget
@@ -1429,7 +1452,8 @@ enforces is what it can see: who is asking, the key, a version and a size.
   `store-delete` answer `store-written { re, version }` — the new version, or the version a delete
   removed — or `store-refused { re, code }`. Parsed and bounded in `relay/src/wire.ts`, ruled in
   `relay/src/store.ts`, dispatched by `#onStoreFrame` in `hub.ts`. Reads are anyone's, an
-  unregistered daemon socket's included; an unregistered socket's write fails `holdsTerm` (it has
+  unregistered daemon socket's included, though a list meets floors (_List floors_, below); an
+  unregistered socket's write fails `holdsTerm` (it has
   no identity) and is answered `not_leader`, not dropped. A put's `env.from` is not compared with
   the socket's id: the relay is blind and the seal's addressing is the clients' to decide.
 - **Storage namespaces**, none starting `device:` or equal to `scheduler:term`, so no store key
@@ -1437,34 +1461,38 @@ enforces is what it can see: who is asking, the key, a version and a size.
   or the leader record. Records never reach the registry push and never count toward
   `MAX_DEVICES`.
 
-  | Key                                 | Value                                      | Why                                                                                  |
-  | ----------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
-  | `store:<key>`                       | `{ version, env }`                         | a live record                                                                        |
-  | `store-tomb:<key>`                  | `{ version, at }`                          | a tombstone: no env                                                                  |
-  | `store-tomb-at:<16-digit at>:<key>` | the store key                              | age index: tombstone keys sort by key, so a bounded purge needs one by age           |
-  | `store-meta:counts`                 | `{ total, prefixes: { "task:": n, ... } }` | kept counts: every DO `list` reads values, and a full `task:` is large (_Send size_) |
+  | Key                                 | Value                                                  | Why                                                                                  |
+  | ----------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+  | `store:<key>`                       | `{ version, env }`                                     | a live record                                                                        |
+  | `store-tomb:<key>`                  | `{ version, at }`                                      | a tombstone: no env                                                                  |
+  | `store-tomb-at:<16-digit at>:<key>` | the store key                                          | age index: tombstone keys sort by key, so a bounded purge needs one by age           |
+  | `store-meta:counts`                 | `{ total, prefixes: { "task:": n, ... }, tombstones }` | kept counts: every DO `list` reads values, and a full `task:` is large (_Send size_) |
 
 - **Who may write**, per `STORE_PREFIXES` and the leg:
 
-  | Prefix   | Leg    | create (`expect: 0`)                            | overwrite (`expect > 0`) | delete      |
-  | -------- | ------ | ----------------------------------------------- | ------------------------ | ----------- |
-  | `task:`  | app    | allowed                                         | `forbidden`              | `forbidden` |
-  | `task:`  | daemon | leader socket + current term, else `not_leader` | same                     | same        |
-  | `queue:` | app    | `forbidden`                                     | `forbidden`              | `forbidden` |
-  | `queue:` | daemon | leader socket + current term, else `not_leader` | same                     | `forbidden` |
+  | Prefix   | Leg    | create (`expect: 0`)                            | overwrite (`expect > 0`)                        | delete      |
+  | -------- | ------ | ----------------------------------------------- | ----------------------------------------------- | ----------- |
+  | `task:`  | app    | allowed                                         | `forbidden`                                     | `forbidden` |
+  | `task:`  | daemon | `not_leader`, or `forbidden` for the leader     | leader socket + current term, else `not_leader` | same        |
+  | `queue:` | app    | `forbidden`                                     | `forbidden`                                     | `forbidden` |
+  | `queue:` | daemon | leader socket + current term, else `not_leader` | same                                            | `forbidden` |
 
   A `term` on an app frame is dropped by the parser, so it authorizes nothing: an app overwrite
   carrying the current term is still `forbidden`. The relay refuses every delete under `queue:`,
   the leader's included: no client deletes the pause (resume overwrites it), and `queue:` keeps no
   tombstone, so a delete could only be a term holder silently erasing a person's pause, or
-  re-creating it from its own version-1 blob (Threat model, item 3).
+  re-creating it from its own version-1 blob (Threat model, item 3). And no daemon creates under
+  `task:`, the leader included (2026-10-18, M3 review S4): since `submit` went only apps
+  enqueue, and the leader meets no create floor, so a create it could make was only ever a
+  create-and-delete loop (Threat model, item 3, the seed thief).
 
 - **The order of checks is the contract:** parse (`invalid_request`, `too_large`), then the rule
   (`forbidden`, `not_leader`), then the tombstone and the version (`version_conflict`), then the
-  app create floor (`rate_limited`), then the caps (`store_full`), then the write. The version
-  check precedes the floor and the caps so an enqueue retried after it landed always reads
-  `version_conflict` — never `rate_limited` or `store_full` — and an idempotent retry is
-  recognizable as such even against a full store.
+  app create floor (`rate_limited`), then the caps (`store_full`: records on a create, tombstones
+  on a delete), then the write. The version check precedes the floor and the caps so an enqueue
+  retried after it landed always reads `version_conflict` — never `rate_limited` or `store_full`
+  — and an idempotent retry is recognizable as such even against a full store; a retried delete
+  likewise. A list meets only its floors (_List floors_).
 - **Versions.** A create lands at 1 and each put adds 1. `expect` must equal the stored version
   (0 for nothing stored). A delete of a missing key is `version_conflict` whatever `expect` is, as
   in `MemoryQueueStore`, and a delete answers the version it removed. A put's size: a create's
@@ -1479,7 +1507,8 @@ enforces is what it can see: who is asking, the key, a version and a size.
 - **Tombstones**, under `task:` only — the one prefix apps may create into, so the one where a
   delete could otherwise be undone by re-creating from an old authentic blob. A delete leaves
   `{ version, at }` and no env, for `STORE_TOMBSTONE_MS`: a put there is `version_conflict` at any
-  `expect`, `get` reads `null`, `list` leaves the key out, and it counts toward neither cap. A put
+  `expect`, `get` reads `null`, `list` leaves the key out, and it counts toward neither record cap
+  (it has one of its own, below). A put
   past the expiry clears the tombstone and its age entry and lands at version 1. Each delete purges
   up to `PURGE_BATCH` (32) expired ones, oldest first, through the age index, so storage stays
   bounded by a window of deletes with no alarm: the one alarm is the sweep's, armed only while
@@ -1488,10 +1517,15 @@ enforces is what it can see: who is asking, the key, a version and a size.
   carries 1 + 2 × 32 keys (the counts row goes in the `put`). The relay logs nothing for a purge:
   after the expiry nearly every leader delete purges, so a line would be a timeline of the
   leader's deletes. The tombstone keeps no env on purpose; the cost is on Threat model item 3.
-  Sizing: since each delete purges expired ones, what is stored is about the last 30 days of
-  deletes — a few finished tasks pruned a day in normal use. Nothing caps the count: the daemon
-  leg has no create floor, so a term holder can create and delete in a loop, two rows a cycle
-  for 30 days (Threat model, item 3, the seed thief).
+  Sizing: since each delete purges expired ones, what stands is about the last 30 days of
+  deletes — a few finished tasks pruned a day in normal use, a few hundred rows. `MAX_TOMBSTONES`
+  (4,096) caps the count: the counts row carries `tombstones`, and a delete that would leave more
+  standing after its purge is `store_full` and leaves the record (2026-10-18, M3 review S4). That
+  is about 136 deletes a day held for the full 30 days, several times what pruning a busy queue
+  does, and two rows each with the age entry, so 8,192 rows and well under a megabyte. A counts
+  row from before the cap has no `tombstones`: the next delete counts the age index once and
+  writes it. A refused prune is the library's to report (`store refused delete …`), and the
+  record holds its slot until a delete fits.
 - **The create floor is the app leg's alone**: 60 creates per socket per 60 s
   (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the app socket's
   attachment (written on its first create, so it survives hibernation) and a fresh socket starting
@@ -1499,15 +1533,30 @@ enforces is what it can see: who is asking, the key, a version and a size.
   create that lands counts: the window is written back after the put returns `ok`, so a
   `version_conflict`, `store_full` or `rate_limited` leaves it untouched and a refusal cannot reset
   it. No floor on the daemon leg: every write there is term-fenced, so only the leader writes, and
-  `MAX_TASKS` bounds it. Enqueue needs no leader: an app create lands with no daemon connected.
+  it creates no task, only its `queue:` singletons. Enqueue needs no leader: an app create lands
+  with no daemon connected.
   **Constraint on M4:** the floor applies on the app leg only because every prefix is term-fenced
   today. A prefix with `termFenced: false` (M4's `account:`) must extend the floor to daemon-leg
   creates, since `/daemon` accepts any bearer token.
-- **Store caps**: a create past `MAX_TASKS` under `task:`, or past `MAX_RECORDS` in all, is `store_full`
-  on either leg. `queue:` is bounded only by the total. Reads are unrated, as `forget` is: a
-  token holder can loop `store-list`, which costs DO CPU and egress, and rows read against the
-  free plan's daily limit — past it every storage read fails until 00:00 UTC (Threat model,
-  item 3; open, M3 review S4).
+- **Store caps**: a create past `MAX_TASKS` under `task:`, or past `MAX_RECORDS` in all, is
+  `store_full` on either leg. `queue:` is bounded only by the total. A delete past
+  `MAX_TOMBSTONES` is `store_full` too (_Tombstones_).
+- **List floors** (2026-10-18, M3 review S4). A `store-list` reads every row under its prefix,
+  128 for a full `task:`, and Durable Object reads are billed per row against a daily limit: 5M
+  on the free plan, past which every storage op fails until 00:00 UTC, registers and routing
+  included. Unrated, that was minutes of one looping token holder or a buggy client. So every
+  socket but the term holder's spends two floors, and past either the list is `rate_limited`: a
+  per-socket window of 4 lists a minute (`MAX_LISTS_PER_WINDOW`, on the attachment as the create
+  floor's is, kept across a re-register), and a DO-wide token bucket per prefix holding 16 and
+  refilling one per 4 s (`LIST_BURST`, `LIST_REFILL_MS`). The bucket sets the bound: 21,600
+  lists a day, 2.8M rows at 128 each, about half the free limit. Exempt is the socket the
+  current term was issued to — a list carries no term — so a takeover is never refused; nothing
+  else lists today. The bucket is in memory, since storing it would write a row per list to guard
+  the rows a list reads; eviction resets it, which needs an idle spell no looping client allows. A
+  refusal spends neither floor and logs `store refused t=store-list leg=… code=rate_limited`.
+  Per prefix so that M4's `account:`, which apps list on open, cannot be throttled by `task:`.
+  `store-get` stays unrated: one row each, so its bound is the socket's message rate, which
+  nothing caps — a residual (Threat model, item 3).
 - **`store-changed { key, version }`** goes to the leader's daemon socket — the one its term was
   issued to, found among the non-superseded daemon sockets — after every successful **app-leg**
   write, which is always a create: app-leg deletes are `forbidden`. Daemon-leg writes are the leader socket's by construction, so a
@@ -4852,25 +4901,23 @@ update` refreshes, and the checkout already on the machine is the version the
   log is local and rewritable, so detection assumes the machine is honest.
 - The daemon's own footprint is indistinguishable from a RAT — machines that
   gain an EDR need it allowlisted by hand.
-- Relay tracing (`observability.traces`) is **dashboard-only, no OTLP
-  destination**. Cloudflare can export traces and correlated logs to Honeycomb,
-  Grafana or Sentry, but span attributes carry the request URL and the app
-  authenticates with `?t=<bearer>` — a browser cannot set a header on a
-  WebSocket — so any export moves the token off Cloudflare, which is exactly the
-  cost threat-model item 3 refuses to pay for free. Getting the token out of the
-  query string is the prerequisite for wiring a destination later. Note that
-  "dashboard-only" is not "not stored": traces persist in Cloudflare's own
-  observability store and are queryable there, so this is a second retained copy
-  of the `?t=` token alongside the invocation logs `observability.enabled`
-  already produces. Item 3 already accepts that exposure to Cloudflare; what is
-  refused here is widening it to a third party.
+- Relay tracing (`observability.traces`) and invocation logs are **off**
+  (2026-10-18, M3 review S7): every frame is an invocation, so both kept the
+  per-frame timeline threat-model item 3 keeps out of the console, the traces
+  keyed by task and device id. Only the relay's own lines are stored — failures
+  and refusals. Tracing goes on for a deploy, with a `head_sampling_rate`, when
+  latency needs chasing (DO wake time, storage ops). Still **no OTLP
+  destination**: Cloudflare can export traces and correlated logs to Honeycomb,
+  Grafana or Sentry, which would move that timeline off Cloudflare, and the app
+  still authenticates with `?t=<bearer>` (a browser cannot set a header on a
+  WebSocket). `redact_query_string` keeps the token out of the URLs Cloudflare
+  stores; an export would rest on that one flag.
 - True distributed tracing across daemon→relay→pwa is not available and was not
   faked. Trace context rides `traceparent` on an HTTP request, but both tiers
   hold one long-lived WebSocket whose only header exchange is the upgrade; every
   frame after it is a separate hibernation-wake invocation with its own trace.
-  Cloudflare's external W3C context propagation is unreleased. The relay's own
-  traces are still worth having (DO wake latency, storage ops), and `iv`-keyed
-  logs cover the cross-tier question they cannot answer.
+  Cloudflare's external W3C context propagation is unreleased. `iv`-keyed logs
+  cover the cross-tier question traces could not answer.
 - The PWA now logs wire metadata to the browser console in production builds —
   op name, `id`/`re`, `iv`, target deviceId, and timeouts. Never payloads or key
   material. Accepted so a phone-only failure, the one case that cannot be
