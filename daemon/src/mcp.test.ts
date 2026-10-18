@@ -872,6 +872,16 @@ describe("spawn_session on auto", () => {
     );
   }, 10_000);
 
+  test("three tries that never left the process say it was not queued, not that it may have been", async () => {
+    const fake = leaderRelay();
+    fake.onCreate = () => new RequestFailure("disconnected", "the relay socket is not open", "relay");
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(fake.creates).toHaveLength(3);
+    expect(text).toBe("auto: not queued — the relay was unreachable after 3 tries; try again");
+    expect(text).not.toContain("may have queued");
+  }, 10_000);
+
   test("a store refusal is worded, and not retried", async () => {
     const fake = leaderRelay();
     fake.onCreate = () => ({ ok: false, code: "store_full" });

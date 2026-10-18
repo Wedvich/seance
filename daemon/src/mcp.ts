@@ -390,7 +390,7 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     ...(placement === null ? {} : { placement }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
-    // A `manual` mark reads apart from a finish: the work may still be running.
+    // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
@@ -443,6 +443,8 @@ const ENQUEUE_RETRY_MS = 1_000;
  */
 async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promise<ToolResult> {
   const task = queuedTask(request, Date.now());
+  // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
+  let sent = false;
   for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
     if (attempt > 1) {
       // oxlint-disable-next-line no-await-in-loop -- the wait between tries
@@ -456,12 +458,18 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
       const lost =
         err instanceof RequestFailure &&
         (err.reason === "timeout" || err.reason === "dropped" || err.reason === "disconnected");
-      if (lost) continue;
+      if (lost) {
+        if (!(err instanceof RequestFailure && err.reason === "disconnected")) sent = true;
+        continue;
+      }
       const why =
         err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
       return errorResult(`auto failed: ${why}`);
     }
-    if (reply === null) continue;
+    if (reply === null) {
+      sent = true;
+      continue;
+    }
     if (!reply.ok) return errorResult(`auto refused (${reply.code}): ${storeErrorText(reply.code)}`);
     const lines = [
       `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
@@ -473,6 +481,9 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
       );
     }
     return textResult(lines.join("\n"));
+  }
+  if (!sent) {
+    return errorResult(`auto: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
   }
   return errorResult(
     `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; check get_queue before retrying`,

@@ -315,7 +315,15 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }
     // An op this leader does not know, from an app that wants an answer (an older
     // build's `submit`): a refusal beats a timeout. Acts on nothing.
-    if (from === APP_ID && plain.re === undefined && plain.op !== "branch-state" && plain.op !== "session-event") {
+    // Nothing to answer without a string op and id: the reply would echo whatever shape the sender put there.
+    if (
+      from === APP_ID &&
+      typeof plain.op === "string" &&
+      typeof plain.id === "string" &&
+      plain.re === undefined &&
+      plain.op !== "branch-state" &&
+      plain.op !== "session-event"
+    ) {
       log.warn(`scheduler: refused op=${quote(plain.op)} from=${quote(from)} — not an op this leader handles`);
       void opts.reply(from, {
         id: crypto.randomUUID(),

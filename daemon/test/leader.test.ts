@@ -290,7 +290,10 @@ describe("queue-changed", () => {
       await leader.settled();
       await nextNudge(relay);
       await enqueueQueued(store, leader, "late");
+      // The refresh noted it (the window is armed) before the tick that admits it, so an admitted task proves a timer is pending.
+      await pollUntil(async () => (await store.get("late"))?.body?.state !== "queued", "the refresh and tick");
       leader.follow("test");
+      // Past the 500ms window the timer would have fired in.
       await Bun.sleep(700);
       expect(relay.appFrames.size).toBe(0);
     } finally {
