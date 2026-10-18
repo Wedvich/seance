@@ -1,6 +1,7 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
   type Decision,
@@ -996,16 +997,20 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toBeNull();
   });
 
-  test("a reply to a read that was since replaced is dropped", async () => {
+  test("an ask made while a read is out waits for it, then reads once more: reads are single-flight", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
     const late = Promise.withResolvers<QueueReply | null>();
     client.onQueue = () => late.promise;
+    const before = client.queueRequests.length;
     const first = store.refreshQueue();
     client.onQueue = async () => ({ tasks: [], holds: [], at: 9 });
-    await store.refreshQueue();
+    const second = store.refreshQueue();
+    await drain();
+    expect(client.queueRequests).toHaveLength(before + 1);
     late.resolve({ tasks: [waiting], holds: [], at: 1 });
-    await first;
+    await Promise.all([first, second]);
+    expect(client.queueRequests).toHaveLength(before + 2);
     expect(store.getState().queueView).toMatchObject({ kind: "ok", tasks: [], at: 9 });
   });
 
@@ -1090,6 +1095,23 @@ describe("the queue screen", () => {
     detach();
   });
 
+  test("a nudge naming the followed task asks the leader once: the queue read it set off updates the verdict too", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    const before = client.queueRequests.length;
+    const placed: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [placed], holds: [], at: 3 });
+    client.nudge({ at: 3, tasks: [created.id] });
+    await until(() => queuedState(store) === "running", "placed");
+    await drain();
+    expect(client.queueRequests.length - before).toBe(1);
+    detach();
+  });
+
   test("a reconnect while a queued verdict waits reads that task once, spending no poll", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
@@ -1103,34 +1125,12 @@ describe("the queue screen", () => {
     detach();
   });
 
-  test("a named nudge while a whole read is in flight is upgraded to whole, never superseding it with less", async () => {
-    const client = new ScriptedClient();
-    const store = await loaded(client);
-    const whole = Promise.withResolvers<QueueReply | null>();
-    client.onQueue = () => whole.promise;
-    const first = store.refreshQueue();
-    const requests: unknown[] = [];
-    const answer = { tasks: [waiting, running, { ...running, id: "r-2" }], holds: [], at: 7 };
-    client.onQueue = async (request) => {
-      requests.push(request);
-      return answer;
-    };
-    const second = store.refreshQueue(["w-1"], true);
-    await second;
-    expect(requests).toEqual([{}]);
-    expect(store.getState().queueView).toMatchObject({ kind: "ok", at: 7 });
-    // The superseded whole read's late reply changes nothing.
-    whole.resolve({ tasks: [], holds: [], at: 1 });
-    await first;
-    expect(store.getState().queueView).toMatchObject({ kind: "ok", at: 7 });
-  });
-
-  test("two named reads in flight ask for the union of their ids, so neither's ids are lost", async () => {
+  test("named nudges while a read is out fold into one trailing read of their union, whole past the leader's cap", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
     const late = Promise.withResolvers<QueueReply | null>();
     client.onQueue = () => late.promise;
-    const first = store.refreshQueue(["w-1"], true);
+    const first = store.refreshQueue();
     const asked: unknown[] = [];
     const moved: Task = { ...waiting, state: "running" };
     const moved2: Task = { ...running, state: "done" };
@@ -1138,11 +1138,66 @@ describe("the queue screen", () => {
       asked.push(request);
       return { tasks: [moved, moved2], holds: [], at: 4 };
     };
-    await store.refreshQueue(["r-1"], true);
-    expect(asked).toEqual([{ tasks: ["w-1", "r-1"] }]);
+    void store.refreshQueue(["w-1"], true);
+    const last = store.refreshQueue(["r-1"], true);
     late.resolve({ tasks: [], holds: [], at: 1 });
-    await first;
+    await Promise.all([first, last]);
+    expect(asked).toEqual([{ tasks: ["w-1", "r-1"] }]);
     expect(store.getState().queueView).toEqual({ kind: "ok", tasks: [moved, moved2], holds: [], at: 4 });
+
+    const many = Array.from({ length: QUEUE_MAX_TASKS }, (_, i) => `m-${i}`);
+    const stuck = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => stuck.promise;
+    const third = store.refreshQueue(many, true);
+    asked.length = 0;
+    client.onQueue = async (request) => {
+      asked.push(request);
+      return { tasks: [], holds: [], at: 5 };
+    };
+    void store.refreshQueue(many.slice(0, 11), true);
+    void store.refreshQueue(many.slice(11).concat(["extra", "extra-2"]), true);
+    stuck.resolve({ tasks: [], holds: [], at: 4 });
+    await third;
+    expect(asked).toEqual([{}]);
+  });
+
+  test("a person's refresh folded into a nudge read keeps its notice behaviour, and a nudge read leaves an action's notice up", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onMarkDone = async () => ({ ok: false, code: "dispatching", message: "in flight" });
+    await store.markDone("w-1");
+    expect(store.getState().queueNotice).toContain("starting");
+
+    const late = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => late.promise;
+    const nudge = store.refreshQueue(["w-1"], true);
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    const person = store.refreshQueue();
+    late.resolve({ tasks: [waiting], holds: [], at: 6 });
+    await Promise.all([nudge, person]);
+    expect(store.getState().queueNotice).toContain("taking over");
+
+    store.dismissLayer();
+    await store.markDone("w-1");
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 7 });
+    await store.refreshQueue(["w-1"], true);
+    expect(store.getState().queueNotice).toContain("starting");
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a read that fails with the screen closed leaves no loading view behind", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("timeout", "queue timed out");
+    };
+    const store = new Store(client);
+    store.openQueue();
+    store.dismissLayer();
+    fake.settle(store);
+    await drain();
+    expect(store.getState().queue).toBe(false);
+    expect(store.getState().queueView?.kind).not.toBe("loading");
   });
 
   test("a named id the leader no longer lists is dropped from the screen, one it was not asked about is kept", async () => {

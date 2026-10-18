@@ -19,6 +19,7 @@ import {
   failureReasonText,
   isSettled,
   isTransportError,
+  QUEUE_MAX_TASKS,
   queuedTask,
   RequestFailure,
   schedulerErrorText,
@@ -116,6 +117,17 @@ const PREVIEW_RETRIES = 10;
  * What would answer a preview: a new leader, or the same one verified at last,
  * asks again. Never "", which is what a drop resets the last-asked key to.
  */
+/** The leader refuses a named read past `QUEUE_MAX_TASKS`: one that long is read whole instead. */
+function capNamed(tasks: readonly string[]): readonly string[] | null {
+  return tasks.length > QUEUE_MAX_TASKS ? null : tasks;
+}
+
+/** How a followed task's last poll ends the verdict's follow: a refusal as it was worded, else by whether it was answered. */
+function followEnd(read: { readonly task: Task } | FollowEnd | "missed" | "waiting"): FollowEnd {
+  if (typeof read === "object" && !("task" in read)) return read;
+  return { kind: read === "missed" ? "unanswered" : "stopped" };
+}
+
 function schedulerKey(scheduler: SchedulerAvailability): string {
   return scheduler.kind === "none" ? "none" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
 }
@@ -166,14 +178,12 @@ export class Store {
   #followTimer: ReturnType<typeof setTimeout> | null = null;
   /** The leader the Queue screen last read from: a new one asks again. */
   #queueLeader = "";
-  /** The newest queue read in flight; an older reply is dropped, as a preview's is. */
-  #queueAsked: object | null = null;
-  /**
-   * What that read asked for: "whole", or the named ids. A later read folds into it
-   * rather than replacing it, since replacing drops the earlier reply and with it
-   * whatever that reply was the only word on.
-   */
-  #queueInflight: "whole" | readonly string[] | null = null;
+  /** The queue read loop while one is out: reads are single-flight, a later ask folds into `#queueTrailing`. */
+  #queueRun: Promise<void> | null = null;
+  /** What to read once the one in flight settles: the union of every ask meanwhile (null names the whole queue). */
+  #queueTrailing: { readonly tasks: readonly string[] | null; readonly nudged: boolean } | null = null;
+  /** The view a `loading` patch replaced, restored when the read fails with nobody looking. */
+  #queuePrior: QueueState | null = null;
   /** Sequence of task reads: a poll answered after a newer read landed is stale. */
   #taskReadSeq = 0;
   #taskReadApplied = 0;
@@ -288,23 +298,48 @@ export class Store {
    * never heals a task it was not told about, so the screen reads whole again.
    */
   #catchUpQueue(scheduler: SchedulerAvailability, reopened: boolean): void {
-    if (this.#watchesQueue() && (reopened || schedulerKey(scheduler) !== this.#queueLeader)) void this.refreshQueue();
+    const read =
+      this.#watchesQueue() && (reopened || schedulerKey(scheduler) !== this.#queueLeader)
+        ? this.refreshQueue(undefined, true)
+        : null;
     const verdict = this.#state.verdict;
     if (reopened && verdict?.kind === "queued" && !isSettled(verdict.task.state)) {
-      void this.#refreshTask(verdict.task.id, null);
+      void this.#followedVia(verdict.task.id, read);
     }
   }
 
   #onQueueChanged(change: QueueChanged): void {
+    const read = this.#watchesQueue() ? this.refreshQueue(change.tasks, true) : null;
     const verdict = this.#state.verdict;
     if (
       verdict?.kind === "queued" &&
       !isSettled(verdict.task.state) &&
       (change.tasks === undefined || change.tasks.includes(verdict.task.id))
     ) {
-      void this.#refreshTask(verdict.task.id, null);
+      void this.#followedVia(verdict.task.id, read);
     }
-    if (this.#watchesQueue()) void this.refreshQueue(change.tasks, true);
+  }
+
+  /**
+   * Brings the followed task up to date: from the queue read already out for it
+   * when that read lands a fresh copy, else with a read of its own (no read, or
+   * one that failed or no longer lists it).
+   */
+  async #followedVia(taskId: string, read: Promise<void> | null): Promise<void> {
+    const listed = (): Task | undefined => {
+      const view = this.#state.queueView;
+      return view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
+    };
+    if (read === null) return this.#refreshTask(taskId, null);
+    const before = listed();
+    await read;
+    const fresh = listed();
+    if (fresh === undefined || fresh === before) return this.#refreshTask(taskId, null);
+    const verdict = this.#state.verdict;
+    if (verdict?.kind !== "queued" || verdict.task.id !== taskId || isSettled(verdict.task.state)) return;
+    this.#taskReadApplied = ++this.#taskReadSeq;
+    if (isSettled(fresh.state)) this.#stopFollowing();
+    if (fresh !== verdict.task) this.#patch({ verdict: { kind: "queued", task: fresh } });
   }
 
   /**
@@ -601,20 +636,57 @@ export class Store {
    * it, or with nothing to merge into, the whole queue is read. Never throws: a
    * failure is the screen's to word, and a list already read stays up under it.
    * `nudged` marks a read a `queue-changed` asked for: a takeover still running
-   * answers it `not_ready`, and the takeover's own nudge reads again.
+   * answers it `not_ready`, and the takeover's own nudge reads again; it also
+   * leaves an action's notice standing. Reads are single-flight: an ask made
+   * while one is out folds into one trailing read, which settles every caller's
+   * promise, and a person's own refresh keeps its notice behaviour in the fold.
    */
-  async refreshQueue(tasks?: readonly string[], nudged = false): Promise<void> {
+  refreshQueue(tasks?: readonly string[], nudged = false): Promise<void> {
     this.#queueLeader = schedulerKey(this.#state.relay.scheduler);
+    if (this.#queueRun === null) {
+      const run = this.#readQueueLoop(tasks ?? null, nudged);
+      this.#queueRun = run;
+      return run;
+    }
+    const held = this.#queueTrailing;
+    const union =
+      tasks === undefined || (held !== null && held.tasks === null)
+        ? null
+        : capNamed([...new Set([...(held?.tasks ?? []), ...tasks])]);
+    this.#queueTrailing = { tasks: union, nudged: nudged && (held?.nudged ?? true) };
+    this.#showQueueLoading();
+    return this.#queueRun;
+  }
+
+  async #readQueueLoop(tasks: readonly string[] | null, nudged: boolean): Promise<void> {
+    let ask = { tasks, nudged };
+    try {
+      for (;;) {
+        // oxlint-disable-next-line no-await-in-loop -- single-flight: one read at a time
+        await this.#readQueue(ask.tasks, ask.nudged);
+        const trailing = this.#queueTrailing;
+        this.#queueTrailing = null;
+        if (trailing === null) return;
+        ask = trailing;
+      }
+    } finally {
+      // In the same turn as the last look at `#queueTrailing`: an ask after it must start a loop of its own.
+      this.#queueRun = null;
+    }
+  }
+
+  /** Only while the screen is open and has no list to show: a read nobody sees leaves no `loading` behind. */
+  #showQueueLoading(): void {
+    const view = this.#state.queueView;
+    if (!this.#state.queue || (view !== null && view.kind !== "failed")) return;
+    this.#queuePrior = view;
+    this.#patch({ queueView: { kind: "loading" } });
+  }
+
+  async #readQueue(tasks: readonly string[] | null, nudged: boolean): Promise<void> {
     const current = this.#state.queueView;
-    const pending = this.#queueAsked !== null ? this.#queueInflight : null;
-    let named: readonly string[] | null = tasks !== undefined && current?.kind === "ok" ? tasks : null;
-    // A whole read already out is as fresh as this one's ids can make it: upgrade, never supersede it with less.
-    if (named !== null && pending === "whole") named = null;
-    else if (named !== null && Array.isArray(pending)) named = [...new Set([...pending, ...named])];
-    const asked = {};
-    this.#queueAsked = asked;
-    this.#queueInflight = named ?? "whole";
-    if (current === null || current.kind === "failed") this.#patch({ queueView: { kind: "loading" } });
+    const named = tasks !== null && current?.kind === "ok" ? capNamed(tasks) : null;
+    this.#showQueueLoading();
     let next: QueueState | { readonly notice: string } | null;
     try {
       const reply = await this.#client.queue(named === null ? {} : { tasks: named });
@@ -626,7 +698,8 @@ export class Store {
       else {
         // An older leader ignores the filter and answers its newest: only the named ids are taken.
         const fresh = reply.tasks.filter((t) => named.includes(t.id));
-        const base = current?.kind === "ok" ? current.tasks : [];
+        const shown = this.#state.queueView;
+        const base = shown?.kind === "ok" ? shown.tasks : [];
         // A named id the reply lacks is gone (pruned, deleted), not unchanged.
         const merged = base.flatMap((t) => {
           const now = fresh.find((f) => f.id === t.id);
@@ -640,18 +713,17 @@ export class Store {
       const text = err instanceof RequestFailure ? failureReasonText(err) : "the queue could not be read";
       next = { notice: `${text.charAt(0).toUpperCase()}${text.slice(1)}` };
     }
-    if (this.#queueAsked !== asked) return;
-    this.#queueAsked = null;
-    this.#queueInflight = null;
-    if (next === null) return;
-    if (!("notice" in next)) {
-      this.#patch({ queueView: next, queueNotice: null });
+    if (next !== null && !("notice" in next)) {
+      this.#patch({ queueView: next, ...(nudged ? {} : { queueNotice: null }) });
+      return;
+    }
+    const view = this.#state.queueView;
+    // A read nobody is looking at has no one to tell, and leaves the view as it was.
+    if (next === null || !this.#state.queue) {
+      if (view?.kind === "loading") this.#patch({ queueView: this.#queuePrior });
       return;
     }
     // Keeps a list that was read: the status line says whether anyone is leading.
-    // A read nobody is looking at has no one to tell.
-    if (!this.#state.queue) return;
-    const view = this.#state.queueView;
     if (view?.kind === "ok") this.#patch({ queueNotice: next.notice });
     else this.#patch({ queueView: { kind: "failed", message: next.notice } });
   }
@@ -1000,10 +1072,14 @@ export class Store {
     if (shown === null || isSettled(shown.state)) return;
     // Answered after a newer read landed: its task is older, but the poll chain it carries goes on.
     if (seq < this.#taskReadApplied) {
-      if (left !== null && left > 0) this.#follow(taskId, left);
+      if (left === null) return;
+      if (read === "waiting") this.#follow(taskId, left + 1);
+      else if (left > 0) this.#follow(taskId, left);
+      else this.#patch({ verdict: { kind: "queued", task: shown, follow: followEnd(read) } });
       return;
     }
-    this.#taskReadApplied = seq;
+    // Only a read that carried the task is newer news than another's: a missed one says nothing.
+    if (typeof read === "object" && "task" in read) this.#taskReadApplied = seq;
     const task = typeof read === "object" && "task" in read ? read.task : shown;
     if (typeof read === "object" && !("task" in read)) {
       if (left === null) return;
@@ -1028,7 +1104,7 @@ export class Store {
       this.#follow(taskId, left);
       return;
     }
-    this.#patch({ verdict: { kind: "queued", task, follow: { kind: read === "missed" ? "unanswered" : "stopped" } } });
+    this.#patch({ verdict: { kind: "queued", task, follow: followEnd(read) } });
   }
 
   #stopFollowing(): void {

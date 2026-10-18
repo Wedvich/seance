@@ -1281,6 +1281,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       const marked = await app.client.markDone(id);
       expect(marked).toMatchObject({ task: { id, state: "done", doneBy: "manual" } });
+      expect(window).not.toBeNull();
       await pollUntil(async () => !(await listWindows()).includes(window ?? ""), "the marked task's session to end");
       const lines = audit.mock.calls.map((args) => args.join(" "));
       expect(
@@ -1404,14 +1405,15 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (queuedId !== null) {
         const id = queuedId;
         // `dispatching` (spawn in flight) and a leader still taking over are asked again, never ignored: a task spawning after the test is a leak.
+        // A cleanup that gives up must not skip the teardown below, nor mask the test's own failure.
         await pollUntil(
           async () => {
             const reply = await app.client.cancel(id).catch(() => null);
-            return reply !== null && ("task" in reply || reply.code === "finished");
+            return reply !== null && ("task" in reply || reply.code === "finished" || reply.code === "task_not_found");
           },
           "the leftover task to be cancelled or finished",
           20_000,
-        );
+        ).catch((err: unknown) => console.error(`leftover task ${id} not cleaned up: ${String(err)}`));
       }
       app.stop();
       watch.close();
