@@ -234,8 +234,10 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
+  /** A `discard` that deleted the unreadable record at `task` and `version`. */
+  readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "pause" | "resume",
+    op: "cancel" | "mark-done" | "pause" | "resume" | "discard",
     id: string,
     code: string,
     /** What the request named: a `cancel` or `mark-done`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
@@ -262,6 +264,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
+    discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
     refused: (op, id, code, subject) =>
