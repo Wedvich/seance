@@ -434,7 +434,8 @@ precede. Wave 2 waits on the wave-1 item named.
     **Done** — `now`, `httpFetch` and `probe` in `RunOpts` (DESIGN.md, Daemon, "Seams").
   - `probe` passed through `startDaemon` to telemetry. **Done**, with the clock.
   - `run.ts`'s wiring split into a capabilities list and a collector registry. **Done**
-    (DESIGN.md, Daemon, "Wiring").
+    (DESIGN.md, Daemon, "Wiring"). The registry reaches into `telemetry.ts` too: each source is one
+    `TELEMETRY_COLLECTORS` entry, so the OAuth quota poll and the Proxmox readers are each one more.
   - `e2e/e2e.test.ts` split by area. **Done** — one file per area behind `startSuite` (docs/development.md).
   - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
     push-endpoint stub. **Done** (docs/development.md).

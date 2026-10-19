@@ -8,10 +8,12 @@ import { fitStatus } from "./status.ts";
 import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
 
 /**
- * The collector registry: every source a `status` tick samples, registered in
- * one place rather than inline in `startDaemon`. A field M4 adds to the status
- * (auth health, the OAuth quota poll, a Proxmox node view) registers its source
- * here.
+ * What the collector registry reads from the daemon: every dependency a `status`
+ * tick's collectors use, named in one place rather than inline in `startDaemon`.
+ * The collectors themselves are `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`),
+ * which `createTelemetry` defaults to so its direct callers build the same set. A
+ * field M4 adds to the status (auth health, the OAuth quota poll, a Proxmox node
+ * view) is one entry there, plus its dependency here if it needs a new one.
  */
 export interface CollectorDeps {
   readonly config: Config;
