@@ -966,6 +966,13 @@ export type MetricsReply = MetricsResponse | MetricsError;
  * `sessions` and quota; `account` on quota when the exclave's config dir says, `model` on `w`.
  * A daemon ahead may add names; a reader charts the ones it knows.
  */
+/**
+ * Disk floor, MiB free (`MachineStatus.free`): under it the scheduler filters a
+ * machine out `disk_low`. Shared so the Machines screen's Disk gauge turns red
+ * exactly where routing stops.
+ */
+export const MIN_FREE_MIB = 1024;
+
 export const METRIC_NAMES = {
   cpu: "cpu_pct",
   mem: "mem_pct",

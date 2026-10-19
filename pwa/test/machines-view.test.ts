@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   METRIC_NAMES,
+  MIN_FREE_MIB,
   type ExclaveInfo,
   type Machine,
+  type MachineStatus,
   type MetricsSeries,
   type SchedulerAvailability,
 } from "@seance/shared";
@@ -42,16 +44,38 @@ describe("deriveMachines", () => {
     expect(card?.exclaves).toEqual([]);
   });
 
-  // Disk is in the status for the scheduler's free-space floor, never on the card.
-  test("pressure renders from the status alone, indexed sessions land on their exclave", () => {
+  test("load and disk render from the status alone, indexed sessions land on their exclave", () => {
     const status = { at: S - 10, scan: 1, cpu: 95, mem: 80, disk: 99, free: 10, sess: [2] };
     const [card] = deriveMachines([machine({ status })], NOW, NO_LEADER).cards;
     expect(card?.gauges.map((gauge) => [gauge.label, gauge.level])).toEqual([
       ["CPU", "err"],
       ["Memory", "warn"],
+      ["Disk", "err"],
     ]);
     expect(card?.exclaves[0]?.sessions).toBe(2);
     expect(card?.charts).toBe(true);
+  });
+
+  // The scheduler's floor is free space, not percent: a small LXC root can be out of routing at 80%.
+  test("disk reads red under the scheduler's free-space floor whatever its percent, and is absent with no reading", () => {
+    const gauges = (status: MachineStatus): [string, string][] =>
+      (deriveMachines([machine({ status })], NOW, NO_LEADER).cards[0]?.gauges ?? []).map((gauge) => [
+        gauge.label,
+        gauge.level,
+      ]);
+    expect(gauges({ at: S - 10, scan: 1, cpu: 5, mem: 5, disk: 80, free: MIN_FREE_MIB - 1 })).toContainEqual([
+      "Disk",
+      "err",
+    ]);
+    expect(gauges({ at: S - 10, scan: 1, cpu: 5, mem: 5, disk: 80, free: MIN_FREE_MIB })).toContainEqual([
+      "Disk",
+      "warn",
+    ]);
+    // No statfs answer: no Disk gauge, rather than a 0% one.
+    expect(gauges({ at: S - 10, scan: 1, cpu: 5, mem: 5 })).toEqual([
+      ["CPU", "ok"],
+      ["Memory", "ok"],
+    ]);
   });
 
   // The status the relay kept when a Mac slept, or a beat from a socket the relay still lists

@@ -16,12 +16,17 @@ export interface ChartLine {
   readonly gaps: string;
 }
 
-const LABELS: Readonly<Record<string, string>> = {
+/** Display names, shared by the chart legend and the machine card's gauges. */
+export const METRIC_LABELS = {
   [METRIC_NAMES.cpu]: "CPU",
   [METRIC_NAMES.mem]: "Memory",
+  [METRIC_NAMES.disk]: "Disk",
   [METRIC_NAMES.h]: "5h",
   [METRIC_NAMES.d]: "7d",
-};
+} as const;
+
+/** Widened for a series' metric, which may be a name this build doesn't know. */
+const LABELS: Readonly<Record<string, string>> = METRIC_LABELS;
 
 /**
  * Quota samples carry the observation's own time, not the tick's, so a series

@@ -1,4 +1,4 @@
-import { LAUNCH_LEDGER_MAX_AGE_MS } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB } from "@seance/shared";
 
 /** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
 export type WindowSpan = "5h" | "7d";
@@ -115,7 +115,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   },
   unknownSeat: { capacity: 1, includes: [] },
   gatedModels: ["fable"],
-  minFreeMib: 1024,
+  minFreeMib: MIN_FREE_MIB,
   globalMax: 8,
   // Half the fleet's slots: one account's sessions draw on its 5h window together.
   accountMax: 4,

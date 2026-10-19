@@ -507,8 +507,8 @@ precede. Wave 2 waits on the wave-1 item named.
   pinned certificate fingerprint.
 - **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
-  nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the PWA shows no
-  disk numbers, since a fill level is upkeep rather than load). The `onAlert` seam exists,
+  nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the Machines
+  screen shows the fill level, but only a push reaches someone not looking at it). The `onAlert` seam exists,
   hard-wired to a log line (`startTerm` in `daemon/src/leader.ts`); a workbox service worker
   exists. Missing: the prefixes, `push-subscribe`, VAPID and RFC 8291 encryption, a push
   handler, the new alert kinds and a persisted de-dupe. Push endpoints can take seconds, so never
@@ -654,7 +654,7 @@ same PR, with the reason.
 6. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
-   it. The same series feeds M4's health alert, and the PWA shows no disk numbers.
+   it. The same series feeds M4's health alert and the Machines screen's Disk gauge.
 7. **No age cap on a quota reading** beyond the reset rule. The 5h window bounds itself — a
    reading older than 5h is past its reset and reads 0% — so only the 7d window can drift, and
    only through use the fleet does not see. Fleet accounts are used almost only inside the

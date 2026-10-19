@@ -2,6 +2,8 @@ import {
   CAPABILITIES,
   effectivePct,
   liveStatus,
+  METRIC_NAMES,
+  MIN_FREE_MIB,
   newestQuotaByAccount,
   schedulerRole,
   type ExclaveInfo,
@@ -12,6 +14,7 @@ import {
   type SchedulerRole,
   type UpdateOutcome,
 } from "@seance/shared";
+import { METRIC_LABELS } from "./chart.ts";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -48,10 +51,7 @@ export interface MachineCard {
   readonly build: string | null;
   /** Set only when its last reported update attempt was a skip or a failure; carries its age, since the next check may not have run yet. */
   readonly updateNote: string | null;
-  /**
-   * CPU and memory only. Disk is collected and stored but not shown: a fill
-   * level is upkeep, not load, and belongs in a health alert (docs/scheduler.md, M4).
-   */
+  /** CPU, memory, and disk fill (percent used on the fullest watched path; red under the scheduler's floor). */
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
   readonly exclaves: readonly ExclaveRow[];
@@ -81,7 +81,7 @@ export interface MachinesView {
   readonly accounts: readonly AccountCard[];
 }
 
-/** Shared by pressure and quota: both are "how close to the wall". */
+/** Shared by pressure, disk fill and quota: all are "how close to the wall". */
 export function levelFor(pct: number): Level {
   if (pct >= 90) return "err";
   if (pct >= 75) return "warn";
@@ -91,6 +91,15 @@ export function levelFor(pct: number): Level {
 function gauge(label: string, pct: number): Gauge {
   const clamped = Math.min(100, Math.max(0, pct));
   return { label, pct: clamped, level: levelFor(clamped) };
+}
+
+/**
+ * Fill level, but red under the scheduler's floor whatever the percent: a small
+ * LXC root at 80% can already be out of routing, and the card must not say amber.
+ */
+function diskGauge(pct: number, freeMib: number | undefined): Gauge {
+  const fill = gauge(METRIC_LABELS[METRIC_NAMES.disk], pct);
+  return freeMib !== undefined && freeMib < MIN_FREE_MIB ? { ...fill, level: "err" } : fill;
 }
 
 const MINUTE = 60_000;
@@ -186,8 +195,9 @@ function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailabi
   // still counts — an observation carries its own stamp.
   const status = liveStatus(machine);
   const gauges = [
-    status?.cpu === undefined ? null : gauge("CPU", status.cpu),
-    status?.mem === undefined ? null : gauge("Memory", status.mem),
+    status?.cpu === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.cpu], status.cpu),
+    status?.mem === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.mem], status.mem),
+    status?.disk === undefined ? null : diskGauge(status.disk, status.free),
   ].filter((entry): entry is Gauge => entry !== null);
   const meta = machine.connected
     ? `${machine.platform}${status === undefined ? "" : ` · updated ${formatSeen(status.at * 1000, now)}`}`
