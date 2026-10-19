@@ -54,7 +54,12 @@ export function App(props: { store: Store }): JSX.Element {
   const formOrVerdict =
     rendered !== null ? (
       <VerdictView
-        key={rendered}
+        // A followed task is keyed on its id, so refreshes update the mounted
+        // verdict (its stages animate) instead of remounting it. Every other
+        // verdict stays keyed on the object: a retry whose failure lands inside
+        // the exit animation is a new verdict and must mount fresh, not snap the
+        // half-dismissed one back.
+        key={rendered.kind === "queued" ? `queued:${rendered.task.id}` : rendered}
         verdict={rendered}
         machineName={view.machine?.name ?? "that machine"}
         machines={state.relay.machines}
