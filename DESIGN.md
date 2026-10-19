@@ -1236,7 +1236,7 @@ taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` fo
   average otherwise serializes to seventeen digits, a third of the reply. Sized
   against measurement: one machine with two exclaves keeps ~14 series, and all
   of them at a day of 5-min points is ~77 KB, so a chart asks for its panel's
-  `names` (the machine chart's pressure is two series, cpu and memory, ~11 KB). Rejected: a points cap alone (the
+  `names` (the machine chart is three series, cpu, memory and disk, ~17 KB). Rejected: a points cap alone (the
   series count grows with exclaves, accounts and models, so no cap fits every
   machine); trimming the oldest points to fit (the chart silently shows less
   range than it asked for); positional value arrays with implied timestamps
@@ -3794,12 +3794,15 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
   filter and score read quota exactly as the cards do. Charts follow the split — HISTORY on a machine asks
-  that daemon for `cpu_pct`/`mem_pct`; on an account it asks one online host of the account
+  that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply
-  that lands after the chart moved on is dropped. Disk is collected and stored but never
-  shown: a fill level is upkeep, not load — it feeds the scheduler's free-space floor and
-  M4's health alert instead. The chart is inline SVG geometry (`chart.ts`), no charting
+  that lands after the chart moved on is dropped. Disk shows as a third gauge, percent
+  used on the fullest watched path (2026-10-19 — an LXC's small root fills quietly, and an
+  earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
+  the percent (docs/scheduler.md, Settled defaults 6); the gauge turns red under that same
+  floor (`MIN_FREE_MIB`) whatever its percent, so a card never shows amber for a machine
+  routing has dropped. `disk_pct` also feeds M4's health alert. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
   missing ink), and a point alone between two breaks is a dot — a laptop in clamshell

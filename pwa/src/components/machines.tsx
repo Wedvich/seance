@@ -7,7 +7,7 @@ import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
 
-const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Pressure", account: "Quota" };
+const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Load and disk", account: "Quota" };
 
 /** Opens on a day: long enough to show a working pattern, on the tier that fits it. */
 const DEFAULT_RANGE: HistoryRange = "24h";

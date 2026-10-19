@@ -157,7 +157,7 @@ export type HistoryTarget =
  * All of them are whole percent, so one 0–100 axis serves either.
  */
 export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]> = {
-  machine: [METRIC_NAMES.cpu, METRIC_NAMES.mem],
+  machine: [METRIC_NAMES.cpu, METRIC_NAMES.mem, METRIC_NAMES.disk],
   account: [METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w],
 };
 
