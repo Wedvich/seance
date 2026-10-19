@@ -15,6 +15,8 @@ export function skillOptionId(listId: string, index: number): string {
 function MatchedName(props: { name: string; query: string }): JSX.Element {
   const { name, query } = props;
   const at = query === "" ? -1 : name.toLowerCase().indexOf(query.toLowerCase());
+  // Fragment is the one way to return a bare string as `JSX.Element`.
+  // oxlint-disable-next-line react/jsx-no-useless-fragment
   if (at < 0) return <>{name}</>;
   return (
     <>

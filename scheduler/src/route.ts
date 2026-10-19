@@ -352,7 +352,7 @@ function seatTierOf(machines: readonly Machine[], accountId: string): string | u
  */
 function appliesTo(window: QuotaWindow, model: string): boolean {
   if (window.model === undefined) return true;
-  const family = window.model.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  const family = window.model.trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
   return family !== "" && model.toLowerCase().includes(family);
 }
 
