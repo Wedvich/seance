@@ -23,6 +23,21 @@ export interface GitFixture {
   readonly barePath: string;
   /** Adds a commit to origin that the clone doesn't have. */
   readonly advanceOrigin: () => Promise<void>;
+  /**
+   * Commits `file` (default `<branch>.txt`) on `branch` and pushes it to origin,
+   * as a session finishing its work would; returns the worktree it committed in.
+   * Without `from`, that is a new worktree of the clone under `.claude/worktrees/`
+   * on a `--no-track` branch from origin/main; the folder is the branch's name, with
+   * `worktree-<name>` placed at `<name>` as `claude --worktree` lays it out (`/` becomes
+   * `-` otherwise). With `from`, the given worktree, already on `branch`. `force` pushes `+branch`.
+   */
+  readonly pushBranch: (branch: string, opts?: PushBranchOptions) => Promise<string>;
+}
+
+export interface PushBranchOptions {
+  readonly from?: string;
+  readonly file?: string;
+  readonly force?: boolean;
 }
 
 /** Bare origin + a clone with origin/HEAD set, like any real `git clone`. */
@@ -57,7 +72,24 @@ export async function makeGitFixture(base: string): Promise<GitFixture> {
     await run(["git", "push", "origin", "main"], seedPath);
   };
 
-  return { root: await realpath(root), repoPath, barePath: await realpath(barePath), advanceOrigin };
+  const branchWorktree = async (branch: string): Promise<string> => {
+    const folder = branch.startsWith("worktree-") ? branch.slice("worktree-".length) : branch;
+    const path = join(repoPath, ".claude", "worktrees", folder.replaceAll("/", "-"));
+    await run(["git", "worktree", "add", "-q", "--no-track", "-b", branch, path, "origin/main"], repoPath);
+    return path;
+  };
+
+  const pushBranch = async (branch: string, opts: PushBranchOptions = {}): Promise<string> => {
+    const worktree = opts.from ?? (await branchWorktree(branch));
+    const file = opts.file ?? `${basename(branch)}.txt`;
+    await writeFile(join(worktree, file), `${file}\n`);
+    await run(["git", ...GIT_ID, "add", file], worktree);
+    await run(["git", ...GIT_ID, "commit", "-q", "-m", `add ${file}`], worktree);
+    await run(["git", "push", "-q", "origin", opts.force === true ? `+${branch}` : branch], worktree);
+    return worktree;
+  };
+
+  return { root: await realpath(root), repoPath, barePath: await realpath(barePath), advanceOrigin, pushBranch };
 }
 
 /** A local clone with one commit — `git worktree add` needs one to branch from. Returns its canonical path. */

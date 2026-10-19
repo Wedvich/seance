@@ -85,13 +85,6 @@ async function launch(w: World, taskId: string, name: string): Promise<string> {
   return path;
 }
 
-async function commitAndPush(worktree: string, file: string, branch: string): Promise<void> {
-  await writeFile(join(worktree, file), `${file}\n`);
-  await git(worktree, "add", file);
-  await git(worktree, "commit", "-q", "-m", `add ${file}`);
-  await git(worktree, "push", "-q", "origin", branch);
-}
-
 /** What GitHub's squash merge leaves: one commit on origin's main, the branch deleted there. */
 async function squashMergeOnOrigin(w: World, branch: string): Promise<void> {
   seq += 1;
@@ -136,7 +129,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     const tracking = await exec(["git", "config", "--get", "branch.worktree-x.remote"], { cwd: path });
     expect(tracking.exitCode).not.toBe(0);
     await emitter.check();
@@ -182,7 +175,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     await squashMergeOnOrigin(w, "worktree-x");
     await emitter.check();
@@ -203,7 +196,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
     // GitHub's default: the head branch stays. Then another task's commit rewrites the same line, before the
@@ -226,7 +219,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await w.fixture.advanceOrigin();
     await emitter.check();
     await emitter.check();
@@ -240,7 +233,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
     await fastForwardOnOrigin(w, "worktree-x");
@@ -254,7 +247,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
     await squashMergeOnOrigin(w, "worktree-x");
@@ -268,7 +261,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
     await git(w.fixture.repoPath, "branch", "-D", "worktree-x");
@@ -282,7 +275,7 @@ describe("branch-state emitter", () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     const sent = w.states.length;
     await git(w.fixture.repoPath, "remote", "set-url", "origin", join(base, "nowhere.git"));
@@ -300,7 +293,7 @@ describe("branch-state emitter", () => {
   test("a failed fetch is not retried on every pass: the repo backs off", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     let fetches = 0;
     const emitter = start(w, {
       fetch: () => {
@@ -319,7 +312,7 @@ describe("branch-state emitter", () => {
   test("the fetch warning names the repo and the exit code, never git's stderr", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     const emitter = start(w, {
       fetch: () =>
         Promise.resolve({
@@ -345,7 +338,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const first = start(w);
     await first.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await first.check();
     first.stop();
     const sent = w.states.length;
@@ -364,7 +357,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const first = start(w);
     await first.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await first.check();
     first.stop();
     await squashMergeOnOrigin(w, "worktree-x");
@@ -438,7 +431,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "old", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await w.ledger.note("old", { prUrl: "https://github.com/org/myrepo/pull/1" });
     await emitter.check();
     const oldTip = w.ledger.notes().find((n) => n.taskId === "old")?.tip;
@@ -467,7 +460,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "old", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     await reuseName(w, path, "x", "new");
     await w.ledger.note("new", { branch: "worktree-x", ahead: true, pushed: true, merged: true });
@@ -484,7 +477,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     const sent = w.states.length;
     expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
@@ -501,7 +494,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await w.ledger.note("t1", { prUrl: "https://github.com/org/myrepo/pull/1" });
     await emitter.check();
     const sent = w.states.length;
@@ -521,7 +514,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     const sent = w.states.length;
     await w.ledger.startNote("t1");
@@ -590,7 +583,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "t1", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     const worked = await git(path, "rev-parse", "HEAD");
     expect(w.ledger.notes()[0]).toMatchObject({ tip: worked, ahead: true, pushed: true });
@@ -609,7 +602,7 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "old", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await w.ledger.note("old", { prUrl: "https://github.com/org/myrepo/pull/1" });
     await emitter.check();
     const oldTip = w.ledger.notes()[0]?.tip;
@@ -619,7 +612,7 @@ describe("branch-state emitter", () => {
     await git(w.fixture.repoPath, "worktree", "remove", "--force", path);
     await git(w.fixture.repoPath, "branch", "-D", "worktree-x");
     await git(w.fixture.repoPath, "worktree", "add", "-q", "--no-track", "-b", "worktree-x", path, "origin/main");
-    await commitAndPush(path, "b.txt", "+worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "b.txt", force: true });
     await squashMergeOnOrigin(w, "worktree-x");
     const sent = w.states.length;
     await emitter.check();
@@ -638,13 +631,13 @@ describe("branch-state emitter", () => {
     const path = await launch(w, "old", "x");
     const emitter = start(w);
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     await reuseName(w, path, "x", "new");
     // The scheduler re-dispatches "old"; its spawn is refused, so nothing but `record` ran: it is now last in the ledger.
     await w.ledger.record("old");
     expect(w.ledger.notes().map((n) => n.taskId)).toEqual(["new", "old"]);
-    await commitAndPush(path, "b.txt", "+worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "b.txt", force: true });
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ taskId: "new", branch: "worktree-x", pushed: true, merged: false });
     stopAll(w);
@@ -664,7 +657,7 @@ describe("branch-state emitter", () => {
       },
     });
     await emitter.check();
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     // The first launch's pushed state is still undelivered when the id is relaunched to the same path.
     await git(path, "reset", "-q", "--hard", "origin/main");
@@ -1034,7 +1027,7 @@ describe("branch-state emitter: the cut-off for ended, quiet tasks", () => {
     time.advance(PAST_GRACE);
     await emitter.check();
     time.advance(PAST_GRACE);
-    await commitAndPush(path, "a.txt", "worktree-x");
+    await w.fixture.pushBranch("worktree-x", { from: path, file: "a.txt" });
     await emitter.check();
     expect(w.states.at(-1)).toMatchObject({ pushed: true, merged: false });
     await squashMergeOnOrigin(w, "worktree-x");
@@ -1100,7 +1093,7 @@ describe("branch-state emitter: what a steady pass costs", () => {
       // oxlint-disable-next-line no-await-in-loop -- one worktree after another in one clone
       const path = await launch(w, `t${i}`, `x${i}`);
       // oxlint-disable-next-line no-await-in-loop -- as above
-      await commitAndPush(path, `f${i}.txt`, `worktree-x${i}`);
+      await w.fixture.pushBranch(`worktree-x${i}`, { from: path, file: `f${i}.txt` });
     }
     // A fetch only when stale: the first pass fetches, the steady ones do not.
     const emitter = start(w, { fetchStaleMs: 3_600_000 });
@@ -1121,7 +1114,7 @@ describe("branch-state emitter: what a steady pass costs", () => {
     const emitter = start(w);
     await emitter.check();
     await git(path, "branch", "-m", "worktree-renamed");
-    await commitAndPush(path, "a.txt", "worktree-renamed");
+    await w.fixture.pushBranch("worktree-renamed", { from: path, file: "a.txt" });
     await emitter.check();
     expect(w.states.map((s) => [s.branch, s.pushed])).toEqual([
       ["worktree-x", false],
