@@ -672,7 +672,7 @@ same PR, with the reason.
    weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 120 s
    (`reservationTtlMs`, twice the replay window, so a spawn that ever runs has begun by half of it). The estimate is per span
    (owner, 2026-10-18): one number for both added a task's 5h share to every week, so a
-   standard seat (×6.25, item 17) at 41% weekly with one task in flight projected 104% and
+   standard seat (then ×6.25, item 17) at 41% weekly with one task in flight projected 104% and
    scored ~8000× worse than any other account. 1% is a guess at a week's share; tune both
    from observed deltas. Account pressure is the convex cost (1 at 50%, 16 at 80%) while the other three
    are fractions or counts, so the weights put one busy machine, or the farthest base, on
@@ -731,11 +731,12 @@ same PR, with the reason.
     refused before launch) has none. Slugs derived from it (window, branch) stay as labels
     (DESIGN.md, Scheduler, "The library").
 17. **Seats differ, so a percentage does not compare across them** (owner, 2026-10-18). A Team
-    premium seat (`seatTier` `team_tier_1`) has 6.25× a standard seat's (`team_standard`)
-    limits, and only premium covers Fable from quota; on standard Fable is billed to credits.
+    premium seat (`seatTier` `team_tier_1`) has 5× a standard seat's (`team_standard`)
+    limits (Anthropic's Team plan page; 6.25× is premium against an individual Pro seat, until
+    2026-10-19 misread as against standard, which is itself 1.25× Pro), and only premium covers Fable from quota; on standard Fable is billed to credits.
     So a Fable task never goes to a seat that doesn't include it — `model_not_included`, a hard
     filter that extra usage does not spill past — and the per-task estimate (8) is scaled by
-    the seat's `capacity`: 5% / 1% (5h / 7d) on premium, 31.25% / 6.25% on standard, which keeps heavy work off the
+    the seat's `capacity`: 5% / 1% (5h / 7d) on premium, 25% / 5% on standard, which keeps heavy work off the
     small seat through the existing line and score, with no task-size field. Premium's own
     Fable allowance is not modelled separately; its `7d Fable` window is what routing reads,
     and only for Fable tasks — a full Fable week leaves other models' work free.
