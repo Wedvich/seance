@@ -114,9 +114,13 @@ describe("LaunchLedger", () => {
     await mkdir(join(path, "x"), { recursive: true });
     const first = ledger.record("dup");
     const second = ledger.record("dup");
-    await expect(first).rejects.toThrow();
+    // Both handled before any await: `second` can reject before `first`'s await
+    // returns, and an unhandled rejection fails the test whatever it asserts.
+    const firstRejects = expect(first).rejects.toThrow();
+    const secondRejects = expect(second).rejects.toThrow();
+    await firstRejects;
     expect(ledger.ids()).toContain("dup");
-    await expect(second).rejects.toThrow();
+    await secondRejects;
     // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
     expect(ledger.ids()).toContain("dup");
   });
