@@ -30,14 +30,8 @@ import { DEFAULT_FORM } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
-import {
-  PREVIEW_DEBOUNCE_MS,
-  PREVIEW_RETRY_MS,
-  QUEUE_POLL_MS,
-  QUEUE_POLLS,
-  Store,
-  UNDO_WINDOW_MS,
-} from "../src/store.ts";
+import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
+import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
