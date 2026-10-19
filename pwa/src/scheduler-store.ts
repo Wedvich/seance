@@ -126,6 +126,13 @@ export class SchedulerStore {
   #followTimer: ReturnType<typeof setTimeout> | null = null;
   /** The leader the Queue screen last read from: a new one asks again. */
   #queueLeader = "";
+  /** The socket dropped since the last catch-up read: nudges sent meanwhile are lost, so the next verified leader is read whole. */
+  #queueMissed = false;
+  /**
+   * Whether the notice up now is one a queue read set. Any read that lands
+   * clears it, nudged or not: only an action's notice outlives a nudge's read.
+   */
+  #noticeFromRead = false;
   /** The queue read loop while one is out: reads are single-flight, a later ask folds into `#queueTrailing`. */
   #queueRun: Promise<void> | null = null;
   /** What to read once the one in flight settles: the union of every ask meanwhile (null names the whole queue). */
@@ -140,7 +147,11 @@ export class SchedulerStore {
   constructor(client: RelayClient, getState: () => AppState, patch: (next: Partial<AppState>) => void) {
     this.#client = client;
     this.#getState = getState;
-    this.#patch = patch;
+    // A read that sets the notice marks it as its own after patching; every other notice write unmarks it.
+    this.#patch = (next) => {
+      if ("queueNotice" in next) this.#noticeFromRead = false;
+      patch(next);
+    };
   }
 
   get #state(): AppState {
@@ -152,6 +163,7 @@ export class SchedulerStore {
     // The leader usually survives a drop unchanged, so without this a preview
     // the drop failed mid-flight would never be asked again on reconnect.
     this.#previewedLeader = "";
+    this.#queueMissed = true;
   }
 
   /** A relay change with the socket open: `reopened` when it had been closed. */
@@ -179,10 +191,16 @@ export class SchedulerStore {
    * never heals a task it was not told about, so the screen reads whole again.
    */
   #catchUpQueue(scheduler: SchedulerAvailability, reopened: boolean): void {
-    const read =
-      this.#watchesQueue() && (reopened || schedulerKey(scheduler) !== this.#queueLeader)
-        ? this.refreshQueue(undefined, true)
-        : null;
+    // Only a verified leader is asked: anything else is refused unsent, which
+    // tells the screen nothing its status line doesn't — and every new term is
+    // unverified until its `lead-proof` lands, so asking then raised a notice
+    // on each takeover. The catch-up waits for the leader to verify instead.
+    const due =
+      scheduler.kind === "ready" &&
+      this.#watchesQueue() &&
+      (this.#queueMissed || schedulerKey(scheduler) !== this.#queueLeader);
+    if (due) this.#queueMissed = false;
+    const read = due ? this.refreshQueue(undefined, true) : null;
     const verdict = this.#state.verdict;
     if (reopened && verdict?.kind === "queued" && !isSettled(verdict.task.state)) {
       void this.#followedVia(verdict.task.id, read);
@@ -400,7 +418,7 @@ export class SchedulerStore {
       next = { notice: readFailureText(err, "the queue could not be read") };
     }
     if (next !== null && !("notice" in next)) {
-      this.#patch({ queueView: next, ...(nudged ? {} : { queueNotice: null }) });
+      this.#patch({ queueView: next, ...(nudged && !this.#noticeFromRead ? {} : { queueNotice: null }) });
       return;
     }
     const view = this.#state.queueView;
@@ -410,8 +428,10 @@ export class SchedulerStore {
       return;
     }
     // Keeps a list that was read: the status line says whether anyone is leading.
-    if (view?.kind === "ok") this.#patch({ queueNotice: next.notice });
-    else this.#patch({ queueView: { kind: "failed", message: next.notice } });
+    if (view?.kind === "ok") {
+      this.#patch({ queueNotice: next.notice });
+      this.#noticeFromRead = true;
+    } else this.#patch({ queueView: { kind: "failed", message: next.notice } });
   }
 
   /**
