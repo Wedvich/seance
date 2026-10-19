@@ -1,5 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
+import { centeredScrollTop } from "../scroll.ts";
 import type { Dot } from "../view.ts";
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:not([tabindex="-1"])';
@@ -19,6 +20,24 @@ export function Sheet(props: {
 }): JSX.Element {
   const { title, closing = false, onExited, onClose, children } = props;
   const panel = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+
+  // Before first paint, so a long list opens on its selection rather than
+  // visibly jumping to it. Rects, not offsetTop: the panel is mid slide-in.
+  useLayoutEffect(() => {
+    const node = list.current;
+    const selected = node?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!node || !selected) return;
+    node.scrollTop = centeredScrollTop(
+      {
+        top: node.getBoundingClientRect().top,
+        height: node.clientHeight,
+        scrollTop: node.scrollTop,
+        scrollHeight: node.scrollHeight,
+      },
+      { top: selected.getBoundingClientRect().top, height: selected.offsetHeight },
+    );
+  }, []);
 
   useEffect(() => {
     const previous = document.activeElement;
@@ -82,7 +101,9 @@ export function Sheet(props: {
             ✕
           </button>
         </div>
-        <div className="sheet-items">{children}</div>
+        <div className="sheet-items" ref={list}>
+          {children}
+        </div>
       </div>
     </div>
   );
