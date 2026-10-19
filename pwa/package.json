@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@seance/shared": "workspace:*",
-    "preact": "^10.28.1"
+    "preact": "^11.0.1"
   },
   "devDependencies": {
     "@preact/preset-vite": "^2.10.6",

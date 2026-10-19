@@ -39,7 +39,8 @@ export function Sheet(props: {
     );
   }, []);
 
-  useEffect(() => {
+  // Layout effect: its cleanup must run before the panel leaves the DOM, as Preact 11 defers useEffect cleanups past paint.
+  useLayoutEffect(() => {
     const previous = document.activeElement;
     const node = panel.current;
     node?.focus();
