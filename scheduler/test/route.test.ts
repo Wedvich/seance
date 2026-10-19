@@ -84,7 +84,7 @@ function byExclave(decision: Decision, id: string): Candidate | undefined {
 function seatReading(seatTier: string): Machine {
   return machine("a", {
     exclaves: [exclave("main", "org:a", { seatTier })],
-    status: status({ quota: [obs(0, { h: 60, hr: NOW_S + 7200, d: 10, dr: NOW_S + 3600 })] }),
+    status: status({ quota: [obs(0, { h: 70, hr: NOW_S + 7200, d: 10, dr: NOW_S + 3600 })] }),
   });
 }
 
@@ -387,7 +387,7 @@ describe("filter", () => {
     });
 
     test("a standard seat's estimate is scaled, as routing scales it", () => {
-      // 60% plus one standard-seat task (31.25%) crosses the line in 5h; on premium it is under everywhere.
+      // 70% plus one standard-seat task (25%) crosses the line in 5h; on premium it is under everywhere.
       expect(accountResetAt("org:a", [seatReading("team_standard")], [], NOW, DEFAULT_CONFIG)).toBe(
         (NOW_S + 7200) * 1000,
       );
@@ -441,11 +441,11 @@ describe("filter", () => {
       expect(decide(fleet).candidates.map(codes)).toEqual([[], []]);
     });
 
-    test("a standard seat's estimate is 6.25× a premium one's, in the filter and the score", () => {
-      // 60% + 31.25% crosses the line on standard; 60% + 5% does not on premium.
-      const decision = decide([seats(60)]);
+    test("a standard seat's estimate is 5× a premium one's, in the filter and the score", () => {
+      // 70% + 25% crosses the line on standard; 70% + 5% does not on premium.
+      const decision = decide([seats(70)]);
       expect(byExclave(decision, "alt")?.rejected).toEqual([
-        { code: "quota_over_line", window: "5h", projectedPct: 91.25 },
+        { code: "quota_over_line", window: "5h", projectedPct: 95 },
       ]);
       expect(byExclave(decision, "main")?.rejected).toEqual([]);
       // Both under the line at the same reading, the standard seat still costs more.
@@ -457,23 +457,23 @@ describe("filter", () => {
     });
 
     test("a weekly takes the 7d estimate, not the 5h one, scaled alike", () => {
-      // 41% + 2 × 6.25% stays well under in 7d; the same reading in 5h is 2 × 31.25% over.
+      // 41% + 2 × 5% stays well under in 7d; the same reading in 5h is 2 × 25% over.
       expect(only(decide([standardSeat(obs(0, { d: 41 }))], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standardSeat(obs(0, { h: 41 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
-        { code: "quota_over_line", window: "5h", projectedPct: 103.5 },
+        { code: "quota_over_line", window: "5h", projectedPct: 91 },
       ]);
-      // 80% + 2 × 6.25% crosses only if the 7d estimate is scaled too; unscaled it would be 82%.
-      expect(only(decide([standardSeat(obs(0, { d: 80 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
-        { code: "quota_over_line", window: "7d", projectedPct: 92.5 },
+      // 85% + 2 × 5% crosses only if the 7d estimate is scaled too; unscaled it would be 87%.
+      expect(only(decide([standardSeat(obs(0, { d: 85 }))], { tasks: [held("x", "a")] })).rejected).toEqual([
+        { code: "quota_over_line", window: "7d", projectedPct: 95 },
       ]);
     });
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
-      const standard = standardSeat(obs(0, { h: 10 }));
-      // 10% + 2 × 31.25% is under; one more in flight makes it 103.75%.
+      const standard = standardSeat(obs(0, { h: 20 }));
+      // 20% + 2 × 25% is under; one more in flight makes it 95%.
       expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
-        { code: "quota_over_line", window: "5h", projectedPct: 103.75 },
+        { code: "quota_over_line", window: "5h", projectedPct: 95 },
       ]);
     });
   });
@@ -494,9 +494,9 @@ describe("score", () => {
   });
 
   test("account_pressure: a weekly adds the 7d estimate, scaled to the seat", () => {
-    // 7d: 80% + 6.25% = 86.25% outweighs 5h's 0% + 31.25%; the 5h estimate there would cap at 99% and cost 9801.
+    // 7d: 80% + 5% = 85% outweighs 5h's 0% + 25%; the 5h estimate there would cap at 99% and cost 9801.
     const candidate = only(decide([standardSeat(obs(0, { h: 0, d: 80 }))]));
-    expect(candidate.score?.components.accountPressure).toBeCloseTo((0.8625 / 0.1375) ** 2, 10);
+    expect(candidate.score?.components.accountPressure).toBeCloseTo((0.85 / 0.15) ** 2, 10);
   });
 
   test("account_pressure: discounted by the share of the window still to run", () => {

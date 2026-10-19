@@ -108,10 +108,10 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: { "5h": 5, "7d": 1 },
-  // Premium seats have 6.25× a standard seat's limits, and only they cover Fable from quota.
+  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota.
   seats: {
     team_tier_1: { capacity: 1, includes: ["fable"] },
-    team_standard: { capacity: 1 / 6.25, includes: [] },
+    team_standard: { capacity: 1 / 5, includes: [] },
   },
   unknownSeat: { capacity: 1, includes: [] },
   gatedModels: ["fable"],
