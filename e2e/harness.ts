@@ -15,7 +15,7 @@ import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
 import type { QueueStore, Task } from "../daemon/src/leader.ts";
 import { createQueueStore, type StoreLeg } from "../daemon/src/queue-store.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
-import { identityOfState, loadOrInitState } from "../daemon/src/state.ts";
+import { identityOfState, loadOrInitState, readState } from "../daemon/src/state.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
 import {
   makeClaudeStub,
@@ -277,12 +277,15 @@ export async function startStack(
     });
 
   let daemon = await startTestDaemon().catch(failed);
-  const { deviceId } = await (Bun.file(join(stateDir, "state.json")).json() as Promise<{ deviceId: string }>).catch(
-    async (error: unknown) => {
-      daemon.stop();
-      return failed(error);
-    },
-  );
+  const state = await readState(join(stateDir, "state.json")).catch(async (error: unknown) => {
+    daemon.stop();
+    return failed(error);
+  });
+  if (state === null) {
+    daemon.stop();
+    return failed(new Error("the daemon's state.json is missing or unreadable"));
+  }
+  const { deviceId } = state;
 
   const secondProcs = new Set<Subprocess>();
   const startSecondDaemon = async (opts: SecondDaemonOpts): Promise<SecondDaemon> => {
@@ -315,12 +318,7 @@ export async function startStack(
     try {
       // Until it parses, not until it exists: the poll can land mid-write.
       await pollUntil(
-        async () =>
-          typeof (
-            await Bun.file(statePath)
-              .json()
-              .catch(() => null)
-          )?.deviceId === "string",
+        async () => (await readState(statePath).catch(() => null)) !== null,
         `${opts.name}'s state.json`,
         10_000,
       );
@@ -328,8 +326,12 @@ export async function startStack(
       await stop();
       throw error;
     }
-    const { deviceId: secondId } = (await Bun.file(statePath).json()) as { deviceId: string };
-    return { deviceId: secondId, log, tmuxSession, stateDir: secondState, stop };
+    const secondParsed = await readState(statePath);
+    if (secondParsed === null) {
+      await stop();
+      throw new Error(`${opts.name}'s state.json vanished after it parsed`);
+    }
+    return { deviceId: secondParsed.deviceId, log, tmuxSession, stateDir: secondState, stop };
   };
 
   const stack: Stack = {
