@@ -13,7 +13,7 @@ import {
   type TickContext,
 } from "./telemetry-collectors.ts";
 
-export { newestQuota, QUOTA_CLOCK_SKEW_MS, readCachedQuota } from "./telemetry-collectors.ts";
+export { MIN_CPU_WINDOW_MS, newestQuota, QUOTA_CLOCK_SKEW_MS, readCachedQuota } from "./telemetry-collectors.ts";
 
 /**
  * What a `status` tick measures (DESIGN.md, "Telemetry"): cpu, memory and disk
@@ -75,6 +75,12 @@ export interface TelemetrySources {
   readonly now?: () => number;
   /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
+  /**
+   * A collector's failure, by its registry name. It drops only that entry's
+   * contribution; this is the one place the cause surfaces, and it is called on
+   * every failing tick — the caller rate-limits, not `createTelemetry`.
+   */
+  readonly onCollectorError?: (collector: string, err: unknown) => void;
 }
 
 export interface Telemetry {
@@ -95,9 +101,18 @@ export function createTelemetry(
   registry: readonly TelemetryCollector[] = TELEMETRY_COLLECTORS,
 ): Telemetry {
   const now = sources.now ?? Date.now;
+  // A throwing hook must not turn a contained failure into a failed tick.
+  const reportFailure = (name: string, err: unknown): void => {
+    try {
+      sources.onCollectorError?.(name, err);
+    } catch {
+      // nothing left to tell
+    }
+  };
   const collectors = registry.map((collector) => collector({ ...sources, probe: sources.probe ?? hostProbe }));
   // Each average remembers when it last took a reading, so the weight after a
-  // failed collector reflects the whole gap, not one tick.
+  // failed collector reflects the whole gap, not one tick. Keyed by entry index
+  // too: a key is free text, and two entries must not share an average by accident.
   const smoothed = new Map<string, { readonly value: number; readonly atMs: number }>();
   let latest: Snapshot | null = null;
   let inFlight: { readonly registered: Registered; readonly snapshot: Promise<Snapshot> } | null = null;
@@ -107,19 +122,27 @@ export function createTelemetry(
     // Time-aware weight rather than a fixed alpha: a laptop back from sleep
     // sees one huge interval and resets to the new reading instead of
     // trusting a two-day-old average for the next four ticks.
-    const smooth = (key: string, value: number | null): number | null => {
-      if (value === null) return null;
-      const prior = smoothed.get(key);
-      const gapMs = prior === undefined ? 0 : nowMs - prior.atMs;
-      const alpha = gapMs <= 0 ? 1 : Math.min(1, gapMs / SMOOTHING_MS);
-      const next = prior === undefined ? value : prior.value + alpha * (value - prior.value);
-      smoothed.set(key, { value: next, atMs: nowMs });
-      return next;
-    };
-    const tick: TickContext = { registered, nowMs, at, smooth };
+    const smoothFor =
+      (index: number) =>
+      (key: string, value: number | null): number | null => {
+        if (value === null) return null;
+        const slot = `${index}:${key}`;
+        const prior = smoothed.get(slot);
+        const gapMs = prior === undefined ? 0 : nowMs - prior.atMs;
+        const alpha = gapMs <= 0 ? 1 : Math.min(1, gapMs / SMOOTHING_MS);
+        const next = prior === undefined ? value : prior.value + alpha * (value - prior.value);
+        smoothed.set(slot, { value: next, atMs: nowMs });
+        return next;
+      };
     // Each collector fails alone: one field absent, never the tick.
     const contributions = await Promise.all(
-      collectors.map((collect) => Promise.try(collect, tick).catch(() => NO_CONTRIBUTION)),
+      collectors.map((collect, index) => {
+        const tick: TickContext = { registered, nowMs, at, smooth: smoothFor(index) };
+        return Promise.try(collect, tick).catch((err: unknown) => {
+          reportFailure(registry[index]?.name ?? `#${index}`, err);
+          return NO_CONTRIBUTION;
+        });
+      }),
     );
     const { fields, samples } = mergeContributions(contributions);
     const snapshot: Snapshot = { at, scan: registered.scan, ...fields };

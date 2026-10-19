@@ -33,19 +33,23 @@ export interface TickContext {
   readonly nowMs: number;
   /** Seconds: the snapshot's stamp and every gauge sample's. */
   readonly at: number;
-  /** The tick's time-aware average for `key`; null passes through and leaves the average where it was. */
+  /** The tick's time-aware average for `key`, scoped to this entry; null passes through and leaves the average where it was. */
   readonly smooth: (key: string, value: number | null) => number | null;
 }
 
-/** The snapshot's measured fields; `at` and `scan` are the tick's own. */
-export type StatusFields = Partial<Omit<Snapshot, "at" | "scan">>;
+/** The snapshot's measured fields; `at` and `scan` are the tick's own, `tr` is `fitStatus`'s trim marker. */
+export type StatusFields = Partial<Omit<Snapshot, "at" | "scan" | "tr">>;
 
 export interface Contribution {
   readonly fields: StatusFields;
   readonly samples: readonly Sample[];
 }
 
-export const NO_CONTRIBUTION: Contribution = { fields: {}, samples: [] };
+// Shared by every failing or empty entry, so frozen: one mutation would leak into all.
+export const NO_CONTRIBUTION: Contribution = Object.freeze({
+  fields: Object.freeze({}),
+  samples: Object.freeze([]),
+});
 
 /**
  * A cpu delta shorter than this is not a reading: the tick a register forces
@@ -187,7 +191,11 @@ function gauge(tick: TickContext, key: GaugeKey, metric: string, value: number |
   return { fields: field(key, value), samples: [{ metric, labels: {}, ts: tick.at, value }] };
 }
 
-/** Fields in list order, a later key winning; samples concatenated. */
+/**
+ * Fields in list order, samples concatenated. Entries own disjoint field keys:
+ * a later one would silently overwrite an earlier, so the registry test asserts
+ * the default set's keys never overlap — a new entry takes a new key.
+ */
 export function mergeContributions(contributions: readonly Contribution[]): Contribution {
   return {
     fields: contributions.reduce<StatusFields>((fields, c) => Object.assign(fields, c.fields), {}),

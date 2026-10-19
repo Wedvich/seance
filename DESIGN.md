@@ -2813,8 +2813,12 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   per-tick read, and owning its read's failure, its state across ticks (the cpu baseline, the
   previous I/O reading, the quota file memo) and the fields and samples it contributes.
   `createTelemetry` keeps only what they share: the tick queue, the `at` stamp, the time-aware
-  smoothing (one average per key), the merge in list order — the status's field order — and the one
-  store write; an entry that rejects or throws drops its own contribution, never the tick. The list
+  smoothing (one average per entry and key, so entries never share one), the merge in list order —
+  the status's field order; entries own disjoint field keys, which the registry test asserts — and
+  the one store write. An entry that rejects drops its own contribution, never the tick, and so now
+  does one that throws synchronously (before the registry, a sync throw rejected the whole tick).
+  The failure surfaces through `TelemetrySources.onCollectorError`, which `run-collectors.ts` turns
+  into one `log.warn` line per collector per process. The list
   lives beside `createTelemetry`, which defaults to it, rather than in `run-collectors.ts`: tests
   build the full set without the daemon's wiring, and `telemetry.ts` importing the wiring would be
   a cycle. An M4

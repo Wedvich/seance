@@ -49,6 +49,7 @@ export interface StatusLoop {
  * waiting a beat.
  */
 export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps, loop: StatusLoopDeps): StatusLoop {
+  const failureWarned = new Set<string>();
   const telemetry = createTelemetry(metrics, {
     diskPaths: collectors.config.repoRoots,
     registered: collectors.registered,
@@ -56,6 +57,12 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     sessionQuota: (exclave, account) => collectors.sessionQuota.get(exclave, account),
     now: collectors.now,
     httpFetch: collectors.httpFetch,
+    // Once per collector: a persistent failure is structural, and every beat would repeat it.
+    onCollectorError: (name, err) => {
+      if (failureWarned.has(name)) return;
+      failureWarned.add(name);
+      log.warn(`telemetry: ${name} failed, its fields are left out of the status: ${String(err)}`);
+    },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
   });
   let stopped = false;
