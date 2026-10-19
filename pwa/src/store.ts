@@ -772,8 +772,9 @@ export class Store {
   /**
    * Restores the spawned prompt to the form and returns to it. Takes the verdict
    * the view rendered rather than reading state: the rendered one outlives
-   * `state.verdict` by the exit animation, and a keyboard activation inside that
-   * window would otherwise restore nothing.
+   * `state.verdict` by the frame a view transition waits for its capture
+   * (app.tsx), and a keyboard activation inside that window would otherwise
+   * restore nothing.
    */
   reusePrompt(verdict: Verdict): void {
     if (verdict.kind === "ok" && verdict.prompt !== undefined) this.setPrompt(verdict.prompt);

@@ -100,7 +100,7 @@ function SwapText(props: { as: "h2" | "p"; className: string; text: string }): J
   };
   useEffect(() => {
     if (leaving.current === null) return;
-    // Backstop for a lost animationend, as the sheets and the verdict's own exit do.
+    // Backstop for a lost animationend, as the sheets do.
     const timer = setTimeout(onLeft, 400);
     return () => clearTimeout(timer);
   }, [text]);
@@ -128,9 +128,6 @@ export function VerdictView(props: {
   machineName: string;
   machines: readonly Machine[];
   now: number;
-  /** True while the exit animation plays; unmount follows via onExited. */
-  closing?: boolean;
-  onExited?: () => void;
   /** The queued verdict's way to the Queue screen. */
   onQueue: () => void;
   /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
@@ -140,20 +137,13 @@ export function VerdictView(props: {
   onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
-  const { verdict, machineName, machines, now, closing = false, onExited, onRetry, onAnother, onReuse, onBack } = props;
+  const { verdict, machineName, machines, now, onRetry, onAnother, onReuse, onBack } = props;
   const content = describeVerdict(verdict, machineName, machines, now, props.waitingNote ?? null);
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
   return (
-    <div
-      className={closing ? "verdict verdict-closing" : "verdict"}
-      role="status"
-      aria-live="polite"
-      onAnimationEnd={(event) => {
-        if (event.animationName === "verdict-out") onExited?.();
-      }}
-    >
+    <div className="verdict" role="status" aria-live="polite">
       {content.stage === null ? (
         <div key="glyph" className={content.glyphClass} aria-hidden="true">
           {content.glyph}
