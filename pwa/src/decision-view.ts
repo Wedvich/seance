@@ -12,7 +12,7 @@ import { failedBody, formatSeen } from "./view.ts";
 
 /**
  * A decision record as sentences: "chose X because …, rejected Y because …"
- * (docs/scheduler.md, Routing, step 5). Pure, so every reason and component
+ * (the `Decision` that DESIGN.md's Scheduler section has `route.ts` return). Pure, so every reason and component
  * line is testable without a DOM; the card only lays these out.
  */
 
@@ -211,6 +211,7 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "awaiting-merge":
       return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
+      if (task.leftRunning === true) return `Marked done — its session may still be running${place}.`;
       // Marked by hand: nothing saw it finish, so "finished" would claim too much.
       return task.doneBy === "manual" ? `Marked done${place}.` : `It finished${place}.`;
     case "failed":
@@ -231,6 +232,10 @@ export function isPlaced(task: Task): boolean {
   return task.assignment !== undefined;
 }
 
+/** A cancel or a mark done that could not reach the task's machine: whatever session it had may outlive the record. */
+const LEFT_RUNNING =
+  "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running.";
+
 /** What the person can do next about a task the scheduler holds, by its state. */
 export function queuedBody(task: Task): string {
   switch (task.state) {
@@ -250,12 +255,11 @@ export function queuedBody(task: Task): string {
     case "awaiting-merge":
       return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
     case "done":
+      if (task.leftRunning === true) return `Marked done by hand. ${LEFT_RUNNING}`;
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
       return failedBody(task.failure?.code);
     case "cancelled":
-      return task.leftRunning === true
-        ? "Its machine was away, so nothing was stopped there. End the session on that machine if it is still running."
-        : "Nothing is running.";
+      return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }
 }

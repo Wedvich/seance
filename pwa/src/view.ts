@@ -550,19 +550,22 @@ export function deriveView(state: AppState, now: number): ViewModel {
   };
 }
 
+/**
+ * What follows the scheduler's own line for a failure it set (`taskFailureText`)
+ * where "Nothing is running" would be wrong or not enough: the step to take.
+ */
+const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
+  ["dispatch_unconfirmed", "Check that machine before starting another."],
+  ["lost_expired", "End it on that machine once it is back."],
+  [
+    "merge_expired",
+    "Tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.",
+  ],
+]);
+
 export function failedBody(code: string | undefined): string {
-  if (code === "dispatch_unconfirmed") {
-    return "Its machine could not say whether the session started, so the scheduler will not start it again. Check that machine before starting another.";
-  }
-  if (code === "lost_expired") {
-    return "Its machine stayed away too long, so the scheduler stopped waiting for it. Its session may still be running there — end it on that machine once it is back.";
-  }
-  if (code === "merge_expired") {
-    return "No merge of its pull request was seen in time, so the scheduler stopped waiting for one, and tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.";
-  }
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
   const scheduler = code === undefined ? null : taskFailureText(code);
-  return scheduler === null
-    ? "The machine refused the spawn. Nothing is running."
-    : `${sentence(scheduler)} Nothing is running.`;
+  if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
+  return `${sentence(scheduler)} ${FAILED_NEXT_STEP.get(code) ?? "Nothing is running."}`;
 }

@@ -275,6 +275,18 @@ describe("the queued verdict's body", () => {
     expect(queuedBody({ ...base, doneBy: "session" })).toBe("The session ended.");
   });
 
+  test("a mark done or cancel that could not reach its machine says its session may still be running", () => {
+    const at = { deviceId: "mac", exclave: "default", clone: "app", window: "w" };
+    const machines = [machine("mac", "Mac")];
+    const marked: Task = { ...base, doneBy: "manual", assignment: at, leftRunning: true };
+    const cancelled: Task = { ...base, state: "cancelled", assignment: at, leftRunning: true };
+    for (const left of [marked, cancelled]) {
+      expect(queuedBody(left)).toContain("End the session on that machine if it is still running.");
+      expect(taskHeadline(left, machines, 1)).toContain("its session may still be running on Mac · default");
+    }
+    expect(queuedBody({ ...base, doneBy: "manual", assignment: at })).toBe("Marked done by hand.");
+  });
+
   test("placed follows the assignment, not the state: a waiting task marked done never reads as placed", () => {
     expect(isPlaced({ ...base, doneBy: "manual" })).toBe(false);
     expect(isPlaced({ ...base, state: "running", assignment: { deviceId: "a", exclave: "main", clone: "app" } })).toBe(

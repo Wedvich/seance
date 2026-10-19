@@ -614,8 +614,8 @@ export class RelayClient {
      *
      * `guard` is the one replay guard the daemon keeps for scheduler envelopes
      * across terms. The relay decides which term an envelope reaches, so a
-     * guard per term would let it hand an app's `submit` to each new term in
-     * turn — one prompt run once per term, inside the replay window.
+     * guard per term would let it hand one app request (a `cancel`, a
+     * `resume`) to each new term in turn, inside the replay window.
      */
     readonly scheduler?: {
       readonly term: number;
@@ -1393,7 +1393,10 @@ export class RelayClient {
     return this.#schedule("cancel", ref, parseTaskReply);
   }
 
-  /** Marks the task `done` without ending its session; the reply is the task as it now stands. */
+  /**
+   * Marks the task `done`, ending its session first when one is live and its
+   * machine reachable; the reply is the task as it now stands.
+   */
   markDone(taskId: string): Promise<TaskReply | null> {
     const ref: TaskRef = { taskId };
     return this.#schedule("mark-done", ref, parseTaskReply);

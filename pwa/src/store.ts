@@ -136,10 +136,6 @@ export const QUEUE_POLLS = 30;
 export const PREVIEW_RETRY_MS = 1_000;
 const PREVIEW_RETRIES = 10;
 
-/**
- * What would answer a preview: a new leader, or the same one verified at last,
- * asks again. Never "", which is what a drop resets the last-asked key to.
- */
 /** The leader refuses a named read past `QUEUE_MAX_TASKS`: one that long is read whole instead. */
 function capNamed(tasks: readonly string[]): readonly string[] | null {
   return tasks.length > QUEUE_MAX_TASKS ? null : tasks;
@@ -159,6 +155,10 @@ function followEnd(read: FollowRead): FollowEnd {
   return { kind: read === "unlisted" ? "unlisted" : "stopped" };
 }
 
+/**
+ * What would answer a preview: a new leader, or the same one verified at last,
+ * asks again. Never "", which is what a drop resets the last-asked key to.
+ */
 function schedulerKey(scheduler: SchedulerAvailability): string {
   return scheduler.kind === "none" ? "none" : `${scheduler.kind}:${scheduler.deviceId}:${scheduler.term}`;
 }
