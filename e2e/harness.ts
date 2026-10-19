@@ -1,4 +1,11 @@
-import { importPsk, toBase64 } from "@seance/shared";
+import {
+  DAEMON_ROLES,
+  importPsk,
+  parseStoreReply,
+  STORE_TIMEOUT_MS,
+  toBase64,
+  type RelayToDaemonFrame,
+} from "@seance/shared";
 import type { Subprocess } from "bun";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -6,9 +13,9 @@ import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
 import type { QueueStore, Task } from "../daemon/src/leader.ts";
-import { createQueueStore } from "../daemon/src/queue-store.ts";
+import { createQueueStore, type StoreLeg } from "../daemon/src/queue-store.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
-import { loadOrInitState } from "../daemon/src/state.ts";
+import { identityOfState, loadOrInitState } from "../daemon/src/state.ts";
 import { PANE_TITLED, tmux } from "../daemon/src/tmux.ts";
 import {
   makeClaudeStub,
@@ -21,7 +28,15 @@ import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/
 import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
 import type { AppState } from "../pwa/src/view.ts";
-import { startRelay, type TestRelay } from "../relay/test/harness.ts";
+import {
+  adoptIdentity,
+  connectApp,
+  connectDaemon,
+  register,
+  startRelay,
+  type Client,
+  type TestRelay,
+} from "../relay/test/harness.ts";
 
 /**
  * Assembles the whole stack, all real: the daemon from daemon/src, the Worker +
@@ -137,11 +152,12 @@ export interface Stack {
    */
   readonly queue: () => QueueStore;
   /**
-   * Put a task into the relay's queue as a leader would have left it: waits for
-   * the daemon to hold a term, then writes through its own socket (a write is
-   * fenced on the term and that socket). Those writes send no `store-changed`,
-   * so the running term never sees them: call `restartDaemon` afterwards so the
-   * next term takes them over.
+   * Put a task into the relay's queue as a leader would have left it. The relay
+   * takes a task's create only from an app, and nudges the leader about it, so
+   * the daemon is stopped first: a stand-in signing with its identity takes a
+   * term, the create goes in on an app socket and the rest through the
+   * stand-in. The daemon is left stopped — call `restartDaemon` afterwards, and
+   * the next term takes the task over.
    */
   readonly seedTask: (task: Task) => Promise<void>;
   /**
@@ -184,6 +200,16 @@ function secondDir(base: string, name: string): string {
  */
 async function mintDeviceId(stateDir: string): Promise<string> {
   return (await loadOrInitState(join(stateDir, "state.json"))).deviceId;
+}
+
+/** A raw relay socket as the queue adapter's leg: one store request, its reply correlated on `re`. */
+function storeLeg(client: Client): StoreLeg {
+  return {
+    store: async (frame) => {
+      client.send(frame);
+      return parseStoreReply(await client.waitForRe<{ re: string }>(frame.id, STORE_TIMEOUT_MS));
+    },
+  };
 }
 
 /**
@@ -307,19 +333,33 @@ export async function startStack(
     queue: (): QueueStore =>
       createQueueStore({ leg: daemon.client, key: appKey, term: daemon.leader.term() ?? 0, now: Date.now }),
     seedTask: async (task: Task): Promise<void> => {
-      await pollUntil(() => daemon.leader.term() !== null, "the suite's daemon to lead before seeding", 10_000);
-      const queue = stack.queue();
-      // Version 1 must be `queued`: the adapter refuses any other first write.
-      const created = await queue.put(task.id, 0, {
-        id: task.id,
-        spec: task.spec,
-        state: "queued",
-        createdAt: task.createdAt,
-      });
-      if (!created.ok) throw new Error(`seeding ${task.id}: ${created.code}`);
-      if (task.state === "queued") return;
-      const advanced = await queue.put(task.id, 1, task);
-      if (!advanced.ok) throw new Error(`seeding ${task.id}: ${advanced.code}`);
+      // Only an app creates a task, and an app's create nudges the leader, which would act on version 1
+      // before version 2 lands. So the daemon goes, and a stand-in signing as it holds a term of its own:
+      // it ignores the nudge, writes the rest, and leaves the record for the restarted daemon's takeover.
+      daemon.stop();
+      adoptIdentity(await identityOfState(await loadOrInitState(join(stateDir, "state.json"))));
+      const standIn = await connectDaemon(relay);
+      const app = await connectApp(relay);
+      try {
+        standIn.send(await register(deviceId, { roles: [DAEMON_ROLES.scheduler] }));
+        const { term } = await standIn.waitFor<Extract<RelayToDaemonFrame, { t: "lead" }>>("lead", 10_000);
+        const queueOn = (client: Client): QueueStore =>
+          createQueueStore({ leg: storeLeg(client), key: appKey, term, now: Date.now });
+        // Version 1 must be `queued`: the adapter refuses any other first write.
+        const created = await queueOn(app).put(task.id, 0, {
+          id: task.id,
+          spec: task.spec,
+          state: "queued",
+          createdAt: task.createdAt,
+        });
+        if (!created.ok) throw new Error(`seeding ${task.id}: ${created.code}`);
+        if (task.state === "queued") return;
+        const advanced = await queueOn(standIn).put(task.id, 1, task);
+        if (!advanced.ok) throw new Error(`seeding ${task.id}: ${advanced.code}`);
+      } finally {
+        app.close();
+        standIn.close();
+      }
     },
     restartDaemon: async (opts: { readonly spawnWaitMs?: number; readonly quiet?: boolean } = {}): Promise<void> => {
       // A failed test's finally can land here with the old daemon still live;

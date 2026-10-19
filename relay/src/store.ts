@@ -78,32 +78,87 @@ export function actOf(frame: Pick<StorePutFrame | StoreDeleteFrame, "t" | "expec
  * Nothing deletes under `queue:`, the leader included: no client deletes the
  * pause (resume overwrites it) and `queue:` keeps no tombstone, so a term
  * holder could otherwise erase a person's pause and re-create it from its own
- * version-1 blob.
+ * version-1 blob. And no daemon creates under `task:`: since `submit` went only
+ * apps enqueue, so the term holder, which meets no create floor, has no creates
+ * to churn against its deletes.
  */
 export function authorize(rule: StoreRule, act: StoreAct, leg: Role, leader: boolean): StoreErrorCode | null {
   if (act === "delete" && rule.prefix === STORE_PREFIXES.queue.prefix) return "forbidden";
-  if (leg === "daemon" && rule.termFenced) return leader ? null : "not_leader";
+  if (leg === "daemon" && rule.termFenced) {
+    if (!leader) return "not_leader";
+    return act === "create" && rule.prefix === STORE_PREFIXES.task.prefix ? "forbidden" : null;
+  }
   if (act === "create") return rule.appCreate ? null : "forbidden";
   return rule.appWrite ? null : "forbidden";
 }
 
-export interface CreateWindow {
+/** A per-socket floor's window, kept on the socket's attachment. */
+export interface RateWindow {
   readonly windowStart: number;
-  readonly creates: number;
+  readonly count: number;
 }
 
 /**
- * The create rate floor, as `#register`'s limit: a new window when there is none
- * or it has expired, else one more create. Null past the floor — the caller
- * then leaves the attachment untouched, so a refusal cannot reset the window.
+ * A floor as `#register`'s limit: a new window when there is none or it has
+ * expired, else one more. Null past the floor — the caller then leaves the
+ * attachment untouched, so a refusal cannot reset the window.
  */
-export function admitCreate(prior: CreateWindow | undefined, now: number): CreateWindow | null {
+function admitWindow(prior: RateWindow | undefined, now: number, windowMs: number, max: number): RateWindow | null {
   const next =
-    prior === undefined || now - prior.windowStart >= STORE_CREATE_WINDOW_MS
-      ? { windowStart: now, creates: 1 }
-      : { windowStart: prior.windowStart, creates: prior.creates + 1 };
-  return next.creates > MAX_STORE_CREATES_PER_WINDOW ? null : next;
+    prior === undefined || now - prior.windowStart >= windowMs
+      ? { windowStart: now, count: 1 }
+      : { windowStart: prior.windowStart, count: prior.count + 1 };
+  return next.count > max ? null : next;
 }
+
+/** The app-leg create floor. */
+export function admitCreate(prior: RateWindow | undefined, now: number): RateWindow | null {
+  return admitWindow(prior, now, STORE_CREATE_WINDOW_MS, MAX_STORE_CREATES_PER_WINDOW);
+}
+
+/**
+ * The `store-list` floors, which bind every socket but the term holder's. A
+ * listing reads every row under its prefix — up to `MAX_TASKS` for `task:` —
+ * and Durable Object reads are billed per row against a daily limit (5M on the
+ * free plan) past which every storage op fails until 00:00 UTC, registers and
+ * routing included. Nothing but a takeover needs a listing today, so the floors
+ * are set by that limit, not by a client: the DO-wide bucket refills one list
+ * per `LIST_REFILL_MS`, 21,600 a day, which at 128 rows each is 2.8M rows read
+ * — about half the limit, the rest left for everything else. The per-socket
+ * window keeps one looping client from spending the whole bucket.
+ */
+export const LIST_WINDOW_MS = 60_000;
+export const MAX_LISTS_PER_WINDOW = 4;
+export const LIST_REFILL_MS = 4_000;
+export const LIST_BURST = 16;
+
+export function admitList(prior: RateWindow | undefined, now: number): RateWindow | null {
+  return admitWindow(prior, now, LIST_WINDOW_MS, MAX_LISTS_PER_WINDOW);
+}
+
+/** A token bucket: `tokens` as of `at`. */
+export interface ListBucket {
+  readonly tokens: number;
+  readonly at: number;
+}
+
+/** One list from the DO-wide bucket, or null when it is empty — the caller then keeps the bucket it had. */
+export function takeList(prior: ListBucket | undefined, now: number): ListBucket | null {
+  const tokens =
+    prior === undefined ? LIST_BURST : Math.min(LIST_BURST, prior.tokens + (now - prior.at) / LIST_REFILL_MS);
+  return tokens < 1 ? null : { tokens: tokens - 1, at: now };
+}
+
+/**
+ * Standing tombstones at most; a delete that would leave one more is
+ * `store_full`. Tombstones count toward no record cap, so without this a term
+ * holder could churn create-and-delete into storage writes for as long as it
+ * held the term. 4,096 is about 136 deletes a day held for the full
+ * `STORE_TOMBSTONE_MS` — several times what pruning a busy queue does — and
+ * with its age entry each tombstone is two rows, so the cap holds them to
+ * 8,192 rows, well under a megabyte.
+ */
+export const MAX_TOMBSTONES = 4_096;
 
 /** Zero-padded so lexical order is numeric order. */
 export function tombstoneAgeKey(at: number, key: string): string {
@@ -126,12 +181,19 @@ interface Tombstone {
 interface Counts {
   readonly total: number;
   readonly prefixes: Readonly<Record<string, number>>;
+  /**
+   * Standing tombstones, expired ones not yet purged included. Absent on a row
+   * written before the cap, and kept absent by a put clearing a tombstone: the
+   * next delete counts them from the age index and writes it.
+   */
+  readonly tombstones?: number;
 }
 
-const NO_COUNTS: Counts = { total: 0, prefixes: {} };
+const NO_COUNTS: Counts = { total: 0, prefixes: {}, tombstones: 0 };
 
 function bumped(counts: Counts, prefix: string, by: 1 | -1): Counts {
   return {
+    ...counts,
     total: Math.max(0, counts.total + by),
     prefixes: { ...counts.prefixes, [prefix]: Math.max(0, (counts.prefixes[prefix] ?? 0) + by) },
   };
@@ -156,10 +218,12 @@ const REFUSED_CONFLICT = { ok: false, code: "version_conflict" } as const;
 export class RelayStore {
   readonly #storage: StoreStorage;
   readonly #tombstoneMs: number;
+  readonly #maxTombstones: number;
 
-  constructor(storage: StoreStorage, tombstoneMs: number) {
+  constructor(storage: StoreStorage, tombstoneMs: number, maxTombstones = MAX_TOMBSTONES) {
     this.#storage = storage;
     this.#tombstoneMs = tombstoneMs;
+    this.#maxTombstones = maxTombstones;
   }
 
   /** Ascending by key, which is the storage list order; tombstones live elsewhere and never appear. */
@@ -200,7 +264,12 @@ export class RelayStore {
       if ((counts.prefixes[rule.prefix] ?? 0) >= (PREFIX_CAPS[rule.prefix] ?? MAX_RECORDS)) {
         return { ok: false, code: "store_full" };
       }
-      entries[COUNTS_KEY] = bumped(counts, rule.prefix, 1);
+      const next = bumped(counts, rule.prefix, 1);
+      // Only a create clears a tombstone: the record is gone, so `expect` had to be 0.
+      entries[COUNTS_KEY] =
+        stone === undefined || next.tombstones === undefined
+          ? next
+          : { ...next, tombstones: Math.max(0, next.tombstones - 1) };
     }
 
     // No await between the two calls: they commit together. An expired
@@ -216,7 +285,9 @@ export class RelayStore {
    * `MemoryQueueStore`. Under a prefix apps may create into, the delete leaves a
    * tombstone and purges up to `PURGE_BATCH` expired ones, oldest first: storage
    * stays bounded by a window of deletes without an alarm, and the one alarm
-   * (the sweep's) is armed only while daemons are connected.
+   * (the sweep's) is armed only while daemons are connected. One that would
+   * leave more than `MAX_TOMBSTONES` standing after its purge is `store_full`,
+   * checked after the version so a retried delete still reads `version_conflict`.
    */
   async delete(key: string, expect: number, now: number): Promise<WriteResult> {
     const rule = ruleFor(key);
@@ -225,25 +296,34 @@ export class RelayStore {
     if (current === undefined || current.version !== expect) return REFUSED_CONFLICT;
 
     const counts = (await this.#storage.get<Counts>(COUNTS_KEY)) ?? NO_COUNTS;
-    const entries: Record<string, StoredRecord | Tombstone | Counts | string> = {
-      [COUNTS_KEY]: bumped(counts, rule.prefix, -1),
-    };
     const deletes = [RECORD_NS + key];
+    // A tombstone and its age entry are written and removed together (here, and
+    // by a put clearing an expired one), so the purge needs no cross-check.
+    const aged = await this.#storage.list<string>({ prefix: TOMBSTONE_AGE_NS, limit: PURGE_BATCH });
+    let purged = 0;
+    for (const [ageKey, storeKey] of aged) {
+      const at = Number(ageKey.slice(TOMBSTONE_AGE_NS.length, TOMBSTONE_AGE_NS.length + 16));
+      if (now - at < this.#tombstoneMs) break;
+      deletes.push(ageKey, TOMBSTONE_NS + storeKey);
+      purged += 1;
+    }
+
+    const standing = Math.max(0, (counts.tombstones ?? (await this.#countTombstones())) - purged);
+    if (rule.appCreate && standing >= this.#maxTombstones) return { ok: false, code: "store_full" };
+    const entries: Record<string, StoredRecord | Tombstone | Counts | string> = {
+      [COUNTS_KEY]: { ...bumped(counts, rule.prefix, -1), tombstones: standing + (rule.appCreate ? 1 : 0) },
+    };
     if (rule.appCreate) {
       entries[TOMBSTONE_NS + key] = { version: current.version, at: now };
       entries[tombstoneAgeKey(now, key)] = key;
     }
 
-    // A tombstone and its age entry are written and removed together (here, and
-    // by a put clearing an expired one), so the purge needs no cross-check.
-    const aged = await this.#storage.list<string>({ prefix: TOMBSTONE_AGE_NS, limit: PURGE_BATCH });
-    for (const [ageKey, storeKey] of aged) {
-      const at = Number(ageKey.slice(TOMBSTONE_AGE_NS.length, TOMBSTONE_AGE_NS.length + 16));
-      if (now - at < this.#tombstoneMs) break;
-      deletes.push(ageKey, TOMBSTONE_NS + storeKey);
-    }
-
     await Promise.all([this.#storage.put(entries), this.#storage.delete(deletes)]);
     return { ok: true, version: current.version };
+  }
+
+  /** Once per counts row from before the cap: an age entry's value is its store key, a few dozen bytes. */
+  async #countTombstones(): Promise<number> {
+    return (await this.#storage.list<string>({ prefix: TOMBSTONE_AGE_NS })).size;
   }
 }

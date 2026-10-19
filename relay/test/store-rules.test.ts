@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_STORE_CREATES_PER_WINDOW,
+  MAX_TASKS,
   STORE_CREATE_WINDOW_MS,
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
@@ -13,13 +14,20 @@ import {
   RECORD_NS,
   TOMBSTONE_AGE_NS,
   TOMBSTONE_NS,
+  LIST_BURST,
+  LIST_REFILL_MS,
+  LIST_WINDOW_MS,
+  MAX_LISTS_PER_WINDOW,
   actOf,
   admitCreate,
+  admitList,
   authorize,
   ruleFor,
+  takeList,
   tombstoneAgeKey,
   RelayStore,
-  type CreateWindow,
+  type ListBucket,
+  type RateWindow,
   type StoreAct,
   type StoreStorage,
 } from "../src/store.ts";
@@ -40,12 +48,12 @@ describe("authorize", () => {
     expect(authorize(task, "delete", "app", false)).toBe("forbidden");
   });
 
-  test("task: on the daemon leg only the term holder writes, whatever the act", () => {
+  test("task: on the daemon leg only the term holder writes, and it never creates", () => {
     const task = rule("task:t-1");
-    for (const act of ACTS) {
-      expect(authorize(task, act, "daemon", true)).toBeNull();
-      expect(authorize(task, act, "daemon", false)).toBe("not_leader");
-    }
+    for (const act of ACTS) expect(authorize(task, act, "daemon", false)).toBe("not_leader");
+    expect(authorize(task, "overwrite", "daemon", true)).toBeNull();
+    expect(authorize(task, "delete", "daemon", true)).toBeNull();
+    expect(authorize(task, "create", "daemon", true)).toBe("forbidden");
   });
 
   test("queue: no app writes at all", () => {
@@ -89,29 +97,55 @@ describe("ruleFor", () => {
   });
 });
 
-describe("admitCreate", () => {
-  test("the first create opens a window", () => {
-    expect(admitCreate(undefined, 1_000)).toEqual({ windowStart: 1_000, creates: 1 });
+describe.each([
+  { name: "admitCreate", admit: admitCreate, windowMs: STORE_CREATE_WINDOW_MS, max: MAX_STORE_CREATES_PER_WINDOW },
+  { name: "admitList", admit: admitList, windowMs: LIST_WINDOW_MS, max: MAX_LISTS_PER_WINDOW },
+])("$name", ({ admit, windowMs, max }) => {
+  test("the first use opens a window", () => {
+    expect(admit(undefined, 1_000)).toEqual({ windowStart: 1_000, count: 1 });
   });
 
-  test("the floor's last create is admitted and the next is not", () => {
-    let window: CreateWindow | undefined;
-    for (let i = 1; i <= MAX_STORE_CREATES_PER_WINDOW; i += 1) {
-      const next = admitCreate(window, 1_000 + i);
+  test("the floor's last use is admitted and the next is not", () => {
+    let window: RateWindow | undefined;
+    for (let i = 1; i <= max; i += 1) {
+      const next = admit(window, 1_000 + i);
       expect(next).not.toBeNull();
       window = next ?? undefined;
     }
-    expect(window).toEqual({ windowStart: 1_001, creates: MAX_STORE_CREATES_PER_WINDOW });
-    expect(admitCreate(window, 2_000)).toBeNull();
+    expect(window).toEqual({ windowStart: 1_001, count: max });
+    expect(admit(window, 2_000)).toBeNull();
   });
 
-  test("a window older than STORE_CREATE_WINDOW_MS starts again at one", () => {
-    const full: CreateWindow = { windowStart: 1_000, creates: MAX_STORE_CREATES_PER_WINDOW };
-    expect(admitCreate(full, 1_000 + STORE_CREATE_WINDOW_MS - 1)).toBeNull();
-    expect(admitCreate(full, 1_000 + STORE_CREATE_WINDOW_MS)).toEqual({
-      windowStart: 1_000 + STORE_CREATE_WINDOW_MS,
-      creates: 1,
+  test("an expired window starts again at one", () => {
+    const full: RateWindow = { windowStart: 1_000, count: max };
+    expect(admit(full, 1_000 + windowMs - 1)).toBeNull();
+    expect(admit(full, 1_000 + windowMs)).toEqual({ windowStart: 1_000 + windowMs, count: 1 });
+  });
+});
+
+describe("takeList", () => {
+  test("a fresh bucket holds LIST_BURST lists, then refills one per LIST_REFILL_MS up to the burst", () => {
+    let bucket: ListBucket | undefined;
+    for (let i = 0; i < LIST_BURST; i += 1) {
+      const next = takeList(bucket, 1_000);
+      expect(next).not.toBeNull();
+      bucket = next ?? undefined;
+    }
+    expect(takeList(bucket, 1_000)).toBeNull();
+    expect(takeList(bucket, 1_000 + LIST_REFILL_MS - 1)).toBeNull();
+    const refilled = takeList(bucket, 1_000 + LIST_REFILL_MS);
+    expect(refilled).not.toBeNull();
+    expect(takeList(refilled ?? undefined, 1_000 + LIST_REFILL_MS)).toBeNull();
+    // A long idle spell refills to the burst, never past it.
+    expect(takeList(bucket, 1_000 + 1_000 * LIST_REFILL_MS)).toEqual({
+      tokens: LIST_BURST - 1,
+      at: 1_000 + 1_000 * LIST_REFILL_MS,
     });
+  });
+
+  // The free plan reads 5M rows a day; past that every storage op fails until midnight UTC.
+  test("a day of full task: listings at the steady rate leaves the rest of the free daily reads", () => {
+    expect((86_400_000 / LIST_REFILL_MS) * MAX_TASKS).toBeLessThan(0.6 * 5_000_000);
   });
 });
 
@@ -248,5 +282,67 @@ describe("RelayStore.delete purge", () => {
     expect(storage.data.has(TOMBSTONE_NS + "task:fresh")).toBe(true);
     expect(storage.data.has(tombstoneAgeKey(NOW - 10, "task:fresh"))).toBe(true);
     expect(storage.deleteSizes).toEqual([1 + 2 * 2]);
+  });
+});
+
+const counts = (storage: ReturnType<typeof fakeStorage>): unknown => storage.data.get(COUNTS_KEY);
+
+describe("RelayStore tombstone cap", () => {
+  const TOMBSTONE_MS = 1_000;
+  const NOW = 100_000;
+  const CAP = 3;
+
+  async function withTasks(...keys: string[]): Promise<{ storage: ReturnType<typeof fakeStorage>; store: RelayStore }> {
+    const storage = fakeStorage();
+    const store = new RelayStore(storage, TOMBSTONE_MS, CAP);
+    for (const key of keys) {
+      // oxlint-disable-next-line no-await-in-loop -- each create reads the counts the last one wrote
+      expect(await store.put(key, 0, ENV, NOW - 10, true)).toMatchObject({ ok: true, version: 1 });
+    }
+    return { storage, store };
+  }
+
+  test("a delete past the cap is store_full and leaves the record; a retried delete still reads version_conflict", async () => {
+    const { storage, store } = await withTasks("task:a", "task:b", "task:c", "task:d");
+    for (const key of ["task:a", "task:b", "task:c"]) {
+      // oxlint-disable-next-line no-await-in-loop -- in order: each delete counts the last one's tombstone
+      expect(await store.delete(key, 1, NOW)).toMatchObject({ ok: true });
+    }
+    expect(counts(storage)).toMatchObject({ total: 1, tombstones: CAP });
+
+    expect(await store.delete("task:d", 1, NOW)).toEqual({ ok: false, code: "store_full" });
+    expect(storage.data.has(RECORD_NS + "task:d")).toBe(true);
+    expect(storage.data.has(TOMBSTONE_NS + "task:d")).toBe(false);
+    expect(await store.delete("task:a", 1, NOW)).toEqual({ ok: false, code: "version_conflict" });
+    expect(counts(storage)).toMatchObject({ total: 1, tombstones: CAP });
+  });
+
+  test("a delete at the cap goes through once the expired tombstones it purges make room", async () => {
+    const { storage, store } = await withTasks("task:d");
+    for (const [i, key] of ["task:a", "task:b", "task:c"].entries()) {
+      seedTombstone(storage, key, NOW - TOMBSTONE_MS - 10 + i);
+    }
+    // Written before the cap: no tombstone count, so the delete counts the age index.
+    storage.data.set(COUNTS_KEY, { total: 1, prefixes: { "task:": 1 } });
+
+    expect(await store.delete("task:d", 1, NOW)).toMatchObject({ ok: true });
+    expect(counts(storage)).toEqual({ total: 0, prefixes: { "task:": 0 }, tombstones: 1 });
+    expect(storage.data.has(TOMBSTONE_NS + "task:a")).toBe(false);
+  });
+
+  test("a row from before the cap is counted from the age index, so its tombstones are not forgotten", async () => {
+    const { storage, store } = await withTasks("task:d");
+    for (const key of ["task:a", "task:b", "task:c"]) seedTombstone(storage, key, NOW - 10);
+    storage.data.set(COUNTS_KEY, { total: 1, prefixes: { "task:": 1 } });
+
+    expect(await store.delete("task:d", 1, NOW)).toEqual({ ok: false, code: "store_full" });
+  });
+
+  test("a create that clears an expired tombstone counts it gone", async () => {
+    const { storage, store } = await withTasks("task:a");
+    expect(await store.delete("task:a", 1, NOW)).toMatchObject({ ok: true });
+    expect(counts(storage)).toMatchObject({ tombstones: 1 });
+    expect(await store.put("task:a", 0, ENV, NOW + TOMBSTONE_MS, true)).toMatchObject({ ok: true, version: 1 });
+    expect(counts(storage)).toMatchObject({ total: 1, tombstones: 0 });
   });
 });
