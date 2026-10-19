@@ -14,6 +14,8 @@ import {
   TOKEN_PARAM,
   type AppStoreRequestFrame,
   type AppFrame,
+  type DiscardReply,
+  type DiscardRequest,
   type Envelope,
   type ErrorResponse,
   type ExclaveInfo,
@@ -49,6 +51,7 @@ import {
   bindTaskRecord,
   isRecord,
   isTerm,
+  parseDiscardReply,
   parseEnvelope,
   parseLeadProof,
   parseMachineInfo,
@@ -1408,6 +1411,14 @@ export class RelayClient {
 
   resume(request: ResumeRequest = {}): Promise<PauseReply | null> {
     return this.#schedule("resume", request, parsePauseReply);
+  }
+
+  /**
+   * Deletes one record the leader holds as unreadable, at the version its
+   * `queue` reply listed it under; never a task it can read.
+   */
+  discard(request: DiscardRequest): Promise<DiscardReply | null> {
+    return this.#schedule("discard", request, parseDiscardReply);
   }
 
   /**

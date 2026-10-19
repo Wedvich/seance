@@ -23,6 +23,7 @@ export function QueueScreen(props: {
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
   pausing: boolean;
+  discarding: boolean;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onRefresh: () => void;
@@ -30,6 +31,7 @@ export function QueueScreen(props: {
   onMarkDone: (taskId: string) => void;
   onPause: () => void;
   onResume: (account?: string) => void;
+  onDiscard: () => void;
   /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
   onOpenSettings?: () => void;
 }): JSX.Element {
@@ -53,6 +55,16 @@ export function QueueScreen(props: {
     setArmed(null);
     if (op === "cancel") onCancel(row.id);
     else onMarkDone(row.id);
+  };
+
+  // Deleting records can't be taken back: the button asks twice, as an act that ends a session does.
+  const clear = (): void => {
+    if (armed !== "discard") {
+      setArmed("discard");
+      return;
+    }
+    setArmed(null);
+    props.onDiscard();
   };
 
   return (
@@ -105,6 +117,22 @@ export function QueueScreen(props: {
             </button>
           </div>
         ))}
+        {view.unreadable !== null && (
+          <div className="banner card">
+            <span className="banner-rule" />
+            <span className="banner-text">
+              <span className="banner-body">{view.unreadable}</span>
+            </span>
+            <button
+              type="button"
+              className="queue-resume"
+              disabled={!view.available || props.discarding}
+              onClick={clear}
+            >
+              {armed === "discard" ? "Tap again to delete" : "Clear"}
+            </button>
+          </div>
+        )}
         {view.empty !== null && <p className="fleet-empty">{view.empty}</p>}
         {view.sections.map((section) => (
           <section key={section.title} className="queue-section">

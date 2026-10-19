@@ -90,12 +90,14 @@ export function App(props: { store: Store }): JSX.Element {
       now={now}
       notice={state.queueNotice}
       pausing={state.pausing}
+      discarding={state.discarding}
       onDismiss={onDismiss}
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
       onPause={() => void store.pauseQueue()}
       onResume={(account) => void store.resumeQueue(account)}
+      onDiscard={() => void store.discardUnreadable()}
       onOpenSettings={onOpenSettings}
     />
   );

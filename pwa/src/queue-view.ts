@@ -50,6 +50,11 @@ export interface QueueScreenView {
   readonly holds: readonly HoldRow[];
   /** A whole-queue hold exists: the footer offers Resume. */
   readonly paused: boolean;
+  /**
+   * Records the leader cannot read, which hold store slots no prune frees: the
+   * line the screen offers to clear them under, or null when there are none.
+   */
+  readonly unreadable: string | null;
   readonly sections: readonly QueueSection[];
   /** Shown in place of the list when there is nothing to list. */
   readonly empty: string | null;
@@ -154,6 +159,11 @@ const SECTIONS: readonly { readonly title: string; readonly pick: (task: Task) =
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
 ];
 
+function unreadableLine(count: number): string | null {
+  if (count === 0) return null;
+  return `${count} unreadable ${count === 1 ? "record holds a queue slot" : "records hold queue slots"} — junk, or sealed under an earlier key`;
+}
+
 export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const { text, available } = statusLine(state);
   const view = state.queueView;
@@ -186,6 +196,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,
     paused: (ok?.holds ?? []).some((hold) => hold.account === undefined),
+    unreadable: unreadableLine(ok?.unreadable.length ?? 0),
     sections,
     empty,
     attention: tasks.some((t) => t.state === "needs-input" && t.escalated === true),

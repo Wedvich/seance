@@ -125,6 +125,8 @@ export interface AppState {
   readonly queueNotice: string | null;
   /** A pause or resume in flight. */
   readonly pausing: boolean;
+  /** Unreadable records being discarded. */
+  readonly discarding: boolean;
 }
 
 const MINUTE = 60_000;
