@@ -23,9 +23,16 @@
     "no-negated-condition": "off",
     "promise/always-return": ["error", { "ignoreLastCallback": true }],
     "promise/no-multiple-resolved": "off",
+    // React Compiler rules (oxlint 1.8x). The pwa is Preact and the raycast ref-mirror
+    // pattern (`ref.current = value` in render) is deliberate; no compiler runs here.
+    "react/immutability": "off",
     "react/no-unescaped-entities": "off",
+    "react/purity": "off",
+    "react/refs": "off",
     "react/react-in-jsx-scope": "off",
     "require-await": "off",
+    // Closures sit beside their one use on purpose (tests, MCP tool handlers); hoisting trades locality for nothing.
+    "unicorn/consistent-function-scoping": "off",
     "unicorn/no-array-callback-reference": "off",
     "unicorn/no-negated-condition": "off",
     "unicorn/no-useless-spread": "off",
