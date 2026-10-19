@@ -8,10 +8,12 @@ import { fitStatus } from "./status.ts";
 import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
 
 /**
- * The collector registry: every source a `status` tick samples, registered in
- * one place rather than inline in `startDaemon`. A field M4 adds to the status
- * (auth health, the OAuth quota poll, a Proxmox node view) registers its source
- * here.
+ * What the collector registry reads from the daemon: every dependency a `status`
+ * tick's collectors use, named in one place rather than inline in `startDaemon`.
+ * The collectors themselves are `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`),
+ * which `createTelemetry` defaults to so its direct callers build the same set. A
+ * field M4 adds to the status (auth health, the OAuth quota poll, a Proxmox node
+ * view) is one entry there, plus its dependency here if it needs a new one.
  */
 export interface CollectorDeps {
   readonly config: Config;
@@ -47,6 +49,7 @@ export interface StatusLoop {
  * waiting a beat.
  */
 export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps, loop: StatusLoopDeps): StatusLoop {
+  const failureWarned = new Set<string>();
   const telemetry = createTelemetry(metrics, {
     diskPaths: collectors.config.repoRoots,
     registered: collectors.registered,
@@ -54,6 +57,12 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     sessionQuota: (exclave, account) => collectors.sessionQuota.get(exclave, account),
     now: collectors.now,
     httpFetch: collectors.httpFetch,
+    // Once per collector: a persistent failure is structural, and every beat would repeat it.
+    onCollectorError: (name, err) => {
+      if (failureWarned.has(name)) return;
+      failureWarned.add(name);
+      log.warn(`telemetry: ${name} failed, its fields are left out of the status: ${String(err)}`);
+    },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
   });
   let stopped = false;

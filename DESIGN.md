@@ -2804,11 +2804,27 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   states, the rescan and reap schedules — each a function of one context returning its `stop`
   and, for the broker and session events, the handler it serves on the local op socket. They
   start in list order and stop in reverse; the local op socket starts after all of them, over
-  the handlers they brought, and its allowlist is unchanged. The **collector registry**
-  (`run-collectors.ts`) is the one place telemetry's sources are named — disk paths, the
-  registered blob, sessions, session quota, the probe, the clock and `httpFetch` — together with the
-  beat that sends each sample as `status`. An M4 subsystem (the OAuth poll, push) is one more
-  capability; an M4 status field (auth health, a Proxmox view) is one more collector. What stays
+  the handlers they brought, and its allowlist is unchanged. `run-collectors.ts` is the one place
+  telemetry's dependencies are named — disk paths, the registered blob, sessions, session quota,
+  the probe, the clock and `httpFetch` — together with the beat that sends each sample as `status`.
+  The **collector registry** they feed is `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`), as
+  `leader.ts` hands its adapters and request handlers to their own modules: one entry per source
+  (cpu, memory, disk, disk I/O, sessions, quota), each a function of the sources returning its
+  per-tick read, and owning its read's failure, its state across ticks (the cpu baseline, the
+  previous I/O reading, the quota file memo) and the fields and samples it contributes.
+  `createTelemetry` keeps only what they share: the tick queue, the `at` stamp, the time-aware
+  smoothing (one average per entry and key, so entries never share one), the merge in list order —
+  the status's field order; entries own disjoint field keys, which the registry test asserts — and
+  the one store write. An entry that rejects drops its own contribution, never the tick, and so now
+  does one that throws synchronously (before the registry, a sync throw rejected the whole tick).
+  The failure surfaces through `TelemetrySources.onCollectorError`, which `run-collectors.ts` turns
+  into one `log.warn` line per collector per process. The list
+  lives beside `createTelemetry`, which defaults to it, rather than in `run-collectors.ts`: tests
+  build the full set without the daemon's wiring, and `telemetry.ts` importing the wiring would be
+  a cycle. An M4
+  subsystem (the OAuth poll, push) is one more capability; an M4 status source (the OAuth quota
+  poll's observations, auth health, a Proxmox cgroup/PSI view) is one more registry entry, plus a
+  `TelemetrySources` field if it needs a dependency not yet passed. What stays
   in `run.ts` on purpose: `schedulerGuard` and the ledger and version-floor memos, module-level
   so a config reload's second `startDaemon` shares them.
 - **tmux**: spawns a window into the **`main` session group**
@@ -3163,7 +3179,8 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   now so one far-future stamp can't stay "newest" for an account). The three pressure
   numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
   laptop back from sleep resets to its first reading instead of trusting a stale
-  average, and no reader keeps a window of its own. Collectors are exec-free
+  average, and no reader keeps a window of its own. Each source is one entry in the collector
+  registry (`daemon/src/telemetry-collectors.ts`; Daemon, "Wiring"). Collectors are exec-free
   where the host allows — macOS memory is the one exec, `/usr/sbin/sysctl`
   once a tick: `os.cpus()` deltas, `/proc/meminfo` (`MemAvailable`)
   or, on macOS, `100 − kern.memorystatus_level` (the kernel's free percentage —
