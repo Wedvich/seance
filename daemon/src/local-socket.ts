@@ -34,7 +34,7 @@ import { isSessionEventFrameKind, type SessionEventReply } from "./session-event
  * same-uid peer could not otherwise reach other machines, and through the
  * broker it can — three ops, to exact registry deviceIds, audited as
  * `origin=local-broker`. That widening is deliberate and confined to those
- * daemons: anywhere else the peer can read the key itself, so `run.ts` passes
+ * daemons: anywhere else the peer can read the key itself, so `run-capabilities.ts` brings
  * no broker. DESIGN.md's "Fleet broker" records it. Broker frames never reach
  * the `Plain` handler below, and `Plain` ops never reach the broker.
  *

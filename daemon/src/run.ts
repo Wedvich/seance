@@ -10,50 +10,31 @@ import {
   type UpdateAvailable,
 } from "@seance/shared";
 import { homedir } from "node:os";
-import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
+import { daemonSink, ensureAuditLog } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { brokerRelay, createBroker } from "./broker.ts";
 import type { SessionBackend } from "./backend.ts";
-import {
-  loadConfig,
-  loadPsk,
-  pskFingerprint,
-  REAP_DEFAULTS,
-  runnableProblems,
-  type Config,
-  type ResolvedPsk,
-} from "./config.ts";
+import { loadConfig, loadPsk, pskFingerprint, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
-import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
+import type { BranchStateDeps } from "./branch-state.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
-import { peerPidSupported } from "./peer.ts";
-import { pruneLogPath } from "./paths.ts";
-import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { RelayClient } from "./relay-client.ts";
+import { startCapabilities } from "./run-capabilities.ts";
+import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { createSessionEvents, EndedTasks, listPanePids, peerBindingProblem } from "./session-events.ts";
+import { EndedTasks } from "./session-events.ts";
 import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
-import { fitStatus } from "./status.ts";
 import type { Fetch } from "./seams.ts";
-import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
+import type { HostProbe, Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
-
-const RESCAN_INTERVAL_MS = 3_600_000;
-/**
- * The schedule asks whether a reap is due this often, against `lastReapAt`
- * in state.json — never on a bare interval from start, which the daemon's
- * frequent restarts (updates, config reloads) would keep resetting.
- */
-const REAP_CHECK_INTERVAL_MS = 600_000;
 
 export interface DaemonHandle {
   readonly client: RelayClient;
@@ -349,53 +330,24 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : {}),
   };
 
-  const telemetry = createTelemetry(metrics, {
-    diskPaths: config.repoRoots,
-    registered: () => registered,
-    sessions: () => handlerCtx.backend.sessions(state.repos),
-    sessionQuota: (exclave, account) => sessionQuota.get(exclave, account),
-    now,
-    httpFetch,
-    ...(opts.probe === undefined ? {} : { probe: opts.probe }),
-  });
-  const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
-  let telemetryTimer: ReturnType<typeof setInterval> | null = null;
-  let trimWarned = false;
-  // Each sample also goes out as `status` while the socket is up — whether or
-  // not anyone is watching, so a freshly opened app finds the latest on the
-  // relay instead of waiting a beat.
-  const sampleTelemetry = (): void => {
-    if (stopped) return;
-    telemetry
-      .tick()
-      .then((snapshot) => {
-        if (stopped || !client.connected) return false;
-        // A tick begun before the latest register names the blob before it —
-        // at boot, none at all — and every reader would drop it. Sent anyway it
-        // spends the relay's one-per-interval floor, and the tick the register
-        // queued behind it, carrying the right stamp, is the one refused. Asked
-        // again by `sendStatus` after its seal, since a register can leave meanwhile.
-        const current = (): boolean => snapshot.scan === registered.scan;
-        if (!current()) return false;
-        const status = fitStatus(snapshot);
-        if (status.tr !== undefined && !trimWarned) {
-          // Once: the condition is structural (too many exclaves for the bound),
-          // not transient, and the fix is a schema change rather than a retry.
-          log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");
-          trimWarned = true;
-        }
-        return client.sendStatus(status, current);
-      })
-      .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
-  };
-  // Also right after every register, re-arming the beat so the next lands past
-  // the relay's floor: the register just changed the blob a status indexes, and
-  // the registry push an app got carries no snapshot until this one.
-  const sampleNow = (): void => {
-    if (telemetryTimer !== null) clearInterval(telemetryTimer);
-    telemetryTimer = setInterval(sampleTelemetry, statusIntervalMs);
-    sampleTelemetry();
-  };
+  // Created before the client, whose every register samples at once; reads it late.
+  const status = startStatusLoop(
+    metrics,
+    {
+      config,
+      registered: () => registered,
+      sessions: () => handlerCtx.backend.sessions(state.repos),
+      sessionQuota,
+      now,
+      httpFetch,
+      ...(opts.probe === undefined ? {} : { probe: opts.probe }),
+    },
+    {
+      intervalMs: opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS,
+      connected: () => client.connected,
+      send: (snapshot, current) => client.sendStatus(snapshot, current),
+    },
+  );
 
   // Every daemon may be nominated; this is what runs if it is. Its app-role leg
   // is built per term over the key imported above, never the broker's.
@@ -433,7 +385,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     schedulerGuard,
     onRegister: (info): void => {
       registered = candidates.get(info) ?? registered;
-      sampleNow();
+      status.sampleNow();
     },
     onConnect: (): void => {
       updateRuntime(true);
@@ -498,7 +450,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   );
   client.start();
   // The first sample waits for no socket: history starts with the process.
-  sampleNow();
+  status.sampleNow();
 
   try {
     await handlerCtx.backend.start?.();
@@ -506,135 +458,46 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     log.warn(`backend start failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // Only where the key is service-delivered: there `seanced mcp` cannot read it,
-  // and the broker is its only way to other machines. Anywhere else it reads the
-  // key itself, so a broker would only widen what a same-uid process can do
-  // without touching the key store — and keep an app-role surface in the daemon.
-  // Built over the key imported above — never a second lookup — and dials
-  // nothing until a peer first asks it to reach another machine.
-  const broker =
-    resolved.source === "credential"
-      ? createBroker({ selfDeviceId: state.deviceId, relay: brokerRelay(config, key), auditSink: daemonSink })
-      : null;
-
-  // Where the kernel cannot name a socket's peer, an event's pane is its own
-  // claim — said once, since it changes what an event can be trusted to mean.
-  // Where it can, binding still rests on a field Bun leaves undocumented; a
-  // failed probe means every event will be refused, and this line is why.
-  if (!peerPidSupported()) {
-    log.warn("local socket: this host reports no peer pid — session events are bound by the pane they name");
-  } else {
-    void peerBindingProblem().then((problem) => {
-      if (problem === null) return;
-      log.warn(`local socket: peer binding failed its probe (${problem}) — every session event will be refused`);
-    });
-  }
-  const sessionEvents = createSessionEvents({
-    panes: listPanePids,
-    exclaves: () => exclaveScan.exclaves,
-    accountOf: (exclave) => exclaveScan.info.find((info) => info.id === exclave)?.accountId ?? null,
-    // The leader reaches itself in process, never by a relay round trip. A
-    // daemon that just lost the role still sends to "scheduler", which the
-    // relay routes to whoever leads now.
-    forward: (event) => {
-      if (leader.term() !== null) {
-        void leader.onSession(
-          event.taskId,
-          event.state,
-          { deviceId: state.deviceId, pane: event.session },
-          event.prUrl,
-        );
-        return;
-      }
-      void client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
-    },
-    quota: sessionQuota,
-    ended: endedTasks,
-  });
-  const branchStates = createBranchStates({
-    ledger: endedTasks.ledger,
+  const capabilities = startCapabilities({
+    config,
+    resolved,
+    key,
+    deviceId: state.deviceId,
+    client,
+    leader,
+    backend: handlerCtx.backend,
+    endedTasks,
+    sessionQuota,
     repos: () => state.repos,
-    // The leader reaches itself in process, never by a relay round trip, as session events do.
-    emit: (branch) => {
-      if (leader.term() !== null) {
-        leader.onBranchState(branch, state.deviceId);
-        return Promise.resolve(true);
-      }
-      return client.sendBranchState(branch);
+    exclaveScan: () => exclaveScan,
+    rescan,
+    lastReapAt: () => state.lastReapAt,
+    reaped: async (at) => {
+      state = { ...state, lastReapAt: at };
+      await saveState(state);
     },
-    // The rule the `sessions` reply's `ended` uses: a task no live session carries has ended (so is one not yet
-    // registered). `state.repos`, not `[]`, is load-bearing: `resolveLive` prunes the shared `repoMemo` to each
-    // call's keys, so an empty list would evict the entries every other caller relies on.
-    liveTasks: async () =>
-      new Set((await handlerCtx.backend.sessions(state.repos)).flatMap((session) => session.taskId ?? [])),
-    ...opts.branchState,
+    stopped: () => stopped,
+    now,
+    httpFetch,
+    ...(opts.rescanIntervalMs === undefined ? {} : { rescanIntervalMs: opts.rescanIntervalMs }),
+    ...(opts.reapCheckIntervalMs === undefined ? {} : { reapCheckIntervalMs: opts.reapCheckIntervalMs }),
+    ...(opts.branchState === undefined ? {} : { branchState: opts.branchState }),
   });
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.
-  const local = await startLocalSocket({
-    handle: createHandler(handlerCtx, "local"),
-    sessionEvents: sessionEvents.handle,
-    ...(broker === null ? {} : { broker: broker.handle }),
-  });
-
-  // Cached repos registered instantly above; refresh in the background now,
-  // then hourly. Explicit rescans arrive as ops.
-  void rescan();
-  const rescanTimer = setInterval(() => void rescan(), opts.rescanIntervalMs ?? RESCAN_INTERVAL_MS);
-
-  // Off unless configured. The report goes to the log, one line each; what it
-  // destroyed is in the audit trail as origin=schedule. A run the CLI already
-  // holds the lock for is skipped and tried at the next check.
-  const reapSettings = config.reap ?? REAP_DEFAULTS;
-  const reapEveryMs = reapSettings.intervalHours * 3_600_000;
-  const reapAbort = new AbortController();
-  let reaping = false;
-  const reapIfDue = async (): Promise<void> => {
-    if (reaping || stopped || now() - (state.lastReapAt ?? 0) < reapEveryMs) return;
-    reaping = true;
-    try {
-      const report = await withReapLock(() =>
-        runReap({
-          repos: state.repos,
-          dryRun: false,
-          minAgeMs: reapSettings.minAgeDays * DAY_MS,
-          audit: reapAudit("schedule", daemonSink),
-          signal: reapAbort.signal,
-          pruneLogPath: pruneLogPath(),
-        }),
-      );
-      for (const line of formatReport(report)) log.info(`reap: ${line}`);
-      // A run the stop cut short isn't the one the schedule promised.
-      if (stopped) return;
-      state = { ...state, lastReapAt: now() };
-      await saveState(state);
-    } catch (err) {
-      log.warn(err instanceof ReapBusy ? `reap: skipped — ${err.message}` : `reap failed: ${String(err)}`);
-    } finally {
-      reaping = false;
-    }
-  };
-  const reapTimer =
-    reapEveryMs > 0 ? setInterval(() => void reapIfDue(), opts.reapCheckIntervalMs ?? REAP_CHECK_INTERVAL_MS) : null;
+  const local = await startLocalSocket({ handle: createHandler(handlerCtx, "local"), ...capabilities.local });
 
   return {
     client,
     localSocket: local.path,
     stop: (): void => {
       stopped = true;
-      clearInterval(rescanTimer);
-      if (telemetryTimer !== null) clearInterval(telemetryTimer);
+      status.stop();
       handlerCtx.backend.stop?.();
-      if (reapTimer !== null) clearInterval(reapTimer);
-      reapAbort.abort();
-      // Its app-role socket and timers go with this handle: a reload builds a
-      // fresh broker, and an orphaned one would hold a relay socket forever.
-      broker?.stop();
+      capabilities.stop();
       // Its leg, timer and loop go with the handle too, before the client it hears terms on.
       leader.stop();
-      sessionEvents.stop();
-      branchStates.stop();
       // Before the relay client, so a reload's stop→start sequence has the path
       // free by the time the incoming daemon binds it.
       local.stop();

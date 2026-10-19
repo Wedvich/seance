@@ -132,7 +132,7 @@ export interface Leader {
    */
   readonly deliver: (env: Envelope) => boolean;
   /**
-   * A `session-event` from this machine, in process (`run.ts`): the leader
+   * A `session-event` from this machine, in process (`run-capabilities.ts`): the leader
    * reaches itself only locally. Other machines' arrive through the term's leg.
    * `from` is where the event came from, which is what lets one resolve a task
    * still reserved (`Scheduler.onSession`); `prUrl` is the event's own, which
@@ -142,7 +142,7 @@ export interface Leader {
    */
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   /**
-   * A `branch-state` from this machine, in process (`run.ts`), as `onSession`
+   * A `branch-state` from this machine, in process (`run-capabilities.ts`), as `onSession`
    * is; other machines' arrive through the term's leg. `from` is the sealing
    * daemon (one sealed `from: "app"` is dropped). Feeds `Scheduler.onBranchState`;
    * dropped outside a running term, as `onSession` is.
