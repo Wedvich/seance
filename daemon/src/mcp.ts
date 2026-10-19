@@ -332,8 +332,9 @@ export function resolveOrigin(
 }
 
 /**
- * Past a bound the leader answers `invalid_request`, which reads as a version
- * mismatch — so it is refused here, naming the bound, as the PWA does.
+ * Past a bound `createTask` refuses the enqueue locally as a bare
+ * `invalid_request`, before any store write — so it is refused here, naming
+ * the bound, as the PWA does.
  */
 function overBound(field: keyof typeof TASK_REQUEST_LIMITS, value: string | undefined): string | null {
   const limit = TASK_REQUEST_LIMITS[field];
@@ -685,7 +686,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
           );
         }
         if ("ok" in reply) {
-          // As on submit, only a successful reply is swapped for `too_large`: the cancel ran, though the task may have finished first.
+          // The transport swaps only a successful reply for `too_large`: the cancel ran, though the task may have finished first.
           if (reply.code === "too_large") {
             return errorResult(
               "cancel_task: the leader took the cancel, but its answer was too large to send — check get_queue for how the task stands",

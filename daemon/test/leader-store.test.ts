@@ -30,7 +30,7 @@ import {
   type Task,
 } from "../src/leader.ts";
 import { startDaemon } from "../src/run.ts";
-import { makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 import { nextRequest, startTestRelay, type TestRelay } from "./harness.ts";
 
 // The leader's term lifecycle on the store seam (scheduler M3 item 3): what a
@@ -427,6 +427,34 @@ describe("a revoked term", () => {
       await pollUntil(() => leader.term() === null, "the revoked takeover to end the term");
       expect(resigned()).toBe(0);
     }, new Revoked());
+  });
+
+  // Q9 of the M3 review: `end` wakes a retry wait that does not exist yet, so one armed after it is never woken.
+  test("a takeover that fails after its term ended neither says it retries nor arms a retry", async () => {
+    class Stalled extends MemoryQueueStore {
+      readonly listing = Promise.withResolvers<void>();
+      readonly gate = Promise.withResolvers<never>();
+      override list(): Promise<readonly StoreEntry[]> {
+        this.listing.resolve();
+        return this.gate.promise;
+      }
+    }
+    const store = new Stalled();
+    const lines = await captureLog(async () => {
+      await withLeader(
+        async ({ leader }) => {
+          leader.lead(1);
+          await store.listing.promise;
+          leader.follow("the relay moved the role elsewhere");
+          store.gate.reject(new Error("store-list: timed out"));
+          // A non-event: nothing to poll for but a line that must not come.
+          await Bun.sleep(100);
+        },
+        store,
+        noLocalOps,
+      );
+    });
+    expect(lines.filter((line) => line.includes("retrying"))).toEqual([]);
   });
 });
 

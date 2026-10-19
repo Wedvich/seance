@@ -439,6 +439,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         await scheduler.takeover();
         break;
       } catch (err) {
+        // Ended while it ran: `end` has already woken a retry that was never armed, so none is.
+        if (!live) return;
         if (err instanceof StoreRevoked) {
           fail(err);
           return;

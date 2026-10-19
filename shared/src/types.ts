@@ -132,7 +132,8 @@ export type DaemonFrame =
  * scheduler leader under `term`; `follow` that it no longer is. Plaintext relay
  * assertions: the relay is the only party that decides leadership, and what a
  * leader does with the role is sealed and term-fenced (DESIGN.md, Scheduler,
- * "Leadership"). The store frames are M3's: no relay sends them yet.
+ * "Leadership"). The store frames answer the leader's store requests and nudge it
+ * after an app's write (`store-changed`).
  */
 export type RelayToDaemonFrame =
   | { readonly t: "msg"; readonly env: Envelope }
@@ -277,8 +278,8 @@ export type RegistryView = RegistryEntry & {
  * The relay's store (scheduler M3; docs/scheduler.md, "Store ops"): sealed
  * records at keys, each `{ version, env }`, `version` 1 on create and +1 per
  * put, ruled by `relay/src/store.ts` (item 1); the app sends
- * `store-list`, `store-get` and `store-put` (`RelayClient`, item 2), and nothing
- * sends `store-delete` yet. Plaintext Layer 1 frames, not ops — the
+ * `store-list`, `store-get` and `store-put` (`RelayClient`, item 2), and the leader
+ * all four, `store-delete` to prune and to `discard`. Plaintext Layer 1 frames, not ops — the
  * relay itself answers them — so a request carries its own `id` (a routing id,
  * `ROUTING_ID_PATTERN`; a UUID fits) and the reply echoes it as `re`. Who may write
  * is a rule per key prefix (`STORE_PREFIXES`); reads are anyone's, since the
@@ -358,7 +359,7 @@ export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
  * junk (the leader skips what does not open), and full means `store_full` on
  * create. The leader prunes finished tasks to keep room; a record it cannot read
  * it reports and never deletes on its own — after a PSK rotation that would be
- * the whole queue — so clearing junk is a person's act. With
+ * the whole queue — so clearing junk is a person's act (`discard`). With
  * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; a deployed relay sent
  * one intact to a daemon and a Bun app leg, a browser's is unchecked (DESIGN.md,
  * "The store", _Send size_, which holds the arithmetic), and paging is the fix
@@ -604,6 +605,16 @@ export const STATUS_MAX_CT_LENGTH = 1024;
  * to build one the relay would drop, which the app sees only as a timeout.
  */
 export const ENVELOPE_MAX_CT_LENGTH = 64 * 1024;
+
+/**
+ * UTF-8 bytes of payload JSON a reply that grows with its data is filled to —
+ * the leader's `queue`, a daemon's `sessions` to the scheduler. Sealing is
+ * base64 of the whole `Plain`, 4/3 of it, so 44 000 seals to about 58 900 of
+ * `ENVELOPE_MAX_CT_LENGTH`'s 65 536, leaving room for the wrapper and a prompt
+ * preview's multi-byte characters. Past it `RelayClient` answers `too_large`
+ * instead of the reply.
+ */
+export const REPLY_JSON_BUDGET = 44_000;
 
 /**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):

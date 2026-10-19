@@ -3,6 +3,7 @@ import {
   APP_ID,
   METRIC_NAMES,
   parseMetricsReply,
+  REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
   SCHEDULER_ID,
   type DespawnResponse,
@@ -21,14 +22,7 @@ import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
-import {
-  createHandler,
-  createLocalOps,
-  fitProgress,
-  SESSIONS_REPLY_BUDGET,
-  type HandlerContext,
-  type TaskLaunches,
-} from "./handlers.ts";
+import { createHandler, createLocalOps, fitProgress, type HandlerContext, type TaskLaunches } from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks } from "./session-events.ts";
@@ -514,7 +508,7 @@ describe("a worktree launch's site and the scheduler's progress", () => {
     const progress = reply.progress ?? [];
     expect(reply.progressTrimmed).toBeGreaterThan(0);
     expect(progress.length + (reply.progressTrimmed ?? 0)).toBe(128);
-    expect(Buffer.byteLength(JSON.stringify(reply), "utf8")).toBeLessThanOrEqual(SESSIONS_REPLY_BUDGET);
+    expect(Buffer.byteLength(JSON.stringify(reply), "utf8")).toBeLessThanOrEqual(REPLY_JSON_BUDGET);
     expect(parseTaskProgressList(progress)).not.toBeNull();
     // The newest survive, in their original order.
     expect(progress.map((entry) => entry.taskId)).toEqual(ids.slice(-progress.length));

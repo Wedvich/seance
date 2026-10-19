@@ -19,6 +19,7 @@ import {
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
+  REPLY_JSON_BUDGET,
   TASK_FAILURE_LIMITS,
   type Decision,
   type PauseHold,
@@ -58,14 +59,6 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
   return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable);
 }
 
-/**
- * UTF-8 bytes of task JSON one `queue` reply may carry. Sealing is base64 of
- * the whole `Plain`, 4/3 of it, against `ENVELOPE_MAX_CT_LENGTH`'s 65 536:
- * 44 000 seals to about 58 900, leaving room for the wrapper and a prompt
- * preview's multi-byte characters.
- */
-const QUEUE_REPLY_BUDGET = 44_000;
-
 /** Where the decision is still live: why a task waits, or where it is going. */
 const LIVE_DECISION: ReadonlySet<Task["state"]> = new Set(["ready", "reserved"]);
 
@@ -100,7 +93,7 @@ function byRelevance(a: Task, b: Task): number {
  * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
  * drops one) and every unreadable record (at most `MAX_TASKS`, the store's own
  * bound, also taken off first: each is one a person may discard). Full decisions are filled against
- * `QUEUE_REPLY_BUDGET`, live ones first and then newest first; the rest go out
+ * `REPLY_JSON_BUDGET`, live ones first and then newest first; the rest go out
  * `winnerOnly`. Where even those overrun it — every bounded field near its cap —
  * the oldest tasks are left out, finished ones before live ones. Exported for
  * its test: a daemon test cannot build a `Scheduler`.
@@ -123,7 +116,7 @@ export function boundedQueue(
   }
   // Every trimmed record is counted up front, so a full one only ever replaces its own.
   let left =
-    QUEUE_REPLY_BUDGET -
+    REPLY_JSON_BUDGET -
     jsonBytes(holds) -
     (unreadable.length === 0 ? 0 : jsonBytes(unreadable)) -
     newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
