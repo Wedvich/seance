@@ -93,7 +93,12 @@ a production change.
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,
   dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
-  between the doubles and the real thing. The fleet-broker and two-machine status flows
+  between the doubles and the real thing. One file per area (`app`, `mcp`, `leader`,
+  `auto`), each booting the same stack of its own through `startSuite` in `e2e/suite.ts`,
+  so a new area is a new file and never an edit to another's setup. The files share one
+  process, so `startSuite` settles 500 ms around the relay's boot and dispose, as the inline
+  sleeps in `relay.test.ts` and `store.test.ts` do; keep that shard off `--parallel`, which would rebuild the worker bundle per
+  file. The fleet-broker and two-machine status flows
   need a second machine, so `stack.startSecondDaemon` boots a second real daemon as a
   subprocess (`e2e/remote-daemon.ts`): `stateDir()` comes from the environment, and two
   daemons in one process would share a deviceId and an op socket. Every daemon gets a

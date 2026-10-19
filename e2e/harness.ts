@@ -237,7 +237,12 @@ export async function startStack(
     ...(stackOpts.secondLeaders ?? []).map((name) => mintDeviceId(join(secondDir(base, name), "state"))),
   ]);
   const relay = await startRelay(TOKEN, { leaders: [...leaders, ...(stackOpts.leaders ?? [])] });
-  const appKey = await importPsk(PSK);
+  // A later step failing must not strand the relay: its workerd outlives the process otherwise (CLAUDE.md, Testing).
+  const failed = async (error: unknown): Promise<never> => {
+    await relay.dispose();
+    throw error;
+  };
+  const appKey = await importPsk(PSK).catch(failed);
 
   const config: Config = {
     name: "TestMac",
@@ -271,8 +276,13 @@ export async function startStack(
       ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
     });
 
-  let daemon = await startTestDaemon();
-  const { deviceId } = (await Bun.file(join(stateDir, "state.json")).json()) as { deviceId: string };
+  let daemon = await startTestDaemon().catch(failed);
+  const { deviceId } = await (Bun.file(join(stateDir, "state.json")).json() as Promise<{ deviceId: string }>).catch(
+    async (error: unknown) => {
+      daemon.stop();
+      return failed(error);
+    },
+  );
 
   const secondProcs = new Set<Subprocess>();
   const startSecondDaemon = async (opts: SecondDaemonOpts): Promise<SecondDaemon> => {
