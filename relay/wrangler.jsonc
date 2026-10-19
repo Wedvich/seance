@@ -11,26 +11,21 @@
   // Off: a preview URL per uploaded version would keep superseded relays reachable
   // under the same BEARER_TOKEN, widening the surface for nothing this repo uses.
   "preview_urls": false,
-  // Our own lines only (DESIGN.md, threat model item 3). The relay logs failures
-  // and refusals, never an accepted frame, because a line per frame is a timeline
-  // of when each machine and app was active. Cloudflare's own telemetry would
-  // keep that timeline anyway: an invocation log for every WebSocket message
-  // and alarm (a time, the Durable Object, CPU and wall time), and a trace whose
-  // storage spans name every key read or written — `store:task:<id>`,
-  // `device:<id>` — so off go both. Console lines are logged unsampled.
+  // `enabled` alone is logs only while automatic tracing is in beta; traces need
+  // the explicit flag. No head_sampling_rate: sampling defeats "find the one slow
+  // op", and the traffic here is a handful of request/response ops, not volume.
+  // Both still keep a per-frame timeline the relay's own lines leave out
+  // (DESIGN.md threat model item 3; open, M3 review S7): turning them off waits
+  // on the owner checking what the stored entries hold.
   //
   // `redact_query_string`: the app authenticates with `?t=<bearer>` because a
   // browser cannot set a header on a WebSocket, and the upgrade's URL is in its
-  // fetch's invocation log and trace. Traces stay off explicitly, not by
-  // omission: Cloudflare plans to fold them into `enabled` with a later
-  // compatibility date. To chase latency, turn them on with a
-  // `head_sampling_rate` for a deploy, then off again — never an OTLP
-  // destination while the token can still reach a URL.
+  // fetch's invocation log and trace. Still no OTLP destination: an export would
+  // rest on that one flag, and would move the timeline off Cloudflare.
   "observability": {
     "enabled": true,
     "redact_query_string": true,
-    "logs": { "invocation_logs": false },
-    "traces": { "enabled": false },
+    "traces": { "enabled": true },
   },
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }],

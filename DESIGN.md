@@ -302,25 +302,19 @@ Séance's noise is cover for a real intruder.
    blind relay cannot read `re`. So the relay pairs each delivered app request with
    one quiet reply from the leader's device, by count (a credit bank; Scheduler,
    "Leadership", "Scheduler replies"), and every miss fails toward a line. These rules
-   govern the relay's own console lines; Cloudflare's telemetry held the same
-   timeline until 2026-10-18 (M3 review S7). Every WebSocket message and alarm is
-   an invocation, and each left an invocation log — the time, the event type, the
-   Durable Object, outcome, CPU and wall time — and, with traces on, a trace whose
-   storage spans carry every key read or written (`store:task:<id>`,
-   `device:<id>`, the tombstone age keys with their times) beside the time:
-   per-task and per-machine activity, retained for the plan's log window (three
-   days on the free plan, seven on paid). The fetch that upgrades a socket logs its
-   URL, user agent and country besides. So `relay/wrangler.jsonc` turns invocation
-   logs off (`logs.invocation_logs: false`) and traces off explicitly (Cloudflare
-   plans to fold them into `observability.enabled` at a later compatibility date),
-   and leaves our console lines unsampled: failures and refusals still reach the
-   logs, each with its time, and nothing else does. Chasing latency means traces
-   on with a `head_sampling_rate` for a deploy, then off again — a sampled
-   timeline is still one, which is why it is not the standing setting. What the
-   dashboard shows for an entry is Cloudflare's to change; the decision rests on
-   its documented fields (Workers Logs, "Invocation logs"; Traces, "Spans and
-   attributes"), and the owner checks the stored entries on each change to
-   `observability`. Two more
+   govern the relay's own console lines only. Cloudflare's invocation logs and
+   traces are on (`observability` in `relay/wrangler.jsonc`), and every WebSocket
+   message and alarm is an invocation, so they hold the same timeline. Per
+   Cloudflare's documented fields (Workers Logs, "Invocation logs"; Traces, "Spans
+   and attributes"), each invocation logs the time, the event type, the Durable
+   Object, outcome, CPU and wall time, and each trace's storage spans carry every
+   key read or written (`store:task:<id>`, `device:<id>`) beside the time:
+   per-task and per-machine activity, kept for the plan's log window (three days
+   on the free plan). Turning them off, or sampling them, is **open** (M3 review
+   S7, 2026-10-18) until the owner has checked the stored entries — in particular
+   whether an uncaught exception is still recorded once invocation logs are off.
+   The token is out of it: `redact_query_string` strips the upgrade URL's `?t=`
+   (item 3, "Bearer token disclosure"). Two more
    things ride the same feed in plaintext. Every push carries the leader's
    `deviceId` and `term` beside its sealed proof (Scheduler, "Leadership"): which
    machine leads, and — since every leader reconnect bumps the term — a counter
@@ -4901,17 +4895,16 @@ update` refreshes, and the checkout already on the machine is the version the
   log is local and rewritable, so detection assumes the machine is honest.
 - The daemon's own footprint is indistinguishable from a RAT — machines that
   gain an EDR need it allowlisted by hand.
-- Relay tracing (`observability.traces`) and invocation logs are **off**
-  (2026-10-18, M3 review S7): every frame is an invocation, so both kept the
-  per-frame timeline threat-model item 3 keeps out of the console, the traces
-  keyed by task and device id. Only the relay's own lines are stored — failures
-  and refusals. Tracing goes on for a deploy, with a `head_sampling_rate`, when
-  latency needs chasing (DO wake time, storage ops). Still **no OTLP
-  destination**: Cloudflare can export traces and correlated logs to Honeycomb,
-  Grafana or Sentry, which would move that timeline off Cloudflare, and the app
-  still authenticates with `?t=<bearer>` (a browser cannot set a header on a
-  WebSocket). `redact_query_string` keeps the token out of the URLs Cloudflare
-  stores; an export would rest on that one flag.
+- Relay tracing (`observability.traces`) and invocation logs are **on, with
+  query strings redacted** (2026-10-18, M3 review S7): every frame is an
+  invocation, so both keep the per-frame timeline threat-model item 3 keeps out
+  of the console, the traces keyed by task and device id — whether to turn them
+  off is open (item 3). Still **no OTLP destination**: Cloudflare can export
+  traces and correlated logs to Honeycomb, Grafana or Sentry, which would move
+  that timeline off Cloudflare, and the app still authenticates with
+  `?t=<bearer>` (a browser cannot set a header on a WebSocket).
+  `redact_query_string` keeps the token out of the URLs Cloudflare stores; an
+  export would rest on that one flag.
 - True distributed tracing across daemon→relay→pwa is not available and was not
   faked. Trace context rides `traceparent` on an HTTP request, but both tiers
   hold one long-lived WebSocket whose only header exchange is the upgrade; every
