@@ -99,7 +99,19 @@ its Tailscale lockdown defeats the relay's purpose).
   prompts or repo names, or spawn anything no PSK holder ever asked for. The
   rollback M3 opened — re-running a task a PSK holder once enqueued, lifting a
   pause — is closed by the leader's version floor and the launch ledger's
-  refusal, bar a narrow residual (Threat model, item 4).
+  refusal, bar a narrow residual (Threat model, item 4). Tests cannot prove a
+  universal like this, so the structural half is enforced instead of
+  remembered: `relay/test/layering.test.ts` fails if `relay/src` imports
+  anything from shared beyond routing, bounds and the register verify, decodes
+  or decrypts anything, reads `ct` except to bound it, or grows a binding a key
+  could arrive in. The behavioural half is witnesses: the relay and store suites
+  grep a sentinel ciphertext out of every routing and store path's log line
+  (Workers Logs keeps those lines; a careless debug log is the realistic leak),
+  and the e2e suite sends a re-addressed and a byte-flipped envelope through
+  the shipped relay to the real daemon and watches both die there while an
+  honest frame is answered. "Blind" means payloads and forgery, not traffic
+  analysis: routing ids, IVs, timing, presence and the length of any blob not
+  padded as `status` is stay visible (Threat model, item 3).
 - **Structured payloads only**: daemons accept the `SpawnRequest` fields
   (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.

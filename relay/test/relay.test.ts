@@ -37,7 +37,7 @@ let relay: TestRelay;
 // One workerd instance for the file: the registry is permanent by design, so
 // every test uses its own deviceId and asserts on its own entry.
 beforeAll(async () => {
-  relay = await startRelay(TOKEN);
+  relay = await startRelay(TOKEN, { captureLogs: true });
 });
 
 afterAll(async () => {
@@ -563,6 +563,58 @@ describe("status", () => {
     daemon.close();
     app.close();
     late.close();
+  });
+});
+
+describe("blindness", () => {
+  /**
+   * The hub logs routing ids and the iv on every path a frame can take; the
+   * ciphertext is the one field that must never follow them, because the
+   * Worker's console lines are what Workers Logs keeps, and that outlives the
+   * frame (store.test.ts holds the store's paths to the same rule). The
+   * sentinel is a valid `ct` to the relay (a bounded string) and unmistakable
+   * in a grep. Each path's own log line is awaited first, so a capture that
+   * silently stopped working cannot pass this vacuously.
+   */
+  test("ciphertext never reaches a log line on any routing path", async () => {
+    const sentinel = `CT-SENTINEL-${crypto.randomUUID()}`;
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await connectDaemon(relay);
+    const logged = (needle: string, what: string): Promise<void> =>
+      pollUntil(() => relay.logs().some((line) => line.includes(needle)), what);
+
+    // register: the blob is stored, and the only line names the deviceId.
+    daemon.send(await register(deviceId, { info: { ...envelope(APP_ID, deviceId), ct: sentinel } }));
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+    await logged(`registered ${deviceId}`, "register");
+
+    // deliver: app → daemon.
+    const toDaemon = { ...envelope(deviceId, APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toDaemon });
+    await daemon.waitFor<DaemonMsg>("msg");
+    await logged(`iv="${toDaemon.iv}"`, "deliver");
+
+    // fanout: daemon → every app.
+    const toApp = { ...envelope(APP_ID, deviceId), ct: sentinel };
+    daemon.send({ t: "msg", env: toApp });
+    await app.waitFor<MsgFrame>("msg");
+    await logged(`iv="${toApp.iv}"`, "fanout");
+
+    // undeliverable: the notice echoes the iv, never the blob.
+    const toNobody = { ...envelope("never-registered", APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toNobody });
+    await app.waitFor<UndeliverableFrame>("undeliverable");
+    await logged(`iv="${toNobody.iv}"`, "undeliverable");
+
+    // dropped: a from-mismatch is logged with its iv and nothing else.
+    const forged = { ...envelope(APP_ID, "some-other-machine"), ct: sentinel };
+    daemon.send({ t: "msg", env: forged });
+    await logged(`iv="${forged.iv}"`, "dropped");
+
+    expect(relay.logs().filter((line) => line.includes(sentinel))).toEqual([]);
+    daemon.close();
+    app.close();
   });
 });
 
