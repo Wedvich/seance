@@ -26,8 +26,12 @@ import { formatSeen } from "./view.ts";
 
 export type Level = "ok" | "warn" | "err";
 
+/** Which pressure gauge a row is; ornament only, so a quota bar has none. */
+export type GaugeIcon = "cpu" | "mem" | "disk";
+
 export interface Gauge {
   readonly label: string;
+  readonly icon?: GaugeIcon;
   /** Whole percent, clamped to 0–100 for the bar. */
   readonly pct: number;
   readonly level: Level;
@@ -88,9 +92,10 @@ export function levelFor(pct: number): Level {
   return "ok";
 }
 
-function gauge(label: string, pct: number): Gauge {
+function gauge(label: string, pct: number, icon?: GaugeIcon): Gauge {
   const clamped = Math.min(100, Math.max(0, pct));
-  return { label, pct: clamped, level: levelFor(clamped) };
+  const base = { label, pct: clamped, level: levelFor(clamped) };
+  return icon === undefined ? base : { ...base, icon };
 }
 
 /**
@@ -98,7 +103,7 @@ function gauge(label: string, pct: number): Gauge {
  * LXC root at 80% can already be out of routing, and the card must not say amber.
  */
 function diskGauge(pct: number, freeMib: number | undefined): Gauge {
-  const fill = gauge(METRIC_LABELS[METRIC_NAMES.disk], pct);
+  const fill = gauge(METRIC_LABELS[METRIC_NAMES.disk], pct, "disk");
   return freeMib !== undefined && freeMib < MIN_FREE_MIB ? { ...fill, level: "err" } : fill;
 }
 
@@ -195,8 +200,8 @@ function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailabi
   // still counts — an observation carries its own stamp.
   const status = liveStatus(machine);
   const gauges = [
-    status?.cpu === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.cpu], status.cpu),
-    status?.mem === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.mem], status.mem),
+    status?.cpu === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.cpu], status.cpu, "cpu"),
+    status?.mem === undefined ? null : gauge(METRIC_LABELS[METRIC_NAMES.mem], status.mem, "mem"),
     status?.disk === undefined ? null : diskGauge(status.disk, status.free),
   ].filter((entry): entry is Gauge => entry !== null);
   const meta = machine.connected

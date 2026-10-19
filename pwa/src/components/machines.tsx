@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useMemo } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
-import type { AccountCard, Gauge, MachineCard, MachinesView } from "../machines-view.ts";
+import type { AccountCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
 import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
 import type { ConnectionState } from "../view.ts";
 import { Disclosure } from "./disclosure.tsx";
@@ -238,6 +238,11 @@ function Bar(props: { gauge: Gauge; resets?: string | null }): JSX.Element {
   return (
     <div className={resets === undefined ? "bar" : "bar bar-resets"}>
       <span className="bar-label">{gauge.label}</span>
+      {gauge.icon !== undefined && (
+        <svg className="bar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          {GAUGE_ICONS[gauge.icon]}
+        </svg>
+      )}
       <span className="bar-track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={gauge.pct}>
         <span className={`bar-fill bar-${gauge.level}`} style={{ width: `${gauge.pct}%` }} />
       </span>
@@ -246,6 +251,27 @@ function Bar(props: { gauge: Gauge; resets?: string | null }): JSX.Element {
     </div>
   );
 }
+
+/**
+ * Lucide's cpu / memory-stick / hard-drive outlines on a 24-unit grid. An
+ * ornament between label and bar, in its own column: the bars keep one left
+ * edge and the label column stays shared with the exclave rows beneath.
+ */
+const GAUGE_ICONS: Record<GaugeIcon, JSX.Element> = {
+  cpu: (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2" />
+    </>
+  ),
+  mem: (
+    <path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M8 11V9M16 11V9M12 11V9M2 15h20M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.1a2 2 0 0 0 0 3.837V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-5.1a2 2 0 0 0 0-3.837Z" />
+  ),
+  disk: (
+    <path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01" />
+  ),
+};
 
 function HistoryChart(props: { history: HistoryView; onPick: (range: HistoryRange) => void }): JSX.Element {
   const { history, onPick } = props;

@@ -1288,6 +1288,22 @@
   white-space: nowrap;
 }
 
+/* Pressure gauges only: the column exists for the row that carries one, so quota bars keep their three. */
+.bar-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: var(--fg2);
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bar:has(> .bar-icon) {
+  grid-template-columns: var(--fleet-label) 13px minmax(0, 1fr) var(--fleet-num);
+  column-gap: 10px;
+}
+
 .bar-track {
   position: relative;
   height: 6px;
