@@ -3779,9 +3779,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   all of it also precached onto a phone. `compat` was rejected because it re-adds the
   layer whose size was the reason to switch. Going native costs the three things
   compat papers over: no `StrictMode` (nothing here relies on double-invoked effects),
-  no `useSyncExternalStore` (`app.tsx` has an 8-line stand-in — Preact renders
-  synchronously, so there is no torn read to guard, only the render-to-effect gap the
-  resync closes), and `onChange` means the _native_ change event, so every text input
+  no `useSyncExternalStore` (`app.tsx` has a small stand-in — Preact defers a `setState`
+  render to a microtask but never renders concurrently, so there is no torn read to
+  guard, only the render-to-effect gap the resync closes), and `onChange` means the _native_ change event, so every text input
   and the prompt use `onInput`.
 - **The PSK is stored as a non-extractable `CryptoKey` in IndexedDB** and its
   base64 is never persisted. An XSS can then use the key while it runs but
@@ -3876,7 +3876,52 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   backdrop click. The top layer makes the page behind it inert for free, and Chrome on
   Android routes back to an open modal's `cancel` before history; that event is
   cancelled and sent through the store as a history pop, so every way out takes the
-  one path and the layer's history entry never strands.
+  one path and the layer's history entry never strands. Both motions are view
+  transitions (next bullet): the phone's panel `main` is the layer, as a pushed screen's
+  is; on a desk the `<dialog>` itself is, so its border and shadow scale with the panel.
+  The dialog unmounts the moment it closes — the old snapshot plays its exit.
+- **Screen and layer motion is the View Transition API, started at the store boundary.**
+  Phone push/pop (Queue, Machines, Settings), form ↔ verdict, and the desk's Settings
+  modal run through `document.startViewTransition({ update, types })`; the old screen is
+  a snapshot, so the outgoing one never stays mounted, and the browser composites the
+  motion. Every store change reaches `useStoreState` — clicks, `popstate` (closing is
+  `history.back()`) and network replies alike — so that is where one `TransitionRunner`
+  (`pwa/src/transition.ts`) is offered each new state. It is keyed on screen identity
+  only (depth, layer, and the verdict by the same key `VerdictView` mounts on: a queued
+  task's id, any other verdict's object), never content, so a poll or a keystroke never
+  starts one; a depth change outranks a verdict change, a verdict replacing a verdict is
+  none, and on a desk only Settings moves. A started transition holds the state back
+  until its update callback, which runs after the browser captures the old screen; the
+  latest offer in that frame wins. The callback's promise resolves once Preact has
+  committed the DOM (a `useLayoutEffect` on a render sequence number, children's layout
+  effects such as `showModal()` running first), with a 100ms backstop so a dropped render
+  never leaves the screen frozen until the browser's own timeout. Transition types
+  (`push`, `pop`, `verdict-in`, `verdict-out`, `modal-in`, `modal-out`) are the CSS
+  vocabulary; `view-transition-name`s and `-class`es are set only under
+  `:root:active-view-transition`, so no idle element is a stacking context because of
+  one and a duplicate name, which aborts a transition, can come only from the two host
+  classes. Reduced motion, a hidden page, or a browser without typed transitions
+  (feature-tested by `CSS.supports("selector(:active-view-transition-type(x))")`, which
+  proves the object form and the type selectors together) gets the state at once — an
+  instant swap. `base.css`'s `*` reduced-motion clamp does not reach the
+  `::view-transition-*` pseudos, so they carry their own clamp beside it. Rejected:
+  keeping the hand-rolled mounted pair (timers, `animationend` filtering on name
+  prefixes, lingering mounts); starting transitions in click handlers (closes arrive by
+  `popstate`, verdicts by the network); applying state before the callback (it lands in
+  the old snapshot); view transitions for the bottom sheets (only one runs at a time, so
+  a sheet would cut a push short, and each one freezes the page a frame and swallows
+  taps the sheet's exit deliberately leaves to the form); for the verdict's poll-driven
+  swaps (owner's call, and the same freeze); a `data-vt` attribute on `<html>` instead
+  of types (set before capture, cleared on `finished`, and a token so overlapping
+  transitions cannot clear each other's — types are scoped to their transition by the
+  browser); Level 1 only, for reach (the target Firefox, 158 on the owner's phone, and
+  Chrome ship Level 2, and a callback-only browser should swap, not run unstyled
+  crossfades); keeping the old CSS as the fallback (two motion systems); unconditional
+  names (duplicate-name aborts, permanent stacking contexts). Not a gain: a back during a
+  push snaps the push to its end and then pops, as the old code restarted; and a
+  finger-following swipe-back would need its own design, since there is no scrubbable
+  timeline to rely on in Firefox. The planned shared decision card from the form's
+  preview into the verdict was dropped with the verdict's card itself (2026-10-19).
 - **Machines is a screen, not a route** (scheduler M1). On a desk it is a column (below).
   Settings no longer links to it: Machines is meant to be always on screen, not a layer reached
   through Settings; on a phone it is a layer straight over the form, opened from the header

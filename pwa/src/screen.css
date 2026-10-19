@@ -1165,26 +1165,11 @@
   }
 }
 
-/* Fade-through on dismissal: the verdict sinks out, then the form fades in. */
-.verdict-closing {
-  animation: verdict-out 0.15s ease-in both;
-  pointer-events: none;
-}
-
+/* The verdict sinking out on its way back to the form; played on its snapshot (view transitions). */
 @keyframes verdict-out {
   to {
     opacity: 0;
     transform: translateY(8px);
-  }
-}
-
-.form-enter {
-  animation: form-in 0.18s ease-out both;
-}
-
-@keyframes form-in {
-  from {
-    opacity: 0;
   }
 }
 
@@ -1714,7 +1699,7 @@
   background: var(--fg2);
 }
 
-/* ---- screen transitions ---- */
+/* ---- view transitions ---- */
 
 .stage {
   position: relative;
@@ -1722,101 +1707,150 @@
   overflow: hidden;
 }
 
-/* Mid-flight taps would land on whichever screen is leaving; swallow them. */
-.stage-animating {
-  pointer-events: none;
-}
-
-/* Opaque, so nothing bleeds through while the panels are in motion. */
+/* Opaque, so a sliding panel never shows what is under it. */
 .stage-panel {
   position: absolute;
   inset: 0;
   background: var(--bg);
 }
 
-/* Stacked push/pop rather than a flat pager: settings slides in over the form,
+/* Screen motion is the View Transition API, started by transition.ts with one
+   type per kind. Names and classes exist only while a transition runs, so an
+   idle panel is never a stacking context because of one, and a duplicate name
+   (which aborts a transition) can only come from these two hosts. */
+:root:active-view-transition .screen-base-host {
+  view-transition-name: screen-base;
+  view-transition-class: screen;
+}
+
+:root:active-view-transition .screen-layer-host {
+  view-transition-name: screen-layer;
+  view-transition-class: screen;
+}
+
+/* The base is an opaque panel, so no root crossfade under it. The modal types
+   keep root's default: it carries the desk dialog's backdrop. */
+:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-old(root),
+:root:active-view-transition-type(push, pop, verdict-in, verdict-out)::view-transition-new(root) {
+  animation: none;
+}
+
+/* An exit-only group paints after an entering one; the layer must stay on top. */
+::view-transition-group(screen-layer) {
+  z-index: 1;
+}
+
+/* Stacked push/pop rather than a flat pager: a layer slides in over the form,
    which gives way by a third and dims under it — the depth says "back leads
    here". The curve is a hard decelerate, all but stopped by two-thirds in. */
-.panel-push-in,
-.panel-pop-out {
+:root:active-view-transition-type(push, pop)::view-transition-old(*.screen),
+:root:active-view-transition-type(push, pop)::view-transition-new(*.screen) {
+  animation-duration: 0.35s;
+  animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+  animation-fill-mode: both;
+}
+
+:root:active-view-transition-type(push, pop)::view-transition-group(screen-layer) {
   box-shadow: -18px 0 36px rgba(0, 0, 0, 0.25);
 }
 
-.panel-push-in {
-  animation: screen-push-in 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+:root:active-view-transition-type(push)::view-transition-new(screen-layer) {
+  animation-name: vt-from-right;
 }
 
-.panel-push-out {
-  animation: screen-push-out 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+:root:active-view-transition-type(push)::view-transition-old(screen-base) {
+  animation-name: vt-give-way;
 }
 
-.panel-pop-in {
-  animation: screen-pop-in 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+:root:active-view-transition-type(pop)::view-transition-old(screen-layer) {
+  animation-name: vt-to-right;
 }
 
-.panel-pop-out {
-  animation: screen-pop-out 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+:root:active-view-transition-type(pop)::view-transition-new(screen-base) {
+  animation-name: vt-come-back;
 }
 
-/* The dim rides the underlying panel, so it shares the slide's clock exactly.
-   Named panel-* on purpose: app.tsx clears the transition on the first
-   animationend whose name starts with "screen-". */
-.panel-push-out::after,
-.panel-pop-in::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: #000;
-  pointer-events: none;
+/* The form fades out fast; the verdict's own one-shot stagger, live in the new
+   image, is the entrance. The verdict panel is opaque, so the new image would
+   cover the old at full opacity and the fade would never show: paint the old
+   above it (old/new are absolutely positioned siblings in the image pair). */
+:root:active-view-transition-type(verdict-in)::view-transition-old(screen-base) {
+  animation: vt-fade-out 0.12s ease-in both;
+  z-index: 1;
 }
 
-.panel-push-out::after {
-  animation: panel-dim 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+:root:active-view-transition-type(verdict-in)::view-transition-new(screen-base) {
+  animation: none;
 }
 
-.panel-pop-in::after {
-  animation: panel-undim 0.35s cubic-bezier(0.32, 0.72, 0, 1) both;
+/* Fade-through on dismissal: the verdict sinks out, then the form fades in. */
+:root:active-view-transition-type(verdict-out)::view-transition-old(screen-base) {
+  animation: verdict-out 0.15s ease-in both;
 }
 
-@keyframes screen-push-in {
+:root:active-view-transition-type(verdict-out)::view-transition-new(screen-base) {
+  animation: vt-fade-in 0.18s ease-out 0.1s both;
+}
+
+/* The desk's Settings modal; root's default crossfade carries the backdrop. */
+:root:active-view-transition-type(modal-in)::view-transition-new(screen-layer) {
+  animation: vt-modal-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+:root:active-view-transition-type(modal-out)::view-transition-old(screen-layer) {
+  animation: vt-modal-out 0.16s ease-in both;
+}
+
+@keyframes vt-from-right {
   from {
     transform: translateX(100%);
   }
 }
 
-@keyframes screen-push-out {
-  to {
-    transform: translateX(-30%);
-  }
-}
-
-@keyframes screen-pop-in {
-  from {
-    transform: translateX(-30%);
-  }
-}
-
-@keyframes screen-pop-out {
+@keyframes vt-to-right {
   to {
     transform: translateX(100%);
   }
 }
 
-@keyframes panel-dim {
-  from {
-    opacity: 0;
-  }
+/* brightness(0.82) is the 18% black the dim overlay used to lay over the panel. */
+@keyframes vt-give-way {
   to {
-    opacity: 0.18;
+    transform: translateX(-30%);
+    filter: brightness(0.82);
   }
 }
 
-@keyframes panel-undim {
+@keyframes vt-come-back {
   from {
-    opacity: 0.18;
+    transform: translateX(-30%);
+    filter: brightness(0.82);
   }
+}
+
+@keyframes vt-fade-out {
   to {
     opacity: 0;
+  }
+}
+
+@keyframes vt-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes vt-modal-out {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
   }
 }
 
@@ -1859,24 +1893,6 @@
   background: rgba(0, 0, 0, 0.45);
 }
 
-/* Named screen-* so app.tsx's transition clear sees them end; the backdrop's
-   are not, being the same clock on a pseudo-element. */
-.layer-modal-in {
-  animation: screen-modal-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
-
-.layer-modal-out {
-  animation: screen-modal-out 0.16s ease-in both;
-}
-
-.layer-modal-in::backdrop {
-  animation: modal-backdrop-in 0.22s ease-out both;
-}
-
-.layer-modal-out::backdrop {
-  animation: modal-backdrop-out 0.16s ease-in both;
-}
-
 .header-close {
   display: grid;
   place-items: center;
@@ -1887,32 +1903,6 @@
   background: var(--sur2);
   color: var(--fg);
   flex: none;
-}
-
-@keyframes screen-modal-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.98);
-  }
-}
-
-@keyframes screen-modal-out {
-  to {
-    opacity: 0;
-    transform: translateY(8px) scale(0.98);
-  }
-}
-
-@keyframes modal-backdrop-in {
-  from {
-    opacity: 0;
-  }
-}
-
-@keyframes modal-backdrop-out {
-  to {
-    opacity: 0;
-  }
 }
 
 /* ---- decision record: the `auto` preview and a queued task's verdict ---- */

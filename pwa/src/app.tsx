@@ -9,29 +9,14 @@ import { readRelayUrl } from "./relay/keys.ts";
 import { deriveMachines } from "./machines-view.ts";
 import { deriveQueue } from "./queue-view.ts";
 import "./screen.css";
-import type { Verdict } from "./state.ts";
 import type { Store } from "./store.ts";
+import { screenKey, TransitionRunner } from "./transition.ts";
 import { deriveView, type AppState } from "./view.ts";
-
-/** Pushed screens in stack order; the spawn form is depth 0. */
-type Depth = 0 | 1;
-
-/** The layers the phone's header menu opens, each straight over the form. */
-type DepthOne = "settings" | "queue" | "machines";
-
-interface ScreenAnim {
-  readonly from: Depth;
-  readonly to: Depth;
-}
 
 export function App(props: { store: Store }): JSX.Element {
   const { store } = props;
   const state = useStoreState(store);
-  const depth: Depth = state.settings || state.queue || state.machines ? 1 : 0;
-  const depthOne = useDepthOne(state);
-  const [anim, clearAnim] = useScreenTransition(depth);
-  const shown = (screen: Depth): boolean => screen === depth || screen === anim?.from;
-  const exit = useVerdictExit(state.verdict);
+  const { layer } = screenKey(state);
   const actions = useSpawnActions(store);
   const wide = useWide(store);
 
@@ -46,31 +31,27 @@ export function App(props: { store: Store }): JSX.Element {
   }, [store]);
 
   const now = Date.now();
-  // A local const, not `exit.rendered` inline: the verdict callbacks close over
-  // it, and it is the copy the buttons belong to.
-  const rendered = exit.rendered;
+  // A local const: the verdict callbacks close over it, so a button acts on the verdict it was rendered with.
+  const verdict = state.verdict;
   const view = deriveView(state, now);
 
   const formOrVerdict =
-    rendered !== null ? (
+    verdict !== null ? (
       <VerdictView
         // A followed task is keyed on its id, so refreshes update the mounted
         // verdict (its stages animate) instead of remounting it. Every other
-        // verdict stays keyed on the object: a retry whose failure lands inside
-        // the exit animation is a new verdict and must mount fresh, not snap the
-        // half-dismissed one back.
-        key={rendered.kind === "queued" ? `queued:${rendered.task.id}` : rendered}
-        verdict={rendered}
+        // verdict stays keyed on the object, so a new one mounts fresh with its
+        // entrance. transition.ts's screenKey mirrors this key.
+        key={verdict.kind === "queued" ? `queued:${verdict.task.id}` : verdict}
+        verdict={verdict}
         machineName={view.machine?.name ?? "that machine"}
         machines={state.relay.machines}
         now={now}
-        closing={exit.closing}
-        onExited={exit.onExited}
         onQueue={actions.openQueue}
         waitingNote={view.autoAvailability.note}
-        onRetry={() => store.retrySpawn(rendered)}
+        onRetry={() => store.retrySpawn(verdict)}
         onAnother={() => store.startAnother()}
-        onReuse={() => store.reusePrompt(rendered)}
+        onReuse={() => store.reusePrompt(verdict)}
         onBack={() => store.dismissLayer()}
       />
     ) : (
@@ -108,9 +89,9 @@ export function App(props: { store: Store }): JSX.Element {
   );
   // A modal dialog rather than a screen: full-screen on a phone, centred over
   // the columns on a desk.
-  const settings = shown(1) && depthOne === "settings" && (
-    <SettingsDialog key="settings" wide={wide} anim={anim} onDismiss={actions.dismissLayer}>
-      <main className={wide ? "screen stage-panel" : panelClass(anim, 1)}>
+  const settings = layer === "settings" && (
+    <SettingsDialog key="settings" wide={wide} onDismiss={actions.dismissLayer}>
+      <main className={wide ? "screen stage-panel" : "screen stage-panel screen-layer-host"}>
         <Settings
           relayUrl={readRelayUrl()}
           relayLine={view.relayLine}
@@ -140,13 +121,8 @@ export function App(props: { store: Store }): JSX.Element {
   // longer need to be one.
   if (wide) {
     return (
-      <div
-        className="desk"
-        onAnimationEnd={(event) => {
-          if (event.animationName.startsWith("screen-")) clearAnim();
-        }}
-      >
-        <main key="form" className={`screen desk-col${exit.entering ? " form-enter" : ""}`}>
+      <div className="desk">
+        <main key="form" className="screen desk-col screen-base-host">
           {formOrVerdict}
         </main>
         <main key="machines" className="screen desk-col">
@@ -160,27 +136,22 @@ export function App(props: { store: Store }): JSX.Element {
     );
   }
 
-  // Both ends of a transition stay mounted while it plays; push and pop are
-  // mirrored full-width slides.
+  // Only the current depth renders: a view transition's old screen is a
+  // snapshot, so the one leaving never has to stay mounted.
   return (
-    <div
-      className={anim === null ? "stage" : "stage stage-animating"}
-      onAnimationEnd={(event) => {
-        if (event.animationName.startsWith("screen-")) clearAnim();
-      }}
-    >
-      {shown(0) && (
-        <main key="form" className={`${panelClass(anim, 0)}${exit.entering ? " form-enter" : ""}`}>
+    <div className="stage">
+      {layer === null && (
+        <main key="form" className="screen stage-panel screen-base-host">
           {formOrVerdict}
         </main>
       )}
-      {shown(1) && depthOne === "queue" && (
-        <main key="queue" className={panelClass(anim, 1)}>
+      {layer === "queue" && (
+        <main key="queue" className="screen stage-panel screen-layer-host">
           {queue(actions.dismissLayer)}
         </main>
       )}
-      {shown(1) && depthOne === "machines" && (
-        <main key="machines" className={panelClass(anim, 1)}>
+      {layer === "machines" && (
+        <main key="machines" className="screen stage-panel screen-layer-host">
           {machines(actions.dismissLayer)}
         </main>
       )}
@@ -210,16 +181,10 @@ function useWide(store: Store): boolean {
  * Settings' layer in a native modal dialog: the top layer makes the page behind
  * it inert and turns Escape — and Android's back, which Chrome routes to an open
  * modal before history — into `cancel`. That is cancelled and sent through the
- * store as a history pop, so every way out takes the same path. Stays open while
- * its panel is still on stage, so the close animation plays in it.
+ * store as a history pop, so every way out takes the same path.
  */
-function SettingsDialog(props: {
-  wide: boolean;
-  anim: ScreenAnim | null;
-  onDismiss: () => void;
-  children: ComponentChildren;
-}): JSX.Element {
-  const { wide, anim, onDismiss, children } = props;
+function SettingsDialog(props: { wide: boolean; onDismiss: () => void; children: ComponentChildren }): JSX.Element {
+  const { wide, onDismiss, children } = props;
   const dialog = useRef<HTMLDialogElement>(null);
 
   useLayoutEffect(() => {
@@ -230,11 +195,11 @@ function SettingsDialog(props: {
     return () => node.close();
   }, []);
 
-  const motion = wide && anim !== null ? (anim.to === 0 ? " layer-modal-out" : " layer-modal-in") : "";
   return (
     <dialog
       ref={dialog}
-      className={`layer-dialog ${wide ? "layer-modal" : "layer-full"}${motion}`}
+      // On a desk the dialog itself is the transition's layer, so its border and shadow move with the panel.
+      className={wide ? "layer-dialog layer-modal screen-layer-host" : "layer-dialog layer-full"}
       aria-label="Settings"
       onCancel={(event) => {
         event.preventDefault();
@@ -248,53 +213,6 @@ function SettingsDialog(props: {
       {children}
     </dialog>
   );
-}
-
-/**
- * Which depth-1 screen showed last, so a pop animation keeps rendering the one
- * that is leaving after its flag has already cleared.
- */
-function useDepthOne(state: AppState): DepthOne {
-  const [which, setWhich] = useState<DepthOne>("settings");
-  const next = state.queue ? "queue" : state.machines ? "machines" : state.settings ? "settings" : null;
-  useLayoutEffect(() => {
-    if (next !== null && next !== which) setWhich(next);
-  }, [next, which]);
-  return next ?? which;
-}
-
-/** The deeper of the two screens is the one sliding; the shallower gives way under it. */
-function panelClass(anim: ScreenAnim | null, screen: Depth): string {
-  if (anim === null) return "screen stage-panel";
-  const pushing = anim.to > anim.from;
-  const role = screen === anim.to ? (pushing ? "push-in" : "pop-in") : pushing ? "push-out" : "pop-out";
-  return `screen stage-panel panel-${role}`;
-}
-
-/**
- * The screens to animate between when the stack moves, null once the
- * transition has played. useLayoutEffect so the animation classes land before
- * the swapped screen paints — an effect after paint would flash the final state
- * for a frame. The timeout backstops a lost animationend, which would otherwise
- * wedge the stage under pointer-events: none.
- */
-function useScreenTransition(depth: Depth): [ScreenAnim | null, () => void] {
-  const [anim, setAnim] = useState<ScreenAnim | null>(null);
-  const previous = useRef(depth);
-
-  useLayoutEffect(() => {
-    if (depth === previous.current) return;
-    setAnim({ from: previous.current, to: depth });
-    previous.current = depth;
-  }, [depth]);
-
-  useEffect(() => {
-    if (anim === null) return;
-    const timer = setTimeout(() => setAnim(null), 600);
-    return () => clearTimeout(timer);
-  }, [anim]);
-
-  return [anim, () => setAnim(null)];
 }
 
 /**
@@ -331,56 +249,65 @@ function useSpawnActions(store: Store): SpawnActions {
 
 /**
  * Stands in for React's useSyncExternalStore, which preact/hooks has no
- * equivalent of. Preact renders synchronously, so there is no torn-read window
- * to guard against; the only gap is a notification landing between render and
- * effect attach, which the resync inside the effect closes.
+ * equivalent of. Preact defers a setState render to a microtask but never
+ * renders concurrently, so there is still no torn read to guard; the only gap
+ * is a notification landing between render and effect attach, which the offer
+ * inside the effect closes.
+ *
+ * Every store change goes through the transition runner, which is why screen
+ * motion starts here rather than in click handlers: closes arrive by popstate
+ * and verdicts by the network. `apply` resolves once Preact has committed the
+ * DOM (children's layout effects, the dialog's showModal among them, run
+ * before this one's), which is the promise a view transition's update
+ * callback returns.
  */
 function useStoreState(store: Store): AppState {
-  const [state, setState] = useState(store.getState);
-  useEffect(() => {
-    setState(store.getState());
-    return store.subscribe(() => setState(store.getState()));
-  }, [store]);
-  return state;
-}
+  const [snap, setSnap] = useState(() => ({ state: store.getState(), seq: 0 }));
+  // A list, not one slot: an instant apply landing in the same render must not
+  // leave a transition's commit to its backstop.
+  const committed = useRef<(() => void)[]>([]);
 
-interface VerdictExit {
-  readonly rendered: Verdict | null;
-  readonly closing: boolean;
-  readonly entering: boolean;
-  readonly onExited: () => void;
+  useLayoutEffect(() => {
+    const waiting = committed.current;
+    committed.current = [];
+    for (const resolve of waiting) resolve();
+  }, [snap.seq]);
+
+  useEffect(() => {
+    const apply = (state: AppState): Promise<void> =>
+      new Promise<void>((resolve) => {
+        committed.current.push(resolve);
+        // seq forces a render even for an identical state, so the promise always settles.
+        setSnap((current) => ({ state, seq: current.seq + 1 }));
+        // Backstop for a render that throws or is dropped: the browser would
+        // otherwise hold the screen frozen until its own update timeout.
+        setTimeout(resolve, 100);
+      });
+    const runner = new TransitionRunner<AppState>(screenKey(store.getState()), {
+      start: typedViewTransitions()
+        ? (options) => document.startViewTransition({ update: options.update, types: options.types })
+        : undefined,
+      reducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      hidden: () => document.visibilityState === "hidden",
+      apply,
+    });
+    const offer = (): void => {
+      const state = store.getState();
+      runner.offer(state, screenKey(state));
+    };
+    offer();
+    return store.subscribe(offer);
+  }, [store]);
+
+  return snap.state;
 }
 
 /**
- * Fade-through for verdict dismissal: the verdict stays mounted while its exit
- * animation plays, then the form fades in — instead of a single-frame swap.
- * The timeout backstops a lost animationend, as with the sheets.
+ * One test for both things screen.css relies on: the object form of
+ * startViewTransition and the type selectors ship together. A browser with
+ * only the Level 1 callback form gets an instant swap rather than the
+ * browser's unstyled default crossfades.
  */
-function useVerdictExit(verdict: Verdict | null): VerdictExit {
-  const [rendered, setRendered] = useState(verdict);
-  const [entering, setEntering] = useState(false);
-
-  useLayoutEffect(() => {
-    if (verdict !== null) setRendered(verdict);
-  }, [verdict]);
-
-  const closing = verdict === null && rendered !== null;
-  const exited = (): void => {
-    setRendered(null);
-    setEntering(true);
-  };
-
-  useEffect(() => {
-    if (!closing) return;
-    const timer = setTimeout(exited, 300);
-    return () => clearTimeout(timer);
-  }, [closing]);
-
-  useEffect(() => {
-    if (!entering) return;
-    const timer = setTimeout(() => setEntering(false), 300);
-    return () => clearTimeout(timer);
-  }, [entering]);
-
-  return { rendered, closing, entering, onExited: exited };
+function typedViewTransitions(): boolean {
+  return typeof CSS !== "undefined" && CSS.supports("selector(:active-view-transition-type(x))");
 }

@@ -65,4 +65,13 @@ textarea {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  /* `*` does not reach the view-transition pseudos. app.tsx starts none under
+     reduced motion; this covers one started any other way. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation-delay: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
