@@ -1393,7 +1393,8 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   _and_ the proof was sealed `from` the nominee for exactly the pushed term. Taking a socket mints a
   term the machine was never told, so no proof for it exists; the last one it did seal, replayed,
   names the wrong term. Between a `lead` and its proof an app reads the new leader as `unverified`
-  for one round trip. Cost: a daemon or relay that predates the proof leaves every nominee
+  for one round trip; the PWA's Queue screen holds its catch-up read until the proof lands rather
+  than asking into that gap, whose unsent refusal used to strand a notice on every takeover. Cost: a daemon or relay that predates the proof leaves every nominee
   `unverified`, so `auto` waits for both to update — fail closed. Rejected: a challenge the app
   sends the nominee (a round trip per app per term, and a timeout where the proof is a push);
   carrying the term in the `status` beat (the beat is floored per socket, so the proof would lag a

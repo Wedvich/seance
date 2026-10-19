@@ -1281,6 +1281,48 @@ describe("the queue screen", () => {
     detach();
   });
 
+  test("a takeover is read once its leader verifies, never while the new term is still unverified", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    client.queueRequests.length = 0;
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    await drain();
+    expect(client.queueRequests).toEqual([]);
+    expect(store.getState().queueNotice).toBeNull();
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 2 } });
+    await until(() => client.queueRequests.length === 1, "the read under the verified term");
+    detach();
+  });
+
+  test("a re-dial that comes back unverified reads the whole queue once the leader verifies, even under the same term", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    client.queueRequests.length = 0;
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open", scheduler: { kind: "unverified", deviceId: "dev-a", term: 1 } });
+    await drain();
+    expect(client.queueRequests).toEqual([]);
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.queueRequests.length === 1, "the catch-up read");
+    expect(client.queueRequests).toEqual([{}]);
+    detach();
+  });
+
+  test("a nudge's read that lands clears a notice a read left (an action's stays: see above)", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onQueue = async () => {
+      throw new RequestFailure("leader_unverified", "unverified");
+    };
+    await store.refreshQueue(undefined, true);
+    expect(store.getState().queueNotice).toMatch(/does not open with this key/u);
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 8 });
+    await store.refreshQueue(["w-1"], true);
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
   test("a nudge naming the followed task asks the leader once: the queue read it set off updates the verdict too", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
