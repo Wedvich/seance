@@ -12,6 +12,7 @@ import {
 import { exclaveOf, type ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import type { MetricsStore, Sample } from "./metrics-store.ts";
+import type { Fetch } from "./seams.ts";
 
 /**
  * What a `status` tick measures (DESIGN.md, "Telemetry"): cpu, memory and disk
@@ -90,6 +91,10 @@ export interface TelemetrySources {
   /** The newest session-reported quota for an exclave id under its account (`SessionQuota.get`); absent, the cache is the only source. */
   readonly sessionQuota?: (exclave: string, account: string | null) => Omit<QuotaObservation, "x"> | undefined;
   readonly probe?: HostProbe;
+  /** The clock a `tick` without an explicit time reads; defaults to `Date.now`. */
+  readonly now?: () => number;
+  /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
+  readonly httpFetch?: Fetch;
 }
 
 export interface Telemetry {
@@ -105,6 +110,7 @@ export interface Telemetry {
 
 export function createTelemetry(store: MetricsStore, sources: TelemetrySources): Telemetry {
   const probe = sources.probe ?? hostProbe;
+  const now = sources.now ?? Date.now;
   let previous: {
     readonly atMs: number;
     readonly io: Awaited<ReturnType<HostProbe["diskIo"]>>;
@@ -217,7 +223,7 @@ export function createTelemetry(store: MetricsStore, sources: TelemetrySources):
   };
 
   return {
-    tick: (nowMs = Date.now()): Promise<Snapshot> => {
+    tick: (nowMs = now()): Promise<Snapshot> => {
       const registered = sources.registered();
       if (inFlight?.registered === registered) return inFlight.snapshot;
       // Queued behind the one in flight, never beside it: the cpu and I/O

@@ -28,6 +28,7 @@ import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
+import type { Fetch } from "./seams.ts";
 import type { VersionFloor } from "./version-floor.ts";
 
 /**
@@ -115,6 +116,8 @@ export interface LeaderBaseOpts {
   /** The wait before a failed takeover is tried again; defaults to the tick interval. */
   readonly takeoverRetryMs?: number;
   readonly now?: () => number;
+  /** Outbound HTTP for the term (M4's push sends); defaults to the global `fetch`. */
+  readonly httpFetch?: Fetch;
 }
 
 export interface Leader {
