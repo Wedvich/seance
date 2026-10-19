@@ -82,7 +82,7 @@ describe("a delivered credential survives the daemon's own spawning", () => {
   });
 
   test("a config reload hands the daemon a credential-sourced key again, so it keeps brokering", async () => {
-    // run.ts builds the fleet broker only for `source: "credential"`, and the
+    // run-capabilities.ts builds the fleet broker only for `source: "credential"`, and the
     // supervisor re-resolves the key on every reload: the source has to survive
     // that hop, not just the key.
     const original = process.env["CREDENTIALS_DIRECTORY"];

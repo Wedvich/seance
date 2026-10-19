@@ -433,7 +433,8 @@ precede. Wave 2 waits on the wave-1 item named.
     the OAuth poll, auth health, push, Linear and Proxmox can be tested only at the unit tier.
     **Done** — `now`, `httpFetch` and `probe` in `RunOpts` (DESIGN.md, Daemon, "Seams").
   - `probe` passed through `startDaemon` to telemetry. **Done**, with the clock.
-  - `run.ts`'s wiring split into a capabilities list and a collector registry.
+  - `run.ts`'s wiring split into a capabilities list and a collector registry. **Done**
+    (DESIGN.md, Daemon, "Wiring").
   - `e2e/e2e.test.ts` split by area.
   - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
     push-endpoint stub.

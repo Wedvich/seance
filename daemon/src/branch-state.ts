@@ -18,8 +18,8 @@ import {
  * Watches every task branch this daemon launched in worktree mode and tells the
  * scheduler when its name, pushed state or merged state changes (DESIGN.md,
  * "Branch state"). Local git reads each pass; the network only for a repo that
- * holds a pushed, unmerged task branch. Imported by `run.ts` alone — it logs, so
- * nothing `seanced mcp` reaches may import it.
+ * holds a pushed, unmerged task branch. Imported by `run-capabilities.ts` alone (`run.ts` only its
+ * type) — it logs, so nothing `seanced mcp` reaches may import it.
  *
  * Never logs a branch name or a path: the repo name and the failure only.
  */

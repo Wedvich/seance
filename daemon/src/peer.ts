@@ -58,7 +58,7 @@ export function socketFd(socket: object): number {
   return typeof fd === "number" && Number.isInteger(fd) ? fd : -1;
 }
 
-/** Whether this host can name a peer at all — decided once; `run.ts` logs it at start. */
+/** Whether this host can name a peer at all — decided once; `run-capabilities.ts` logs it at start. */
 export function peerPidSupported(): boolean {
   peerCall ??= loadPeerCall();
   return peerCall !== null;

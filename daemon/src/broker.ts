@@ -42,7 +42,7 @@ import { log } from "./log.ts";
  * configured relay. There is no frame that returns the key, seals or opens
  * arbitrary bytes, or addresses `"machines"`.
  *
- * Built only by a daemon whose key is service-delivered (`run.ts`): elsewhere
+ * Built only by a daemon whose key is service-delivered (`run-capabilities.ts`): elsewhere
  * `seanced mcp` reads the key itself, and the broker would add authority, not reach.
  */
 
