@@ -128,8 +128,8 @@ export function VerdictView(props: {
   machineName: string;
   machines: readonly Machine[];
   now: number;
-  /** The queued verdict's way to the Queue screen. */
-  onQueue: () => void;
+  /** The queued verdict's way to the Queue screen; absent where the queue is already on screen (wide). */
+  onQueue?: () => void;
   /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
   waitingNote?: string | null;
   onRetry: () => void;
@@ -158,7 +158,7 @@ export function VerdictView(props: {
         <button type="button" className="primary" onClick={onPrimary}>
           {content.primary.label}
         </button>
-        {verdict.kind === "queued" && (
+        {verdict.kind === "queued" && props.onQueue !== undefined && (
           <button type="button" className="quiet" onClick={props.onQueue}>
             See the queue
           </button>
