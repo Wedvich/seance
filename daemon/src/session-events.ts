@@ -309,6 +309,15 @@ export class EndedTasks {
   }
 
   /**
+   * The ledger holds the task as launched here, and no launch of it is in
+   * flight: a launch beside one in flight is a duplicate dispatch, which the
+   * spawn's own `task_running` check answers once the first has tagged its pane.
+   */
+  launched(taskId: string): boolean {
+    return !this.#launches.has(taskId) && this.#ledger.ids().includes(taskId);
+  }
+
+  /**
    * Resolves once no launch is in flight. A reply listed mid-spawn would show
    * the task in neither `sessions` nor `ended` — the shape that proves a spawn
    * never landed — so the reply waits the few seconds a spawn takes instead.

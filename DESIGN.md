@@ -96,9 +96,10 @@ its Tailscale lockdown defeats the relay's purpose).
 - **The relay is blind**: it routes opaque blobs and stores what it cannot
   read — each machine's sealed info and, since M3, the scheduler's sealed task
   records and pause (_Scheduler_, "The store"). Relay compromise cannot read
-  prompts or repo names, or spawn anything no PSK holder ever asked for — but
-  since M3 it can re-run a task a PSK holder once enqueued, and lift a pause
-  (Threat model, item 4).
+  prompts or repo names, or spawn anything no PSK holder ever asked for. The
+  rollback M3 opened — re-running a task a PSK holder once enqueued, lifting a
+  pause — is closed by the leader's version floor and the launch ledger's
+  refusal, bar a narrow residual (Threat model, item 4).
 - **Structured payloads only**: daemons accept the `SpawnRequest` fields
   (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.
@@ -491,23 +492,26 @@ Séance's noise is cover for a real intruder.
    reports, so a relay that serves an old blob with its old version passes;
    and a relay that ignores its tombstones can re-create a deleted task from
    its own authentic version-1 blob, which the 30-day admit rule bounds only
-   by age. Choosing the leader and routing the role address are availability
-   and integrity of the queue's _order_, inside the accepted "replay or
-   withhold" class. Rollback is not, and is **open** (M3 review S1,
-   2026-10-18; not accepted), for two of its effects. **It can re-run a
-   past task.** It sends `store-changed`, then answers `store-get` with the
-   task's version-1 create blob at version 1: `Scheduler.refresh` replaces the
-   held task whatever its version, so a task settled `done` at version 5 reads
-   `queued` again, is admitted and dispatched, and the target daemon's launch
-   ledger records the id a second time and launches it. That works at will for
-   any task under 30 days old, cancelled ones included, and the same holds for a
-   takeover's `store-list`. A prompt approved once, run again days later or after
-   a cancel, is a spawn nobody asked for at that time. **It can lift any
-   pause.** A missing `queue:pause` reads as no holds, and so does an older
-   version served at its own version; a takeover the relay triggers (a `lead`
-   to any daemon), answered that way, dispatches whatever the pause held.
-   Before M3 a relay could replay a request only inside the ±60s window, and IV
-   dedup stopped even that. None of these forges a task or reads a prompt.
+   by age. The first two are availability and integrity of the queue's
+   _order_, inside the accepted "replay or withhold" class. Rollback alone
+   would not be: a task settled `done` at version 5, served back as its
+   version-1 create, reads `queued` and is dispatched again, and a pause
+   served older or missing reads as no holds. Two checks close it (M3 review
+   S1, 2026-10-18). **The leader's version floor** (`daemon/src/version-floor.ts`;
+   Scheduler, "The queue store"): the highest version this process has seen
+   or written at each key, kept across terms and restarts, below which a task
+   record reads `version_regressed` and is never admitted or dispatched, a
+   pause below it or missing holds the whole queue, and a task record that
+   vanishes without the leader's delete is kept as held. **The ledger
+   refusal**: a daemon refuses a scheduler spawn for a task id its launch
+   ledger holds as launched with `task_launched`, audited (Session events), so
+   a task that ran on a machine does not run there again. **Residual,
+   accepted:** a leader that never saw the task's later versions — a daemon
+   leading for the first time, or one whose floor forgot the key (30 days
+   unseen) or lost its file — routing it to a machine whose ledger never ran
+   it or no longer holds it (a week, 128 launches). It needs the relay
+   itself, the task is one a PSK holder once enqueued, and nothing here forges
+   a task or reads a prompt.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -609,7 +613,8 @@ nothing checked it. The last is the gap they leave.
   (task ids and launch times, plus each worktree task's progress: clone and
   worktree paths, branch, PR URL; Local op socket, "Session events", Scheduler,
   "Branch state"), is written 0600 the same way, temp file first, and so is `session-quota.json` (the last
-  quota each exclave's sessions reported, "Session events"). `metrics.sqlite` and its `-wal` and
+  quota each exclave's sessions reported, "Session events"), and `version-floor.json` (the
+  leader's version per store key, Scheduler, "The queue store"). `metrics.sqlite` and its `-wal` and
   `-shm` join them: the database is created as an empty 0600 file before SQLite
   opens it, and SQLite gives the files it spawns the database's mode. All
   created at 0600 rather than
@@ -1216,13 +1221,16 @@ taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` fo
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
-- `queue { tasks? }` → `{ tasks, holds, at }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
+- `queue { tasks? }` → `{ tasks, holds, at, unreadable? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
   `needs-input` leading, newest first within each) with their latest
   decisions, prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task); a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
   only (at most `QUEUE_MAX_TASKS`): what a `queue-changed` named, or the one task a verdict
   follows. An unreadable filter is `invalid_request`, never "everything"; an older leader
-  ignores it and answers its own listing, so a reader filters the reply again.
+  ignores it and answers its own listing, so a reader filters the reply again. `unreadable`
+  lists every `task:` record the leader cannot read, whatever the filter, as `{ taskId,
+version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
+  the holds are): what fills the store without ever running.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
@@ -2287,6 +2295,25 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   (`openAtRest` plus `parsePauseRecord`); an unreadable record reads as `key_mismatch`,
   `unopenable`, `malformed` or `version_mismatch`, and a hold list `parsePauseRecord` refuses
   is `refused` before sealing. Item 5 drives it through the port only.
+- **The version floor** (`daemon/src/version-floor.ts`, `flooredStore`; added 2026-10-18, M3
+  review S1). Binding checks a record's sealed version against the one the relay reports, so it
+  cannot see the relay itself serving an authentic old blob at that blob's own version. The
+  floor can: the highest version seen or written at each `task:` key and at `queue:pause`. A
+  readable task record below it reads `version_regressed`, held apart like any unreadable one;
+  a pause below it, or missing once one was seen, reads the same and so holds the whole queue
+  until a `resume` or `pause` overwrites it — the leader's own pause write sets the floor, even
+  lower, which is how a relay that lost its storage is recovered from; a task record that
+  vanishes without the leader having deleted it (a `get` answered null) rejects, so the
+  library keeps the task as held. A listing that leaves a key out is not a vanish — a new term
+  holds only what it lists, and runs nothing it does not hold. One floor per process, like
+  `schedulerGuard` and for its reason: the relay chooses which term sees a read. It is a file,
+  `version-floor.json` in `stateDir()`, 0600, ids and versions only, written temp-fsync-rename
+  and the directory synced before the leader acts on a read that raised it; a missing or
+  corrupt one is an empty floor, never a crash. Bounded to keys seen within
+  `STORE_TOMBSTONE_MS` and to 4,096 of them, least recently seen first: each takeover's listing
+  sees again what the store still holds, and a deleted key's tombstone lasts no longer. A
+  confirmed delete sets the floor one past the deleted version, so any record there reads
+  regressed; a delete whose answer was lost lets the next null read count as it landing.
 - **The relay client's store leg** (`RelayClient.store`). Store frames correlate on their own
   `id` in a pending map apart from sealed requests, as the app-client's do, and a reply counts
   only from the socket the request left on. A reply that does not parse settles `null`; a timeout
@@ -4435,7 +4462,12 @@ state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check,
   never prompt text), written temp-fsync-rename **before** the spawn runs; a spawn whose
   id cannot be recorded is refused `launch_error`, since launched unrecorded a lost reply
   could later read as proof it never ran. A spawn refused for any reason but
-  `task_running` launched nothing and leaves the ledger again. It survives restarts, so
+  `task_running` launched nothing and leaves the ledger again. A scheduler spawn
+  (`client: "scheduler"`) for an id the ledger holds, with no launch of it in flight, is
+  refused `task_launched` and audited, and nothing runs (added 2026-10-18, M3 review S1): a
+  leader re-dispatches a task only on this ledger's proof that it never landed, so such a
+  spawn comes from a record a relay rolled back (Threat model, item 4). One whose session
+  still runs is answered `task_running` with its pane, as the spawn itself would. It survives restarts, so
   `ended` does too, and it is what makes `ledgerSince` a proof: from that time (this
   daemon's clock) every task launched here is in `sessions` or in `ended`, so a task in
   neither, reserved after it, never landed (_Scheduler_, "The library", "Reserve, then

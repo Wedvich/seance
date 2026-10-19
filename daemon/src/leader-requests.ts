@@ -31,6 +31,7 @@ import {
   type SchedulerOp,
   type Task,
   type TaskResponse,
+  type UnreadableTaskRef,
 } from "@seance/shared";
 import { daemonSink, queueAudit } from "./audit.ts";
 import { log } from "./log.ts";
@@ -51,7 +52,10 @@ function schedulerError(code: SchedulerErrorCode, message: string): SchedulerErr
 function queueView(scheduler: Scheduler, now: number, only?: readonly string[]): QueueResponse {
   const wanted = only === undefined ? null : new Set(only);
   const tasks = wanted === null ? scheduler.tasks() : scheduler.tasks().filter((t) => wanted.has(t.id));
-  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds());
+  const unreadable = scheduler
+    .unreadable()
+    .map(({ id, version, reason }): UnreadableTaskRef => ({ taskId: id, version, reason }));
+  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable);
 }
 
 /**
@@ -94,7 +98,8 @@ function byRelevance(a: Task, b: Task): number {
 /**
  * Most relevant first (`byRelevance`) and bounded, prompts cut, with every hold in force (at most
  * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
- * drops one). Full decisions are filled against
+ * drops one) and every unreadable record (at most `MAX_TASKS`, the store's own
+ * bound, also taken off first: each is one a person may discard). Full decisions are filled against
  * `QUEUE_REPLY_BUDGET`, live ones first and then newest first; the rest go out
  * `winnerOnly`. Where even those overrun it — every bounded field near its cap —
  * the oldest tasks are left out, finished ones before live ones. Exported for
@@ -105,6 +110,7 @@ export function boundedQueue(
   decisionOf: (id: string) => Decision | undefined,
   now: number,
   holds: readonly PauseHold[] = [],
+  unreadable: readonly UnreadableTaskRef[] = [],
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -116,7 +122,11 @@ export function boundedQueue(
     sizes.set(task.id, jsonBytes(withDecision(task, cut)));
   }
   // Every trimmed record is counted up front, so a full one only ever replaces its own.
-  let left = QUEUE_REPLY_BUDGET - jsonBytes(holds) - newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
+  let left =
+    QUEUE_REPLY_BUDGET -
+    jsonBytes(holds) -
+    (unreadable.length === 0 ? 0 : jsonBytes(unreadable)) -
+    newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
   const byClaim = [
     ...newest.filter((t) => LIVE_DECISION.has(t.state)),
     ...newest.filter((t) => !LIVE_DECISION.has(t.state)),
@@ -147,6 +157,7 @@ export function boundedQueue(
       }),
     at: now,
     holds,
+    ...(unreadable.length === 0 ? {} : { unreadable }),
   };
 }
 

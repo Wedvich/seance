@@ -40,6 +40,7 @@ import { readSource } from "./selfsource.ts";
 import { createSessionEvents, EndedTasks, listPanePids, peerBindingProblem } from "./session-events.ts";
 import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
+import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
@@ -142,6 +143,22 @@ function endedTasksFor(path: string): Promise<EndedTasks> {
     endedTasksByLedger.set(path, tasks);
   }
   return tasks;
+}
+
+/**
+ * The leader's version floor, one per file per process for `schedulerGuard`'s
+ * reason: a floor per term, or per reload, would let the relay roll a record
+ * back under whichever one had not seen it yet.
+ */
+const floorsByPath = new Map<string, Promise<VersionFloor>>();
+
+function versionFloorFor(path: string): Promise<VersionFloor> {
+  let floor = floorsByPath.get(path);
+  if (floor === undefined) {
+    floor = VersionFloor.open(path);
+    floorsByPath.set(path, floor);
+  }
+  return floor;
 }
 
 /** Wires config/state/scan/handlers into a running relay client. */
@@ -371,6 +388,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // Late-bound: the client below is built after the leader it hands frames to.
     reply: (to, response) => client.reply(to, response),
     resign: () => void client.resign(),
+    floor: await versionFloorFor(versionFloorPath()),
     // Production leads on the relay store, over this daemon's own socket (the
     // term fence is that socket); tests seed one store across terms instead.
     ...(opts.leader?.store !== undefined

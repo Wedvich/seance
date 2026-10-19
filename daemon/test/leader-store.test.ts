@@ -520,6 +520,9 @@ describe("branch state and PR", () => {
 
 describe("leader in the daemon", () => {
   async function startLeaderDaemon(relay: TestRelay, store: QueueStore | undefined) {
+    // A machine of its own each: the version floor is one per state dir per process, and these
+    // tests reuse task ids at versions an earlier one already raised it past.
+    process.env["SEANCE_STATE_DIR"] = await mkdtemp(join(base, "state-"));
     const fixture = await makeGitFixture(await mkdtemp(join(base, "fixture-")));
     const config: Config = {
       name: "LeaderBox",
