@@ -435,9 +435,9 @@ precede. Wave 2 waits on the wave-1 item named.
   - `probe` passed through `startDaemon` to telemetry. **Done**, with the clock.
   - `run.ts`'s wiring split into a capabilities list and a collector registry. **Done**
     (DESIGN.md, Daemon, "Wiring").
-  - `e2e/e2e.test.ts` split by area.
+  - `e2e/e2e.test.ts` split by area. **Done** — one file per area behind `startSuite` (docs/development.md).
   - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
-    push-endpoint stub.
+    push-endpoint stub. **Done** (docs/development.md).
 
 **Items.**
 

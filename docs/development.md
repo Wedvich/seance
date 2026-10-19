@@ -77,6 +77,14 @@ a production change.
   wrapper puts it in raw mode); the rest finish and the sweep runs as usual.
   The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
   tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
+  Three fixtures stand in for what lies outside a machine, importable from daemon suites and e2e alike (no e2e file uses them yet):
+  `makeSecurityShim` (`daemon/test/security-shim.ts`) puts a `security` first on PATH that
+  serves keychain items from files, so a keychain read needs no keychain (the daemon calls
+  it only on macOS; Raycast runs `/usr/bin/security` by absolute path, so its tests inject
+  the read instead); `GitFixture.pushBranch` commits on a feature branch and pushes it to
+  the fixture's origin, as a session finishing its work would; and `startPushEndpoint`
+  (`daemon/test/push-endpoint.ts`) is a Web Push service on 127.0.0.1 that records each
+  push and answers a chosen status, or holds the answer. Each has a self-test beside it.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
@@ -93,7 +101,12 @@ a production change.
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
   the user flows end to end — machine discovery, spawns and their failures,
   dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
-  between the doubles and the real thing. The fleet-broker and two-machine status flows
+  between the doubles and the real thing. One file per area (`app`, `mcp`, `leader`,
+  `auto`), each booting the same stack of its own through `startSuite` in `e2e/suite.ts`,
+  so a new area is a new file and never an edit to another's setup. The files share one
+  process, so `startSuite` settles 500 ms around the relay's boot and dispose, as the inline
+  sleeps in `relay.test.ts` and `store.test.ts` do; keep that shard off `--parallel`, which would rebuild the worker bundle per
+  file. The fleet-broker and two-machine status flows
   need a second machine, so `stack.startSecondDaemon` boots a second real daemon as a
   subprocess (`e2e/remote-daemon.ts`): `stateDir()` comes from the environment, and two
   daemons in one process would share a deviceId and an op socket. Every daemon gets a
