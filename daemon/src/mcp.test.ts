@@ -17,10 +17,11 @@ import {
   type RequestOp,
   type SpawnRequest,
   type Task,
-  type TaskRequest,
+  type TaskSpec,
 } from "@seance/shared";
 import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
+import type { AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
@@ -61,7 +62,11 @@ function fakeLocal(
 }
 
 /** A bare `LazyRelay` is the direct transport, which is what most of these tests drive. */
-async function connectedClient(relay: LazyRelay | Fleet, local: LocalMachine | null = null): Promise<Client> {
+async function connectedClient(
+  relay: LazyRelay | Fleet,
+  local: LocalMachine | null = null,
+  audit: AuditSink = () => {},
+): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
   // point of pinning is that these tests prove the modern era is served. That
@@ -72,7 +77,7 @@ async function connectedClient(relay: LazyRelay | Fleet, local: LocalMachine | n
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, audit), { transport: serverTransport });
   await client.connect(clientTransport);
   return client;
 }
@@ -800,15 +805,18 @@ function leaderRelay(
 async function callAuto(
   fake: ReturnType<typeof fakeRelay>,
   args: Record<string, unknown> = {},
-): Promise<{ text: string; error: boolean }> {
+): Promise<{ text: string; error: boolean; audited: readonly string[] }> {
   const lazy = new LazyRelay({ create: () => fake });
-  const client = await connectedClient(lazy, null);
+  const audited: string[] = [];
+  const client = await connectedClient(lazy, null, (line) => {
+    audited.push(line);
+  });
   try {
     const result = await client.callTool({
       name: "spawn_session",
       arguments: { machine: "auto", repo: "seance", prompt: "fix it", ...args },
     });
-    return { text: toolText(result), error: result.isError === true };
+    return { text: toolText(result), error: result.isError === true, audited };
   } finally {
     lazy.stop();
   }
@@ -876,11 +884,15 @@ describe("spawn_session on auto", () => {
     const fake = leaderRelay();
     const stdout = spyOn(console, "log");
     try {
-      const { text, error } = await callAuto(fake, { title: "Fix it", mode: "here", model: "", plan: true });
+      const { text, error, audited } = await callAuto(fake, { title: "Fix it", mode: "here", model: "", plan: true });
       expect(error).toBe(false);
       expect(fake.creates).toHaveLength(1);
       const [created] = fake.creates;
       expect(text).toStartWith(`task ${created?.id}: queued`);
+      // The box's own record of an enqueue no daemon saw; never the prompt.
+      expect(audited).toEqual([
+        `audit enqueue origin=mcp client=mcp task="${created?.id}" createdAt=${created?.createdAt} queued`,
+      ]);
       expect(text).toContain("get_queue shows where it lands and why");
       expect(text).not.toContain("No scheduler is leading");
       // Nothing reachable from `seanced mcp` writes to stdout: it is the JSON-RPC channel.
@@ -891,14 +903,15 @@ describe("spawn_session on auto", () => {
     const [created] = fake.creates;
     expect(created?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
     expect(created?.state).toBe("queued");
-    // A TaskRequest carries no `client` — the leader stamps its own dispatch — and an empty model means default.
+    // The record names its client, for the leader's admit line; an empty model means default.
     expect(created?.spec).toEqual({
       repo: ORIGIN,
       mode: "here",
       prompt: "fix it",
       title: "Fix it",
       plan: true,
-    } satisfies TaskRequest);
+      client: "mcp",
+    } satisfies TaskSpec);
     // The scheduler places it; this process neither asked it anything nor spawned on a machine itself.
     expect(fake.requests).toEqual([]);
   });
@@ -922,10 +935,11 @@ describe("spawn_session on auto", () => {
   test("three lost tries say the task may have queued, naming its id, and stop there", async () => {
     const fake = leaderRelay();
     fake.onCreate = () => new RequestFailure("dropped", "the relay socket closed", "relay");
-    const { text, error } = await callAuto(fake);
+    const { text, error, audited } = await callAuto(fake);
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(3);
     expect(new Set(fake.creates.map((t) => t.id)).size).toBe(1);
+    expect(audited).toEqual([expect.stringMatching(/ task="[^"]+" createdAt=\d+ unanswered$/u)]);
     expect(text).toBe(
       `auto: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
     );
@@ -934,20 +948,23 @@ describe("spawn_session on auto", () => {
   test("three tries that never left the process say it was not queued, not that it may have been", async () => {
     const fake = leaderRelay();
     fake.onCreate = () => new RequestFailure("disconnected", "the relay socket is not open", "relay");
-    const { text, error } = await callAuto(fake);
+    const { text, error, audited } = await callAuto(fake);
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(3);
     expect(text).toBe("auto: not queued — the relay was unreachable after 3 tries; try again");
+    // Nothing left this process, so nothing is recorded as enqueued.
+    expect(audited).toEqual([]);
     expect(text).not.toContain("may have queued");
   }, 10_000);
 
   test("a store refusal is worded, and not retried", async () => {
     const fake = leaderRelay();
     fake.onCreate = () => ({ ok: false, code: "store_full" });
-    const { text, error } = await callAuto(fake);
+    const { text, error, audited } = await callAuto(fake);
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(1);
     expect(text).toBe(`auto refused (store_full): ${storeErrorText("store_full")}`);
+    expect(audited).toEqual([expect.stringMatching(/ refused code="store_full"$/u)]);
   });
 
   test("with no leader, or an unverified one, the task still queues and the answer says it waits for one", async () => {

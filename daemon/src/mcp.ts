@@ -35,6 +35,7 @@ import {
   type TaskRequest,
 } from "@seance/shared";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
+import { cliSink, enqueueAudit, type AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
@@ -491,8 +492,9 @@ const ENQUEUE_RETRY_MS = 1_000;
  * the same task, since a repeat create reads `landedEarlier`; every try lost says
  * so and names the id. Never logs: stdout is the JSON-RPC channel.
  */
-async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promise<ToolResult> {
-  const task = queuedTask(request, Date.now());
+async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest, audit: AuditSink): Promise<ToolResult> {
+  const task = queuedTask({ ...request, client: "mcp" }, Date.now());
+  const audited = enqueueAudit(audit);
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;
   for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
@@ -520,7 +522,13 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
       sent = true;
       continue;
     }
-    if (!reply.ok) return errorResult(`auto refused (${reply.code}): ${storeErrorText(reply.code)}`);
+    if (!reply.ok) {
+      // oxlint-disable-next-line no-await-in-loop -- the last thing this try does: it returns
+      await audited(task, { kind: "refused", code: reply.code });
+      return errorResult(`auto refused (${reply.code}): ${storeErrorText(reply.code)}`);
+    }
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    await audited(task, { kind: "queued", landedEarlier: reply.landedEarlier });
     const lines = [
       `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
       "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
@@ -535,6 +543,7 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
   if (!sent) {
     return errorResult(`auto: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
   }
+  await audited(task, { kind: "unanswered" });
   return errorResult(
     `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; check get_queue before retrying`,
   );
@@ -552,8 +561,12 @@ async function enqueueAuto(scheduler: SchedulerLeg, request: TaskRequest): Promi
  * handler the relay leg reaches and so the same backend, repo set, machineTag
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
+ *
+ * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): an `auto`
+ * enqueue reaches no daemon, so this process records it in the audit log itself,
+ * as `seanced spawn` does — never on stdout, the JSON-RPC channel.
  */
-export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null): McpServer {
+export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, audit: AuditSink = cliSink): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
@@ -757,7 +770,7 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null):
           // The origin a clone name resolved to is what the leader bounds, not the name.
           const longOrigin = overBound("repo", resolved.origin);
           if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}`);
-          return enqueueAuto(lease.scheduler, { repo: resolved.origin, ...task });
+          return enqueueAuto(lease.scheduler, { repo: resolved.origin, ...task }, audit);
         });
       }
       const request: SpawnRequest = {

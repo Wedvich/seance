@@ -1,4 +1,11 @@
-import { StoreRevoked, Scheduler, type QueueStore, type SchedulerConfig, type SessionSource } from "@seance/scheduler";
+import {
+  StoreRevoked,
+  Scheduler,
+  type QueueStore,
+  type SchedulerConfig,
+  type SessionSource,
+  type Task,
+} from "@seance/scheduler";
 import {
   APP_ID,
   isSchedulerOp,
@@ -15,6 +22,7 @@ import {
   type SessionState,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
+import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
@@ -193,11 +201,22 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
     list: () => inner.list(),
     get: (id) => inner.get(id),
     getPause: () => inner.getPause(),
-    put: async (id, expect, body) => landed(await inner.put(id, expect, body), id),
+    put: async (id, expect, body) => {
+      const write = landed(await inner.put(id, expect, body), id);
+      // Version 1 is an app's create and always `queued`, so the write after it is the leader's
+      // first move: admission, unless a cancel or mark-done got there first.
+      if (write.ok && expect === 1 && ADMITTED.has(body.state)) await admitted(body);
+      return write;
+    },
     delete: async (id, expect) => landed(await inner.delete(id, expect), id),
     putPause: async (expect, holds) => landed(await inner.putPause(expect, holds), null),
   };
 }
+
+/** Where admission leaves a `queued` task (`admission` in the library). */
+const ADMITTED: ReadonlySet<Task["state"]> = new Set(["ready", "blocked", "failed"]);
+
+const admitted = admitAudit(daemonSink);
 
 /** One nudge per this long, however many writes: an app re-fetches once, not per transition. */
 const NUDGE_COALESCE_MS = 500;

@@ -589,7 +589,11 @@ nothing checked it. The last is the gap they leave.
   timer: a 3am cleanup must not read as someone at the desk. `leader` is the
   daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
   "The leader") — distinct from `local`, which says a peer on the op socket asked,
-  and from the `client=scheduler` other machines log under `relay`. The daemon writes
+  and from the `client=scheduler` other machines log under `relay`; the leader's
+  `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
+  key itself: a store write the relay answers, which no daemon sees, so that process
+  appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
+  M3 review S5). The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -1685,6 +1689,11 @@ code=…`: the request id finds the app's side, and the task id joins the line t
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
   the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
   the relay; the despawn a cancel sends audits on its target as any scheduler dispatch does.
+  An enqueue is no request — an app's create is a store write the relay answers — so the
+  leader's record of one is its admission, the first write after the version-1 create:
+  `audit queue origin=leader op=admit task=<task> client=<client> createdAt=<ms>
+state=ready|blocked|failed`, `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
+  MCP's `mcp`; absent from older clients), never the prompt (added 2026-10-18, M3 review S5).
 
 - **`queue-changed` tells apps to re-read** (M3 item 6). Every write the term makes to a
   `task:` record (the `watched` store wrapper), an app's create it refreshes on `store-changed`,
@@ -4064,12 +4073,12 @@ daemons update machine-by-machine behind fast-moving clients, so a daemon must
 never reject a spawn over a client name minted after it was built, and the
 field is display-only, so validation would buy nothing.
 
-An `auto` spawn is not an MCP spawn at its target: `TaskRequest` has no `client`
-field, and the leader dispatches with its own (`client="scheduler"`, audited
-`origin=relay` at another machine and `origin=leader` on its own). The session is the
-scheduler's, which is what its audit line says; that an agent asked for it is in that
-agent's transcript. Carrying `mcp` through would mean a `TaskRequest` schema change,
-not taken for M2.
+An `auto` spawn is not an MCP spawn at its target: the leader dispatches with its own
+`client` (`client="scheduler"`, audited `origin=relay` at another machine and
+`origin=leader` on its own). The session is the scheduler's, which is what its audit line
+says. That an agent asked for it is in that agent's transcript, in the MCP box's own
+`audit enqueue origin=mcp` line, and on the leader's `op=admit` line, which reads the
+task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 review S5).
 
 **Threat-model addendum.**
 
