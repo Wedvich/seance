@@ -2780,6 +2780,22 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   `HandlerContext`/`RunOpts` — session group, pane-death budget, doctor's tmux
   checks), and leaving `SpawnFailure`/`SpawnOutcome` in `spawn.ts`, the one
   file such a fork deletes.
+- **Seams** (M4 readiness, R6): `startDaemon` takes `now`, `httpFetch` and `probe` (`RunOpts`), and
+  hands the clock and `httpFetch` to the leader and telemetry, `probe` to telemetry; defaults are
+  `Date.now`, the global `fetch` and `hostProbe`. They are what lets a daemon-tier test
+  (`daemon/test/seams.test.ts`) drive what the daemon reports — and M4's OAuth poll, push, Linear
+  and Proxmox readers be tested there rather than only at the unit tier. The clock is wiring time
+  (scan stamps, runtime.json, the reap schedule, telemetry's sample time, the leader's); a sealed
+  envelope's `ts` stays on the wall clock, since replay windows judge it. The leader's clock also
+  judges records peers stamped with their wall clocks — a task's `created_ahead` check against the
+  replay window and admission's age limit, which must agree with the relay's wall-clock tombstone —
+  so an injected clock must track wall time (an offset of seconds, or wall time plus control) in
+  any test that queues tasks. Three readers stay on the wall clock on purpose: session events and
+  branch states keep their own `now` (branch state compares against git's fetch times), and Claude
+  Code's quota `fetchedAtMs` is wall time written by another process. The option is `httpFetch`,
+  not `fetch`, so it is not mistaken for `BranchStateDeps.fetch`, a git fetch. `Fetch`
+  (`daemon/src/seams.ts`) is its own type rather than `typeof fetch`, whose Bun type carries
+  `preconnect`, which no stand-in satisfies without a cast. Nothing reads `httpFetch` yet.
 - **tmux**: spawns a window into the **`main` session group**
   (`tmux new-window -t main:`) — terminals auto-attach to that group via
   zshrc, so daemon-spawned windows appear in every attached terminal

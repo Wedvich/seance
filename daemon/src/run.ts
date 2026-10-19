@@ -42,7 +42,8 @@ import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import { fitStatus } from "./status.ts";
-import { createTelemetry, type Registered } from "./telemetry.ts";
+import type { Fetch } from "./seams.ts";
+import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
@@ -105,6 +106,19 @@ export interface RunOpts {
   };
   /** Tests only: the branch-state emitter's intervals, which are constants in production. */
   readonly branchState?: Pick<BranchStateDeps, "intervalMs" | "fetchStaleMs">;
+  /**
+   * The clock wiring reads — scan stamps, runtime.json, the reap schedule —
+   * and the leader and telemetry inherit; defaults to `Date.now`. A sealed
+   * envelope's `ts` stays on the wall clock: replay windows judge it. The
+   * leader's clock also judges records peers stamped with theirs (task
+   * `created_ahead`, admission age), so a test that queues tasks must keep it
+   * near wall time.
+   */
+  readonly now?: () => number;
+  /** Outbound HTTP for the leader and telemetry; defaults to the global `fetch`. */
+  readonly httpFetch?: Fetch;
+  /** The host telemetry samples; defaults to `hostProbe`. */
+  readonly probe?: HostProbe;
 }
 
 export interface SelfUpdateOpts {
@@ -182,7 +196,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let state: State = await loadOrInitState();
   const identity = await identityOfState(state);
   const key = await importPsk(resolved.psk);
-  const startedAt = Date.now();
+  const now = opts.now ?? Date.now;
+  const httpFetch: Fetch = opts.httpFetch ?? ((input, init) => fetch(input, init));
+  const startedAt = now();
 
   // Read once per process: this is the code actually running, not whatever a
   // later `git pull` puts on disk. The previous run's sha decides the announce
@@ -256,7 +272,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // Same blob list, fresh paths: a moved exclave root is counted where it now
     // is without a register, since every index still means the same exclave.
     if (exclaveInfoEqual(exclaves.info, registered.exclaves.info)) registered = { ...registered, exclaves };
-    state = { ...state, repos: scanned, scannedAt: Date.now() };
+    state = { ...state, repos: scanned, scannedAt: now() };
     await saveState(state);
     if (changed) {
       log.info(
@@ -285,7 +301,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       pid: process.pid,
       startedAt,
       connected,
-      connectedSince: connected ? Date.now() : null,
+      connectedSince: connected ? now() : null,
       sha: source?.sha ?? null,
     }).catch((err: unknown) => log.warn(`could not write runtime.json: ${String(err)}`));
   };
@@ -338,6 +354,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     registered: () => registered,
     sessions: () => handlerCtx.backend.sessions(state.repos),
     sessionQuota: (exclave, account) => sessionQuota.get(exclave, account),
+    now,
+    httpFetch,
+    ...(opts.probe === undefined ? {} : { probe: opts.probe }),
   });
   const statusIntervalMs = opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS;
   let telemetryTimer: ReturnType<typeof setInterval> | null = null;
@@ -396,6 +415,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       : { storeLeg: { store: (frame) => client.store(frame) }, key }),
     ...(opts.leader?.tickIntervalMs === undefined ? {} : { tickIntervalMs: opts.leader.tickIntervalMs }),
     ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
+    now,
+    httpFetch,
   });
 
   const client = new RelayClient({
@@ -570,7 +591,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const reapAbort = new AbortController();
   let reaping = false;
   const reapIfDue = async (): Promise<void> => {
-    if (reaping || stopped || Date.now() - (state.lastReapAt ?? 0) < reapEveryMs) return;
+    if (reaping || stopped || now() - (state.lastReapAt ?? 0) < reapEveryMs) return;
     reaping = true;
     try {
       const report = await withReapLock(() =>
@@ -586,7 +607,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       for (const line of formatReport(report)) log.info(`reap: ${line}`);
       // A run the stop cut short isn't the one the schedule promised.
       if (stopped) return;
-      state = { ...state, lastReapAt: Date.now() };
+      state = { ...state, lastReapAt: now() };
       await saveState(state);
     } catch (err) {
       log.warn(err instanceof ReapBusy ? `reap: skipped — ${err.message}` : `reap failed: ${String(err)}`);

@@ -429,9 +429,10 @@ precede. Wave 2 waits on the wave-1 item named.
   at-rest ops and record types, and `push-subscribe`. The prefixes stay unaccepted until store
   rules v2.
 - **Daemon seams.**
-  - An injectable `fetch` and clock through `startDaemon`, the leader and telemetry. Without them
+  - An injectable `httpFetch` and clock through `startDaemon`, the leader and telemetry. Without them
     the OAuth poll, auth health, push, Linear and Proxmox can be tested only at the unit tier.
-  - `probe` passed through `startDaemon` to telemetry (today it is not).
+    **Done** — `now`, `httpFetch` and `probe` in `RunOpts` (DESIGN.md, Daemon, "Seams").
+  - `probe` passed through `startDaemon` to telemetry. **Done**, with the clock.
   - `run.ts`'s wiring split into a capabilities list and a collector registry.
   - `e2e/e2e.test.ts` split by area.
   - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
@@ -474,7 +475,7 @@ precede. Wave 2 waits on the wave-1 item named.
     knows it, so the PR is the handoff.
 - **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an
   idle exclave's quota refreshes within `staleAfter`; a failing endpoint is quiet. Missing today:
-  a credentials reader, a fetch seam and `quota.staleAfter`. `QuotaSource "oauth"` is reserved,
+  a credentials reader and `quota.staleAfter` (the fetch seam is in `RunOpts`). `QuotaSource "oauth"` is reserved,
   and telemetry already layers sources.
   - _Proposed (#7), exit criterion:_ "while the access token is live" — the daemon never
     refreshes.
@@ -502,7 +503,7 @@ precede. Wave 2 waits on the wave-1 item named.
   - _Proposed (#20):_ park #128 (penalise the default exclave's account) and redo it as a flag
     on the account record once those land; decide before the skills filter takes `route.ts`.
 - **Proxmox node view** — read by the LXC daemons, folded into their own `status`. An injectable
-  `HostProbe` exists at the unit tier only; missing are cgroup and PSI readers, an API client and
+  `HostProbe` reaches telemetry through `startDaemon`; missing are cgroup and PSI readers, an API client and
   token storage. _Proposed (#17):_ a read-only token (PVEAuditor), stored as the PSK is, with a
   pinned certificate fingerprint.
 - **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
