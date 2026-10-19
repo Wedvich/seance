@@ -57,7 +57,12 @@ beforeAll(async () => {
     machineTag: "testbox",
   };
   const ctx: HandlerContext = {
-    backend: createBackend(config, { home: join(base, "home"), waitMs: 700 }),
+    // Every spawn here must register, so this is a ceiling, not a wait: the
+    // backend polls and returns once the pane titles. A miss still acks `ok`, but
+    // `pending` and without the window in its list — the stub alone takes ~0.4s
+    // idle, past 0.7s under a loaded suite. Short budgets are for stuck stubs
+    // (`STUCK_WAIT` in spawn.test.ts), which this file never spawns.
+    backend: createBackend(config, { home: join(base, "home"), waitMs: 5_000 }),
     getRepos: () => repos,
     rescan: () => Promise.resolve(repos),
     auditSink: collect,
@@ -133,6 +138,7 @@ describe("the local op socket", () => {
     expect(reply.ok).toBe(true);
     if (!reply.ok) throw new Error(reply.message);
     expect(reply.window).toBe("Local Op");
+    expect(reply.pending).toBeUndefined();
 
     // The window really exists, and the machineTag suffix proves it went through
     // the same backend a relayed spawn would — not a second spawn path.
@@ -164,6 +170,8 @@ describe("the local op socket", () => {
       { path: sockPath },
     );
     if (!spawned.ok) throw new Error(spawned.message);
+    // A spawn that never registered acks without its window, so say that rather than "no id".
+    expect(spawned.pending).toBeUndefined();
     const id = spawned.sessions.find((entry) => entry.window === "Short Lived")?.id;
     if (id === undefined) throw new Error("the spawn ack listed no id for its window");
     lines.length = 0;
