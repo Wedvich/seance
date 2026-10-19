@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { Task, TaskState } from "@seance/shared";
 import { DEFAULT_FORM, type Verdict } from "../src/state.ts";
 import {
   screenKey,
+  TRANSITION_KINDS,
   TransitionRunner,
   transitionKind,
   type TransitionDeps,
@@ -238,5 +240,48 @@ describe("TransitionRunner", () => {
     });
     runner.offer("queue", QUEUE);
     expect(applied).toEqual(["queue"]);
+  });
+});
+
+/** Rules as [selector, declarations], comments stripped; nested at-rules flatten to their inner rule. */
+function rules(css: string): [string, string][] {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("}")
+    .map((chunk) => chunk.split("{"))
+    .filter((parts) => parts.length >= 2)
+    .map((parts): [string, string] => [parts.at(-2)?.trim() ?? "", parts.at(-1) ?? ""]);
+}
+
+const read = (name: string): string => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8");
+
+describe("the view-transition stylesheet", () => {
+  const screen = read("screen.css");
+
+  test("names and classes are set only while a transition runs", () => {
+    const naming = rules(screen).filter(([, body]) => /view-transition-(name|class)\s*:/.test(body));
+    expect(naming.length).toBeGreaterThan(0);
+    for (const [selector] of naming) {
+      for (const part of selector.split(",")) {
+        expect(part.trim()).toMatch(/^:root:active-view-transition(-type\(|\s)/);
+      }
+    }
+  });
+
+  test("every type a selector names is one the runner starts", () => {
+    const named = [...screen.matchAll(/:active-view-transition-type\(([^)]*)\)/g)].flatMap((m) =>
+      (m[1] ?? "").split(",").map((type) => type.trim()),
+    );
+    expect(named.length).toBeGreaterThan(0);
+    const known: readonly string[] = TRANSITION_KINDS;
+    for (const type of named) expect(known).toContain(type);
+  });
+
+  test("reduced motion reaches the transition pseudo-elements", () => {
+    const base = read("base.css");
+    const clamp = base.slice(base.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(clamp).toContain("::view-transition-group(*)");
+    expect(clamp).toContain("::view-transition-old(*)");
+    expect(clamp).toContain("::view-transition-new(*)");
   });
 });
