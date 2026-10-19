@@ -162,6 +162,12 @@ interface SocketAttachment {
   readonly superseded?: true;
   /** The `store-list` floor's window (`admitList`); a re-register keeps it, so it cannot reset the floor. */
   readonly listWindow?: RateWindow;
+  /**
+   * Spend of the current register window. Kept off `identity` because it is
+   * stamped for attempts the verify or the registry cap turns away too, and
+   * those must not make the socket read as registered.
+   */
+  readonly rate?: RegisterRate;
 }
 
 /**
@@ -194,6 +200,9 @@ interface SocketIdentity {
   readonly deviceId: string;
   /** Known roles a verified v2 register signed; absent on attachments from before roles existed. */
   readonly roles?: readonly DaemonRole[];
+}
+
+interface RegisterRate {
   /** Start of the current register-rate window, ms. */
   readonly windowStart: number;
   readonly registers: number;
@@ -539,7 +548,7 @@ export class Hub implements DurableObject {
     const { deviceId, info } = frame;
     const now = Date.now();
     const attachment = (ws.deserializeAttachment() ?? { connectedAt: now }) as SocketAttachment;
-    const prior = attachment.identity;
+    const prior = attachment.rate;
     const rate =
       prior === undefined || now - prior.windowStart >= REGISTER_WINDOW_MS
         ? { windowStart: now, registers: 1 }
@@ -550,6 +559,12 @@ export class Hub implements DurableObject {
       console.log(`refused register from ${deviceId}: over ${MAX_REGISTERS_PER_WINDOW} per window`);
       return;
     }
+    // Spent before the verify or the entry cap can refuse, because every
+    // attempt past here costs a verify, a storage read and a list. Persisting
+    // only on success made a full registry unmeter itself: the refusal left
+    // `rate` unset, so the next frame recomputed a fresh window and freshly
+    // minted ids became unlimited per socket.
+    ws.serializeAttachment({ ...attachment, rate } satisfies SocketAttachment);
 
     // Behind the rate limit, so a token holder pays for at most ten verifies a
     // minute per socket. The id is the hash of the key and the signature proves
@@ -587,7 +602,8 @@ export class Hub implements DurableObject {
     // the status a daemon sends right after registering is let through.
     ws.serializeAttachment({
       connectedAt: attachment.connectedAt,
-      identity: { deviceId, roles: knownRoles(frame.roles ?? []), ...rate },
+      rate,
+      identity: { deviceId, roles: knownRoles(frame.roles ?? []) },
       ...(attachment.listWindow === undefined ? {} : { listWindow: attachment.listWindow }),
     } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {

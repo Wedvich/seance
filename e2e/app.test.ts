@@ -2,8 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  APP_ID,
+  fromBase64,
   liveStatus,
   newestQuotaByAccount,
+  open,
+  seal,
+  toBase64,
+  type Plain,
   type RegistryView,
   type RelayToAppFrame,
   type SessionEntry,
@@ -47,6 +53,11 @@ function spawnReady(state: AppState): boolean {
   return machine?.connected === true && machine.repos.some((r) => r.name === "myrepo");
 }
 
+/** A fresh `sessions` request; the daemon's reply names its id in `re`. */
+function sessionsRequest(): Plain {
+  return { id: crypto.randomUUID(), ts: Date.now(), op: "sessions", payload: {} };
+}
+
 describe("daemon ↔ relay ↔ app", () => {
   test("machine appears decrypted and sessions fan out on connect", async () => {
     const app = startApp(stack);
@@ -73,6 +84,62 @@ describe("daemon ↔ relay ↔ app", () => {
       expect(view.at).toBeGreaterThan(0);
     } finally {
       app.stop();
+    }
+  });
+
+  /**
+   * The pieces are proven apart — shared/ shows a re-addressed or tampered
+   * envelope fails AAD, the daemon suite shows its client drops one, the relay
+   * suite shows the hub forwards a blob untouched. This is the composition over
+   * the shipped relay: the frames a compromised relay could emit reach the real
+   * daemon and die there, while an honest frame on the same socket is answered.
+   * A raw app socket rather than startApp; replies to every app are fanned to
+   * it too, so each is opened and matched on `re`.
+   */
+  test("a re-addressed or tampered envelope crosses the real relay and is dropped by the daemon", async () => {
+    const raw = await connectApp(stack.relay);
+    const ownEntryOnline = (frame: Extract<RelayToAppFrame, { t: "registry" }>): boolean =>
+      frame.entries.some((entry) => entry.deviceId === stack.deviceId && entry.connected);
+    try {
+      while (!ownEntryOnline(await raw.waitFor<Extract<RelayToAppFrame, { t: "registry" }>>("registry", 10_000)));
+      const replyTo = async (timeoutMs = 5_000): Promise<string | undefined> => {
+        const frame = await raw.waitFor<Extract<RelayToAppFrame, { t: "msg" }>>("msg", timeoutMs);
+        return (await open(stack.appKey, frame.env)).re;
+      };
+
+      // A relay re-addressing a blob sealed for another machine to this one.
+      const readdressed = sessionsRequest();
+      const elsewhere = await seal(stack.appKey, { to: "some-other-device", from: APP_ID }, readdressed);
+      raw.send({ t: "msg", env: { ...elsewhere, to: stack.deviceId } });
+
+      // A relay flipping one ciphertext byte.
+      const tampered = sessionsRequest();
+      const flipped = await seal(stack.appKey, { to: stack.deviceId, from: APP_ID }, tampered);
+      const ct = fromBase64(flipped.ct);
+      ct[0] = (ct[0] ?? 0) ^ 0xff;
+      raw.send({ t: "msg", env: { ...flipped, ct: toBase64(ct) } });
+
+      // Control, sent last: its reply proves the daemon was listening on this
+      // socket for both frames above, so silence on them is a drop, not a race.
+      const honest = sessionsRequest();
+      raw.send({ t: "msg", env: await seal(stack.appKey, { to: stack.deviceId, from: APP_ID }, honest) });
+      const dropped = new Set([readdressed.id, tampered.id]);
+      for (;;) {
+        // oxlint-disable-next-line no-await-in-loop -- replies arrive one at a time
+        const re = await replyTo();
+        expect(dropped.has(re ?? "")).toBe(false);
+        if (re === honest.id) break;
+      }
+      // Nothing answers a dropped frame later either — a negative, so a sleep is the honest tool.
+      await Bun.sleep(300);
+      for (;;) {
+        // oxlint-disable-next-line no-await-in-loop -- draining what already arrived
+        const re = await replyTo(300).catch(() => null);
+        if (re === null) break;
+        expect(dropped.has(re ?? "")).toBe(false);
+      }
+    } finally {
+      raw.close();
     }
   });
 

@@ -37,7 +37,7 @@ let relay: TestRelay;
 // One workerd instance for the file: the registry is permanent by design, so
 // every test uses its own deviceId and asserts on its own entry.
 beforeAll(async () => {
-  relay = await startRelay(TOKEN);
+  relay = await startRelay(TOKEN, { captureLogs: true });
 });
 
 afterAll(async () => {
@@ -566,6 +566,58 @@ describe("status", () => {
   });
 });
 
+describe("blindness", () => {
+  /**
+   * The hub logs routing ids and the iv on every path a frame can take; the
+   * ciphertext is the one field that must never follow them, because the
+   * Worker's console lines are what Workers Logs keeps, and that outlives the
+   * frame (store.test.ts holds the store's paths to the same rule). The
+   * sentinel is a valid `ct` to the relay (a bounded string) and unmistakable
+   * in a grep. Each path's own log line is awaited first, so a capture that
+   * silently stopped working cannot pass this vacuously.
+   */
+  test("ciphertext never reaches a log line on any routing path", async () => {
+    const sentinel = `CT-SENTINEL-${crypto.randomUUID()}`;
+    const deviceId = await newDeviceId();
+    const app = await connectApp(relay);
+    const daemon = await connectDaemon(relay);
+    const logged = (needle: string, what: string): Promise<void> =>
+      pollUntil(() => relay.logs().some((line) => line.includes(needle)), what);
+
+    // register: the blob is stored, and the only line names the deviceId.
+    daemon.send(await register(deviceId, { info: { ...envelope(APP_ID, deviceId), ct: sentinel } }));
+    await waitForEntry(app, deviceId, (entry) => entry.connected);
+    await logged(`registered ${deviceId}`, "register");
+
+    // deliver: app → daemon.
+    const toDaemon = { ...envelope(deviceId, APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toDaemon });
+    await daemon.waitFor<DaemonMsg>("msg");
+    await logged(`iv="${toDaemon.iv}"`, "deliver");
+
+    // fanout: daemon → every app.
+    const toApp = { ...envelope(APP_ID, deviceId), ct: sentinel };
+    daemon.send({ t: "msg", env: toApp });
+    await app.waitFor<MsgFrame>("msg");
+    await logged(`iv="${toApp.iv}"`, "fanout");
+
+    // undeliverable: the notice echoes the iv, never the blob.
+    const toNobody = { ...envelope("never-registered", APP_ID), ct: sentinel };
+    app.send({ t: "msg", env: toNobody });
+    await app.waitFor<UndeliverableFrame>("undeliverable");
+    await logged(`iv="${toNobody.iv}"`, "undeliverable");
+
+    // dropped: a from-mismatch is logged with its iv and nothing else.
+    const forged = { ...envelope(APP_ID, "some-other-machine"), ct: sentinel };
+    daemon.send({ t: "msg", env: forged });
+    await logged(`iv="${forged.iv}"`, "dropped");
+
+    expect(relay.logs().filter((line) => line.includes(sentinel))).toEqual([]);
+    daemon.close();
+    app.close();
+  });
+});
+
 describe("robustness", () => {
   test("ignores malformed frames without dropping the socket", async () => {
     const deviceId = await newDeviceId();
@@ -608,11 +660,21 @@ describe("robustness", () => {
 });
 
 /** Current registry as the DO reports it: a fresh app socket is pushed it on connect. */
-async function registryIds(target: TestRelay): Promise<string[]> {
+async function registryEntries(target: TestRelay): Promise<readonly RegistryView[]> {
   const observer = await connectApp(target);
   const frame = await observer.waitFor<RegistryFrame>("registry");
   observer.close();
-  return frame.entries.map((entry) => entry.deviceId);
+  return frame.entries;
+}
+
+async function registryIds(target: TestRelay): Promise<string[]> {
+  return (await registryEntries(target)).map((entry) => entry.deviceId);
+}
+
+/** `connected` is derived from live sockets, so it is what proves a register landed. */
+async function isConnected(target: TestRelay, deviceId: string): Promise<boolean> {
+  const entries = await registryEntries(target);
+  return entries.find((entry) => entry.deviceId === deviceId)?.connected ?? false;
 }
 
 /**
@@ -755,6 +817,8 @@ describe("scheduler leadership, allowlist unset", () => {
 describe("registry entry cap", () => {
   const MAX_DEVICES = 32;
   let bounded: TestRelay;
+  /** Filled by the first test; the second registers one of them as a known id. */
+  let filling: readonly string[] = [];
 
   beforeAll(async () => {
     bounded = await startRelay(TOKEN);
@@ -766,7 +830,7 @@ describe("registry entry cap", () => {
 
   test("a full registry turns away unknown machines and keeps serving known ones", async () => {
     const app = await connectApp(bounded);
-    const filling = await Promise.all(Array.from({ length: MAX_DEVICES }, () => newDeviceId()));
+    filling = await Promise.all(Array.from({ length: MAX_DEVICES }, () => newDeviceId()));
     const daemons: Client[] = [];
     for (const deviceId of filling) {
       // oxlint-disable-next-line no-await-in-loop -- the assertion is about the boundary, so fill in a known order
@@ -799,6 +863,36 @@ describe("registry entry cap", () => {
     rejoined.close();
     overflow.close();
     for (const daemon of daemons.slice(1)) daemon.close();
+    app.close();
+  }, 30_000);
+
+  // Runs on the registry the test above filled.
+  test("a register the full registry turns away still spends the window", async () => {
+    const MAX_REGISTERS_PER_WINDOW = 10;
+    const app = await connectApp(bounded);
+    const daemon = await connectDaemon(bounded);
+
+    // Every one of these is genuine and refused by the entry cap, and every one
+    // costs a verify, a storage read and a list over the prefix. If the refusal
+    // were free the window would never advance and freshly minted ids would be
+    // unlimited per socket.
+    const unknown = await Promise.all(Array.from({ length: MAX_REGISTERS_PER_WINDOW }, () => newDeviceId()));
+    for (const deviceId of unknown) {
+      // oxlint-disable-next-line no-await-in-loop -- each frame spends the window in order
+      daemon.send(await register(deviceId));
+    }
+    await drain(app);
+
+    // A known id the cap would wave through: the only thing left to refuse it
+    // is the rate limit the refusals above must have spent.
+    const known = filling[1] ?? "";
+    daemon.send(await register(known));
+    await drain(app);
+
+    expect(await isConnected(bounded, known)).toBe(false);
+    expect(await registryIds(bounded)).toHaveLength(MAX_DEVICES);
+
+    daemon.close();
     app.close();
   }, 30_000);
 });
@@ -835,6 +929,14 @@ describe("register rate limit", () => {
     const ids = await registryIds(limited);
     expect(ids).toHaveLength(MAX_REGISTERS_PER_WINDOW);
     expect(ids).not.toContain(over);
+
+    // A refusal must not hand the caller a fresh window: an id already in the
+    // registry — nothing else would turn it away — is refused just the same.
+    // budget[0] reads disconnected: this socket's route moved on to the last id.
+    const first = budget[0] ?? "";
+    daemon.send(await register(first));
+    await drain(app);
+    expect(await isConnected(limited, first)).toBe(false);
 
     // Honest about the shape of the guarantee: the budget is per socket, so a
     // new connection starts a new window. This bounds one socket's write rate,

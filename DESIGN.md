@@ -99,7 +99,19 @@ its Tailscale lockdown defeats the relay's purpose).
   prompts or repo names, or spawn anything no PSK holder ever asked for. The
   rollback M3 opened — re-running a task a PSK holder once enqueued, lifting a
   pause — is closed by the leader's version floor and the launch ledger's
-  refusal, bar a narrow residual (Threat model, item 4).
+  refusal, bar a narrow residual (Threat model, item 4). Tests cannot prove a
+  universal like this, so the structural half is enforced instead of
+  remembered: `relay/test/layering.test.ts` fails if `relay/src` imports
+  anything from shared beyond routing, bounds and the register verify, decodes
+  or decrypts anything, reads `ct` except to bound it, or grows a binding a key
+  could arrive in. The behavioural half is witnesses: the relay and store suites
+  grep a sentinel ciphertext out of every routing and store path's log line
+  (Workers Logs keeps those lines; a careless debug log is the realistic leak),
+  and the e2e suite sends a re-addressed and a byte-flipped envelope through
+  the shipped relay to the real daemon and watches both die there while an
+  honest frame is answered. "Blind" means payloads and forgery, not traffic
+  analysis: routing ids, IVs, timing, presence and the length of any blob not
+  padded as `status` is stay visible (Threat model, item 3).
 - **Structured payloads only**: daemons accept the `SpawnRequest` fields
   (`shared/src/types.ts` is the schema of record) and build shell commands
   themselves. Raw command strings never cross the wire.
@@ -381,9 +393,11 @@ Séance's noise is cover for a real intruder.
    registry push to every app each time. Neither cap defends _against_ a token
    holder; rotating the token does. They keep the cost finite. The rate limit
    is per socket, so it bounds one connection's spend, not an attacker's total.
-   Wire-level bounds back both: ids are ≤64 safe characters and ciphertext
-   ≤64 KiB, so a register can never reach the DO's value limit as an unhandled
-   throw (2 MB per value on the SQLite backend this DO is declared with —
+   Wire-level bounds back both, measured in UTF-8 bytes rather than string
+   units (2026-10-19; counted as units, a ciphertext at a cap could encode to
+   three times it, and a `status` at its cap past the 2 KiB socket attachment
+   that holds it): ids are ≤64 safe bytes and ciphertext ≤64 KiB, so a register
+   can never reach the DO's value limit as an unhandled throw (2 MB per value on the SQLite backend this DO is declared with —
    `new_sqlite_classes`; this was first written against the KV backend's 128
    KiB). `deviceId` has no shape of its own beyond those bounds — it is the
    base64url SHA-256 of the daemon's public key (43 characters), and the hub
@@ -602,7 +616,12 @@ nothing checked it. The last is the gap they leave.
   session it collided with), prompt length and prompt SHA-256 prefix — never the
   prompt text, which would make `seanced.log` a transcript of everything ever
   asked. With a stolen PSK this log is the only thing that says someone else
-  used your machines.
+  used your machines. The process table was the matching exposure and is closed
+  (2026-10-19): the seed prompt used to reach claude as an argv operand, so the
+  text the log reduces to a hash stood in `ps` output for the session's whole
+  life — readable by every local process, path 6's injected agent included, for
+  every session on the box. It is delivered on stdin now; mechanics and
+  rejected alternatives under Daemon.
 - **Every spawn path audits, through one formatter**, tagged `origin=relay`,
   `origin=cli` or `origin=local`. A trail that covered only the relay would make
   `seanced spawn` the quieter way in — precisely the path someone with local
@@ -2872,10 +2891,10 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   accepted risk. Port the accumulated wisdom from `/spawn`
   (`~/.claude/commands/spawn.md`): worktree/window naming
   (prompt slug; see the naming note below), seed-prompt preamble (worktree setup instructions),
-  `--remote-control` always — kept off the argv tail with the seed prompt
-  behind a `--` terminator, because the flag takes an _optional_ value and,
-  adjacent, it swallows the prompt as the session's name while the session
-  starts idle — **opus**/medium defaults (revised from
+  `--remote-control` always — ahead of the other flags and with a `--`
+  terminator closing the command, because the flag takes an _optional_ value
+  and, adjacent to the seed, it swallowed the prompt as the session's name
+  while the session started idle — **opus**/medium defaults (revised from
   sonnet), per-spawn `caffeinate -is`
   unconditionally (a session you asked for stays awake even on battery),
   and the pane-death verification (remain-on-exit, then poll `pane_dead`
@@ -2894,6 +2913,32 @@ restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   `here` checkout behind origin) and the stuck-spawn detection — joined by a
   blank line in `handleSpawn`, and stays a documented `SessionBackend` fork
   seam besides.
+- **The seed prompt is delivered on stdin, never argv** (revised 2026-10-19).
+  It used to be an operand produced by a command substitution
+  (`… -- "$(cat <seedfile>)"`), which the shell expands _before_ `exec`: the
+  rendered preamble and prompt were then claude's argv — and `caffeinate`'s —
+  for the session's lifetime, i.e. plaintext in `ps` for anything running as
+  the user, which is precisely the text the audit trail reduces to a length and
+  a hash. The seed file is redirected onto stdin instead
+  (`… -- < <seedfile>`): claude takes non-tty stdin as its opening prompt and
+  reopens `/dev/tty` for the UI, so the pane stays attachable and typeable, and
+  macOS's `caffeinate -is` passes the fd through untouched. The shell opens the
+  fd before `exec`, so the unlink after the pane-alive check drops the name and
+  never the read — the cleanup ordering is unchanged. Residual, and unchanged
+  by this: the 0700 seed file is same-user readable until that unlink, seconds
+  against a whole session in `ps`.
+  `--` no longer guards a value, only the absence of one, and stays as the
+  standing guarantee that nothing appended later becomes a flag's optional
+  argument. Probed live on claude 2.1.303 (2026-10-19): argv ends at `--`, fd 0
+  is the unlinked seed, the session answers the seed, takes typed keys after it,
+  and `--remote-control` attaches. Rejected: a prompt-from-file flag (none in
+  2.1.234 or 2.1.303 — checked against `--help`, not assumed); an environment variable
+  (`/proc/<pid>/environ` is same-uid readable and lives exactly as long as argv
+  did); a heredoc (tmux keeps `pane_start_command` for the pane's life, so the
+  text would move from `ps` to the tmux server rather than disappear); and
+  typing it in with `send-keys` or `load-buffer`+`paste-buffer` (send-keys puts
+  the prompt in a client's argv, and both race the TUI being ready for input,
+  trading a leak for a session that silently starts idle).
 - **Worktree spawns fetch first** (revised 2026-10-17; supersedes the "keeping
   the fetch" rejection in the next bullet). Before launch, `base-fetch.ts`
   runs `git fetch origin +refs/heads/<default>:refs/remotes/origin/<default>`
@@ -3852,7 +3897,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — HISTORY on a machine asks
+  filter and score read quota exactly as the cards do. Charts follow the split — History on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply
@@ -3960,7 +4005,15 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   cards read it, observer named and "asleep" when it is. **Queue on auto** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
-  and its decision and follows it: a `queue-changed` nudge that names the task (or none) re-reads
+  and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
+  refreshes update it in place; three tiles, Queued · Placed · Running, each the direct spawn's
+  glyph squircle, stand in for the glyph until the task settles, since an outcome is a glyph and
+  a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
+  stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
+  decision card is not on the verdict at all — the owner's call: the form's preview says where
+  it would go, the Queue screen's row says why there, and the verdict says only that it is
+  running; `verdict-view.ts` derives the rest): a `queue-changed` nudge that names the task (or
+  none) re-reads
   `queue {tasks: [id]}` at once, a reconnect or a new leader re-reads it, and a poll every 2s, at
   most 30 times, is the fallback while the task has not settled (`isSettled`,
   `shared/src/task-phase.ts`). A read answered `not_ready` is a missed

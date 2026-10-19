@@ -5,6 +5,7 @@ import { describeDecision } from "../decision-view.ts";
 import type { QueueRow, QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
+import { Disclosure } from "./disclosure.tsx";
 import { RelayDot, RelaySettings } from "./relay-dot.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
@@ -37,6 +38,14 @@ export function QueueScreen(props: {
 }): JSX.Element {
   const { view, relayState, machines, now, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
+  const [why, setWhy] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleWhy = (id: string): void =>
+    setWhy((open) => {
+      const next = new Set(open);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
   useEffect(() => {
     if (armed === null) return;
@@ -147,17 +156,21 @@ export function QueueScreen(props: {
                       {row.headline} · {row.age}
                     </p>
                   </div>
+                  {row.decision !== null && (
+                    <Disclosure
+                      open={why.has(row.id)}
+                      label={row.decision.tense === "did" ? "Why there" : "Where it would go"}
+                      onToggle={() => toggleWhy(row.id)}
+                    />
+                  )}
                 </div>
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {row.decision !== null && (
-                  <details className="queue-why">
-                    <summary>{row.decision.tense === "did" ? "Why there" : "Where it would go"}</summary>
-                    <DecisionCard
-                      summary={describeDecision(row.decision.record, machines, now, row.decision.tense)}
-                      title={row.decision.tense === "did" ? "WHY THERE" : "WHERE IT WOULD GO"}
-                      quota
-                    />
-                  </details>
+                {row.decision !== null && why.has(row.id) && (
+                  <DecisionCard
+                    summary={describeDecision(row.decision.record, machines, now, row.decision.tense)}
+                    title={row.decision.tense === "did" ? "WHY THERE" : "WHERE IT WOULD GO"}
+                    quota
+                  />
                 )}
                 {(row.canMarkDone || row.canCancel) && (
                   <div className="queue-actions">

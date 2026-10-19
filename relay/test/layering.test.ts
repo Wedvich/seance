@@ -39,12 +39,46 @@ describe("relay/src stays blind", () => {
       const source = await readFile(join(SRC, name), "utf8");
       // The package index is the only door: a deep path would skirt this list.
       if (/["']@seance\/shared\/.+["']/u.test(source)) offenders.push(`${name}: deep import into shared`);
-      if (/subtle\.(?:decrypt|encrypt|importKey)/u.test(source)) offenders.push(`${name}: uses envelope crypto`);
+      // `timingSafeEqual` on the bearer token is the one WebCrypto call allowed.
+      if (/subtle\.(?:decrypt|encrypt|importKey|deriveKey)|\bAES-GCM\b/u.test(source)) {
+        offenders.push(`${name}: uses envelope crypto`);
+      }
+      if (/\batob\s*\(/u.test(source)) offenders.push(`${name}: decodes base64`);
       for (const value of sharedValueImports(source)) {
         if (ALLOWED_VALUES.has(value) || CONSTANT.test(value)) continue;
         offenders.push(`${name}: imports ${value}`);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("reads the ciphertext field only to bound its size", async () => {
+    // wire.ts caps `ct` so a bearer-token holder cannot fill DO storage or the
+    // socket attachment; anywhere else `ct` rides inside an opaque envelope.
+    const files = (await readdir(SRC)).filter((name) => name.endsWith(".ts"));
+    const offenders: string[] = [];
+    for (const name of files) {
+      // oxlint-disable-next-line no-await-in-loop -- seven small files; concurrency buys nothing
+      const source = await readFile(join(SRC, name), "utf8");
+      const reads = [...source.matchAll(/\.ct\b|\[["']ct["']\]/gu)].length;
+      const bounds = name === "wire.ts" ? [...source.matchAll(/\b(?:boundedString|fitsBytes)\(env\.ct,/gu)].length : 0;
+      if (reads > bounds) offenders.push(`${name}: ${reads - bounds} read(s) of ct beyond a bound`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the Worker's env holds no key: one secret, the leader allowlist and test-only timings", async () => {
+    // A new binding is where a PSK would arrive; pinning the list makes adding one a reviewed change.
+    const env = await readFile(join(SRC, "env.ts"), "utf8");
+    const fields = [...env.matchAll(/^\s*readonly\s+([A-Z_]+)\??:/gmu)].map((m) => m[1]);
+    expect(fields).toEqual([
+      "HUB",
+      "BEARER_TOKEN",
+      "SCHEDULER_LEADERS",
+      "SWEEP_INTERVAL_MS",
+      "SWEEP_SILENCE_LIMIT_MS",
+      "STORE_TOMBSTONE_MS",
+      "SCHEDULER_REPLY_WINDOW_MS",
+    ]);
   });
 });

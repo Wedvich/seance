@@ -93,7 +93,10 @@ a production change.
   out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
   `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
   `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
-  scheduler reply credit lapse. A new suite file in
+  scheduler reply credit lapse. `startRelay({ captureLogs })` collects the worker's
+  console lines for `logs()`, which is how the relay and store suites prove ciphertext
+  never reaches a log line; `relay/test/layering.test.ts` is the structural half of
+  "the relay is blind" (DESIGN.md, _Security model_). A new suite file in
   the relay shard, which shares one process with `relay.test.ts`, settles 500 ms before
   booting and after disposing (as `store.test.ts` does), because workerd booted soon after
   a dispose breaks its stdio.

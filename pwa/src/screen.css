@@ -878,6 +878,8 @@
 
 /* ---- verdict ---- */
 
+/* Top-anchored, not centred: a queued verdict grows as its task moves, and the
+   headline must stay put while what follows it fades in below. */
 .verdict {
   flex: 1;
   min-height: 0;
@@ -885,9 +887,9 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 18px;
-  padding: 28px 22px;
+  padding: 56px 22px 28px;
   text-align: center;
 }
 
@@ -921,11 +923,194 @@
   font-weight: 400;
 }
 
+/* Outgoing and incoming text share one grid cell, so a swap is a cross-fade
+   and the taller of the two sets the height — no jump mid-fade. */
+.swap-stack {
+  display: grid;
+  width: 100%;
+}
+
+.swap-stack > * {
+  grid-area: 1 / 1;
+}
+
+/* A state change reads left to right: the old line slides out left as the new
+   one slides in from the right, crossfading on the way. Compound selectors, so
+   they outrank the element's one-shot entrance rule below. */
+.swap-stack > .swap-out {
+  animation: swap-out 0.3s ease-in-out both;
+  pointer-events: none;
+}
+
+.swap-stack > .swap-in {
+  animation: swap-in 0.3s ease-in-out both;
+}
+
+@keyframes swap-in {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+}
+
+@keyframes swap-out {
+  to {
+    opacity: 0;
+    transform: translateX(-32px);
+  }
+}
+
+/* ---- stage track: a queued task's three beads ---- */
+
+/* Beads share the width up to 96px each, so a narrow phone squeezes the track rather than scrolling it. */
+.stage-track {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 288px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-bead {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The same squircle as the direct spawn's glyph, so a queued verdict ends on the tile a manual one shows. */
+.stage-dot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--sur2);
+  color: var(--acc);
+  font-size: 20px;
+  transition: opacity 0.3s ease;
+}
+
+.stage-bead-now .stage-dot {
+  color: var(--fg2);
+}
+
+.stage-bead-next .stage-dot {
+  opacity: 0.45;
+}
+
+/* inline-block, not inline: a transform does nothing on an inline box, and the tick's entrance is one. */
+.stage-mark {
+  position: relative;
+  display: inline-block;
+  line-height: 1;
+}
+
+.stage-mark-wait {
+  animation: fade-in 0.3s ease-out both;
+}
+
+.stage-mark-done {
+  animation: mark-pop 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+@keyframes mark-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+/* The relay dot's sonar, behind the waiting tile. A gentler swell than the
+   dot's: on a 40px tile the dot's 2.4× ring would reach the neighbours. */
+.stage-sonar {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--acc) 35%, transparent);
+  animation: stage-sonar 1.6s ease-out infinite;
+}
+
+/* Like the dot's: the global clamp would freeze the ring at full size, so drop it. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-sonar {
+    display: none;
+  }
+}
+
+@keyframes stage-sonar {
+  from {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  70%,
+  to {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+/* The link runs from the previous tile's edge to this one's; it is drawn by
+   this bead so filling it is the one transition a step makes. */
+.stage-link {
+  position: absolute;
+  top: 19px;
+  /* Edge to edge of the two dots, whatever width the bead got. */
+  left: calc(-50% + 20px);
+  right: calc(50% + 20px);
+  height: 2px;
+  background: var(--sur2);
+  overflow: hidden;
+}
+
+.stage-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--acc);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.4s ease;
+}
+
+.stage-bead-done .stage-link::after,
+.stage-bead-now .stage-link::after {
+  transform: scaleX(1);
+}
+
+.stage-name {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg2);
+  transition: color 0.3s ease;
+}
+
+.stage-bead-done .stage-name,
+.stage-bead-now .stage-name {
+  color: var(--fg);
+}
+
 .verdict-body {
   margin: 0;
   font-size: 16.5px;
   line-height: 1.55;
   color: var(--fg2);
+}
+
+/* Two lines' room: a stage's body is one or two lines, and the card below must not jump as they change. */
+.swap-stack > .verdict-body {
+  min-height: 3.1em;
 }
 
 .verdict-detail {
@@ -955,6 +1140,7 @@
 
 /* One-shot entrance: glyph and headline land first, the rest a beat later. */
 .verdict-glyph,
+.stage-track,
 .verdict-headline {
   animation: verdict-in 0.22s ease-out both;
 }
@@ -963,6 +1149,13 @@
 .verdict-detail,
 .verdict-actions {
   animation: verdict-in 0.22s ease-out 0.08s both;
+}
+
+/* The stage marks: a tick or ellipsis fades in on its tile as the task moves. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
 }
 
 @keyframes verdict-in {
@@ -1142,7 +1335,7 @@
   border-radius: 16px;
 }
 
-/* Name and HISTORY share one line box, so top-aligning them centres both on the same line. */
+/* Name and its toggle share one line box, so top-aligning them centres both on the same line. */
 .fleet-card-head {
   --fleet-line: 20px;
   display: flex;
@@ -1178,10 +1371,35 @@
   overflow-wrap: anywhere;
 }
 
-.fleet-toggle {
+/* Tap target from padding that negative margins take back, as `.prompt-action` does. */
+.disclosure {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
   line-height: var(--fleet-line);
-  animation: none;
+  color: var(--fg2);
+  background: transparent;
+  border: 0;
+  padding: 12px 4px 12px 16px;
+  margin: -12px -4px;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .disclosure:hover {
+    color: var(--acc);
+  }
+}
+
+.disclosure-chevron {
+  font-size: 9px;
+  transition: transform 150ms ease;
+}
+
+.disclosure[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(90deg);
 }
 
 .fleet-note {
@@ -1261,6 +1479,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Pressure gauges only: the column exists for the row that carries one, so quota bars keep their three. */
+.bar-icon {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: var(--fg2);
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.bar:has(> .bar-icon) {
+  grid-template-columns: var(--fleet-label) 13px minmax(0, 1fr) var(--fleet-num);
+  column-gap: 10px;
 }
 
 .bar-track {
@@ -1838,16 +2072,6 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
-}
-
-.queue-why > summary {
-  font-size: 13px;
-  color: var(--fg2);
-  cursor: pointer;
-}
-
-.queue-why > .decision {
-  margin-top: 8px;
 }
 
 .queue-refresh {
