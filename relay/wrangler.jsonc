@@ -14,14 +14,17 @@
   // `enabled` alone is logs only while automatic tracing is in beta; traces need
   // the explicit flag. No head_sampling_rate: sampling defeats "find the one slow
   // op", and the traffic here is a handful of request/response ops, not volume.
+  // Both still keep a per-frame timeline the relay's own lines leave out
+  // (DESIGN.md threat model item 3; open, M3 review S7): turning them off waits
+  // on the owner checking what the stored entries hold.
   //
-  // Deliberately no OTLP destination (dashboard only). Span attributes carry the
-  // request URL, and the app authenticates with `?t=<bearer>` because a browser
-  // cannot set a header on a WebSocket — so any export would put the token in a
-  // third party's logs, which is the cost DESIGN.md's threat model item 3 calls
-  // out. Getting the token off the query string is the prerequisite for one.
+  // `redact_query_string`: the app authenticates with `?t=<bearer>` because a
+  // browser cannot set a header on a WebSocket, and the upgrade's URL is in its
+  // fetch's invocation log and trace. Still no OTLP destination: an export would
+  // rest on that one flag, and would move the timeline off Cloudflare.
   "observability": {
     "enabled": true,
+    "redact_query_string": true,
     "traces": { "enabled": true },
   },
   "durable_objects": {
