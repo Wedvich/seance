@@ -57,6 +57,15 @@ describe("parseEnvelope bounds", () => {
     expect(parseEnvelope(env({ ct: "A".repeat(64 * 1024 + 1) }))).toBeNull();
   });
 
+  test("the caps are bytes, so multi-byte text cannot carry three times the cap", () => {
+    // 32 KiB of three-byte characters is 96 KiB encoded: under the cap counted
+    // as string units, past the storage value it would become.
+    expect(parseEnvelope(env({ ct: "€".repeat(32 * 1024) }))).toBeNull();
+    expect(parseEnvelope(env({ ct: "€".repeat(21 * 1024) }))).not.toBeNull();
+    // `iv` has no charset to save it — the size cap is the only bound there.
+    expect(parseEnvelope(env({ iv: "€".repeat(16) }))).toBeNull();
+  });
+
   test("routing ids are bounded and boring — they become storage keys and log lines", () => {
     expect(parseEnvelope(env({ to: "a".repeat(64) }))).not.toBeNull();
     expect(parseEnvelope(env({ to: "a".repeat(65) }))).toBeNull();
@@ -143,6 +152,11 @@ describe("status frames", () => {
     expect(parseDaemonFrame(JSON.stringify({ t: "msg", env: over }))).not.toBeNull();
     expect(parseDaemonFrame(JSON.stringify({ t: "status" }))).toBeNull();
     expect(parseDaemonFrame(JSON.stringify({ t: "status", env: env({ iv: "" }) }))).toBeNull();
+  });
+
+  test("the KiB is bytes: a status of multi-byte text at the unit count would overflow the attachment", () => {
+    const wide = env({ to: APP_ID, from: "device-1", ct: "€".repeat(STATUS_MAX_CT_LENGTH) });
+    expect(parseDaemonFrame(JSON.stringify({ t: "status", env: wide }))).toBeNull();
   });
 
   test("an app socket cannot send one", () => {
@@ -292,6 +306,9 @@ describe("store frames", () => {
     for (const parsed of both(put(1, 1024 * 1024))) expect(parsed).toMatchObject(tooLarge);
     // A create may not use an overwrite's room.
     for (const parsed of both(put(0, STORE_MAX_CT_LENGTH))) expect(parsed).toMatchObject(tooLarge);
+    // Bytes, not units: a create of multi-byte text under the unit count is still past the bound.
+    const wide = { ...frames.put, expect: 0, env: sealed("€".repeat(STORE_CREATE_MAX_CT_LENGTH / 2)) };
+    for (const parsed of both(wide)) expect(parsed).toMatchObject(tooLarge);
   });
 
   test("at exactly each bound the frame parses", () => {
