@@ -1142,7 +1142,7 @@
   border-radius: 16px;
 }
 
-/* Name and HISTORY share one line box, so top-aligning them centres both on the same line. */
+/* Name and its toggle share one line box, so top-aligning them centres both on the same line. */
 .fleet-card-head {
   --fleet-line: 20px;
   display: flex;
@@ -1178,10 +1178,35 @@
   overflow-wrap: anywhere;
 }
 
-.fleet-toggle {
+/* Tap target from padding that negative margins take back, as `.prompt-action` does. */
+.disclosure {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
   line-height: var(--fleet-line);
-  animation: none;
+  color: var(--fg2);
+  background: transparent;
+  border: 0;
+  padding: 12px 4px 12px 16px;
+  margin: -12px -4px;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .disclosure:hover {
+    color: var(--acc);
+  }
+}
+
+.disclosure-chevron {
+  font-size: 9px;
+  transition: transform 150ms ease;
+}
+
+.disclosure[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(90deg);
 }
 
 .fleet-note {
@@ -1838,16 +1863,6 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
-}
-
-.queue-why > summary {
-  font-size: 13px;
-  color: var(--fg2);
-  cursor: pointer;
-}
-
-.queue-why > .decision {
-  margin-top: 8px;
 }
 
 .queue-refresh {
