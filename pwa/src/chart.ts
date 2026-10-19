@@ -64,13 +64,11 @@ export function accountSeries(series: readonly MetricsSeries[], accountId: strin
     for (const [ts, value] of entry.points) window.points.set(ts, value);
     windows.set(key, window);
   }
-  return [...windows.values()].map(
-    ({ metric, model, points }): MetricsSeries => ({
-      metric,
-      labels: model === undefined ? {} : { model },
-      points: [...points].toSorted(([a], [b]) => a - b),
-    }),
-  );
+  return [...windows.values()].map(({ metric, model, points }): MetricsSeries => ({
+    metric,
+    labels: model === undefined ? {} : { model },
+    points: [...points].toSorted(([a], [b]) => a - b),
+  }));
 }
 
 function format(value: number): string {

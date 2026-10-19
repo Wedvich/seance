@@ -81,11 +81,10 @@ export async function openTaskListing(
   const copies = new Map<string, number>();
   for (const stored of records) copies.set(stored.key, (copies.get(stored.key) ?? 0) + 1);
   const opened = await Promise.all(
-    records.map(
-      async (stored): Promise<TaskRecord | RecordUnreadable> =>
-        !stored.key.startsWith(STORE_PREFIXES.task.prefix) || (copies.get(stored.key) ?? 0) > 1
-          ? "key_mismatch"
-          : openTaskRecord(key, stored, now),
+    records.map(async (stored): Promise<TaskRecord | RecordUnreadable> =>
+      !stored.key.startsWith(STORE_PREFIXES.task.prefix) || (copies.get(stored.key) ?? 0) > 1
+        ? "key_mismatch"
+        : openTaskRecord(key, stored, now),
     ),
   );
   const tasks: TaskRecord[] = [];

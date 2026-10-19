@@ -238,7 +238,7 @@ Séance's noise is cover for a real intruder.
    has only the config field. Revised once more (2026-07-30, same day) for
    boxes that do have a TPM: where `/dev/tpmrm0` exists — bare metal, or a
    Proxmox LXC with the device passed through — `systemd-creds encrypt
---with-key=tpm2` seals the PSK at `~/.local/state/seance/psk.cred`,
+   --with-key=tpm2` seals the PSK at `~/.local/state/seance/psk.cred`,
    behind the same `loadPsk()` and the same `seanced psk-import`. Sealed to
    the TPM alone, deliberately no PCR binding: a PCR-bound blob dies on the
    next firmware update, and the threat here is at-rest exfiltration
@@ -1217,7 +1217,7 @@ requesting socket only.
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows, each `{ id?, window, repo, path,
-taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` for
+  taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` for
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
@@ -1283,7 +1283,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   follows. An unreadable filter is `invalid_request`, never "everything"; an older leader
   ignores it and answers its own listing, so a reader filters the reply again. `unreadable`
   lists every `task:` record the leader cannot read, whatever the filter, as `{ taskId,
-version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
+  version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
   the holds are): what fills the store without ever running.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
@@ -1769,14 +1769,14 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   parse — 32 at every bound still seal under the envelope. **All four are audited** (`queueAudit`
   in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
-code=…`: the request id finds the app's side, and the task id joins the line to the
+  code=…`: the request id finds the app's side, and the task id joins the line to the
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
   the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
   the relay; the despawn a cancel sends audits on its target as any scheduler dispatch does.
   An enqueue is no request — an app's create is a store write the relay answers — so the
   leader's record of one is its admission, the first write after the version-1 create:
   `audit queue origin=leader op=admit task=<task> client=<client> createdAt=<ms>
-state=ready|blocked|failed`, `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
+  state=ready|blocked|failed`, `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
   MCP's `mcp`; absent from older clients), never the prompt (added 2026-10-18, M3 review S5).
 
 - **`queue-changed` tells apps to re-read** (M3 item 6). Every write the term makes to a
@@ -1804,7 +1804,7 @@ state=ready|blocked|failed`, `client` the record's own `TaskSpec.client` (the PW
   `Leader.deliver` says whether a term took the envelope — a running one, or one still taking
   over, which answers `not_ready` — and when none did, `relay-client.ts` opens it under the
   same scheduler guard and answers an app's scheduler request `{ ok: false, code:
-"not_leader" }`. Anything else — a late reply or event for an ended term — is dropped
+  "not_leader" }`. Anything else — a late reply or event for an ended term — is dropped
   (`reason=not-leading`). That makes a follower
   open what is sent the scheduler, where it used to drop it unopened; it acts on none of it beyond
   that one answer.
@@ -1895,7 +1895,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Routing caps" below; or `scope:
-"batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). Skill and
+  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). Skill and
   stacked-base filters are M4's. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
@@ -1941,7 +1941,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
   it. `accountMax` (4, docs/scheduler.md Settled defaults 8) puts `cap_reached` with `scope:
-"account"` on each candidate whose exclave's account already holds that many, counted by
+  "account"` on each candidate whose exclave's account already holds that many, counted by
   the account of each task's reservation or assignment exactly as projected usage counts
   "each in-flight one billed to the same account" — one count, `accountInFlight` in
   `route.ts`. A task whose machine has left the registry has no account to read and counts
@@ -2081,7 +2081,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   pruning ("Pruning") and expiry ("Expiry") run in the first pass, which the host ticks right
   after takeover, so the term answers after one list and one round of `sessions`.
 - **States** (`task.ts`; M2 item 1, M3's added in M3 item 4a, 2026-10-17): `queued →
-blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
+  blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
   `failed`, `cancelled` and `lost` off-path, one transition table, an illegal move a thrown
   bug. `awaiting-merge → failed` is merge expiry, and `lost → failed` covers `lost_expired` beside
   `dispatch_unconfirmed` ("Expiry"). An app creates `queued`; only admission moves it ("Admission and dependencies").
@@ -2101,7 +2101,7 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   when one never can. An edge releases when its predecessor is `done`, whatever settled
   it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
   `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
-"merged"` only at `done`, a merge being what makes a task done. A `failed` or
+  "merged"` only at `done`, a merge being what makes a task done. A `failed` or
   `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
   predecessor with a PR and a pushed branch fails `opened` too. A dependent already
   released has left `blocked` and is not judged again, so an outcome can depend on whether a
@@ -2756,7 +2756,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   was rejected for forking all three. `loginctl enable-linger` starts the
   unit at distro boot with no login session; the Windows scheduled task at
   logon runs `conhost.exe --headless wsl.exe -d <distro> --exec sleep
-infinity`, which both boots the distro after a Windows restart (nothing
+  infinity`, which both boots the distro after a Windows restart (nothing
   else starts WSL until poked) and pins the VM against its idle timeout.
   `install` automates all three — the task via `schtasks.exe` interop,
   printing the manual command if registration is denied — and requires
@@ -2767,7 +2767,7 @@ infinity`, which both boots the distro after a Windows restart (nothing
   screen, WSL cannot run and the machine shows offline — same class as a
   LaunchAgent, which is also per-login. Update = `git pull` +
   `seanced restart` (`launchctl kickstart -k` / `systemctl --user
-restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
+  restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   let `Restart=always` relaunch it — no sudoers or polkit rule to provision).
   Rejected: daemon-inside-tmux (reboot silently takes
   the machine offline — recreates the god-session fragility), the logon
@@ -3568,7 +3568,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   `update-ref -d <ref> <sha>`, a compare-and-delete that refuses a branch that
   moved since it was judged, then its config section, as `git branch -D` would.
   Every deletion's audit line carries the full tip sha — `git branch <name>
-<sha>` is the recovery.
+  <sha>` is the recovery.
 - **Network**: `git fetch --prune origin` only when reap's own last prune of
   that clone is over a day old. That time is kept in `reap-fetch.json` in the
   state dir, keyed by canonical common dir, and written once per run for the
@@ -3607,7 +3607,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   `url.<base>.insteadOf` can rewrite one to ssh. Windows has no `/dev/tty`,
   so it reads as no terminal there. A repo
   with no `origin/HEAD` on disk (about a third) gets `git remote set-head origin
---auto`, bounded the same way, since "merged" needs something to measure
+  --auto`, bounded the same way, since "merged" needs something to measure
   against; still none, and the repo is skipped and named. The branch-state
   emitter (Scheduler, "Branch state") is the other fetcher, through the same guarded
   `fetchIfStale` with a 5-minute window, its own in-memory record of its
@@ -3617,7 +3617,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   worktrees can set that config with `git config`. `core.fsmonitor` (a hook,
   or a daemon per worktree), hooks (`reference-transaction` fires on the
   ref updates reap makes) and the `ext::` transport (it runs its URL) are off for every call (`-c core.fsmonitor=false -c
-core.hooksPath=/dev/null -c protocol.ext.allow=never`). Every network call —
+  core.hooksPath=/dev/null -c protocol.ext.allow=never`). Every network call —
   reap's fetch and `set-head`, the base fetch, the emitter's fetch, self-update's
   `set-head` and fetch — goes through `networkGit` (`git-hardened.ts`), and
   `classifyTip`'s `merge-tree` checks the same thing first: `repoConfigRefusal`
@@ -4432,7 +4432,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   Rejected: falling back to an in-process spawn, which reintroduces the second
   executor this design exists to avoid.
 - **`list_machines` still needs the relay**, and marks the local entry `local:
-true`. When the relay cannot be reached at all it answers with this machine
+  true`. When the relay cannot be reached at all it answers with this machine
   alone plus a note. That is not a nicety: with the relay down, a model that can
   see no machine cannot spawn on the one it is sitting on either. The entry's
   `connected` is probed, not assumed — a connect to the op socket, no op sent,
@@ -4521,7 +4521,7 @@ request itself as an app-role relay client with the key it imported at start.
   (root on every call, and the key in another process); copying the PSK into a store
   the user can read (undoes the sealing).
 - **Never a `Plain`, never an `OpName`.** A broker frame is `{v, kind: "broker", id,
-action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
+  action, …}`; the remote op rides in `remoteOp`, there is no `ts`, and the socket
   routes on `kind` before the `Plain` check. So no broker verb can arrive from the
   relay, no relay op can be smuggled in as a broker action, and — the reason for
   `remoteOp` over `op` — a daemon that predates the broker sees a malformed frame and
@@ -4572,7 +4572,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check, as
+  state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check, as
   broker frames are. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
   reaches the socket through `seanced session-event` (JSON on stdin). A hooks module
@@ -4845,7 +4845,7 @@ latency budget — one hotkey to a running session.
   lists. Those four are duplicated by necessity (different runtimes, plus a
   static manifest that cannot import), so they are guarded instead.
 - **`seanced raycast install` drives Raycast's own CLI, exactly as `mcp
-install` drives Claude's.** Two steps, in order. `ray build` first, because
+  install` drives Claude's.** Two steps, in order. `ray build` first, because
   it is the only typecheck in the loop: `ray develop` skips it entirely — its
   output stops at "compiled entry points", where `ray build` also prints
   "checked TypeScript" — so without this gate a `shared/` wire-type change
@@ -4903,7 +4903,7 @@ install` drives Claude's.** Two steps, in order. `ray build` first, because
   cannot be read.
   When PATH's node is older or missing, install prepends Raycast's own bundled
   runtime (`~/Library/Application Support/com.raycast.macos/NodeJS/runtime/
-<version>/bin`) to the child's PATH — resolved at use time and written
+  <version>/bin`) to the child's PATH — resolved at use time and written
   nowhere, since that directory is versioned and disappears on the next app
   update. Dependencies, when the workspace has none, come from `bun install` at
   the repo root and never npm: `workspace:*` is not an npm spec, and npm would
@@ -4961,7 +4961,7 @@ are tmux-rename's, except where they say mods.
   with `tmux new-window -e` (argv, never the shell string), so a spawn never
   depends on the global one having been set.
 - **The mod reads the tag from the tmux server at rename time** (`tmux
-show-environment -g`), falling back to its own process env only when the
+  show-environment -g`), falling back to its own process env only when the
   server has none (another tmux server, a failed query). Claude copies its env
   once at launch, so a process-env-only mod left any session started on an
   untagged server untagged for good — even after the republish — and one open
@@ -4985,7 +4985,7 @@ show-environment -g`), falling back to its own process env only when the
   whose env never reaches the session; `session.attach` carries no env or tty
   either, and doesn't fire for a terminal attach. So with no `TMUX_PANE` the
   mod looks from outside: `ps -wwAo pid=,ppid=,args=` for each `claude attach
-<prefix of its session id>`, walked up its parents to a pane's shell from
+  <prefix of its session id>`, walked up its parents to a pane's shell from
   `tmux list-panes -a`. The prefix must be an id-shaped word of 4+ characters:
   ps joins argv with spaces, so a prompt like `claude "attach a debugger"` would
   otherwise match every id starting with `a`. Every window attached gets the name; none found (not
@@ -5000,7 +5000,7 @@ show-environment -g`), falling back to its own process env only when the
   window step is skipped.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
   the repo root lists the mods; `seanced mod install` runs `claude plugin
-marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
+  marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
   A directory marketplace is read in place, never copied, so unlike the Raycast
   import a `git pull` (or a self-update) reaches the next session with nothing
   re-run. `marketplace add` is idempotent and repoints in place when the name is
@@ -5014,7 +5014,7 @@ marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
   from a different checkout. Rejected: `CLAUDE_CODE_PLUGIN_DIRS` in
   `~/.claude/settings.json` (Claude's development path — hot-reloads on every
   save), installing from GitHub (`<owner>/<repo>`; a copy that only `claude plugin
-update` refreshes, and the checkout already on the machine is the version the
+  update` refreshes, and the checkout already on the machine is the version the
   daemon runs).
 - **Per exclave**: plugins live per config dir (`<configDir>/plugins/`, enabled in
   that dir's `settings.json`), so `mod install`, `mod uninstall` and doctor's mod
@@ -5127,7 +5127,7 @@ CSP items landed with the app (see the PWA section).
   delivery via `LoadCredentialEncrypted=` rather than probe loosening. What
   remained was tooling, not research, and `install --system` has since folded
   the unit half of that runbook into the CLI (2026-08-11). `psk-import
---system` is still open: sealing is a root step by hand (docs/psk.md).
+  --system` is still open: sealing is a root step by hand (docs/psk.md).
   A delivered key is unreadable outside the unit, so every check that resolves
   one first reported a healthy box as broken and exited 1; `doctor` therefore
   _reads_ the system unit (`systemUnitDeliversPsk`) purely to distinguish "the

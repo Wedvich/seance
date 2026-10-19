@@ -114,20 +114,16 @@ export function createQueueStore(o: QueueStoreOpts): QueueStore {
       const reply = await read({ t: "store-list", id: crypto.randomUUID(), prefix: STORE_PREFIXES.task.prefix });
       if (reply.t !== "store-listed") throw new Error(`store-list: answered with ${reply.t}`);
       const { tasks, unreadable } = await openTaskListing(o.key, reply.records, o.now());
-      const readable = tasks.map(
-        (record): StoredTask => ({
-          id: record.task.id,
-          version: record.version,
-          body: record.task,
-        }),
-      );
-      const skipped = unreadable.map(
-        (entry): StoreEntry => ({
-          id: entry.key.startsWith(STORE_PREFIXES.task.prefix) ? entry.key.slice(TASK_PREFIX_LENGTH) : entry.key,
-          version: entry.version,
-          reason: entry.reason,
-        }),
-      );
+      const readable = tasks.map((record): StoredTask => ({
+        id: record.task.id,
+        version: record.version,
+        body: record.task,
+      }));
+      const skipped = unreadable.map((entry): StoreEntry => ({
+        id: entry.key.startsWith(STORE_PREFIXES.task.prefix) ? entry.key.slice(TASK_PREFIX_LENGTH) : entry.key,
+        version: entry.version,
+        reason: entry.reason,
+      }));
       return [...readable, ...skipped];
     },
 

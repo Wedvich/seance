@@ -585,7 +585,7 @@ precede. Wave 2 waits on the wave-1 item named.
 - **Auth health** (after the OAuth poll) — `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
   filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
-unknown` with its observed-at, carried in `status`, not the register blob (a change there
+  unknown` with its observed-at, carried in `status`, not the register blob (a change there
   re-registers and drops the status, #102). Filter widens to "missing **or expired**"; `unknown`
   routes, since it is every exclave before its first poll. _Proposed (#6):_ a compact,
   never-trimmed list of expired exclaves in `status`, since auth shares about 680 bytes with
