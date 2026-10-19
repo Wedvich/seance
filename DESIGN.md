@@ -270,7 +270,11 @@ Séance's noise is cover for a real intruder.
    Events and would reach any Logpush sink — enabling Logpush to a third party
    later moves the blast radius off Cloudflare, so that choice is not free. The
    relay's `observability` sets `redact_query_string` (2026-10-18, M3 review S7),
-   so the upgrade's URL is stored without it in Cloudflare's logs and traces. It also buys a
+   so the upgrade's URL is stored without its query string. Checked 2026-10-19 over
+   the 7 days Cloudflare still held: every stored `/app` URL already read
+   `t=REDACTED` before the flag, and a daemon's `Authorization` header is stored as
+   `********`, so no rotation followed. The flag stays for the trace a latency hunt
+   turns on (item 3, further down). It also buys a
    passive feed: every `/app` socket receives every machine's `status` every
    30s. The payload is sealed, and padded to one length before sealing
    (Presence & identity, "Encoding"): unpadded, its ciphertext length varied
@@ -302,19 +306,25 @@ Séance's noise is cover for a real intruder.
    blind relay cannot read `re`. So the relay pairs each delivered app request with
    one quiet reply from the leader's device, by count (a credit bank; Scheduler,
    "Leadership", "Scheduler replies"), and every miss fails toward a line. These rules
-   govern the relay's own console lines only. Cloudflare's invocation logs and
-   traces are on (`observability` in `relay/wrangler.jsonc`), and every WebSocket
-   message and alarm is an invocation, so they hold the same timeline. Per
-   Cloudflare's documented fields (Workers Logs, "Invocation logs"; Traces, "Spans
-   and attributes"), each invocation logs the time, the event type, the Durable
-   Object, outcome, CPU and wall time, and each trace's storage spans carry every
-   key read or written (`store:task:<id>`, `device:<id>`) beside the time:
-   per-task and per-machine activity, kept for the plan's log window (three days
-   on the free plan). Turning them off, or sampling them, is **open** (M3 review
-   S7, 2026-10-18) until the owner has checked the stored entries — in particular
-   whether an uncaught exception is still recorded once invocation logs are off.
-   The token is out of it: `redact_query_string` strips the upgrade URL's `?t=`
-   (item 3, "Bearer token disclosure"). Two more
+   govern the relay's own console lines. Cloudflare's invocation logs and traces
+   are **off** (`observability` in `relay/wrangler.jsonc`; M3 review S7, closed
+   2026-10-19), because every WebSocket message and alarm is an invocation and
+   both kept that same timeline for 7 days. What the stored entries held, read
+   through the Workers Observability API: a `webSocketMessage` entry carried the time, event
+   type, Durable Object, outcome, CPU and wall time and a request and trace id,
+   with no message content, size or socket id; a fetch entry added the client's
+   IP, city, postal code, coordinates, ASN and TLS fingerprint. Storage spans
+   carried no keys (no `cloudflare.durable_object.kv.query.keys` on any of them,
+   against what Cloudflare's span reference led us to expect), so traces were
+   the timeline without the task and device ids. Uncaught exceptions should
+   survive the switch: each one was a separate `cf-worker` line with the error,
+   while its invocation entry carried only the event type. Cloudflare does not
+   document it either way, so the first exception after the deploy is the
+   check. Sampling was rejected: a
+   sampled timeline is still one, and `logs.head_sampling_rate` would sample
+   these failure lines too. Rates and latency remain in Workers Metrics as
+   aggregates; to chase one slow op, turn traces on for one deploy, then off
+   again. Two more
    things ride the same feed in plaintext. Every push carries the leader's
    `deviceId` and `term` beside its sealed proof (Scheduler, "Leadership"): which
    machine leads, and — since every leader reconnect bumps the term — a counter
@@ -4898,16 +4908,16 @@ update` refreshes, and the checkout already on the machine is the version the
   log is local and rewritable, so detection assumes the machine is honest.
 - The daemon's own footprint is indistinguishable from a RAT — machines that
   gain an EDR need it allowlisted by hand.
-- Relay tracing (`observability.traces`) and invocation logs are **on, with
-  query strings redacted** (2026-10-18, M3 review S7): every frame is an
-  invocation, so both keep the per-frame timeline threat-model item 3 keeps out
-  of the console, the traces keyed by task and device id — whether to turn them
-  off is open (item 3). Still **no OTLP destination**: Cloudflare can export
-  traces and correlated logs to Honeycomb, Grafana or Sentry, which would move
-  that timeline off Cloudflare, and the app still authenticates with
-  `?t=<bearer>` (a browser cannot set a header on a WebSocket).
-  `redact_query_string` keeps the token out of the URLs Cloudflare stores; an
-  export would rest on that one flag.
+- Relay tracing (`observability.traces`) and invocation logs are **off**
+  (2026-10-19, M3 review S7; threat-model item 3): every frame is an invocation,
+  so both kept the per-frame timeline the console refuses. The cost is the
+  retroactive view: an incident that happened while traces were off cannot be
+  replayed, only the next one caught by turning them on for a deploy. Still
+  **no OTLP destination**: Cloudflare can export traces and correlated logs to
+  Honeycomb, Grafana or Sentry, which would move that timeline off Cloudflare,
+  and the app still authenticates with `?t=<bearer>` (a browser cannot set a
+  header on a WebSocket). `redact_query_string` keeps the token out of the URLs
+  Cloudflare stores; an export would rest on that one flag.
 - True distributed tracing across daemon→relay→pwa is not available and was not
   faked. Trace context rides `traceparent` on an HTTP request, but both tiers
   hold one long-lived WebSocket whose only header exchange is the upgrade; every
