@@ -4,6 +4,7 @@ import { type ChartLine, chartLines } from "../chart.ts";
 import type { AccountCard, Gauge, MachineCard, MachinesView } from "../machines-view.ts";
 import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
 import type { ConnectionState } from "../view.ts";
+import { Disclosure } from "./disclosure.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
 
@@ -207,14 +208,11 @@ function HistoryToggle(props: {
   // Kept while a chart is open even if its source drops: it is the chart's only close.
   if (!available && history === null) return null;
   return (
-    <button
-      type="button"
-      className="prompt-action fleet-toggle"
-      aria-expanded={history !== null}
-      onClick={history === null ? onShow : onHide}
-    >
-      {history === null ? "HISTORY" : "HIDE"}
-    </button>
+    <Disclosure
+      open={history !== null}
+      label={history === null ? "History" : "Hide"}
+      onToggle={history === null ? onShow : onHide}
+    />
   );
 }
 

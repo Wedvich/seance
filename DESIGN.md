@@ -3897,7 +3897,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — HISTORY on a machine asks
+  filter and score read quota exactly as the cards do. Charts follow the split — History on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply
