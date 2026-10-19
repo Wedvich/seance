@@ -1,4 +1,4 @@
-import type { JSX } from "preact";
+import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Machine } from "@seance/shared";
 import { describeDecision } from "../decision-view.ts";
@@ -384,7 +384,7 @@ export function SpawnScreen(props: {
     actions.setPrompt(completeSkill(name));
     promptInput.current?.focus();
   };
-  const pickerKey = (event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): boolean => {
+  const pickerKey = (event: TargetedKeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!pickerOpen || event.isComposing) return false;
     if (event.key === "Escape") {
       setDismissed(form.prompt);
@@ -462,8 +462,6 @@ export function SpawnScreen(props: {
               onScroll={syncBackdrop}
               rows={pickerOpen ? 1 : undefined}
               aria-labelledby="prompt-label"
-              role="combobox"
-              aria-expanded={pickerOpen}
               aria-autocomplete="list"
               aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
               aria-activedescendant={
