@@ -47,7 +47,7 @@ export function App(props: { store: Store }): JSX.Element {
         machineName={view.machine?.name ?? "that machine"}
         machines={state.relay.machines}
         now={now}
-        onQueue={actions.openQueue}
+        onQueue={wide ? undefined : actions.openQueue}
         waitingNote={view.autoAvailability.note}
         onRetry={() => store.retrySpawn(verdict)}
         onAnother={() => store.startAnother()}
