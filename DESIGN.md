@@ -1581,7 +1581,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `createLocalOps(…, "leader")` in `handlers.ts` runs the same validation, backend and audit lines
   the op handlers do, under the new origin `leader`, and takes no `Plain`, so only `sessions`,
   `spawn` and `despawn` can be asked for. Every other machine audits a scheduler dispatch as
-  `origin=relay client=scheduler`.
+  `origin=relay client=scheduler`. Its `sessions` gets a remote's deadline,
+  `OP_TIMEOUT_MS.sessions`, past which it is `unreachable` as a silent remote is: it waits for
+  every launch in flight, ones that start while it waits included, and the pass waits for it
+  (added 2026-10-18, M3 review P1).
 - **Takeover before any dispatch.** The term waits for its leg's first authoritative registry, then
   runs `Scheduler.takeover()` — what it reads and settles is _The library_'s, "What takeover settles", below. A
   takeover that throws is retried every tick
@@ -1604,7 +1607,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   arrives while takeover runs is buffered, since takeover's `load` replaces the held view, and
   applied right after it; one whose refresh fails is kept and retried at the start of the next
   tick, before the pass reads the held view. A nudge with no running term is ignored: takeover
-  reads the same state.
+  reads the same state. A record held unreadable as `created_ahead` — a create from a client
+  whose clock runs more than the replay window fast — binds once the leader's clock passes its
+  stamp, and nothing nudges then, so the term's timer (not every push's tick) re-reads each such
+  record, one `store-get` apiece (added 2026-10-18, M3 review Q5).
 - **Session events reach the term two ways** (item 5; Local op socket, "Session events").
   Another daemon's `session-event` comes through the relay to this daemon's socket. That socket
   hands it unopened to the term's leg, which opens and replay-checks it under the scheduler guard
@@ -2046,7 +2052,14 @@ blocked → ready → reserved → running ⇄ needs-input → awaiting-merge �
   refresh. A pass routes ready tasks
   oldest first, except that one batch's members go in `index` order from where its oldest
   ready member would have gone.
-- **Done detection** (`done.ts`, M3 item 4a). A session that ends with a PR known — the
+- **Done detection** (`done.ts`, M3 item 4a). A failed session read is no answer, never an empty
+  list: `listClaudeSessions` and `listPanes` read empty only when no tmux server runs (tmux's
+  "no server running", or a socket path that does not exist), and throw on any other failure —
+  the exec timeout, a permission error, a server from another tmux version — so `sessions`
+  answers `internal_error` and the library leaves the tasks as they were. Read as empty, every
+  task the machine launched would be in `ended` and settle (added 2026-10-18, M3 review Q1;
+  reap's in-use check and a spawn's `task_running` check read panes the same way).
+  A session that ends with a PR known — the
   event's `prUrl`, the one its record holds, or its machine's `progress` — is
   `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
   it is `done`, `doneBy: "session"`. A live session's newer PR URL is recorded even when

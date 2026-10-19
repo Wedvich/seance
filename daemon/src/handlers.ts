@@ -8,6 +8,7 @@ import type {
   Plain,
   RepoEntry,
   RescanResponse,
+  SessionEntry,
   SessionsResponse,
   SpawnRequest,
   SpawnResponse,
@@ -111,6 +112,20 @@ async function stuckNote(ctx: HandlerContext, handle: string | undefined): Promi
   return screen === null ? base : `${base}:\n${screen}`;
 }
 
+/**
+ * The list a spawn or despawn ack carries. The op already ran, so a read that
+ * fails costs the list, never the answer: an error there would read as the op
+ * having failed, or (a transport code) as maybe never having run.
+ */
+async function sessionsAfter(ctx: HandlerContext, op: string): Promise<readonly SessionEntry[]> {
+  try {
+    return await ctx.backend.sessions(ctx.getRepos());
+  } catch (err) {
+    log.warn(`${op} ran, but the session list after it could not be read: ${String(err)}`);
+    return [];
+  }
+}
+
 async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unknown): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
@@ -152,7 +167,7 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
     // after the backend has watched the new window register (or give up): a
     // list sampled before that is short by the very window this ack announces.
     const found = outcome.registered;
-    const sessions = await ctx.backend.sessions(ctx.getRepos());
+    const sessions = await sessionsAfter(ctx, "spawn");
     const notes = [outcome.note, found ? undefined : await stuckNote(ctx, outcome.handle)];
     const note = notes.filter((n) => n !== undefined).join("\n\n");
     // Field by field rather than a spread: `handle` is backend-scoped and must not reach the wire.
@@ -199,7 +214,7 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
   await audit.ok(result);
   // After the outcome, so the list the caller caches no longer holds the window.
   // Outside the try: a listing that fails must not audit a done despawn as failed.
-  const sessions = await ctx.backend.sessions(ctx.getRepos());
+  const sessions = await sessionsAfter(ctx, "despawn");
   return { ok: true, window: result.window, outcome: result.outcome, sessions };
 }
 

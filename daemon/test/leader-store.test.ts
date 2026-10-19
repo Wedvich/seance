@@ -84,7 +84,7 @@ const noLocalOps: LocalOps = {
  * builds one, on a store the test holds. The tick is pushed out so a task that
  * moves did so because it was told to, not because a timer came round.
  */
-function leaderOver(relay: TestRelay, store: QueueStore, local: LocalOps = noLocalOps) {
+function leaderOver(relay: TestRelay, store: QueueStore, local: LocalOps = noLocalOps, tickIntervalMs = 3_600_000) {
   let resigned = 0;
   const replies: { readonly to: string; readonly response: Plain }[] = [];
   const leader: Leader = createLeader({
@@ -98,7 +98,7 @@ function leaderOver(relay: TestRelay, store: QueueStore, local: LocalOps = noLoc
     resign: () => {
       resigned += 1;
     },
-    tickIntervalMs: 3_600_000,
+    tickIntervalMs,
     createRelay: (term, onEvent) =>
       new RelayClient({
         url: appRelayUrl(relay.url),
@@ -122,9 +122,10 @@ async function withLeader(
   }) => Promise<void>,
   store: QueueStore = new MemoryQueueStore(),
   local: LocalOps = noLocalOps,
+  tickIntervalMs?: number,
 ): Promise<void> {
   const relay = startTestRelay(TOKEN);
-  const { leader, replies, resigned } = leaderOver(relay, store, local);
+  const { leader, replies, resigned } = leaderOver(relay, store, local, tickIntervalMs);
   try {
     await body({ relay, leader, replies, resigned });
   } finally {
@@ -226,6 +227,26 @@ describe("store-changed", () => {
         return (await stateOf(store, "x")) === "ready";
       }, "a later tick to retry the failed refresh and admit it");
     }, store);
+  });
+
+  // Q5 of the M3 review: no second store-changed comes for a create from a phone whose clock runs fast.
+  test("a create stamped ahead of the leader's clock is read again on the timer, and admitted once it binds", async () => {
+    const store = new MemoryQueueStore();
+    // Read as the adapter reads a record whose `createdAt` is past the leader's clock plus the replay window.
+    store.plant("x", "created_ahead");
+    await withLeader(
+      async ({ leader }) => {
+        leader.lead(1);
+        await leader.settled();
+        // The leader's clock passes the stamp: the same record now binds, and nothing nudges the leader.
+        await store.put("x", 1, task("x"));
+        await pollUntil(async () => (await stateOf(store, "x")) === "ready", "the timer to re-read and admit x");
+        expect(leader.term()).toBe(1);
+      },
+      store,
+      noLocalOps,
+      50,
+    );
   });
 });
 
