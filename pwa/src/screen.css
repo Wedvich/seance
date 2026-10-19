@@ -1771,9 +1771,12 @@
 }
 
 /* The form fades out fast; the verdict's own one-shot stagger, live in the new
-   image, is the entrance. */
+   image, is the entrance. The verdict panel is opaque, so the new image would
+   cover the old at full opacity and the fade would never show: paint the old
+   above it (old/new are absolutely positioned siblings in the image pair). */
 :root:active-view-transition-type(verdict-in)::view-transition-old(screen-base) {
   animation: vt-fade-out 0.12s ease-in both;
+  z-index: 1;
 }
 
 :root:active-view-transition-type(verdict-in)::view-transition-new(screen-base) {

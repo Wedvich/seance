@@ -56,6 +56,7 @@ export function transitionKind(prev: ScreenKey, next: ScreenKey): TransitionKind
 /** The slice of the browser's ViewTransition the runner reads. */
 export interface ViewTransitionLike {
   readonly updateCallbackDone: Promise<void>;
+  skipTransition(): void;
 }
 
 export interface TransitionOptions {
@@ -78,12 +79,18 @@ export interface TransitionDeps<S> {
  * the old screen: the update callback runs a frame after the start, and a
  * state applied before it would land in the "old" snapshot.
  */
+interface Started {
+  readonly from: ScreenKey;
+  readonly kind: TransitionKind;
+  transition: ViewTransitionLike | null;
+}
+
 export class TransitionRunner<S> {
   readonly #deps: TransitionDeps<S>;
   /** The key of the latest offered state, which is what the screen shows or is about to. */
   #shown: ScreenKey;
   /** Set while a started transition waits for its update callback; latest offer wins. */
-  #pending: { readonly state: S; readonly run: number } | null = null;
+  #pending: { readonly state: S; readonly run: number; readonly started: Started } | null = null;
   #runs = 0;
 
   constructor(initial: ScreenKey, deps: TransitionDeps<S>) {
@@ -92,10 +99,15 @@ export class TransitionRunner<S> {
   }
 
   offer(state: S, key: ScreenKey): void {
-    const kind = transitionKind(this.#shown, key);
+    const previous = this.#shown;
+    const kind = transitionKind(previous, key);
     this.#shown = key;
     if (this.#pending !== null) {
-      this.#pending = { state, run: this.#pending.run };
+      const { started, run } = this.#pending;
+      this.#pending = { state, run, started };
+      // The types were fixed at start; a collapsed final state that is no
+      // longer that screen change would play the wrong choreography.
+      if (transitionKind(started.from, key) !== started.kind) started.transition?.skipTransition();
       return;
     }
     const { start, reducedMotion, hidden, apply } = this.#deps;
@@ -104,7 +116,8 @@ export class TransitionRunner<S> {
       return;
     }
     const run = ++this.#runs;
-    this.#pending = { state, run };
+    const started: Started = { from: previous, kind, transition: null };
+    this.#pending = { state, run, started };
     const update = (): Promise<void> => this.#flush(run) ?? Promise.resolve();
     let transition: ViewTransitionLike;
     try {
@@ -113,6 +126,7 @@ export class TransitionRunner<S> {
       void this.#flush(run);
       return;
     }
+    started.transition = transition;
     // The browser runs `update` even for a skipped transition; this only
     // backstops one that never did, so a state is never lost. Scoped to its
     // own run, so a late rejection cannot flush a newer transition's state

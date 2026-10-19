@@ -119,19 +119,25 @@ interface Fake {
   readonly starts: TransitionOptions[];
   /** Settles the nth started transition's updateCallbackDone. */
   readonly reject: (index: number) => void;
+  /** Indexes of starts whose skipTransition was called. */
+  readonly skipped: number[];
 }
 
-function fake(options: { supported?: boolean; reduced?: boolean; hidden?: boolean } = {}): Fake {
+function fake(
+  options: { supported?: boolean; reduced?: boolean; hidden?: boolean; applyResult?: Promise<void> } = {},
+): Fake {
   const applied: string[] = [];
   const starts: TransitionOptions[] = [];
   const rejects: (() => void)[] = [];
+  const skipped: number[] = [];
   const deps: TransitionDeps<string> = {
     start:
       options.supported === false
         ? undefined
         : (transition) => {
-            starts.push(transition);
+            const index = starts.push(transition) - 1;
             return {
+              skipTransition: () => void skipped.push(index),
               updateCallbackDone: new Promise<void>((_resolve, reject) => {
                 rejects.push(() => reject(new Error("skipped")));
               }),
@@ -141,10 +147,10 @@ function fake(options: { supported?: boolean; reduced?: boolean; hidden?: boolea
     hidden: () => options.hidden ?? false,
     apply: (next) => {
       applied.push(next);
-      return Promise.resolve();
+      return options.applyResult ?? Promise.resolve();
     },
   };
-  return { deps, applied, starts, reject: (index) => rejects[index]?.() };
+  return { deps, applied, starts, skipped, reject: (index) => rejects[index]?.() };
 }
 
 const FORM = screenKey(state());
@@ -188,6 +194,44 @@ describe("TransitionRunner", () => {
     expect(f.applied).toEqual([]);
     await f.starts[0]?.update();
     expect(f.applied).toEqual(["verdict, typed again"]);
+  });
+
+  test("update returns the promise apply returned, so the commit is awaitable", async () => {
+    const gate = Promise.withResolvers<void>();
+    const f = fake({ applyResult: gate.promise });
+    new TransitionRunner(FORM, f.deps).offer("queue", QUEUE);
+    let settled = false;
+    const done = (async (): Promise<void> => {
+      await f.starts[0]?.update();
+      settled = true;
+    })();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    gate.resolve();
+    await done;
+    expect(settled).toBe(true);
+  });
+
+  test("a collapse into a different screen change skips the transition and still lands the latest", async () => {
+    const f = fake();
+    const runner = new TransitionRunner(FORM, f.deps);
+    runner.offer("queue", QUEUE);
+    runner.offer("form", FORM);
+    expect(f.skipped).toEqual([0]);
+    await f.starts[0]?.update();
+    expect(f.applied).toEqual(["form"]);
+  });
+
+  test("a collapse that keeps the same screen change does not skip", async () => {
+    const f = fake();
+    const runner = new TransitionRunner(FORM, f.deps);
+    runner.offer("a", VERDICT);
+    runner.offer("b", VERDICT);
+    runner.offer("c", VERDICT);
+    expect(f.skipped).toEqual([]);
+    await f.starts[0]?.update();
+    expect(f.applied).toEqual(["c"]);
   });
 
   test("an offer after the callback starts a fresh transition and leaves the first's state alone", async () => {
@@ -246,7 +290,7 @@ describe("TransitionRunner", () => {
 /** Rules as [selector, declarations], comments stripped; nested at-rules flatten to their inner rule. */
 function rules(css: string): [string, string][] {
   return css
-    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replaceAll(/\/\*[\s\S]*?\*\//gu, "")
     .split("}")
     .map((chunk) => chunk.split("{"))
     .filter((parts) => parts.length >= 2)
@@ -259,17 +303,17 @@ describe("the view-transition stylesheet", () => {
   const screen = read("screen.css");
 
   test("names and classes are set only while a transition runs", () => {
-    const naming = rules(screen).filter(([, body]) => /view-transition-(name|class)\s*:/.test(body));
+    const naming = rules(screen).filter(([, body]) => /view-transition-(name|class)\s*:/u.test(body));
     expect(naming.length).toBeGreaterThan(0);
     for (const [selector] of naming) {
       for (const part of selector.split(",")) {
-        expect(part.trim()).toMatch(/^:root:active-view-transition(-type\(|\s)/);
+        expect(part.trim()).toMatch(/^:root:active-view-transition(-type\(|\s)/u);
       }
     }
   });
 
   test("every type a selector names is one the runner starts", () => {
-    const named = [...screen.matchAll(/:active-view-transition-type\(([^)]*)\)/g)].flatMap((m) =>
+    const named = [...screen.matchAll(/:active-view-transition-type\(([^)]*)\)/gu)].flatMap((m) =>
       (m[1] ?? "").split(",").map((type) => type.trim()),
     );
     expect(named.length).toBeGreaterThan(0);
@@ -279,7 +323,16 @@ describe("the view-transition stylesheet", () => {
 
   test("reduced motion reaches the transition pseudo-elements", () => {
     const base = read("base.css");
-    const clamp = base.slice(base.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
+    const start = base.lastIndexOf("@media (prefers-reduced-motion: reduce)");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const open = base.indexOf("{", start);
+    let depth = 0;
+    let end = open;
+    for (; end < base.length; end++) {
+      if (base[end] === "{") depth++;
+      else if (base[end] === "}" && --depth === 0) break;
+    }
+    const clamp = base.slice(open, end);
     expect(clamp).toContain("::view-transition-group(*)");
     expect(clamp).toContain("::view-transition-old(*)");
     expect(clamp).toContain("::view-transition-new(*)");
