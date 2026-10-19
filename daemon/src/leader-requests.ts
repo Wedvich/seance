@@ -2,6 +2,7 @@ import {
   FINISHED,
   StoreRevoked,
   type CancelResult,
+  type DiscardResult,
   type MarkDoneResult,
   type PauseResult,
   type Scheduler,
@@ -22,6 +23,7 @@ import {
   REPLY_JSON_BUDGET,
   TASK_FAILURE_LIMITS,
   type Decision,
+  type DiscardResponse,
   type PauseHold,
   type PauseResponse,
   type Plain,
@@ -201,6 +203,11 @@ const MARK_DONE_REFUSALS: Record<Exclude<MarkDoneResult, { readonly ok: true }>[
   ),
 };
 
+const DISCARD_REFUSALS: Record<Exclude<DiscardResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no unreadable record by that id"),
+  conflict: schedulerError("conflict", "the record is at another version now; read the queue again"),
+};
+
 const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code"], SchedulerError> = {
   not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
   dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
@@ -275,10 +282,19 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply: TaskResponse = { task: result.task };
       return reply;
     }
-    case "discard":
-      // Parsed so the shape is held to now; the library's `discard` lands with S2's leader half.
-      if (parseDiscardRequest(payload) === null) return schedulerError("invalid_request", "malformed discard request");
-      return schedulerError("invalid_request", "this leader cannot discard records yet");
+    case "discard": {
+      const request = parseDiscardRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed discard request");
+      const result = await scheduler.discard(request.taskId, request.version);
+      if (!result.ok) {
+        await audit.refused("discard", id, result.code, { taskId: request.taskId });
+        return DISCARD_REFUSALS[result.code];
+      }
+      await audit.discarded(id, request.taskId, request.version);
+      // No tick: an unreadable record held nothing back but a slot in the store, and an app's create takes that.
+      const reply: DiscardResponse = { taskId: request.taskId };
+      return reply;
+    }
   }
 }
 

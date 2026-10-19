@@ -1259,6 +1259,13 @@ version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
+- `discard { taskId, version }` (`DiscardRequest`) → `{ taskId }` (`DiscardResponse`): deletes a
+  record the leader holds unreadable, at the version a `queue` reply's `unreadable` listed it
+  under (`Scheduler.discard`; added 2026-10-18, M3 review S2). Never a readable task
+  (`task_not_found`), nor a record that changed since (`conflict`). Audited as
+  `op=discard … task=… version=… ok`, or with its refusal. The person's remedy for junk a
+  bearer-token holder planted and for records sealed under an old PSK, which no reader deletes
+  on its own and which hold the store's slots until someone does.
 - `queue-changed { at, tasks? }` runs the other way: the leader's term leg sends it `to: "app"`,
   fire-and-forget, when something an app would show changed (Scheduler, "The leader"). It is
   not a request and has no reply; an app re-reads `queue` on it.
