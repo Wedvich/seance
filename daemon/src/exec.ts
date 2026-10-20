@@ -39,6 +39,20 @@ export function childEnv(
   return env;
 }
 
+/** Drains `stream` but keeps only the first `cap` bytes; no cap keeps everything. */
+async function readText(stream: ReadableStream<Uint8Array>, cap: number | undefined): Promise<string> {
+  if (cap === undefined) return new Response(stream).text();
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  for await (const chunk of stream) {
+    if (kept >= cap) continue;
+    const part = chunk.subarray(0, cap - kept);
+    chunks.push(part);
+    kept += part.length;
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 export async function exec(
   argv: readonly string[],
   opts: {
@@ -59,10 +73,20 @@ export async function exec(
      * With `killGroup`: SIGKILL the group this long after the timeout's SIGTERM.
      * A child that traps TERM would otherwise hold its caller forever. Opt-in:
      * the git/ssh callers keep the one SIGTERM.
+     *
+     * Also makes the group signalled only while its leader is unreaped: once the
+     * leader's exit is reported the group id is reserved only as long as some
+     * member lives, so it may name an unrelated group and no timer here (nor a
+     * caller, via `onExit`) may signal it. A descendant that outlives its leader
+     * and traps TERM is the price.
      */
     readonly killAfterMs?: number;
     /** Receives the child's pid as soon as it exists, so a caller can kill its group on shutdown. */
     readonly onSpawn?: (pid: number) => void;
+    /** Called once the child has been reaped, whatever its pipes are still doing: the pid is no longer the caller's to signal. */
+    readonly onExit?: () => void;
+    /** Keep only this many bytes of each of stdout and stderr; the rest is read and dropped. */
+    readonly maxOutputBytes?: number;
   } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
@@ -73,10 +97,35 @@ export async function exec(
     stderr: "pipe",
     detached: opts.killGroup === true,
   });
-  opts.onSpawn?.(proc.pid);
+  const strict = opts.killGroup === true && opts.killAfterMs !== undefined;
+  let exited = false;
   let timedOut = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const timer = setTimeout(() => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  void proc.exited.then(() => {
+    exited = true;
+    if (strict) {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+    }
+    opts.onExit?.();
+  });
+  try {
+    opts.onSpawn?.(proc.pid);
+  } catch (err) {
+    // A caller that cannot track the child must not leave it running unmanaged.
+    if (opts.killGroup === true) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+    }
+    proc.kill("SIGKILL");
+    throw err;
+  }
+  timer = setTimeout(() => {
+    if (strict && exited) return;
     timedOut = true;
     if (opts.killGroup !== true) {
       proc.kill();
@@ -89,6 +138,7 @@ export async function exec(
     }
     if (opts.killAfterMs === undefined) return;
     killTimer = setTimeout(() => {
+      if (exited) return;
       try {
         process.kill(-proc.pid, "SIGKILL");
       } catch {
@@ -111,12 +161,14 @@ export async function exec(
     }
   }
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readText(proc.stdout, opts.maxOutputBytes),
+    readText(proc.stderr, opts.maxOutputBytes),
     proc.exited,
   ]);
   clearTimeout(timer);
-  clearTimeout(killTimer);
+  // Strict mode's SIGKILL timer outlives the pipes (a TERM-trapping member may have closed
+  // its stdio) and is cleared only when the leader is reaped, above.
+  if (!strict) clearTimeout(killTimer);
   return { exitCode, stdout, stderr, timedOut };
 }
 

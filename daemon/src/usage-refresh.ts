@@ -40,6 +40,9 @@ const HARD_DEADLINE_SLACK_MS = 1_000;
 /** Longest stretch of a failed run's output a warn carries. */
 const EXCERPT_CHARS = 200;
 
+/** An abandoned run's pipes stay read until their holder dies; stop keeping what they carry. */
+const OUTPUT_CAP_BYTES = 64 * 1024;
+
 /**
  * Fixed argv: nothing here comes from a frame, a request or a file. `--safe-mode`
  * always — smaller and faster, and no user hook, plugin or mod runs, so the
@@ -197,8 +200,13 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
       killGroup: true,
       killAfterMs,
       timeoutMs,
+      maxOutputBytes: OUTPUT_CAP_BYTES,
       onSpawn: (pid) => {
         running = pid;
+      },
+      // Reaped, not pipes closed: a setsid'd descendant can hold stdout long after the pgid is reusable.
+      onExit: () => {
+        running = null;
       },
     }).then(
       (result): Outcome => ({
@@ -235,17 +243,18 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
       backoff.delete(key);
       return;
     }
-    const detail =
-      outcome.kind === "ran" && outcome.excerpt !== "" && outcome.exitCode !== 0 ? `: ${outcome.excerpt}` : "";
+    // Exit 0 with the cache unmoved is the documented failure (`/usage` printing the `/cost` view),
+    // and a timed-out run may have said why on stderr: the excerpt helps in all three.
+    const detail = outcome.kind === "ran" && outcome.excerpt !== "" ? `: ${outcome.excerpt}` : "";
     const why =
       outcome.kind === "error"
         ? `could not run ${claudeBin}: ${outcome.message}`
         : outcome.kind === "abandoned"
-          ? `abandoned after ${(timeoutMs + killAfterMs) / 1000}s, still running`
+          ? `abandoned after ${(timeoutMs + killAfterMs + HARD_DEADLINE_SLACK_MS) / 1000}s, still running`
           : outcome.timedOut
-            ? `timed out after ${timeoutMs / 1000}s`
+            ? `timed out after ${timeoutMs / 1000}s${detail}`
             : outcome.exitCode === 0
-              ? "the cache did not move"
+              ? `the cache did not move${detail}`
               : `exit ${outcome.exitCode}, the cache did not move${detail}`;
     if (backoff.get(key)?.warned !== true) {
       log.warn(`usage refresh: ${id} failed (${why}) — retrying every ${Math.round(staleAfterMs / 60_000)} min`);
@@ -291,12 +300,21 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
       queued.length = 0;
       if (timer !== null) clearInterval(timer);
       timer = null;
-      if (running === null) return;
-      try {
-        process.kill(-running, "SIGKILL");
-      } catch {
-        // group already gone
-      }
+      const pid = running;
+      if (pid === null) return;
+      // TERM first: a mid-write KILL could truncate .claude.json, and on a config reload the process lives on.
+      const signal = (sig: "SIGTERM" | "SIGKILL"): void => {
+        try {
+          process.kill(-pid, sig);
+        } catch {
+          // group already gone
+        }
+      };
+      signal("SIGTERM");
+      // Only while the leader is unreaped (`running` still names it): after that the pgid may be reused.
+      setTimeout(() => {
+        if (running === pid) signal("SIGKILL");
+      }, killAfterMs).unref();
     },
     idle: async (): Promise<void> => {
       // oxlint-disable-next-line no-await-in-loop -- a drain begun while waiting is waited for too

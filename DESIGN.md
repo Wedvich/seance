@@ -3341,11 +3341,15 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   config reload's two daemons too, so a small LXC never carries two. A run is killed with its
   process group after 60 s (SIGTERM, then SIGKILL after 5 s for a child that traps it), and
   abandoned a second past that even if a detached grandchild still holds its pipes, so a
-  wedged run cannot hold the lane; `stop()` kills a run in flight, so a restart never leaves
-  one beside the next daemon's. Success is the cache's stamp (`fetchedAtMs`, read on its own,
+  wedged run cannot hold the lane; the group is signalled only while its leader is unreaped
+  (afterwards its id may be reused), and a run's output is capped at 64 KiB. `stop()` sends
+  a run in flight the same TERM-then-KILL, so a restart never leaves one beside the next
+  daemon's and a mid-write kill does not truncate `.claude.json`; a process exiting right
+  after `stop()` leaves a TERM-trapping run to the orphan's own devices. Success is the cache's stamp (`fetchedAtMs`, read on its own,
   whether or not a window parses) moving, not the exit code or stdout; a failure backs that
   exclave off for `staleAfter` (state process-wide, like the lane), warns once per streak, with a
-  bounded one-line excerpt of the run's stderr or JSON `result`, and says when it recovers. The
+  bounded one-line excerpt of the run's JSON `result`, else stderr (for a non-zero exit, a timeout
+  or an exit 0 that left the cache unmoved), and says when it recovers. The
   refresh is not a spawn — no session, no pane, no prompt, fixed argv — so it carries no audit
   origin; failures are logged once per streak. Exec rules (threat model): fixed argv, `exec.ts`'s `bareEnv` so the child gets only
   `HOME`, `PATH`, `USER`/`LOGNAME` (from the passwd entry: without them Claude Code's macOS

@@ -28,7 +28,7 @@ const MIN = 60_000;
  * does what `control.json` says for its exclave — `write` stamps the cache at
  * the control clock as Claude Code would, `leave` exits 0 with the cache
  * untouched, `fail` exits 1 (`failmsg`, `failjson`: with a message), `slow` writes
- * after a beat, `stamp` moves `fetchedAtMs` over a cache with no parseable
+ * after a beat, `costview` exits 0 printing the /cost view over an untouched cache, `stamp` moves `fetchedAtMs` over a cache with no parseable
  * window, `hang` never exits, `trap` never exits and ignores SIGTERM, `orphan`
  * exits leaving a detached grandchild on its stdout.
  * Bun by shebang, not a bash wrapper: bash adds `PWD`, `SHLVL` and `_`, and the
@@ -54,12 +54,16 @@ record("start");
 if (mode === "hang" || mode === "trap") await Bun.sleep(600_000);
 if (mode === "orphan") {
   // A detached grandchild keeps the run's stdout open past the stub's own exit.
-  const child = Bun.spawn(["sleep", "5"], { detached: true, stdout: "inherit", stderr: "inherit" });
+  const child = Bun.spawn(["sleep", "60"], { detached: true, stdout: "inherit", stderr: "inherit" });
   writeFileSync(join(dir, "grandchild.pid"), String(child.pid));
   process.exit(0);
 }
 if (mode === "slow") await Bun.sleep(150);
 if (mode === "fail") process.exit(1);
+if (mode === "costview") {
+  console.log(JSON.stringify({ result: "Total cost:  $0.00\\nTotal duration" }));
+  process.exit(0);
+}
 if (mode === "failmsg") {
   console.error("boom\\n  bad   thing");
   process.exit(1);
@@ -90,7 +94,18 @@ interface Run {
   readonly cwd: string;
 }
 
-type Mode = "write" | "stamp" | "leave" | "fail" | "failmsg" | "failjson" | "slow" | "hang" | "trap" | "orphan";
+type Mode =
+  | "write"
+  | "stamp"
+  | "leave"
+  | "fail"
+  | "failmsg"
+  | "failjson"
+  | "slow"
+  | "costview"
+  | "hang"
+  | "trap"
+  | "orphan";
 
 let base: string;
 let stubDir: string;
@@ -344,7 +359,7 @@ describe("the /usage refresh", () => {
     await cacheAged("default", 11 * MIN);
     await cacheAged("work", 11 * MIN);
     await control({ default: "trap" });
-    const usage = await refresher({ timeoutMs: 1_000, killAfterMs: 200 });
+    const usage = await refresher({ timeoutMs: 2_000, killAfterMs: 200 });
 
     const lines = await captureLog(async () => {
       usage.poke("default");
@@ -356,26 +371,38 @@ describe("the /usage refresh", () => {
     const [trapped, next] = await started();
     expect(next?.exclave).toBe("work");
     expect(alive(trapped?.pid ?? 0)).toBe(false);
-    expect(lines.join("\n")).toContain("default failed (timed out after 1s)");
+    // The slot frees only after TERM at the timeout and KILL after the grace.
+    expect((next?.at ?? 0) - (trapped?.at ?? 0)).toBeGreaterThanOrEqual(2_000 + 200);
+    expect(lines.join("\n")).toContain("default failed (timed out after 2s)");
   });
 
   test("a run whose detached grandchild holds its stdout is abandoned, and the slot frees", async () => {
     await cacheAged("default", 11 * MIN);
     await cacheAged("work", 11 * MIN);
     await control({ default: "orphan" });
-    const usage = await refresher({ timeoutMs: 1_000, killAfterMs: 200 });
+    const usage = await refresher({ timeoutMs: 2_000, killAfterMs: 200 });
 
-    const lines = await captureLog(async () => {
-      usage.poke("default");
-      usage.poke("work");
-      await pollUntil(async () => (await started()).length === 2, "the next exclave's run", 10_000);
-      await usage.idle();
-    });
+    try {
+      const lines = await captureLog(async () => {
+        usage.poke("default");
+        usage.poke("work");
+        await pollUntil(async () => (await started()).length === 2, "the next exclave's run", 10_000);
+        await usage.idle();
+      });
 
-    expect((await started())[1]?.exclave).toBe("work");
-    expect(lines.join("\n")).toContain("default failed (abandoned after 1.2s, still running)");
-    const grandchild = Number(await readFile(join(stubDir, "grandchild.pid"), "utf8"));
-    process.kill(grandchild, "SIGKILL");
+      expect((await started())[1]?.exclave).toBe("work");
+      expect(lines.join("\n")).toContain("default failed (abandoned after 3.2s, still running)");
+    } finally {
+      // Outlives any test timeout, so it is ours to reap.
+      const pid = Number(await readFile(join(stubDir, "grandchild.pid"), "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
   });
 
   test("stop kills a run in flight, so a restart does not leave it running beside the next daemon's", async () => {
@@ -391,6 +418,19 @@ describe("the /usage refresh", () => {
     usage.stop();
     await pollUntil(() => !alive(pid), "the run's death");
     await usage.idle();
+  });
+
+  test("an exit-0 run that left the cache unmoved still carries its excerpt", async () => {
+    await cacheAged("default", 11 * MIN);
+    await control({ default: "costview" });
+
+    const lines = await captureLog(async () => {
+      const usage = await refresher();
+      usage.poke("default");
+      await usage.idle();
+    });
+
+    expect(lines.join("\n")).toContain("default failed (the cache did not move: Total cost: $0.00 Total duration)");
   });
 
   test("a cache whose stamp moved but holds no parseable window is a success, and is not re-run", async () => {
