@@ -238,7 +238,8 @@ export type RelayToAppFrame =
       readonly deviceId: string;
       readonly code: ForgetRefusalCode;
     }
-  | StoreReplyFrame;
+  | StoreReplyFrame
+  | StoreChangedFrame;
 
 /**
  * Machine registry as persisted by the Durable Object. An entry is overwritten
@@ -286,47 +287,172 @@ export type RegistryView = RegistryEntry & {
  * bearer token already lists ciphertext. Records live in DO storage under a
  * namespace of their own, so no key can alias `device:<id>` or `scheduler:term`.
  *
- * A delete under a prefix apps may create into leaves a tombstone: the key and
- * its last version, no `env`, kept `STORE_TOMBSTONE_MS`. While it stands, a put
- * there is `version_conflict`, a get reads `null` and a list leaves it out; it
- * counts toward neither `MAX_TASKS` nor `MAX_RECORDS`. Without it, a token
- * holder could re-create a deleted task from its own authentic version-1 blob
- * and run it again, which version binding cannot see. Past its expiry the
- * reader's age rule (`TaskRecord`) takes over.
- *
- * Reserved, not accepted yet: `account:<hmac>` (M4's account records, app-
- * writable by `expect`), which adds a prefix here when it lands.
+ * A delete under a prefix with `tombstone` leaves one: the key and its last
+ * version, no `env`, kept `STORE_TOMBSTONE_MS`. While it stands, a put there is
+ * `version_conflict`, a get reads `null` and a list leaves it out; it counts
+ * toward no record cap. Without it, a token holder could re-create a deleted
+ * task from its own authentic version-1 blob and run it again, which version
+ * binding cannot see. Past its expiry the reader's age rule (`TaskRecord`) takes
+ * over. Deterministic keys (an HMAC, a singleton) get none: a tombstone there
+ * would block the one key that names the thing for 30 days, so their prefixes
+ * refuse deletes instead and are cleared by overwrite (owner decision #8, M4).
  */
-export const STORE_PREFIXES = {
+export interface StorePrefixRule {
+  readonly prefix: string;
   /**
-   * `task:<id>` → a sealed `TaskRecord`. Any app (or the leader) creates at
-   * `expect: 0`, so enqueue needs no leader; every overwrite and delete is the
-   * leader's.
+   * The one key the prefix accepts, for a singleton: any other key under it is
+   * `invalid_request`. A cap of one alone lets a token holder take the slot with
+   * junk and, deletes being refused, keep it.
    */
-  task: { prefix: "task:", appCreate: true, appWrite: false, termFenced: true },
+  readonly key?: string;
+  /** Apps may create (`expect: 0`). */
+  readonly appCreate: boolean;
+  /** Apps may overwrite (`expect > 0`), by `expect` (CAS). */
+  readonly appWrite: boolean;
   /**
-   * `queue:pause` → the sealed `PauseRecord`: what the queue holds, kept here
-   * so a pause outlives the leader that took it (leader changes are routine).
-   * The leader's alone, created included.
+   * The daemon leg's writes need the current term from the socket it was
+   * issued to (`holdsTerm`). Not fenced: any registered daemon socket writes,
+   * and its creates meet the create floor as an app's do.
    */
-  queue: { prefix: "queue:", appCreate: false, appWrite: false, termFenced: true },
-} as const;
+  readonly termFenced: boolean;
+  /** The daemon leg may create here (the term holder on a fenced prefix). Overwrites are always the daemon leg's. */
+  readonly daemonCreate: boolean;
+  /** `leader`: only the term holder deletes. `never`: nobody does, the leader included. */
+  readonly deletes: "leader" | "never";
+  /** A delete leaves a tombstone. On wherever apps can create and anyone can delete. */
+  readonly tombstone: boolean;
+  /**
+   * Live records at most under the prefix; a create past it is `store_full`.
+   * The caps sum to at most `MAX_RECORDS` (checked in the relay's tests).
+   */
+  readonly cap: number;
+}
 
-export type StorePrefix = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES]["prefix"];
+/**
+ * Task records at most, in `task:`. M2 held ≤64 unfinished tasks plus the newest
+ * 50 finished, which fits. Like `MAX_DEVICES` it bounds a bearer-token holder's
+ * junk (the leader skips what does not open), and full means `store_full` on
+ * create. The leader prunes finished tasks to keep room; a record it cannot read
+ * it reports and never deletes on its own — after a PSK rotation that would be
+ * the whole queue — so clearing junk is a person's act (`discard`). With
+ * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; a deployed relay sent
+ * one intact to a daemon and a Bun app leg, a browser's is unchecked (DESIGN.md,
+ * "The store", _Send size_, which holds the arithmetic), and paging is the fix
+ * if an app leg refuses it.
+ */
+export const MAX_TASKS = 128;
 
-/** A known prefix, then a routing id — so a key stays a short, boring storage key, and a task id is one as it stands. */
-export const STORE_KEY_PATTERN = new RegExp(
-  `^(?:${Object.values(STORE_PREFIXES)
-    .map((rule) => rule.prefix)
-    .join("|")})[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}$`,
-  "u",
-);
+/**
+ * Records across every prefix: the per-prefix caps sum to 202 of it, and the
+ * rest is room for a prefix M4 has yet to name (push subscriptions). 10 MiB at most.
+ */
+export const MAX_RECORDS = 256;
 
 /** The one key under `queue:`. */
 export const PAUSE_KEY = "queue:pause";
 
+/** The one key under `quota:`. */
+export const QUOTA_KEY = "quota:fleet";
+
+export const STORE_PREFIXES = {
+  /**
+   * `task:<id>` → a sealed `TaskRecord`. Any app creates at `expect: 0`, so
+   * enqueue needs no leader; every overwrite and delete is the leader's, and
+   * the leader creates none (M3 review S4).
+   */
+  task: {
+    prefix: "task:",
+    appCreate: true,
+    appWrite: false,
+    termFenced: true,
+    daemonCreate: false,
+    deletes: "leader",
+    tombstone: true,
+    cap: MAX_TASKS,
+  },
+  /**
+   * `queue:pause` → the sealed `PauseRecord`: what the queue holds, kept here
+   * so a pause outlives the leader that took it (leader changes are routine).
+   * The leader's alone, created included; resume overwrites it. Its one key is its cap.
+   */
+  queue: {
+    prefix: "queue:",
+    key: PAUSE_KEY,
+    appCreate: false,
+    appWrite: false,
+    termFenced: true,
+    daemonCreate: true,
+    deletes: "never",
+    tombstone: false,
+    cap: 1,
+  },
+  /**
+   * `settings:<name>` → leader-held singletons (the VAPID keypair, the Linear
+   * key). Written only by a leader op, never by an app (owner decision #9), so
+   * fenced as `queue:` is. Eight: a handful of singletons with room to spare.
+   */
+  settings: {
+    prefix: "settings:",
+    appCreate: false,
+    appWrite: false,
+    termFenced: true,
+    daemonCreate: true,
+    deletes: "never",
+    tombstone: false,
+    cap: 8,
+  },
+  /**
+   * `account:<hmac>` → an account's alias, edited from any client with no
+   * leader up. Apps and every registered daemon socket create and overwrite by
+   * `expect` (owner decision #14: the daemon leg is harder to open than the app
+   * leg that already has these rights). One per Claude account the fleet
+   * signs into; 64 is far past a personal fleet's handful.
+   */
+  account: {
+    prefix: "account:",
+    appCreate: true,
+    appWrite: true,
+    termFenced: false,
+    daemonCreate: true,
+    deletes: "never",
+    tombstone: false,
+    cap: 64,
+  },
+  /**
+   * `quota:fleet` (`QUOTA_KEY`) → the fleet quota record, written by any daemon by
+   * read-open-compare-`expect`, never by an app. One record by decision (one
+   * per account would tell the relay when each is in use), so a cap of one.
+   */
+  quota: {
+    prefix: "quota:",
+    key: QUOTA_KEY,
+    appCreate: false,
+    appWrite: false,
+    termFenced: false,
+    daemonCreate: true,
+    deletes: "never",
+    tombstone: false,
+    cap: 1,
+  },
+} as const satisfies Readonly<Record<string, StorePrefixRule>>;
+
+export type StorePrefix = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES]["prefix"];
+
 /**
- * Ciphertext (base64 chars) one record may hold, under the 64 KiB of
+ * A known prefix, then a routing id — so a key stays a short, boring storage key,
+ * and a task id is one as it stands — or, for a singleton prefix, its one key.
+ */
+export const STORE_KEY_PATTERN = new RegExp(
+  `^(?:${Object.values<StorePrefixRule>(STORE_PREFIXES)
+    .map((rule) => rule.key ?? `${rule.prefix}[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}`)
+    .join("|")})$`,
+  "u",
+);
+
+/**
+ * Ciphertext one record may hold, in UTF-8 bytes — the relay measures bytes,
+ * not string units (#29), and base64 is one byte a character, so an honest
+ * sealer's `ct.length` is the same number. Under the 64 KiB of
  * `ENVELOPE_MAX_CT_LENGTH`: small enough that a whole prefix is one
  * `store-listed` frame. A put past it is `too_large`, so a sealer checks the
  * sealed length first, as the daemon's transport does a reply.
@@ -352,23 +478,6 @@ export const STORE_MAX_CT_LENGTH = 40 * 1024;
  * decision of ten candidates (both measured in parse.test.ts).
  */
 export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
-
-/**
- * Task records at most, in `task:`. M2 held ≤64 unfinished tasks plus the newest
- * 50 finished, which fits. Like `MAX_DEVICES` it bounds a bearer-token holder's
- * junk (the leader skips what does not open), and full means `store_full` on
- * create. The leader prunes finished tasks to keep room; a record it cannot read
- * it reports and never deletes on its own — after a PSK rotation that would be
- * the whole queue — so clearing junk is a person's act (`discard`). With
- * `STORE_MAX_CT_LENGTH`, a full prefix lists as one frame; a deployed relay sent
- * one intact to a daemon and a Bun app leg, a browser's is unchecked (DESIGN.md,
- * "The store", _Send size_, which holds the arithmetic), and paging is the fix
- * if an app leg refuses it.
- */
-export const MAX_TASKS = 128;
-
-/** Records across every prefix: `MAX_TASKS` plus room for the singletons and M4's account records. 10 MiB at most. */
-export const MAX_RECORDS = 256;
 
 /**
  * How long a tombstone stands, and the oldest `createdAt` a leader admits from
@@ -466,8 +575,8 @@ export interface StoreRecord {
  * the act (an app overwriting a task). `invalid_request`: a key outside
  * `STORE_KEY_PATTERN`, an unknown prefix, a malformed field. `too_large`: `ct`
  * past `STORE_MAX_CT_LENGTH`, or a create's past `STORE_CREATE_MAX_CT_LENGTH`.
- * `rate_limited`: past the create floor. `store_full`: a create past
- * `MAX_TASKS` or `MAX_RECORDS`.
+ * `rate_limited`: past the create floor. `store_full`: a create past its
+ * prefix's `cap` or `MAX_RECORDS`, or a delete past the tombstone cap.
  */
 export const STORE_ERROR_CODES = [
   "version_conflict",
@@ -506,11 +615,13 @@ export type StoreReplyFrame =
   | { readonly t: "store-refused"; readonly re: string; readonly code: string };
 
 /**
- * Relay → the leader's daemon socket, after a write the leader did not make
- * itself (an app's enqueue): the nudge that makes the loop read the key, so the
- * leader never polls the store. `version` 0: the key was deleted. The relay
- * already knows every write it makes, so this tells the leader nothing new
- * about the relay — and nothing about the record.
+ * Relay → the leader's daemon socket, after a write its term socket did not
+ * make itself (an app's enqueue, a follower's `quota:` write): the nudge that
+ * makes the loop read the key, so the leader never polls the store. Relay → every
+ * app socket but the writer's, after a write under an `appWrite` prefix
+ * (`account:`), so an edit made in one client shows in another. `version` 0:
+ * the key was deleted. The relay already knows every write it makes, so this
+ * tells the receiver nothing new about the relay — and nothing about the record.
  */
 export interface StoreChangedFrame {
   readonly t: "store-changed";

@@ -70,6 +70,7 @@ import {
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
+  type StorePrefixRule,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
@@ -864,15 +865,17 @@ describe("store", () => {
     expect(parseDecision({ ...decision, candidates: [oauth] })).toBeNull();
   });
 
-  test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {
-    for (const { prefix } of Object.values(STORE_PREFIXES)) expect(isStoreKey(`${prefix}x`)).toBe(true);
+  test("keys are a known prefix and a routing id; an unknown prefix is no key", () => {
+    for (const rule of Object.values<StorePrefixRule>(STORE_PREFIXES))
+      expect(isStoreKey(rule.key ?? `${rule.prefix}x`)).toBe(true);
+    for (const bad of ["queue:x", "queue:pause2", "quota:x", "quota:"]) expect(isStoreKey(bad)).toBe(false);
     expect(isStoreKey(`task:${"a".repeat(ROUTING_ID_MAX_LENGTH)}`)).toBe(true);
     for (const bad of [
       `task:${"a".repeat(ROUTING_ID_MAX_LENGTH + 1)}`,
       "task:",
       "task:a:b",
       "task:a/b",
-      "account:abc",
+      "push:abc",
       "device:abc",
       "scheduler:term",
       "TASK:a",

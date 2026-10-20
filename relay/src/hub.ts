@@ -43,6 +43,7 @@ import {
   admitList,
   authorize,
   RelayStore,
+  floorsWrite,
   ruleFor,
   takeList,
   type ListBucket,
@@ -160,8 +161,19 @@ interface SocketAttachment {
    * nothing back into it, and it keeps no status (`#leftBy`).
    */
   readonly superseded?: true;
-  /** The `store-list` floor's window (`admitList`); a re-register keeps it, so it cannot reset the floor. */
-  readonly listWindow?: RateWindow;
+  /**
+   * Set when a register on this socket failed verify, before it closes: the
+   * identity from an earlier register no longer speaks for it, so a store frame
+   * queued behind the failure is refused like an unregistered socket's.
+   */
+  readonly unverified?: true;
+  /** The `store-list` floor's windows by prefix (`admitList`); a re-register keeps them, so it cannot reset the floor. */
+  readonly listWindows?: ListWindows;
+  /**
+   * The write floor's window (`admitCreate`), spent by writes under a prefix
+   * that is not term-fenced, overwrites included. Kept by a re-register for the same reason.
+   */
+  readonly createWindow?: RateWindow;
   /**
    * Spend of the current register window. Kept off `identity` because it is
    * stamped for attempts the verify or the registry cap turns away too, and
@@ -176,8 +188,11 @@ interface SocketAttachment {
  */
 interface AppAttachment {
   readonly createWindow?: RateWindow;
-  readonly listWindow?: RateWindow;
+  readonly listWindows?: ListWindows;
 }
+
+/** A socket's `store-list` windows, one per prefix it has listed. */
+type ListWindows = Readonly<Record<string, RateWindow>>;
 
 interface DaemonSocket {
   readonly ws: WebSocket;
@@ -353,19 +368,6 @@ export class Hub implements DurableObject {
       console.log("wire dropped reason=malformed-daemon-frame");
       return;
     }
-    // Before the register and registration checks: reads are anyone's, and an
-    // unregistered socket's write fails `holdsTerm` (no identity) and is
-    // answered `not_leader` rather than dropped. A put's `env.from` is not
-    // compared with the socket's id: the relay is blind, and the seal's
-    // addressing is the clients' to decide.
-    if (frame.t === "store-rejected") {
-      this.#refuseStore(ws, "daemon", frame.id, frame.t, undefined, frame.code);
-      return;
-    }
-    if (isStoreRequest(frame)) {
-      await this.#onStoreFrame(ws, "daemon", frame);
-      return;
-    }
     if (frame.t === "register") {
       const pending = this.#register(ws, frame);
       this.#registering.set(ws, pending);
@@ -378,6 +380,21 @@ export class Hub implements DurableObject {
     }
     // A failed register already logged itself; this frame just meets its outcome.
     await this.#registering.get(ws)?.catch(() => undefined);
+    // After the register: under a prefix that is not term-fenced any registered
+    // daemon socket writes, so registration is the daemon leg's authority there,
+    // and nothing on this leg reads before it either. Refused, not dropped, so
+    // the client settles rather than riding `STORE_TIMEOUT_MS`; a superseded
+    // socket counts as unregistered. A put's `env.from` is not compared with the
+    // socket's id: the relay is blind, and the seal's addressing is the clients'.
+    if (frame.t === "store-rejected" || isStoreRequest(frame)) {
+      if (this.#leaderSocketOf(ws) === null) {
+        this.#refuseStore(ws, "daemon", frame.id, frame.t, undefined, "forbidden");
+        return;
+      }
+      if (frame.t === "store-rejected") this.#refuseStore(ws, "daemon", frame.id, frame.t, undefined, frame.code);
+      else await this.#onStoreFrame(ws, "daemon", frame);
+      return;
+    }
     const deviceId = this.#deviceIdOf(ws);
     if (deviceId === null) {
       console.log("wire dropped reason=unregistered-daemon");
@@ -578,6 +595,7 @@ export class Hub implements DurableObject {
       console.log(`refused register from ${deviceId}: ${verdict}`);
       // Closed, not left open: a daemon re-registers on connect only, and the
       // reason is the one word it gets about why its identity was not accepted.
+      ws.serializeAttachment({ ...attachment, rate, unverified: true } satisfies SocketAttachment);
       ws.close(1000, "register unverified");
       return;
     }
@@ -604,7 +622,8 @@ export class Hub implements DurableObject {
       connectedAt: attachment.connectedAt,
       rate,
       identity: { deviceId, roles: knownRoles(frame.roles ?? []) },
-      ...(attachment.listWindow === undefined ? {} : { listWindow: attachment.listWindow }),
+      ...(attachment.listWindows === undefined ? {} : { listWindows: attachment.listWindows }),
+      ...(attachment.createWindow === undefined ? {} : { createWindow: attachment.createWindow }),
     } satisfies SocketAttachment);
     for (const other of this.#ctx.getWebSockets("daemon")) {
       if (other === ws || this.#deviceIdOf(other) !== deviceId) continue;
@@ -640,9 +659,10 @@ export class Hub implements DurableObject {
   }
 
   /**
-   * Answers one store frame. A list meets its floors first (`#admitList`). For
+   * Answers one store frame; on the daemon leg, only a registered socket's
+   * (`#onDaemonMessage`). A list meets its floors first (`#admitList`). For
    * a write the order of checks is the contract: rule (`forbidden` /
-   * `not_leader`), then tombstone and version, then the app create floor, then
+   * `not_leader`), then tombstone and version, then the create floor, then
    * the caps (records on a create, tombstones on a delete), then the write. The
    * floor sits behind the version check so an enqueue retried after it landed
    * reads `version_conflict`, not `rate_limited`, and only creates that land
@@ -685,14 +705,13 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // Tentative: only a create that lands is written back to the attachment, so
-    // a refusal of any kind leaves the window as it was. No floor on the daemon
-    // leg: every write there is term-fenced and none creates a task, so the
-    // leader's creates are its own `queue:` singletons. The attachment is an
-    // `AppAttachment` only on an app socket, so it is read only when the floor applies.
-    const floored = leg === "app" && act === "create";
-    const attachment = floored ? (ws.deserializeAttachment() as AppAttachment | null) : null;
-    const window = floored ? admitCreate(attachment?.createWindow, now) : null;
+    // Tentative: only a write that lands is written back to the attachment, so
+    // a refusal of any kind leaves the window as it was. The floor binds where
+    // writes are not term-fenced (`floorsWrite`): there any registered socket
+    // writes, while on a fenced prefix the term holder's writes are its own,
+    // bounded by caps and by the term.
+    const floored = floorsWrite(rule, act, leg);
+    const window = floored ? admitCreate(this.#attachmentOf(ws)?.createWindow, now) : null;
     let result: WriteResult;
     try {
       result =
@@ -708,31 +727,40 @@ export class Hub implements DurableObject {
       this.#refuseStore(ws, leg, frame.id, frame.t, frame.key, result.code);
       return;
     }
-    if (window !== null) ws.serializeAttachment({ ...attachment, createWindow: window } satisfies AppAttachment);
+    // Re-read for the write-back: the spread keeps the rest of the attachment as it is now.
+    if (window !== null) ws.serializeAttachment({ ...this.#attachmentOf(ws), createWindow: window });
     this.#storeReply(ws, { t: "store-written", re: frame.id, version: result.version });
-    if (leg === "app") await this.#nudgeLeader(frame.key, frame.t === "store-put" ? result.version : 0);
+    const version = frame.t === "store-put" ? result.version : 0;
+    if (rule.appWrite) this.#nudgeApps(ws, frame.key, version);
+    // A frame that held the term is the leader's own write: no read to find the leader. One without a term (a non-fenced prefix) may still be its socket's, which `#nudgeLeader` checks.
+    if (!leader) await this.#nudgeLeader(ws, frame.key, version);
+  }
+
+  /** Either leg's attachment, for a spread that writes one floor's window back: each leg's carries its own. */
+  #attachmentOf(ws: WebSocket): AppAttachment | SocketAttachment | null {
+    return ws.deserializeAttachment() as AppAttachment | SocketAttachment | null;
   }
 
   /**
    * The `store-list` floors (`admitList`, `takeList`): false past either.
    * Exempt is the socket the current term was issued to — a list carries no
    * term — so a takeover is never refused; anyone else, a follower or an older
-   * socket of the leader's own id included, spends both. A refusal spends
-   * neither, as the create floor's does not.
+   * socket of the leader's own id included, spends both. Both are the prefix's:
+   * one prefix's lists never spend another's. A refusal spends neither, as the
+   * create floor's does not.
    */
   async #admitList(ws: WebSocket, leg: Role, prefix: string, now: number): Promise<boolean> {
     if (leg === "daemon") {
       const record = await this.#leaderRecord();
       if (holdsTerm(record, record.term, this.#leaderSocketOf(ws))) return true;
     }
-    // Either leg's attachment: each carries its own `listWindow`, and the spread keeps the rest as it was.
-    const attachment = ws.deserializeAttachment() as AppAttachment | SocketAttachment | null;
-    const window = admitList(attachment?.listWindow, now);
+    const attachment = this.#attachmentOf(ws);
+    const window = admitList(attachment?.listWindows?.[prefix], now);
     if (window === null) return false;
     const bucket = takeList(this.#listBuckets.get(prefix), now);
     if (bucket === null) return false;
     this.#listBuckets.set(prefix, bucket);
-    ws.serializeAttachment({ ...attachment, listWindow: window });
+    ws.serializeAttachment({ ...attachment, listWindows: { ...attachment?.listWindows, [prefix]: window } });
     return true;
   }
 
@@ -750,21 +778,38 @@ export class Hub implements DurableObject {
   }
 
   /**
-   * Tells the leader's daemon socket — the one its term was issued to — that an
-   * app wrote a key. Daemon-leg writes are the leader's own, so any app-leg write
-   * is one the leader did not make. With no such socket nothing is sent: the next
+   * Tells the leader's daemon socket — the one its term was issued to — that a
+   * key was written by anyone else: an app, or, under a prefix that is not
+   * term-fenced, another daemon socket. Only the term socket's own writes are
+   * skipped, since it made them. With no such socket nothing is sent: the next
    * leader reconciles from `store-list` at takeover.
    */
-  async #nudgeLeader(key: string, version: number): Promise<void> {
+  async #nudgeLeader(writer: WebSocket, key: string, version: number): Promise<void> {
     const record = await this.#leaderRecord();
     if (record.deviceId === null) return;
     const leader = this.#daemonsNewestFirst([]).find(
       ({ attachment }) =>
         attachment?.identity?.deviceId === record.deviceId && attachment.connectedAt === record.connectedAt,
     );
-    if (leader === undefined) return;
+    if (leader === undefined || leader.ws === writer) return;
     const err = trySend(leader.ws, JSON.stringify({ t: "store-changed", key, version } satisfies RelayToDaemonFrame));
     if (err !== null) console.log(`store-changed not sent: ${err}`);
+  }
+
+  /**
+   * Tells every app socket but the writer that a key under an `appWrite` prefix
+   * changed, so an edit made in one client shows in the others. Failures alone
+   * are logged, as `#status`'s are: a line per fan-out would be a timeline of edits.
+   */
+  #nudgeApps(writer: WebSocket, key: string, version: number): void {
+    const text = JSON.stringify({ t: "store-changed", key, version } satisfies RelayToAppFrame);
+    const failures: string[] = [];
+    for (const app of this.#ctx.getWebSockets("app")) {
+      if (app === writer) continue;
+      const err = trySend(app, text);
+      if (err !== null) failures.push(err);
+    }
+    if (failures.length > 0) console.log(`store-changed not sent to apps:${failSuffix(failures)}`);
   }
 
   async #route(env: Envelope, sender: WebSocket, senderRole: Role): Promise<void> {
@@ -1067,7 +1112,7 @@ export class Hub implements DurableObject {
   #leaderSocketOf(ws: WebSocket): LeaderSocket | null {
     if (this.#roleOf(ws) !== "daemon") return null;
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    if (attachment === null || attachment.superseded === true) return null;
+    if (attachment === null || attachment.superseded === true || attachment.unverified === true) return null;
     const deviceId = attachment.identity?.deviceId;
     return deviceId === undefined ? null : { deviceId, connectedAt: attachment.connectedAt };
   }

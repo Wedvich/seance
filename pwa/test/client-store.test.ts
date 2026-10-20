@@ -287,7 +287,7 @@ describe("reading tasks", () => {
     const twice = queued();
     const outside = queued();
     const copy = await stored(twice, 1);
-    const outsideAt = `queue:${outside.id}`;
+    const outsideAt = `settings:${outside.id}`;
     const records = [await stored(good, 1), copy, copy, await stored(outside, 1, key, outsideAt)];
     double.answer = (frame) => ({ t: "store-listed", re: frame["id"], records });
 

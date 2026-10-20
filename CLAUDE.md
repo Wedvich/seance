@@ -158,13 +158,18 @@ green:
   pause write alone may set it lower): a task record below it is `version_regressed`, a pause
   below it or missing holds the whole queue, and a task record that vanishes without the
   leader's delete is never read as gone, and the
-  relay's store: a `term` on an app-leg store frame authorizes nothing, a daemon-leg write is
-  fenced on the term and the socket it was issued to (`holdsTerm` in `relay/src/leadership.ts`),
-  store records live under their own storage namespaces so no key aliases `device:` or
-  `scheduler:term`, `queue:` deletes are refused, the app leg can only create, and only under
-  `task:`, and the relay logs no store `env`/`ct` and no
+  relay's store: every store policy is a field on the prefix's `STORE_PREFIXES` rule and
+  `relay/src/store.ts` names no prefix, a `term` on an app-leg store frame authorizes nothing, a
+  daemon-leg write to a term-fenced prefix is fenced on the term and the socket it was issued to
+  (`holdsTerm` in `relay/src/leadership.ts`), a `/daemon` socket's store frames are answered only
+  once its register is accepted, every create the term fence does not cover meets the write
+  floor, and so does every overwrite there, a singleton prefix accepts one key (`queue:pause`,
+  `quota:fleet`: a cap of one alone lets a token holder squat the slot), store records live under their own storage namespaces so no key aliases `device:` or
+  `scheduler:term`, deletes are refused on every prefix but `task:` (the leader's there, and only
+  `task:` keeps tombstones), the app leg creates only under `task:` and `account:` and overwrites
+  only under `account:`, and the relay logs no store `env`/`ct` and no
   line per accepted store read or write — nor one per delivered scheduler envelope, `queue-changed`
-  nudge or credited reply, only their failures (DESIGN.md threat model, "Bearer token
+  or `store-changed` nudge or credited reply, only their failures (DESIGN.md threat model, "Bearer token
   disclosure"), and a task record is read only through `openTaskRecord` then `bindTaskRecord`
   (`shared/src/task-record.ts`), and no reader deletes a record it cannot read on its own — after
   a PSK rotation every record reads that way — and a tombstone lives exactly as long as

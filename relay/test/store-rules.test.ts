@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_RECORDS,
   MAX_STORE_CREATES_PER_WINDOW,
   MAX_TASKS,
   STORE_CREATE_WINDOW_MS,
@@ -22,6 +23,7 @@ import {
   admitCreate,
   admitList,
   authorize,
+  floorsWrite,
   ruleFor,
   takeList,
   tombstoneAgeKey,
@@ -77,6 +79,80 @@ describe("authorize", () => {
     expect(authorize(pause, "delete", "app", false)).toBe("forbidden");
     expect(authorize(pause, "delete", "app", true)).toBe("forbidden");
   });
+
+  test("settings: the leader's alone, as queue: is, and never deleted", () => {
+    const settings = rule("settings:vapid");
+    for (const act of ACTS) expect(authorize(settings, act, "app", false)).toBe("forbidden");
+    for (const act of ["create", "overwrite"] as const) {
+      expect(authorize(settings, act, "daemon", true)).toBeNull();
+      expect(authorize(settings, act, "daemon", false)).toBe("not_leader");
+    }
+    expect(authorize(settings, "delete", "daemon", true)).toBe("forbidden");
+  });
+
+  // Owner decision #14: the daemon leg needs a signed register on top of the token, so it gets an app's rights here.
+  test("account: apps and any registered daemon create and overwrite; nobody deletes", () => {
+    const account = rule("account:abc");
+    for (const leg of ["app", "daemon"] as const) {
+      for (const leader of [false, true]) {
+        expect(authorize(account, "create", leg, leader)).toBeNull();
+        expect(authorize(account, "overwrite", leg, leader)).toBeNull();
+        expect(authorize(account, "delete", leg, leader)).toBe("forbidden");
+      }
+    }
+  });
+
+  test("quota: any registered daemon creates and overwrites, no app writes, nobody deletes", () => {
+    const quota = rule("quota:fleet");
+    for (const leader of [false, true]) {
+      expect(authorize(quota, "create", "daemon", leader)).toBeNull();
+      expect(authorize(quota, "overwrite", "daemon", leader)).toBeNull();
+      expect(authorize(quota, "delete", "daemon", leader)).toBe("forbidden");
+    }
+    for (const act of ACTS) expect(authorize(quota, act, "app", false)).toBe("forbidden");
+  });
+});
+
+describe("prefix rules", () => {
+  const rules = Object.values(STORE_PREFIXES);
+
+  test("the caps sum to at most MAX_RECORDS, so no prefix's fill can starve another's", () => {
+    expect(rules.reduce((sum, { cap }) => sum + cap, 0)).toBeLessThanOrEqual(MAX_RECORDS);
+    expect(STORE_PREFIXES.task.cap).toBe(MAX_TASKS);
+  });
+
+  // A tombstone is what stops an app re-creating a deleted record from its own old blob; a never-deleted
+  // prefix needs none, and on a deterministic key one would block the only key that names the thing.
+  test("a tombstone wherever a delete can be undone by a create, and nowhere else", () => {
+    for (const { prefix, appCreate, deletes, tombstone } of rules) {
+      expect({ prefix, tombstone }).toEqual({ prefix, tombstone: deletes !== "never" && appCreate });
+    }
+  });
+
+  test("no prefix is another's prefix, so a key has one rule", () => {
+    for (const a of rules) for (const b of rules) if (a !== b) expect(a.prefix.startsWith(b.prefix)).toBe(false);
+  });
+
+  test("the write floor binds every app create, and every create and overwrite where writes are not term-fenced", () => {
+    for (const r of rules) {
+      expect(floorsWrite(r, "create", "app")).toBe(true);
+      expect(floorsWrite(r, "create", "daemon")).toBe(!r.termFenced);
+      expect(floorsWrite(r, "overwrite", "daemon")).toBe(!r.termFenced);
+      expect(floorsWrite(r, "overwrite", "app")).toBe(!r.termFenced);
+      for (const leg of ["app", "daemon"] as const) expect(floorsWrite(r, "delete", leg)).toBe(false);
+    }
+  });
+
+  test("a singleton prefix accepts its one key: another key under it has no rule, and the key pattern agrees", () => {
+    for (const r of rules) {
+      if (!("key" in r)) continue;
+      expect(ruleFor(r.key)).toBe(r);
+      expect(ruleFor(`${r.prefix}junk`)).toBeNull();
+      expect(STORE_KEY_PATTERN.test(r.key)).toBe(true);
+      expect(STORE_KEY_PATTERN.test(`${r.prefix}junk`)).toBe(false);
+    }
+    expect(rules.flatMap((r) => ("key" in r ? [r.key] : []))).toEqual(["queue:pause", "quota:fleet"]);
+  });
 });
 
 describe("actOf", () => {
@@ -92,7 +168,10 @@ describe("ruleFor", () => {
   test("a key maps to its prefix's rule; an unknown prefix to none", () => {
     expect(ruleFor("task:x")).toBe(STORE_PREFIXES.task);
     expect(ruleFor("queue:pause")).toBe(STORE_PREFIXES.queue);
-    expect(ruleFor("account:x")).toBeNull();
+    expect(ruleFor("account:x")).toBe(STORE_PREFIXES.account);
+    expect(ruleFor("quota:fleet")).toBe(STORE_PREFIXES.quota);
+    expect(ruleFor("settings:vapid")).toBe(STORE_PREFIXES.settings);
+    expect(ruleFor("push:x")).toBeNull();
     expect(ruleFor("device:x")).toBeNull();
   });
 });
@@ -143,9 +222,12 @@ describe("takeList", () => {
     });
   });
 
-  // The free plan reads 5M rows a day; past that every storage op fails until midnight UTC.
-  test("a day of full task: listings at the steady rate leaves the rest of the free daily reads", () => {
-    expect((86_400_000 / LIST_REFILL_MS) * MAX_TASKS).toBeLessThan(0.6 * 5_000_000);
+  // The free plan reads 5M rows a day; past that every storage op fails until midnight UTC. Each prefix has
+  // its own bucket, so the bound is every prefix listed full at the steady rate: the caps, at most MAX_RECORDS.
+  test("a day of every prefix listed full at the steady rate leaves the rest of the free daily reads", () => {
+    const caps = Object.values(STORE_PREFIXES).reduce((sum, { cap }) => sum + cap, 0);
+    expect((86_400_000 / LIST_REFILL_MS) * caps).toBeLessThan(0.6 * 5_000_000);
+    expect((86_400_000 / LIST_REFILL_MS) * MAX_RECORDS).toBeLessThan(0.6 * 5_000_000);
   });
 });
 
@@ -164,7 +246,15 @@ describe("tombstoneAgeKey", () => {
 });
 
 describe("storage namespaces", () => {
-  const SAMPLE_KEYS = ["task:t-1", "task:a.b_c-D", `task:${"z".repeat(64)}`, "queue:pause", "queue:q-000"];
+  const SAMPLE_KEYS = [
+    "task:t-1",
+    "task:a.b_c-D",
+    `task:${"z".repeat(64)}`,
+    "queue:pause",
+    `account:${"f".repeat(64)}`,
+    "quota:fleet",
+    "settings:vapid",
+  ];
 
   test("a record's storage key never aliases the registry or the leader record", () => {
     for (const key of SAMPLE_KEYS) {
@@ -336,6 +426,24 @@ describe("RelayStore tombstone cap", () => {
     storage.data.set(COUNTS_KEY, { total: 1, prefixes: { "task:": 1 } });
 
     expect(await store.delete("task:d", 1, NOW)).toEqual({ ok: false, code: "store_full" });
+  });
+
+  // RelayStore storage directly: `authorize` refuses this delete on every leg, so no frame reaches it.
+  test("a delete under a prefix with no tombstone leaves none and counts none", async () => {
+    const { storage, store } = await withTasks("queue:pause");
+    expect(await store.delete("queue:pause", 1, NOW)).toMatchObject({ ok: true, version: 1 });
+    expect(storage.data.has(TOMBSTONE_NS + "queue:pause")).toBe(false);
+    expect(counts(storage)).toMatchObject({ total: 0, tombstones: 0 });
+    expect(await store.put("queue:pause", 0, ENV, NOW, true)).toMatchObject({ ok: true, version: 1 });
+  });
+
+  test("a create past its prefix's cap is store_full, and other prefixes still create", async () => {
+    const { store } = await withTasks(
+      ...Array.from({ length: STORE_PREFIXES.settings.cap }, (_, i) => `settings:s${i}`),
+    );
+    expect(await store.put("settings:over", 0, ENV, NOW, true)).toEqual({ ok: false, code: "store_full" });
+    expect(await store.put("quota:other", 0, ENV, NOW, true)).toEqual({ ok: false, code: "invalid_request" });
+    expect(await store.put("account:a", 0, ENV, NOW, true)).toMatchObject({ ok: true, version: 1 });
   });
 
   test("a create that clears an expired tombstone counts it gone", async () => {

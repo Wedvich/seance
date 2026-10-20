@@ -256,7 +256,7 @@ describe("store frames", () => {
   });
 
   test("a bad key is invalid_request, under get, put and delete", () => {
-    const keys = ["device:x", "task:", "task:a:b", "account:x", `task:${"a".repeat(65)}`, "scheduler:term", "", 3];
+    const keys = ["device:x", "task:", "task:a:b", "push:x", `task:${"a".repeat(65)}`, "scheduler:term", "", 3];
     for (const key of keys) {
       for (const frame of [frames.get, frames.put, frames.delete]) {
         for (const parsed of both({ ...frame, key })) {
@@ -267,12 +267,14 @@ describe("store frames", () => {
   });
 
   test("a list prefix must be a known one", () => {
-    for (const prefix of ["account:", "device:", "task", "", undefined, 1]) {
+    for (const prefix of ["push:", "device:", "task", "", undefined, 1]) {
       for (const parsed of both({ ...frames.list, prefix })) {
         expect(parsed).toMatchObject({ t: "store-rejected", code: "invalid_request" });
       }
     }
-    expect(parseAppFrame(JSON.stringify({ ...frames.list, prefix: "queue:" }))).toMatchObject({ prefix: "queue:" });
+    for (const prefix of ["queue:", "account:", "quota:", "settings:"]) {
+      expect(parseAppFrame(JSON.stringify({ ...frames.list, prefix }))).toMatchObject({ prefix });
+    }
   });
 
   test("expect is a safe non-negative integer", () => {

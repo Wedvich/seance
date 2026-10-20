@@ -222,14 +222,14 @@ describe("reader rules", () => {
         records: [
           { key: "task:dup", version: 1, env },
           { key: "task:dup", version: 1, env },
-          { key: "queue:x", version: 1, env },
+          { key: "settings:x", version: 1, env },
         ],
       }));
       const listed = await store.list();
       expect(listed.map((e) => [e.id, e.reason])).toEqual([
         ["dup", "key_mismatch"],
         ["dup", "key_mismatch"],
-        ["queue:x", "key_mismatch"],
+        ["settings:x", "key_mismatch"],
       ]);
     });
   });
@@ -446,7 +446,7 @@ describe("pause", () => {
       relay.replyNextStore((frame) => ({
         t: "store-record",
         re: frame.id,
-        record: { key: "queue:other", version: 1, env },
+        record: { key: "settings:other", version: 1, env },
       }));
       expect(await store.getPause()).toEqual({ version: 1, reason: "key_mismatch" });
     });
