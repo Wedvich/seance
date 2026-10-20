@@ -220,8 +220,15 @@ function judgeAccount(
   const pressure = pressureOf(windows, added, pass.now);
   const over = overLine(windows, added, pass.now, pass.config);
   if (over === null) return { quota, pressure };
-  if (exclave.extraUsageEnabled === true) return { quota, spill: over, pressure };
-  return { reason: { code: "quota_over_line", ...over }, quota, pressure };
+  // Spent credits can't take the spill. Unknown credits (a daemon that predates `c`) still may: refusing them would
+  // stop every spill until the fleet upgrades.
+  const spent = (observation.c ?? 0) >= 100;
+  if (exclave.extraUsageEnabled === true && !spent) return { quota, spill: over, pressure };
+  return {
+    reason: { code: "quota_over_line", ...over, ...(exclave.extraUsageEnabled === true ? { creditsSpent: true } : {}) },
+    quota,
+    pressure,
+  };
 }
 
 /**

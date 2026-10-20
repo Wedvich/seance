@@ -294,6 +294,26 @@ describe("filter", () => {
       expect(candidate.score).toBeDefined();
     });
 
+    // Spending credits that are already at the cap would launch a task that can't run.
+    test("extra usage on but credits spent: filtered, never spilled; credits unreported still spill", () => {
+      const over = (credits: { c?: number }): ReturnType<typeof only> =>
+        only(
+          decide([
+            machine("a", {
+              exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
+              status: status({ quota: [obs(0, { h: 95, ...credits })] }),
+            }),
+          ]),
+        );
+      const spent = over({ c: 100 });
+      expect(spent.rejected).toEqual([
+        { code: "quota_over_line", window: "5h", projectedPct: 100, creditsSpent: true },
+      ]);
+      expect(spent.spill).toBeUndefined();
+      expect(over({ c: 99 }).spill).toEqual({ window: "5h", projectedPct: 100 });
+      expect(over({}).spill).toEqual({ window: "5h", projectedPct: 100 });
+    });
+
     test("extra usage unknown (null) reads as off", () => {
       const fleet = [
         machine("a", {

@@ -1454,9 +1454,25 @@
   font-size: 12px;
 }
 
-/* The reset is the fourth column where any bar in the list has one; `auto` keeps it as wide as the longest. */
+/*
+ * The reset is the fourth column where any bar in the list has one. The list
+ * owns the columns and each row takes them as a subgrid: per row, `auto` sized
+ * to that row alone, so a longer note shortened just its own track. The note
+ * column's floor is the longest common note ("resets in 23h", 13ch), so every
+ * card's tracks match; only a rare longer one ("$1,000 of $1,000") widens its
+ * own card. The list takes the rows' font so `ch` measures their characters.
+ */
+.bars:has(> .bar-resets) {
+  display: grid;
+  grid-template-columns: var(--fleet-label) minmax(0, 1fr) minmax(var(--fleet-num), auto) minmax(13ch, auto);
+  column-gap: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .bar-resets {
-  grid-template-columns: var(--fleet-label) minmax(0, 1fr) var(--fleet-num) auto;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
 }
 
 .bar-label {
@@ -1514,7 +1530,6 @@
 }
 
 .bar-reset {
-  min-width: 7.5em;
   color: var(--fg2);
   white-space: nowrap;
 }

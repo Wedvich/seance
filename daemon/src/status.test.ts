@@ -20,6 +20,10 @@ function quota(x: number): MachineStatus["quota"] extends readonly (infer Q)[] |
     hr: T + 3600,
     dr: T + 86_400,
     w: [{ m: "Fable", p: 25, r: T + 86_400 }],
+    c: 82,
+    cu: 4104,
+    cl: 5000,
+    cc: "USD",
     s: "cache",
     at: T,
   };
@@ -69,17 +73,23 @@ function unpadded(s: PaddedStatus): MachineStatus {
 
 describe("fitStatus", () => {
   test("a status within budget goes out whole and unmarked, padded to the budget with spaces", () => {
-    const four = status(4);
-    const fitted = fitStatus(four);
-    expect(unpadded(fitted)).toEqual(four);
+    const five = status(5);
+    const fitted = fitStatus(five);
+    expect(unpadded(fitted)).toEqual(five);
     expect(fitted.tr).toBeUndefined();
     expect(fitted._).toMatch(/^ *$/u);
     expect(statusBytes(fitted)).toBe(STATUS_PAYLOAD_BUDGET);
   });
 
-  test("trims per-model windows, then reset stamps, then exclaves from the last index down, then quota — marking each", () => {
+  test("trims credit amounts, then per-model windows, then reset stamps, then exclaves from the last index down, then quota — marking each", () => {
     const full = status(3);
-    const noWindows = { ...full, quota: full.quota?.map(({ w: _w, ...rest }) => rest), tr: 0 };
+    const noAmounts = {
+      ...full,
+      quota: full.quota?.map(({ cu: _cu, cl: _cl, cc: _cc, ...rest }) => rest),
+      tr: 0,
+    };
+    expect(unpadded(fitStatus(full, padded(noAmounts)))).toEqual(noAmounts);
+    const noWindows = { ...noAmounts, quota: noAmounts.quota?.map(({ w: _w, ...rest }) => rest) };
     const noResets = { ...noWindows, quota: noWindows.quota?.map(({ hr: _hr, dr: _dr, ...rest }) => rest) };
     expect(unpadded(fitStatus(full, padded(noWindows)))).toEqual(noWindows);
     expect(unpadded(fitStatus(full, padded(noResets)))).toEqual(noResets);
@@ -93,13 +103,13 @@ describe("fitStatus", () => {
     const pressureOnly = { ...rest, tr: 3 };
     expect(unpadded(fitStatus(full, padded(pressureOnly)))).toEqual(pressureOnly);
     // However tight the step, the result lands on the budget exactly.
-    for (const budget of [padded(noWindows), padded(noResets) - 1, padded(pressureOnly)]) {
+    for (const budget of [padded(noAmounts), padded(noWindows), padded(noResets) - 1, padded(pressureOnly)]) {
       expect(statusBytes(fitStatus(full, budget))).toBe(budget);
     }
   });
 
   test("an exclave list too long even for sess still says it was trimmed", () => {
-    const huge = { ...status(1), sess: Array.from({ length: 400 }, () => 9) };
+    const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);
     expect(fitted.sess).toBeUndefined();
     expect(fitted.tr).toBe(1);
@@ -110,9 +120,12 @@ describe("fitStatus", () => {
     // Exact at the edge: a payload of the budget seals to the bound, one more byte over it.
     expect(await sealedLength(exactly(STATUS_PAYLOAD_BUDGET))).toBe(STATUS_MAX_CT_LENGTH);
     expect(await sealedLength(exactly(STATUS_PAYLOAD_BUDGET + 1))).toBeGreaterThan(STATUS_MAX_CT_LENGTH);
-    // Four exclaves with every field: the headroom the schema's short keys buy; five trims.
-    expect(fitStatus(status(4)).tr).toBeUndefined();
-    expect(fitStatus(status(5)).tr).toBeDefined();
+    // Five exclaves with every field: the headroom the schema's short keys buy. Six lose
+    // only the credit amounts — `c`, which routing reads, and every window stay.
+    expect(fitStatus(status(5)).tr).toBeUndefined();
+    const six = fitStatus(status(6));
+    expect(six.tr).toBe(0);
+    expect(six.quota?.every((q) => q.c !== undefined && q.w !== undefined && q.cu === undefined)).toBe(true);
     // A dozen, trimmed, always fits.
     const fitted = fitStatus(status(12));
     expect(fitted.quota?.length).toBeGreaterThan(0);

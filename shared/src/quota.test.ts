@@ -109,6 +109,18 @@ describe("newestQuotaByAccount", () => {
     });
   });
 
+  // Only the cache reports credits; a session report one turn later must not
+  // erase them, and nothing expires them but the month.
+  test("credits fill from a reading under a month older, never from one past it", () => {
+    const fill = (olderAt: number): number | undefined =>
+      newestQuotaByAccount([
+        host("tower", [exclave("work", "org:acct")], [{ x: 0, h: 100, s: "session", at: S }]),
+        host("laptop", [exclave("main", "org:acct")], [{ x: 0, c: 42, s: "cache", at: olderAt }]),
+      ]).get("org:acct")?.observation.c;
+    expect(fill(S - 30 * 86_400)).toBe(42);
+    expect(fill(S - 31 * 86_400)).toBeUndefined();
+  });
+
   test("a tie keeps the first machine in fleet order", () => {
     const newest = newestQuotaByAccount([
       host("a", [exclave("one", "org:acct")], [{ x: 0, h: 10, s: "cache", at: S }]),

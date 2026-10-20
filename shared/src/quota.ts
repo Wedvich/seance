@@ -55,6 +55,8 @@ export function newestQuotaByAccount(
 
 const FIVE_HOURS_S = 5 * 3_600;
 const SEVEN_DAYS_S = 7 * 86_400;
+/** Credits reset monthly, on a day the cache doesn't name — the longest month bounds a reading's life. */
+const CREDIT_MONTH_S = 31 * 86_400;
 
 /**
  * `newer` with every window it lacks taken from `older`, under `newer`'s stamp,
@@ -65,7 +67,10 @@ const SEVEN_DAYS_S = 7 * 86_400;
  * `hr`. Per-model windows merge by model name. A window with no reset has
  * nothing to expire it, and once filled its age hides behind `newer`'s stamp,
  * so it is taken only from a reading less than one window length older — else
- * a long-asleep machine's reading would pin the account forever.
+ * a long-asleep machine's reading would pin the account forever. Credits `c`
+ * never carry a reset, so they follow that rule over a month: only the cache
+ * reports them, and a newer session report must not erase them. The percent
+ * and its amounts travel together, like a window and its reset.
  */
 export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): QuotaObservation {
   const age = newer.at - older.at;
@@ -84,6 +89,14 @@ export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): Qu
       ? { d: older.d, ...(older.dr === undefined ? {} : { dr: older.dr }) }
       : {}),
     ...(w.length === 0 ? {} : { w }),
+    ...(newer.c === undefined && older.c !== undefined && age < CREDIT_MONTH_S ? creditsOf(older) : {}),
+  };
+}
+
+function creditsOf({ c, cu, cl, cc }: QuotaObservation): Pick<QuotaObservation, "c" | "cu" | "cl" | "cc"> {
+  return {
+    ...(c === undefined ? {} : { c }),
+    ...(cu === undefined || cl === undefined || cc === undefined ? {} : { cu, cl, cc }),
   };
 }
 

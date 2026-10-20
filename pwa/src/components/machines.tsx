@@ -186,7 +186,7 @@ function AccountCardView(props: {
       {account.bars.length > 0 && (
         <div className="bars">
           {account.bars.map((bar) => (
-            <Bar key={bar.label} gauge={bar} resets={bar.resets} />
+            <Bar key={bar.label} gauge={bar} note={bar.note} />
           ))}
         </div>
       )}
@@ -233,10 +233,10 @@ function SessionCount(props: { count: number }): JSX.Element {
  * leaves the column out entirely (a pressure gauge); `null` keeps it, empty,
  * so a window without a reset stamp stays in line with its siblings.
  */
-function Bar(props: { gauge: Gauge; resets?: string | null }): JSX.Element {
-  const { gauge, resets } = props;
+function Bar(props: { gauge: Gauge; note?: string | null }): JSX.Element {
+  const { gauge, note } = props;
   return (
-    <div className={resets === undefined ? "bar" : "bar bar-resets"}>
+    <div className={note === undefined ? "bar" : "bar bar-resets"}>
       <span className="bar-label">{gauge.label}</span>
       {gauge.icon !== undefined && (
         <svg className="bar-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -247,7 +247,7 @@ function Bar(props: { gauge: Gauge; resets?: string | null }): JSX.Element {
         <span className={`bar-fill bar-${gauge.level}`} style={{ width: `${gauge.pct}%` }} />
       </span>
       <span className="bar-value">{gauge.pct}%</span>
-      {resets !== undefined && <span className="bar-reset">{resets ?? ""}</span>}
+      {note !== undefined && <span className="bar-reset">{note ?? ""}</span>}
     </div>
   );
 }

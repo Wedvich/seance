@@ -64,7 +64,8 @@ export interface MachineCard {
 }
 
 export interface QuotaBar extends Gauge {
-  readonly resets: string | null;
+  /** Trailing text: when a window resets, or credits spent of their cap ("$42 of $50"). */
+  readonly note: string | null;
 }
 
 export interface AccountCard {
@@ -244,17 +245,36 @@ function servesMetrics(machine: Machine): boolean {
 /** The reset floor is `effectivePct`'s; this only says when the window resets, or that it has. */
 function quotaBar(label: string, pct: number, resetsAt: number | undefined, now: number): QuotaBar {
   const bar = gauge(label, effectivePct(pct, resetsAt, now));
-  if (resetsAt === undefined) return { ...bar, resets: null };
-  if (resetsAt * 1000 <= now) return { ...bar, resets: "reset" };
-  return { ...bar, resets: formatUntil(resetsAt * 1000, now) };
+  if (resetsAt === undefined) return { ...bar, note: null };
+  if (resetsAt * 1000 <= now) return { ...bar, note: "reset" };
+  return { ...bar, note: formatUntil(resetsAt * 1000, now) };
 }
 
+/**
+ * Credits show only while a window is full: that is when use spills into them,
+ * and until then they are a monthly figure nothing on the card is spending.
+ */
 function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
   const bars: QuotaBar[] = [];
   if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
   if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
   for (const window of observation.w ?? []) bars.push(quotaBar(`7d ${window.m}`, window.p, window.r, now));
-  return bars;
+  if (observation.c === undefined || !bars.some((bar) => bar.pct >= 100)) return bars;
+  return [...bars, creditsBar(observation)];
+}
+
+/**
+ * A percent like every other row, with "$42 of $50" where a reset goes: the
+ * fraction is what the row answers, and whole units keep the note inside the
+ * column's floor, so a card spilling into credits keeps its track length.
+ * Without amounts (trimmed, or a daemon that predates them) the note is empty.
+ * The daemon sends hundredths, whatever the currency.
+ */
+function creditsBar({ c, cu, cl, cc }: QuotaObservation): QuotaBar {
+  const bar = gauge("Credits", c ?? 0);
+  if (cu === undefined || cl === undefined || cc === undefined) return { ...bar, note: null };
+  const money = new Intl.NumberFormat("en-US", { style: "currency", currency: cc, maximumFractionDigits: 0 });
+  return { ...bar, note: `${money.format(cu / 100)} of ${money.format(cl / 100)}` };
 }
 
 /**

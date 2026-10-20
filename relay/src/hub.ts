@@ -141,7 +141,7 @@ interface SocketAttachment {
    * sample. When the socket goes, `#leftBy` keeps it in the entry with the
    * `lastSeen` put the relay makes anyway, for its accounts' quota — never as
    * pressure (DESIGN.md, Presence & identity). Bounded by
-   * `STATUS_MAX_CT_LENGTH` so it, the identity and `owed` fit the attachment's 2 KiB together.
+   * `STATUS_MAX_CT_LENGTH` so it, the identity and `owed` fit the attachment's 16 KiB together.
    */
   readonly status?: SocketStatus;
   /**
