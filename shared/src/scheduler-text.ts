@@ -32,6 +32,7 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   reset_unknown: "no quota reading says when that account resets, so it can't be paused until then",
   internal_error: "the scheduler hit an error",
   too_large: "the scheduler's answer was too large to send back",
+  subscriptions_full: "the scheduler already holds as many push subscriptions as it keeps; remove one first",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */
@@ -100,6 +101,12 @@ export function reasonText(reason: Reason): string {
       return "no clone of this repo there";
     case "auth_missing":
       return "not signed in";
+    case "auth_expired":
+      return "its login has expired (needs /login)";
+    case "skill_absent":
+      return `the ${reason.skill} skill is not installed there`;
+    case "base_unpushed":
+      return "the branch it stacks on is not pushed, and sits on another exclave";
     case "quota_unknown":
       return reason.why === "trimmed"
         ? "its account's quota was trimmed from the latest status"

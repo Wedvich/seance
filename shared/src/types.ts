@@ -527,6 +527,11 @@ export interface StoreChangedFrame {
  * `sealTaskRecord` (shared/src/task-record.ts), `pause-state` by the leader's
  * queue-store adapter (`daemon/src/queue-store.ts`, `putPause`), which the
  * library writes the pause through (`QueueStore.putPause`).
+ *
+ * M4's three (shapes only; no writer yet, and their store prefixes land with
+ * store rules v2): `account` (`AccountRecord`, sealed to `"app"`), `quota`
+ * (`FleetQuotaRecord`, sealed to `"app"` by daemons) and `settings`
+ * (`SettingsRecord`, sealed to SCHEDULER_ID by the leader).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -534,6 +539,9 @@ export const AT_REST_OPS = {
   leadProof: "lead-proof",
   task: "task",
   pauseState: "pause-state",
+  account: "account",
+  quota: "quota",
+  settings: "settings",
 } as const;
 
 export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
@@ -659,7 +667,32 @@ export interface RepoEntry {
    * across machines. Absent from older daemons.
    */
   readonly origin?: string;
+  /**
+   * Project skills: entries under `<clone>/.claude/skills/` holding a
+   * `SKILL.md`, which belong to this clone, not to an exclave (M4, Skills). At
+   * most `REPO_MAX_SKILLS`, each an `isSkillName`. Absent from older daemons
+   * and unknown, never empty, when absent: a reader treats a project-only
+   * skill as one the inventory does not know.
+   */
+  readonly skills?: readonly string[];
 }
+
+/**
+ * Project skills one `RepoEntry` carries at most; a reader drops a longer list
+ * as unknown rather than costing the clone. It bounds one clone's share, not
+ * the blob: every clone rides the register blob (~12 KiB for 60 repos), and 16
+ * names of ~20 characters add ~350 B a clone, but 60 clones at every bound
+ * (~1 KiB each) would pass `ENVELOPE_MAX_CT_LENGTH`. So the writer checks the
+ * sealed blob and drops project skills, which are optional, before anything else.
+ */
+export const REPO_MAX_SKILLS = 16;
+
+/**
+ * A skill name's length at most — Claude Code's own limit on a skill's `name`.
+ * What `/name` resolves is the directory, so `isSkillName` holds a name to what a
+ * directory entry and a prompt's first token can both be.
+ */
+export const SKILL_NAME_MAX_LENGTH = 64;
 
 /**
  * One exclave as the daemon reports it: a tree at `~/<id>` whose Claude Code
@@ -786,8 +819,11 @@ export interface MachineInfo {
  * `MachineInfo.capabilities` entries. `metrics`: the op — a daemon without it
  * ignores the op, which an app sees only as a timeout. `taskId`: the spawn
  * field — a daemon without it spawns a duplicate rather than refusing one.
+ * `baseBranch`: the spawn field (M4, stacking) — a daemon without it drops the
+ * field and starts the worktree from the default branch, so a leader sends it
+ * only to a daemon advertising this. No daemon does yet.
  */
-export const CAPABILITIES = { metrics: "metrics", taskId: "taskId" } as const;
+export const CAPABILITIES = { metrics: "metrics", taskId: "taskId", baseBranch: "baseBranch" } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
 
@@ -900,7 +936,24 @@ export interface MachineStatus {
    * exclave without an observation is unknown, not unobserved.
    */
   readonly tr?: number;
+  /**
+   * Exclaves whose login has expired, by index, as `quota[].x` (M4, Auth
+   * health; decided #6): the compact form, since auth shares the status's
+   * budget with quota. An exclave not listed is `ok` or `unknown`, and both
+   * route. Never trimmed — `fitStatus` (`daemon/src/status.ts`) takes only quota
+   * detail, quota and `sess` — so at most `STATUS_MAX_AUTH_EXPIRED` entries, a
+   * reader refusing more. Absent from older daemons, and when none has expired.
+   */
+  readonly ax?: readonly number[];
 }
+
+/**
+ * `MachineStatus.ax` entries at most. What bounds the list is the machine's
+ * exclave count; 16 is far past any real one (the budget holds five exclaves'
+ * quota whole), and 16 indices cost under 60 of the ~1,100 bytes a status may
+ * hold, which is what lets the list go untrimmed.
+ */
+export const STATUS_MAX_AUTH_EXPIRED = 16;
 
 /** Resolutions the daemon's metrics store keeps, seconds — raw, 5-min and hourly tiers. */
 export const METRICS_STEPS = [30, 300, 3600] as const;
@@ -1059,6 +1112,16 @@ export interface SpawnRequest {
    * `CAPABILITIES.taskId` says which don't.
    */
   readonly taskId?: string;
+  /**
+   * Start the worktree from this branch instead of the default (M4, stacking).
+   * A branch name by `isBranchName` (git's `check-ref-format` rules), refused as
+   * malformed otherwise; resolved against `refs/remotes/origin/<b>`, never
+   * interpolated, and unresolvable is `base_not_found`. An old daemon drops it
+   * and starts from the default branch, so it is sent only to a daemon
+   * advertising `CAPABILITIES.baseBranch`. Accepted in shape today, acted on by
+   * none.
+   */
+  readonly baseBranch?: string;
 }
 
 /**
@@ -1082,6 +1145,8 @@ export const SPAWN_ERROR_CODES = [
   "task_launched",
   "fetch_failed",
   "no_default_branch",
+  /** `baseBranch` names no branch on origin (M4, stacking). */
+  "base_not_found",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1212,12 +1277,31 @@ export interface TaskProgress {
   readonly pushed?: true;
   /** `BranchState.merged`'s verdict. */
   readonly merged?: true;
+  /**
+   * The session's exit status once its pane died (tmux's `pane_dead_status`,
+   * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
+   * whose entries are bare ids an older leader reads as such, and on the ledger
+   * entry that already survives restarts, so the sweep and a takeover read one
+   * value. Absent while the pane lives, for a status tmux did not give, and from
+   * older daemons — a reader then settles as today.
+   */
+  readonly exit?: number;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
-/** What a session is doing, as `session-event` reports it (docs/scheduler.md). */
-export const SESSION_STATES = ["busy", "idle", "needs-input", "ended"] as const;
+/** Exit statuses `TaskProgress.exit` may hold: a process's, 0–255. */
+export const EXIT_STATUS_MAX = 255;
+
+/**
+ * What a session is doing, as `session-event` reports it (docs/scheduler.md).
+ * `done` (M4, decided #21): the session reports its own task finished — after a
+ * deploy it watched, say. Bound to the sender's pane like every event, so a
+ * session can finish only its own task. Shape only: no daemon forwards it and
+ * no leader acts on it until the authoring surface lands; an older daemon
+ * refuses it as an unknown state.
+ */
+export const SESSION_STATES = ["busy", "idle", "needs-input", "ended", "done"] as const;
 
 export type SessionState = (typeof SESSION_STATES)[number];
 
@@ -1240,7 +1324,12 @@ export interface SessionEvent {
   readonly at: number;
 }
 
-/** A git ref name's length at most, as `branch-state` and a task record carry one. */
+/**
+ * A git ref name's length at most, as `branch-state` and a task record carry one.
+ * Those are only length-checked: git made the branch, so it is valid by
+ * definition, and a stricter reader would cost a stored task. A branch an app or
+ * leader names for git to act on (`baseBranch`) is held to `isBranchName` too.
+ */
 export const BRANCH_MAX_LENGTH = 255;
 
 /**
@@ -1330,6 +1419,13 @@ export type TaskState = (typeof TASK_STATES)[number];
  */
 export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "title" | "model" | "effort" | "plan"> {
   readonly repo: string;
+  /**
+   * A skill the task needs (M4, Skills; decided #19), by `isSkillName`: routing
+   * restricts to clones and exclaves that have it, when the fleet's inventory
+   * knows the name at all. Absent, a prompt starting `/name` is read as the
+   * declaration. An older leader drops it, which routes as an unknown name does.
+   */
+  readonly skill?: string;
 }
 
 /**
@@ -1376,9 +1472,13 @@ export interface BatchMembership {
  * state it is — `running` included. `merged`: its branch merged. A `done`
  * predecessor releases both, whatever settled it, since `mark-done` always
  * wins. A `here` predecessor has no task branch, so `opened` releases on its PR
- * alone and `merged` only at `done`.
+ * alone and `merged` only at `done`. `done` (M4, decided #21): only the
+ * predecessor's `done`, whatever settled it — under `until: "reported"` that
+ * waits past its merge for its session's report, which is how a dependent waits
+ * on a deploy. An older leader reads a task with a `done` edge as malformed and
+ * holds it unreadable, never runs it.
  */
-export const DEP_AFTER = ["opened", "merged"] as const;
+export const DEP_AFTER = ["opened", "merged", "done"] as const;
 
 export type DepAfter = (typeof DEP_AFTER)[number];
 
@@ -1430,14 +1530,39 @@ export const TASK_SPEC_LIMITS = {
   batchIndex: MAX_TASKS,
 } as const;
 
+/**
+ * Where the work a task builds on lives (M4, stacking): the placement drives
+ * `dependency_distance`, and `branch`, by `isBranchName`, is the predecessor's
+ * branch its worktree starts from (`SpawnRequest.baseBranch`). An older leader
+ * keeps the placement and drops `branch`.
+ */
+export interface TaskBase extends Placement {
+  readonly branch?: string;
+}
+
+/**
+ * What settles a task (M4, decided #21). `merged`, the default: its merge, as
+ * today. `reported`: a merge is recorded but settles nothing; only its
+ * session's `done` report, `mark-done` or Linear Done does.
+ */
+export const TASK_UNTIL = ["merged", "reported"] as const;
+
+export type TaskUntil = (typeof TASK_UNTIL)[number];
+
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
   /** Restrict to a machine, an exclave name, or both; absent fields are free. */
   readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
-  /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
-  readonly base?: Placement;
+  /** Where the work this task builds on lives (M4's stacking fills it; unset today). */
+  readonly base?: TaskBase;
+  /**
+   * Absent is `merged`. An older leader drops it and settles at the merge, so a
+   * `reported` task enqueued under one finishes early; its `after: "done"`
+   * dependents it holds unreadable regardless (`DEP_AFTER`).
+   */
+  readonly until?: TaskUntil;
   readonly batch?: BatchMembership;
   /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */
   readonly deps?: readonly TaskDep[];
@@ -1491,6 +1616,18 @@ export type Reason =
   | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
   | { readonly code: "repo_absent" }
   | { readonly code: "auth_missing" }
+  /** M4, Auth health: the exclave is listed in its status's `ax`. */
+  | { readonly code: "auth_expired" }
+  /**
+   * M4, Skills: the task needs `skill` (declared, or its prompt's `/name`), the
+   * fleet's inventory knows it, and neither this exclave nor this clone has it.
+   */
+  | { readonly code: "skill_absent"; readonly skill: string }
+  /**
+   * M4, stacking: the branch the task stacks on is not pushed, so only the
+   * exclave holding it could start from it, and this candidate is not that one.
+   */
+  | { readonly code: "base_unpushed" }
   | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
   | {
       readonly code: "quota_over_line";
@@ -1645,10 +1782,12 @@ export interface Task {
 
 /**
  * `merged`: its branch merged (`branch-state`). `session`: its session ended
- * with no PR to wait on. `manual`: `mark-done`, which always wins. Linear's
- * Done joins in M4.
+ * with no PR to wait on. `manual`: `mark-done`, which always wins. `linear`
+ * (M4, decided #18): its Linear issue went Done — a person closed it, so it
+ * settles as `manual` does, open PR or not. An older leader reads a task done
+ * by `linear` as malformed and holds it unreadable.
  */
-export const DONE_SIGNALS = ["merged", "session", "manual"] as const;
+export const DONE_SIGNALS = ["merged", "session", "manual", "linear"] as const;
 
 export type DoneSignal = (typeof DONE_SIGNALS)[number];
 
@@ -1732,6 +1871,98 @@ export interface PauseRecord extends VersionBound {
   readonly holds: readonly PauseHold[];
 }
 
+/** An alias's length at most, in UTF-16 units: a name on a card. */
+export const ACCOUNT_ALIAS_MAX_LENGTH = 64;
+
+/**
+ * Payload of an `account:<hmac>` record (`op: "account"`, sealed to `"app"`; M4,
+ * Account records). A reader keeps it only when `accountId` hashes to its key,
+ * so a writer without the PSK can file a record under no account's key.
+ */
+export interface AccountRecord extends VersionBound {
+  /** `ExclaveInfo.accountId`. */
+  readonly accountId: string;
+  /** Null once cleared: `account:` refuses deletes (decided #8), so a clear is an overwrite. */
+  readonly alias: string | null;
+}
+
+/** One account's quota observation without its exclave index — what a `QuotaObservation` is once it leaves its status. */
+export type QuotaReading = Omit<QuotaObservation, "x">;
+
+/** One account's newest observation in the fleet quota record. */
+export interface FleetQuotaEntry {
+  /** `ExclaveInfo.accountId`; at most one entry each. */
+  readonly accountId: string;
+  /** The deviceId whose status saw it, as `QuotaBasis.observer`. */
+  readonly observer: string;
+  readonly reading: QuotaReading;
+}
+
+/**
+ * Accounts the fleet quota record holds at most: the relay's 32 machines with
+ * two accounts each. A record of 64 entries at every field's bound seals well
+ * under `STORE_MAX_CT_LENGTH`.
+ */
+export const FLEET_QUOTA_MAX_ACCOUNTS = 64;
+
+/**
+ * Payload of the fleet quota record (`op: "quota"`, sealed to `"app"` by the
+ * daemon that writes it; M4, Fleet quota record): each account's newest
+ * observation, one record so the relay cannot tell which account is in use when.
+ * A list, not a map keyed by account id, so no id can name a prototype key.
+ */
+export interface FleetQuotaRecord extends VersionBound {
+  readonly accounts: readonly FleetQuotaEntry[];
+}
+
+/**
+ * A Web Push subscription as `PushSubscription.toJSON()` gives it, minus
+ * `expirationTime`. `endpoint` is `https:` on a `PUSH_SERVICE_HOSTS` host
+ * (`isPushEndpoint`); `p256dh` (65 bytes) and `auth` (16) are base64url, the
+ * RFC 8291 keys a payload is encrypted to.
+ */
+export interface WebPushSubscription {
+  readonly endpoint: string;
+  readonly keys: { readonly p256dh: string; readonly auth: string };
+}
+
+/**
+ * The push services a leader may send to (decided #10): an allowlist rather than
+ * any public https host, so a forged subscription cannot aim the leader at an
+ * arbitrary URL. `*.` names any subdomain, never the bare host. A new browser
+ * vendor is one entry.
+ */
+export const PUSH_SERVICE_HOSTS = [
+  "fcm.googleapis.com",
+  "updates.push.services.mozilla.com",
+  "web.push.apple.com",
+  "*.notify.windows.com",
+] as const;
+
+/** Subscriptions the settings record holds at most: a person's browsers and devices. */
+export const PUSH_MAX_SUBSCRIPTIONS = 16;
+
+/** The VAPID keypair (RFC 8292), base64url: an uncompressed P-256 point (65 bytes) and its private scalar (32). */
+export interface VapidKeys {
+  readonly publicKey: string;
+  readonly privateKey: string;
+}
+
+/** A Linear API key's length at most. */
+export const LINEAR_KEY_MAX_LENGTH = 256;
+
+/**
+ * Payload of the settings record (`op: "settings"`, sealed to SCHEDULER_ID; M4,
+ * Settings and Web Push). The leader alone writes it (decided #9), from an
+ * app's request sealed `from: "app"`; every PSK holder can open it. Never in
+ * logs, `queue`, MCP or `status`. Each part absent until set.
+ */
+export interface SettingsRecord extends VersionBound {
+  readonly vapid?: VapidKeys;
+  readonly linearKey?: string;
+  readonly subscriptions?: readonly WebPushSubscription[];
+}
+
 /**
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
  * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
@@ -1800,6 +2031,8 @@ export const SCHEDULER_ERROR_CODES = [
   "conflict",
   /** `pause` with `until: "reset"`: no quota reading says when that account resets. */
   "reset_unknown",
+  /** `push-subscribe` (M4): the settings record holds `PUSH_MAX_SUBSCRIPTIONS` already. */
+  "subscriptions_full",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -1921,6 +2154,26 @@ export interface QueueChanged {
 export interface RoutePreviewResponse {
   readonly decision: Decision;
 }
+
+/**
+ * `op: "push-subscribe"` (M4, Settings and Web Push), app → leader, sealed
+ * `from: "app"`: add this browser's subscription to the settings record. Not in
+ * `SCHEDULER_OPS` until its item builds the handler, so today a leader answers
+ * it as any op it does not handle (`invalid_request`), never by accepting it.
+ * The leader parses it with `parsePushSubscribeRequest`, which holds the
+ * endpoint to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request`,
+ * `subscriptions_full` and `conflict`.
+ */
+export const PUSH_SUBSCRIBE_OP = "push-subscribe";
+
+export type PushSubscribeRequest = WebPushSubscription;
+
+/** `push-subscribe` → the endpoint now subscribed; subscribing one already held is not a refusal. */
+export interface PushSubscribeResponse {
+  readonly endpoint: string;
+}
+
+export type PushSubscribeReply = PushSubscribeResponse | SchedulerError;
 
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
