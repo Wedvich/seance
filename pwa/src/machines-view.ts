@@ -272,7 +272,7 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
  * A percent like every other row, with "$42 of $50" where a reset goes: the
  * fraction is what the row answers, and whole units keep the note inside the
  * column's floor, so a card spilling into credits keeps its track length.
- * Without amounts (trimmed, or a daemon that predates them) the note is empty.
+ * Without amounts (a daemon that predates them) the note is empty.
  * The daemon sends cents.
  */
 function creditsBar({ c, cu, cl }: QuotaObservation): QuotaBar {
