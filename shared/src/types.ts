@@ -419,7 +419,7 @@ export const STORE_PREFIXES = {
     cap: 64,
   },
   /**
-   * `quota:<name>` → the fleet quota record, written by any daemon by
+   * `quota:fleet` (`QUOTA_KEY`) → the fleet quota record, written by any daemon by
    * read-open-compare-`expect`, never by an app. One record by decision (one
    * per account would tell the relay when each is in use), so a cap of one.
    */
