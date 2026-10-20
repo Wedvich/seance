@@ -6,6 +6,7 @@ import {
   isStatusStale,
   liveStatus,
   newestQuotaByAccount,
+  sameCreditMonth,
   type Candidate,
   type Decision,
   type ExclaveInfo,
@@ -220,8 +221,26 @@ function judgeAccount(
   const pressure = pressureOf(windows, added, pass.now);
   const over = overLine(windows, added, pass.now, pass.config);
   if (over === null) return { quota, pressure };
-  if (exclave.extraUsageEnabled === true) return { quota, spill: over, pressure };
-  return { reason: { code: "quota_over_line", ...over }, quota, pressure };
+  // Spent credits can't take the spill. Unknown credits (a daemon that predates `c`) still may: refusing them would
+  // stop every spill until the fleet upgrades.
+  const spent = creditsSpent(observation, pass.now);
+  if (exclave.extraUsageEnabled === true && !spent) return { quota, spill: over, pressure };
+  return {
+    reason: { code: "quota_over_line", ...over, ...(exclave.extraUsageEnabled === true ? { creditsSpent: true } : {}) },
+    quota,
+    pressure,
+  };
+}
+
+/**
+ * From the amounts when they came: `c` rounds for the card, so $49.80 of $50
+ * reads 100 there while credits remain. Only a daemon that predates the
+ * amounts leaves the percent to decide. Last month's spend is unknown, not spent.
+ */
+function creditsSpent({ c, cu, cl, at }: QuotaObservation, nowMs: number): boolean {
+  if (!sameCreditMonth(at, nowMs / 1000)) return false;
+  if (cu !== undefined && cl !== undefined) return cu >= cl;
+  return (c ?? 0) >= 100;
 }
 
 /**

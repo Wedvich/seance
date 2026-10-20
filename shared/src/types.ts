@@ -592,11 +592,15 @@ export const STATUS_MIN_INTERVAL_MS = 10_000;
 
 /**
  * Ciphertext bound (base64 chars) on a `status` envelope. The relay keeps the
- * latest on the daemon socket's attachment — 2 KiB, shared with the socket's
- * identity — so the relay refuses a larger one and the daemon trims its blob
- * to fit (`daemon/src/status.ts`) rather than send one that will be dropped.
+ * latest on the daemon socket's attachment (Cloudflare caps it at 16 KiB,
+ * shared with the socket's identity), so the relay refuses a larger one and
+ * the daemon trims its blob to fit (`daemon/src/status.ts`) rather than send
+ * one that will be dropped. What holds it well under the attachment cap is
+ * cost: every status is padded to this length, every 30s from every machine to
+ * every app, and the registry push carries one per live machine. 1.5 KiB fits
+ * five exclaves' quota whole.
  */
-export const STATUS_MAX_CT_LENGTH = 1024;
+export const STATUS_MAX_CT_LENGTH = 1536;
 
 /**
  * Ciphertext bound (base64 chars) on every other envelope the relay forwards.
@@ -799,8 +803,8 @@ export type QuotaSource = (typeof QUOTA_SOURCES)[number];
 
 /**
  * One account's newest quota observation on this daemon. Keys are short and
- * every number an integer: the whole `status` must fit a DO socket attachment
- * (2 KiB, shared with the socket's identity), and the inputs are already
+ * every number an integer: the whole `status` is padded to `STATUS_MAX_CT_LENGTH`
+ * and sent to every app every 30s, and the inputs are already
  * smoothed or stepped, so a float would claim precision nobody has.
  */
 export interface ScopedWindow {
@@ -831,6 +835,20 @@ export interface QuotaObservation {
    * `d` and these.
    */
   readonly w?: readonly ScopedWindow[];
+  /**
+   * Usage credits spent, whole percent of the monthly cap — what a full window
+   * spills into. Absent when credits are off or uncapped. No reset stamp: the
+   * cache doesn't say when the month turns.
+   */
+  readonly c?: number;
+  /**
+   * Credits spent and the monthly cap in cents (4104 is $41.04) — credits are
+   * USD — whatever exponent the cache used: the daemon rescales, readers divide
+   * by 100. What routing decides spent on (`c` rounds), and the card's "$41 of
+   * $50". Both or neither, and only beside `c`.
+   */
+  readonly cu?: number;
+  readonly cl?: number;
   readonly s: QuotaSource;
   /** Observed at, unix seconds. */
   readonly at: number;
@@ -985,6 +1003,7 @@ export const METRIC_NAMES = {
   d: "quota_7d_pct",
   /** Label `model` carries the display name. */
   w: "quota_7d_model_pct",
+  c: "quota_credits_pct",
 } as const;
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
@@ -1471,7 +1490,13 @@ export type Reason =
   | { readonly code: "repo_absent" }
   | { readonly code: "auth_missing" }
   | { readonly code: "quota_unknown"; readonly why: "unobserved" | "trimmed" }
-  | { readonly code: "quota_over_line"; readonly window: string; readonly projectedPct: number }
+  | {
+      readonly code: "quota_over_line";
+      readonly window: string;
+      readonly projectedPct: number;
+      /** Credits are on but spent to the monthly cap, so the account can't spill. */
+      readonly creditsSpent?: true;
+    }
   /**
    * The task's model is one its seat bills to credits (`model`, the gated
    * family as `SchedulerConfig.gatedModels` names it). Never spilled past, as

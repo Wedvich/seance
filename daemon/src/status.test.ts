@@ -20,6 +20,9 @@ function quota(x: number): MachineStatus["quota"] extends readonly (infer Q)[] |
     hr: T + 3600,
     dr: T + 86_400,
     w: [{ m: "Fable", p: 25, r: T + 86_400 }],
+    c: 82,
+    cu: 4104,
+    cl: 5000,
     s: "cache",
     at: T,
   };
@@ -69,9 +72,9 @@ function unpadded(s: PaddedStatus): MachineStatus {
 
 describe("fitStatus", () => {
   test("a status within budget goes out whole and unmarked, padded to the budget with spaces", () => {
-    const four = status(4);
-    const fitted = fitStatus(four);
-    expect(unpadded(fitted)).toEqual(four);
+    const five = status(5);
+    const fitted = fitStatus(five);
+    expect(unpadded(fitted)).toEqual(five);
     expect(fitted.tr).toBeUndefined();
     expect(fitted._).toMatch(/^ *$/u);
     expect(statusBytes(fitted)).toBe(STATUS_PAYLOAD_BUDGET);
@@ -99,7 +102,7 @@ describe("fitStatus", () => {
   });
 
   test("an exclave list too long even for sess still says it was trimmed", () => {
-    const huge = { ...status(1), sess: Array.from({ length: 400 }, () => 9) };
+    const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);
     expect(fitted.sess).toBeUndefined();
     expect(fitted.tr).toBe(1);
@@ -110,9 +113,12 @@ describe("fitStatus", () => {
     // Exact at the edge: a payload of the budget seals to the bound, one more byte over it.
     expect(await sealedLength(exactly(STATUS_PAYLOAD_BUDGET))).toBe(STATUS_MAX_CT_LENGTH);
     expect(await sealedLength(exactly(STATUS_PAYLOAD_BUDGET + 1))).toBeGreaterThan(STATUS_MAX_CT_LENGTH);
-    // Four exclaves with every field: the headroom the schema's short keys buy; five trims.
-    expect(fitStatus(status(4)).tr).toBeUndefined();
-    expect(fitStatus(status(5)).tr).toBeDefined();
+    // Six exclaves with every field: the headroom the schema's short keys buy. Seven lose
+    // only the per-model windows — the credits, which routing reads, are never trimmed alone.
+    expect(fitStatus(status(6)).tr).toBeUndefined();
+    const seven = fitStatus(status(7));
+    expect(seven.tr).toBe(0);
+    expect(seven.quota?.every((q) => q.cu !== undefined && q.hr !== undefined && q.w === undefined)).toBe(true);
     // A dozen, trimmed, always fits.
     const fitted = fitStatus(status(12));
     expect(fitted.quota?.length).toBeGreaterThan(0);

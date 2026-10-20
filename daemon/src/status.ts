@@ -6,9 +6,9 @@ const PLAIN_OVERHEAD = JSON.stringify({ id: crypto.randomUUID(), ts: Date.now(),
 /**
  * UTF-8 bytes the sealed payload takes — `fitStatus` pads every status to
  * exactly this. Base64 costs a third, the tag sixteen bytes, the wrapper its
- * fixed width. With the schema's short keys this holds four exclaves' quota
- * with every field (~125 bytes each) — a machine with more trims rather than
- * sends a frame the relay would drop whole.
+ * fixed width. With the schema's short keys this holds six
+ * exclaves' quota with every field, seven without the per-model windows — a
+ * machine with more trims rather than sends a frame the relay would drop whole.
  */
 export const STATUS_PAYLOAD_BUDGET = Math.floor(STATUS_MAX_CT_LENGTH / 4) * 3 - AEAD_TAG_BYTES - PLAIN_OVERHEAD;
 
@@ -48,15 +48,12 @@ function trimStatus(status: MachineStatus, budget: number): MachineStatus {
   if (statusBytes(status) <= budget) return status;
   if (status.quota !== undefined) {
     const { quota } = status;
-    const steps: (() => readonly QuotaObservation[])[] = [
-      () => withoutModelWindows(quota),
-      () => withoutResets(withoutModelWindows(quota)),
-    ];
-    for (const step of steps) {
-      const trimmed: MachineStatus = { ...status, quota: step(), tr: 0 };
+    let kept = quota;
+    for (const step of [withoutModelWindows, withoutResets]) {
+      kept = step(kept);
+      const trimmed: MachineStatus = { ...status, quota: kept, tr: 0 };
       if (statusBytes(trimmed) <= budget) return trimmed;
     }
-    let kept = withoutResets(withoutModelWindows(quota));
     while (kept.length > 1) {
       kept = kept.slice(0, -1);
       const trimmed: MachineStatus = { ...status, quota: kept, tr: quota.length - kept.length };

@@ -104,8 +104,10 @@ export function reasonText(reason: Reason): string {
       return reason.why === "trimmed"
         ? "its account's quota was trimmed from the latest status"
         : "its account's quota has never been observed";
-    case "quota_over_line":
-      return `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
+    case "quota_over_line": {
+      const line = `${reason.window} quota would reach ${Math.round(reason.projectedPct)}%`;
+      return reason.creditsSpent === true ? `${line}, and its credits are spent` : line;
+    }
     case "model_not_included":
       return `its seat bills ${reason.model} to credits`;
     case "cap_reached":

@@ -175,6 +175,7 @@ function quotaCollector(sources: CollectorSources): Collect {
       for (const window of q.w ?? []) {
         samples.push({ metric: METRIC_NAMES.w, labels: { ...labels, model: window.m }, ts: q.at, value: window.p });
       }
+      if (q.c !== undefined) samples.push({ metric: METRIC_NAMES.c, labels, ts: q.at, value: q.c });
     }
     return { fields: observations.length === 0 ? {} : { quota: observations }, samples };
   };
@@ -314,8 +315,8 @@ function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promis
  * it in the config dir: whole-percent `utilization` and an ISO `resets_at` per
  * window, stamped `fetchedAtMs`, plus the `limits` list, whose `weekly_scoped`
  * entries are the per-model weekly caps (the "Current week (Fable)" bar; the
- * model id is not cached, only its display name). Nothing else in the file is
- * read, and M1 has
+ * model id is not cached, only its display name), and `extra_usage` for the
+ * credits spent (`creditsOf`). Nothing else in the file is read, and M1 has
  * no other source (session reports are M2, the OAuth poll M4). An exclave no
  * session has run in has no observation — absent, so readers fall back to
  * another daemon's view of the same account. A stamp past `nowMs` is capped
@@ -340,7 +341,8 @@ export async function readCachedQuota(
   const five = windowOf(cached["utilization"]["five_hour"]);
   const seven = windowOf(cached["utilization"]["seven_day"]);
   const scoped = scopedWindows(cached["utilization"]["limits"]);
-  if (five === null && seven === null && scoped.length === 0) return null;
+  const credits = creditsOf(cached["utilization"]["extra_usage"]);
+  if (five === null && seven === null && scoped.length === 0 && credits === null) return null;
   return {
     x,
     s: "cache",
@@ -350,7 +352,32 @@ export async function readCachedQuota(
     ...(five?.resetsAt === undefined ? {} : { hr: five.resetsAt }),
     ...(seven?.resetsAt === undefined ? {} : { dr: seven.resetsAt }),
     ...(scoped.length === 0 ? {} : { w: scoped }),
+    ...credits,
   };
+}
+
+/**
+ * Credits spent as whole percent of the monthly cap, from the minor-unit
+ * amounts rather than `utilization`, which the cache leaves null at zero spent;
+ * the amounts beside it, rescaled from the cache's exponent to cents, when
+ * the cache names the exponent. Credits are USD, so its `currency` goes unread. Null when credits are off or
+ * uncapped: no cap, no percentage.
+ */
+function creditsOf(extra: unknown): Pick<QuotaObservation, "c" | "cu" | "cl"> | null {
+  if (!isRecord(extra) || extra["is_enabled"] !== true) return null;
+  const used = extra["used_credits"];
+  const limit = extra["monthly_limit"];
+  if (typeof used !== "number" || !Number.isFinite(used) || used < 0) return null;
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return null;
+  const c = extra["spend_limit_reached"] === true ? 100 : Math.min(100, Math.round((used / limit) * 100));
+  const places = extra["decimal_places"];
+  if (typeof places !== "number" || !Number.isInteger(places) || places < 0 || places > 4) return { c };
+  // Spent rounds down, so a finer exponent never reads as more spent than it was.
+  const scale = 10 ** (2 - places);
+  const cu = Math.floor(used * scale);
+  const cl = Math.round(limit * scale);
+  if (!Number.isSafeInteger(cu) || !Number.isSafeInteger(cl)) return { c };
+  return { c, cu, cl };
 }
 
 function scopedWindows(limits: unknown): readonly ScopedWindow[] {

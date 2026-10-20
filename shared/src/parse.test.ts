@@ -230,6 +230,20 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25, r: -1 }] }] })).toBeNull();
   });
 
+  test("credit amounts come both or neither, and only beside the percent", () => {
+    const credits = { c: 82, cu: 4104, cl: 5000 };
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...credits }] })?.quota?.[0]).toEqual({
+      ...quota,
+      ...credits,
+    });
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, c: 82 }] })).not.toBeNull();
+    const { c: _c, ...amounts } = credits;
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...amounts }] })).toBeNull();
+    const { cl: _cl, ...uncapped } = credits;
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...uncapped }] })).toBeNull();
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...credits, cu: 41.5 }] })).toBeNull();
+  });
+
   test("absent is the only unknown: null fields and unknown quota sources are refused", () => {
     expect(parseMachineStatus({ ...status, mem: null })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, s: "guess" }] })).toBeNull();
@@ -498,6 +512,16 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
+  });
+
+  test("an over-the-line reason may say its credits are spent; any other value drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const over: Reason = { code: "quota_over_line", window: "5h", projectedPct: 100 };
+    expect(parseDecision(decision(over))?.candidates[0]?.rejected).toEqual([over]);
+    const spent: Reason = { ...over, creditsSpent: true };
+    expect(parseDecision(decision(spent))?.candidates[0]?.rejected).toEqual([spent]);
+    expect(parseDecision(decision({ ...over, creditsSpent: false }))?.candidates[0]?.rejected).toEqual([]);
   });
 
   test("a batch order hold names the member it waits on; an index past the batch bound drops the reason", () => {

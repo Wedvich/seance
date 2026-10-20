@@ -67,7 +67,7 @@ function exactBase64(value: unknown, length: number): value is string {
 
 /**
  * Bytes, not string units: what the caps protect is measured in bytes (the
- * socket attachment's 2 KiB that `status` shares, the store's value budget),
+ * socket attachment's 16 KiB that `status` shares, the store's value budget),
  * and one unit of non-ASCII text is up to three of them — counted as units, a
  * `status` at its cap encodes past the attachment and throws on the write.
  * UTF-8 is never fewer bytes than units, so the cheap check turns the absurd
@@ -226,7 +226,7 @@ export function parseDaemonFrame(text: string): DaemonFrame | StoreRejected | nu
     return env === null ? null : { t: "msg", env };
   }
   if (value["t"] === "status") {
-    // Tighter than a msg: it lands on the socket attachment (2 KiB, shared with
+    // Tighter than a msg: it lands on the socket attachment (16 KiB, shared with
     // the socket's identity), not in a storage value.
     const env = parseEnvelope(value["env"], STATUS_MAX_CT_LENGTH);
     return env === null ? null : { t: "status", env };

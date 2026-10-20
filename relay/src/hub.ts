@@ -141,7 +141,7 @@ interface SocketAttachment {
    * sample. When the socket goes, `#leftBy` keeps it in the entry with the
    * `lastSeen` put the relay makes anyway, for its accounts' quota — never as
    * pressure (DESIGN.md, Presence & identity). Bounded by
-   * `STATUS_MAX_CT_LENGTH` so it, the identity and `owed` fit the attachment's 2 KiB together.
+   * `STATUS_MAX_CT_LENGTH` so it, the identity and `owed` fit the attachment's 16 KiB together.
    */
   readonly status?: SocketStatus;
   /**
@@ -945,7 +945,7 @@ export class Hub implements DurableObject {
   async #pushRegistry(targets?: readonly WebSocket[], exclude: readonly WebSocket[] = []): Promise<void> {
     const apps = targets ?? this.#ctx.getWebSockets("app");
     if (apps.length === 0) return;
-    // Once per push: every attachment carries a ~1 KiB `status` to decode.
+    // Once per push: every attachment carries a ~1.5 KiB `status` to decode.
     const live = this.#liveSockets(exclude);
     const frame: RelayToAppFrame = {
       t: "registry",
@@ -1075,7 +1075,7 @@ export class Hub implements DurableObject {
   /**
    * Daemon sockets by accept time, newest first — the order that breaks a tie
    * between two sockets on one deviceId across a reconnect. Each attachment is
-   * deserialized once, up front: it carries the ~1 KiB `status`, and a sort
+   * deserialized once, up front: it carries the ~1.5 KiB `status`, and a sort
    * comparator would decode it on every comparison. A superseded socket is no
    * route, presence or candidate, even once its successor has gone: it is
    * listed only until a zombie's close or sweep runs.

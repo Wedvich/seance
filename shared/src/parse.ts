@@ -306,8 +306,11 @@ function parseScopedWindow(value: unknown): ScopedWindow | null {
 export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> | null {
   if (!isRecord(value)) return null;
   if (!isUint(value["at"]) || !isQuotaSource(value["s"])) return null;
-  const { h, d, hr, dr } = value;
+  const { h, d, hr, dr, c } = value;
   if (!isOptionalUint(h) || !isOptionalUint(d) || !isOptionalUint(hr) || !isOptionalUint(dr)) return null;
+  if (!isOptionalUint(c)) return null;
+  const credits = parseCreditAmounts(value);
+  if (credits === null || (c === undefined && credits.cu !== undefined)) return null;
   const w = value["w"] === undefined ? undefined : parseList(value["w"], parseScopedWindow);
   if (w === null) return null;
   return {
@@ -318,7 +321,17 @@ export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> |
     ...(hr === undefined ? {} : { hr }),
     ...(dr === undefined ? {} : { dr }),
     ...(w === undefined ? {} : { w }),
+    ...(c === undefined ? {} : { c }),
+    ...credits,
   };
+}
+
+/** `cu` and `cl` together or not at all: spent without its cap reads as nothing. */
+function parseCreditAmounts(value: Record<string, unknown>): Pick<QuotaObservation, "cu" | "cl"> | null {
+  const { cu, cl } = value;
+  if (cu === undefined && cl === undefined) return {};
+  if (!isUint(cu) || !isUint(cl)) return null;
+  return { cu, cl };
 }
 
 function parseQuotaObservation(value: unknown): QuotaObservation | null {
@@ -652,10 +665,10 @@ function parseReason(value: unknown): Reason | null {
       return why === "unobserved" || why === "trimmed" ? { code, why } : null;
     }
     case "quota_over_line": {
-      const { window, projectedPct } = value;
-      return isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) && isFiniteNumber(projectedPct)
-        ? { code, window, projectedPct }
-        : null;
+      const { window, projectedPct, creditsSpent } = value;
+      if (!isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
+      if (creditsSpent !== undefined && creditsSpent !== true) return null;
+      return { code, window, projectedPct, ...(creditsSpent === undefined ? {} : { creditsSpent }) };
     }
     case "model_not_included": {
       const { model } = value;

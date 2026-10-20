@@ -75,7 +75,7 @@ export function sanitizeStatus(status: MachineStatus, exclaveCount: number, nowM
 }
 
 function isSaneObservation(q: QuotaObservation): boolean {
-  if (!isPct(q.h) || !isPct(q.d)) return false;
+  if (!isPct(q.h) || !isPct(q.d) || !isPct(q.c)) return false;
   return q.w === undefined || q.w.every((w) => isPct(w.p));
 }
 

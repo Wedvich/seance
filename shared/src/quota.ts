@@ -65,7 +65,11 @@ const SEVEN_DAYS_S = 7 * 86_400;
  * `hr`. Per-model windows merge by model name. A window with no reset has
  * nothing to expire it, and once filled its age hides behind `newer`'s stamp,
  * so it is taken only from a reading less than one window length older — else
- * a long-asleep machine's reading would pin the account forever.
+ * a long-asleep machine's reading would pin the account forever. Credits `c`
+ * never carry a reset, so they fill only from a reading in `newer`'s credit
+ * month: only the cache reports them, and a newer session report must not
+ * erase them. The percent and its amounts travel together, like a window and
+ * its reset.
  */
 export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): QuotaObservation {
   const age = newer.at - older.at;
@@ -84,7 +88,26 @@ export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): Qu
       ? { d: older.d, ...(older.dr === undefined ? {} : { dr: older.dr }) }
       : {}),
     ...(w.length === 0 ? {} : { w }),
+    ...(newer.c === undefined && older.c !== undefined && sameCreditMonth(newer.at, older.at) ? creditsOf(older) : {}),
   };
+}
+
+function creditsOf({ c, cu, cl }: QuotaObservation): Pick<QuotaObservation, "c" | "cu" | "cl"> {
+  return {
+    ...(c === undefined ? {} : { c }),
+    ...(cu === undefined || cl === undefined ? {} : { cu, cl }),
+  };
+}
+
+/**
+ * Credits reset at 00:00 UTC on the 1st — the cache carries no reset stamp,
+ * so this is the assumed boundary. A reading from an earlier month says
+ * nothing about this month's spend.
+ */
+export function sameCreditMonth(aS: number, bS: number): boolean {
+  const a = new Date(aS * 1000);
+  const b = new Date(bS * 1000);
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth();
 }
 
 /**

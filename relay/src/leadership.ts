@@ -18,7 +18,7 @@ export interface Candidate {
 
 /**
  * The verified roles this relay acts on. What a register signed is kept raw only
- * until it verifies; a socket attachment (2 KiB, shared with `status`) then
+ * until it verifies; a socket attachment (16 KiB, shared with `status`) then
  * holds just these.
  */
 export function knownRoles(roles: readonly string[]): readonly DaemonRole[] {

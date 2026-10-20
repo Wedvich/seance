@@ -185,7 +185,8 @@ they now live:
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
   deltas per task.
 
-**Credits spill:** detected, logged and shown in the PWA (DESIGN.md "Credits spill"). From M4 the
+**Credits spill:** detected, logged and shown in the PWA (DESIGN.md "Credits spill"). An account
+whose credits are spent to the monthly cap is never spilled into (DESIGN.md, Routing). From M4 the
 same `onAlert` fires a Web Push ("Spending credits on <account> for <task>"), once per account
 per window, not per task; the de-dupe outliving a leader change is M4's (Settings and Web Push,
 below).
@@ -569,7 +570,7 @@ precede. Wave 2 waits on the wave-1 item named.
   machine that saw it, and a `forget`, a reinstall or a machine retired takes that reading with
   it. Persisting `SessionQuota` (DESIGN.md, "Session events") stops a restart regressing it, and
   does nothing for those. Its other payoff is `status` shrinking to pressure, which frees most of
-  the 2 KiB socket attachment; its cost is a daemon write path into the store and a 5-min floor
+  the 16 KiB socket attachment; its cost is a daemon write path into the store and a 5-min floor
   on freshness, where `status` is faster — so readers fold both, newest wins.
   - _Corrections (R2)._
     - "A single `quota` key" does not fit `STORE_KEY_PATTERN`, which needs a prefix plus a
