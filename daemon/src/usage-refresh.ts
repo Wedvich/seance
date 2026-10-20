@@ -1,4 +1,5 @@
 import { userInfo } from "node:os";
+import { QUOTA_DEFAULTS } from "./config.ts";
 import { DEFAULT_EXCLAVE, type Exclave, type ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import { log } from "./log.ts";
@@ -15,8 +16,8 @@ import { cachedStampReader } from "./telemetry-collectors.ts";
  * reading older than `staleAfter`, one run at a time per process.
  */
 
-/** `quota.staleAfter`: the age past which an exclave's cached reading is refreshed. */
-export const STALE_AFTER_MS = 10 * 60_000;
+/** Default `quota.staleAfter` (config `quota.staleAfterMinutes`): the age past which an exclave's cached reading is refreshed. */
+export const STALE_AFTER_MS = QUOTA_DEFAULTS.staleAfterMinutes * 60_000;
 
 /**
  * Claude Code's own debounce: `/usage` answers from the cache while
@@ -51,7 +52,7 @@ const OUTPUT_CAP_BYTES = 64 * 1024;
 export const USAGE_ARGS = ["--safe-mode", "--output-format", "json", "-p", "/usage"] as const;
 
 export interface UsageRefreshOpts {
-  /** Floored at `DEBOUNCE_MS`. */
+  /** Floored at `DEBOUNCE_MS` too: config refuses less, but callers pass ms directly. */
   readonly staleAfterMs?: number;
   readonly checkIntervalMs?: number;
   readonly timeoutMs?: number;
