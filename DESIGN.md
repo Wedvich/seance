@@ -3331,8 +3331,10 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   refreshes a login; Claude Code does all three under its own rules, and the `cache` collector
   reads the result as before. A run is a whole Claude Code process (~350 MiB, 5–8 s) even when
   Claude Code answers from its cache, so it runs only for a reading older than `staleAfter`
-  (`STALE_AFTER_MS`, 10 min; floored at 60 s, Claude Code's own debounce, inside which a run
-  moves nothing), judged on the wall clock against `fetchedAtMs`, which is the debounce marker:
+  (config `quota.staleAfterMinutes`, default 10, read at each daemon start so a config reload
+  takes a change; a value under 1 minute, Claude Code's own debounce, inside which a run moves
+  nothing, is refused like any out-of-range key rather than clamped, and the refresh floors at
+  60 s besides), judged on the wall clock against `fetchedAtMs`, which is the debounce marker:
   the daemon keeps none of its own. What asks: every bound session event pokes its exclave
   (Local op socket, "Session events"), and a timer pokes every exclave each minute, so one with
   no session running is still refreshed. So a healthy exclave's reading is at most `staleAfter`

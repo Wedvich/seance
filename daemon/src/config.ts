@@ -24,6 +24,32 @@ export interface Config {
   readonly machineTag?: string;
   /** `seanced reap`'s settings; absent means the defaults, with the schedule off. */
   readonly reap?: ReapConfig;
+  /** The `/usage` refresh's settings; absent means the defaults. */
+  readonly quota?: QuotaConfig;
+}
+
+export interface QuotaConfig {
+  /**
+   * The spec's `quota.staleAfter`: an exclave's cached quota older than this is
+   * refreshed through `claude -p /usage`. Never under 1 — Claude Code's own 60 s
+   * debounce, inside which a run moves nothing.
+   */
+  readonly staleAfterMinutes: number;
+}
+
+export const QUOTA_DEFAULTS: QuotaConfig = { staleAfterMinutes: 10 };
+
+function parseQuota(raw: unknown, path: string): QuotaConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new TypeError(`config at ${path}: "quota" must be an object`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const value = "staleAfterMinutes" in obj ? obj["staleAfterMinutes"] : QUOTA_DEFAULTS.staleAfterMinutes;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
+    throw new TypeError(`config at ${path}: "quota.staleAfterMinutes" must be a number ≥ 1`);
+  }
+  return { staleAfterMinutes: value };
 }
 
 export interface ReapConfig {
@@ -94,8 +120,10 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
     throw new TypeError(`config at ${path}: "repoRoots" must be a non-empty array of strings`);
   }
   const reap = parseReap(obj["reap"], path);
+  const quota = parseQuota(obj["quota"], path);
   return {
     ...(reap === undefined ? {} : { reap }),
+    ...(quota === undefined ? {} : { quota }),
     name: requireString(obj, "name", path),
     relayUrl: requireString(obj, "relayUrl", path),
     bearerToken: requireString(obj, "bearerToken", path),

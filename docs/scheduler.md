@@ -523,8 +523,8 @@ precede. Wave 2 waits on the wave-1 item named.
   runs; no exclave is spawned for twice inside 60s; a failing refresh is quiet (daemon, with a
   `claude` stub that writes or leaves the cache).
 
-  As built: `quota.staleAfter` is a daemon constant (`STALE_AFTER_MS`, 10 min), not yet a config
-  key; the timer checks every minute, so a healthy exclave is at most `staleAfter` plus a minute
+  As built: `quota.staleAfter` is the config key `quota.staleAfterMinutes` (default 10; under 1
+  refused, the repo's unit-in-the-name convention, like `reap.intervalHours`); the timer checks every minute, so a healthy exclave is at most `staleAfter` plus a minute
   plus a run old — plus the runs queued ahead of it on the process-wide lane (each up to the
   timeout, 60 s, then SIGKILL after 5 s) — and unbounded while its runs fail (backed off for
   `staleAfter` per attempt, state process-wide so a config reload does not reset it).

@@ -171,6 +171,9 @@ Edit `~/.config/seance/config.json`:
 - `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
+- `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
+  account's cached quota may get before the daemon refreshes it with `claude -p /usage`.
+  Values under 1 are refused: Claude Code debounces `/usage` for 60 s anyway.
 
 Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
 Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;

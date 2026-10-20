@@ -112,6 +112,39 @@ describe("loadConfig", () => {
       await expect(loadConfig(path)).rejects.toThrow("reap");
     }
   });
+
+  test("quota is optional, an empty block takes the 10 min default, and a set value parses", async () => {
+    const dir = await tempDir();
+    const bare = join(dir, "bare.json");
+    await writeFile(bare, JSON.stringify(VALID));
+    expect((await loadConfig(bare)).quota).toBeUndefined();
+
+    const empty = join(dir, "empty.json");
+    await writeFile(empty, JSON.stringify({ ...VALID, quota: {} }));
+    expect((await loadConfig(empty)).quota).toEqual({ staleAfterMinutes: 10 });
+
+    const floor = join(dir, "floor.json");
+    await writeFile(floor, JSON.stringify({ ...VALID, quota: { staleAfterMinutes: 1 } }));
+    expect((await loadConfig(floor)).quota).toEqual({ staleAfterMinutes: 1 });
+  });
+
+  test("a staleAfter under Claude Code's 60 s debounce, or not a number, is refused, not clamped", async () => {
+    const dir = await tempDir();
+    const bad = [
+      { staleAfterMinutes: 0.5 },
+      { staleAfterMinutes: -1 },
+      { staleAfterMinutes: "10m" },
+      { staleAfterMinutes: null },
+      "10m",
+    ];
+    for (const [i, quota] of bad.entries()) {
+      const path = join(dir, `bad-${i}.json`);
+      // oxlint-disable-next-line no-await-in-loop
+      await writeFile(path, JSON.stringify({ ...VALID, quota }));
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(loadConfig(path)).rejects.toThrow("quota");
+    }
+  });
 });
 
 describe("runnableProblems", () => {

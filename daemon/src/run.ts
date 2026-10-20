@@ -13,7 +13,15 @@ import { homedir } from "node:os";
 import { daemonSink, ensureAuditLog } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
-import { loadConfig, loadPsk, pskFingerprint, runnableProblems, type Config, type ResolvedPsk } from "./config.ts";
+import {
+  loadConfig,
+  loadPsk,
+  pskFingerprint,
+  QUOTA_DEFAULTS,
+  runnableProblems,
+  type Config,
+  type ResolvedPsk,
+} from "./config.ts";
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
@@ -477,7 +485,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     usageRefresh:
       opts.usageRefresh === undefined
         ? null
-        : createUsageRefresh({ ...opts.usageRefresh, scan: () => exclaveScan, home }),
+        : createUsageRefresh({
+            // Read per startDaemon, so a config reload's new daemon takes a changed value.
+            staleAfterMs: (config.quota ?? QUOTA_DEFAULTS).staleAfterMinutes * 60_000,
+            ...opts.usageRefresh,
+            scan: () => exclaveScan,
+            home,
+          }),
     rescan,
     lastReapAt: () => state.lastReapAt,
     reaped: async (at) => {
