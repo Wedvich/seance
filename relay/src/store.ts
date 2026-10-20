@@ -61,9 +61,10 @@ export type StoreRule = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES];
 
 /** Null for a key no rule accepts: an unknown prefix, or another key under a singleton prefix. */
 export function ruleFor(key: string): StoreRule | null {
-  const rule = Object.values<StorePrefixRule>(STORE_PREFIXES).find((candidate) => key.startsWith(candidate.prefix));
-  if (rule === undefined || (rule.key !== undefined && rule.key !== key)) return null;
-  return rule as StoreRule;
+  const rule = Object.values(STORE_PREFIXES).find((candidate) => key.startsWith(candidate.prefix));
+  if (rule === undefined) return null;
+  const general: StorePrefixRule = rule;
+  return general.key !== undefined && general.key !== key ? null : rule;
 }
 
 export type StoreAct = "create" | "overwrite" | "delete";
