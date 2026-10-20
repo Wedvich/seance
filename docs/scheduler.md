@@ -524,10 +524,11 @@ precede. Wave 2 waits on the wave-1 item named.
   `claude` stub that writes or leaves the cache).
 
   As built: `quota.staleAfter` is the config key `quota.staleAfterMinutes` (default 10; under 1
-  refused, the repo's unit-in-the-name convention, like `reap.intervalHours`); the timer checks every minute, so a healthy exclave is at most `staleAfter` plus a minute
-  plus a run old — plus the runs queued ahead of it on the process-wide lane (each up to the
+  refused, the repo's unit-in-the-name convention, like `reap.intervalHours`); the timer checks
+  every minute, so a healthy exclave is at most `staleAfter` plus a minute plus a run old — plus the runs queued ahead of it on the process-wide lane (each up to the
   timeout, 60 s, then SIGKILL after 5 s) — and unbounded while its runs fail (backed off for
-  `staleAfter` per attempt, state process-wide so a config reload does not reset it).
+  `staleAfter` per attempt, state process-wide so a config reload does not reset it, nor shorten
+  a backoff already running: its `retryAt` was set from the old `staleAfter`).
   `session-quota.json` is left on disk unread rather than deleted.
 
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:

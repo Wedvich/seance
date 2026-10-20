@@ -45,6 +45,10 @@ function parseQuota(raw: unknown, path: string): QuotaConfig | undefined {
     throw new TypeError(`config at ${path}: "quota" must be an object`);
   }
   const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key === "staleAfterMinutes") continue;
+    throw new TypeError(`config at ${path}: unknown key "quota.${key}" (the key is "staleAfterMinutes")`);
+  }
   const value = "staleAfterMinutes" in obj ? obj["staleAfterMinutes"] : QUOTA_DEFAULTS.staleAfterMinutes;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
     throw new TypeError(`config at ${path}: "quota.staleAfterMinutes" must be a number ≥ 1`);

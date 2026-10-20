@@ -3339,7 +3339,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   (Local op socket, "Session events"), and a timer pokes every exclave each minute, so one with
   no session running is still refreshed. So a healthy exclave's reading is at most `staleAfter`
   plus a minute plus a run old, plus the runs queued ahead of it on the shared lane (each up to
-  the timeout), and unbounded while its runs fail. Signed out (`authOk` false) never runs. One run at a time in the process, across a
+  the timeout), and unbounded while its runs fail. Signed out (`authOk` false) never runs. A failure's backoff is process-wide and survives a reload, its retry time fixed from the old `staleAfter`, so lowering the value does not shorten a backoff already running. One run at a time in the process, across a
   config reload's two daemons too, so a small LXC never carries two. A run is killed with its
   process group after 60 s (SIGTERM, then SIGKILL after 5 s for a child that traps it), and
   abandoned a second past that even if a detached grandchild still holds its pipes, so a

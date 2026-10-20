@@ -553,6 +553,42 @@ describe("the daemon", () => {
     }
   });
 
+  test("config quota.staleAfterMinutes reaches the refresher: a 2 min old reading is stale at 1 min", async () => {
+    clock = Date.now();
+    await cacheAged("default", 2 * MIN);
+    await cacheAged("work", 0);
+    await control({});
+    const relay = startTestRelay(TOKEN);
+    const config: Config = {
+      name: "UsageMac",
+      relayUrl: relay.url,
+      bearerToken: TOKEN,
+      psk: PSK,
+      repoRoots: [fixture.root],
+      tmuxSession: "main",
+      quota: { staleAfterMinutes: 1 },
+    };
+    let daemon: { stop(): void } | undefined;
+    try {
+      daemon = await startDaemon({
+        config,
+        backend: createBackend(config, { home }),
+        home,
+        pingIntervalMs: 60_000,
+        pongTimeoutMs: 1_000,
+        baseBackoffMs: 20,
+        telemetryIntervalMs: 100,
+        usageRefresh: { claudeBin: stub },
+      });
+      // The 10 min default would leave a 2 min old reading alone.
+      await pollUntil(async () => (await started()).length > 0, "a run at the 1 min staleAfter");
+      expect((await started()).map((run) => run.exclave)).toEqual(["default"]);
+    } finally {
+      daemon?.stop();
+      relay.stop();
+    }
+  });
+
   test("a session event from a pane in a stale exclave refreshes it, though the timer is a long way off", async () => {
     clock = Date.now();
     await cacheAged("default", 0);

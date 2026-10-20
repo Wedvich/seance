@@ -136,6 +136,8 @@ describe("loadConfig", () => {
       { staleAfterMinutes: "10m" },
       { staleAfterMinutes: null },
       "10m",
+      [],
+      { staleAfter: 5 },
     ];
     for (const [i, quota] of bad.entries()) {
       const path = join(dir, `bad-${i}.json`);
