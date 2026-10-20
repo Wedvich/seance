@@ -269,17 +269,59 @@ function countSessions(sessions: readonly SessionEntry[], scan: ExclaveScan): re
 export function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promise<QuotaObservation | null> {
   const memo = new Map<string, { readonly key: string; readonly quota: QuotaObservation | null }>();
   return async (file, x, nowMs) => {
-    const info = await statFile(file).catch(() => null);
-    if (info === null) {
+    const key = await statKey(file);
+    if (key === null) {
       memo.delete(file);
       return null;
     }
-    const key = `${info.mtimeMs}:${info.size}`;
     const hit = memo.get(file);
     const quota = hit?.key === key ? hit.quota : await readCachedQuota(file, x, nowMs);
     memo.set(file, { key, quota });
     return quota === null ? null : { ...quota, x };
   };
+}
+
+async function statKey(file: string): Promise<string | null> {
+  const info = await statFile(file).catch(() => null);
+  return info === null ? null : `${info.mtimeMs}:${info.size}`;
+}
+
+/**
+ * Just `cachedUsageUtilization.fetchedAtMs`, in seconds and capped like a
+ * quota's `at`, memoized on the file's stat as `cachedQuotaReader` is. The
+ * `/usage` refresh judges staleness and success on this stamp, not on a parsed
+ * observation: a cache Claude Code wrote that holds no window we parse is still
+ * a refresh, and re-running it would only cost another process.
+ */
+export function cachedStampReader(): (file: string, nowMs: number) => Promise<number | null> {
+  const memo = new Map<string, { readonly key: string; readonly stamp: number | null }>();
+  return async (file, nowMs) => {
+    const key = await statKey(file);
+    if (key === null) {
+      memo.delete(file);
+      return null;
+    }
+    const hit = memo.get(file);
+    const stamp = hit?.key === key ? hit.stamp : await readCacheStamp(file);
+    memo.set(file, { key, stamp });
+    return stamp === null ? null : Math.floor(Math.min(stamp, nowMs + QUOTA_CLOCK_SKEW_MS) / 1000);
+  };
+}
+
+async function readCacheStamp(file: string): Promise<number | null> {
+  try {
+    return cacheStamp(JSON.parse(await readFile(file, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+function cacheStamp(config: unknown): number | null {
+  if (!isRecord(config)) return null;
+  const cached = config["cachedUsageUtilization"];
+  if (!isRecord(cached)) return null;
+  const fetched = cached["fetchedAtMs"];
+  return typeof fetched === "number" && Number.isFinite(fetched) && fetched >= 0 ? fetched : null;
 }
 
 /**
@@ -308,8 +350,8 @@ export async function readCachedQuota(
   if (!isRecord(config)) return null;
   const cached = config["cachedUsageUtilization"];
   if (!isRecord(cached) || !isRecord(cached["utilization"])) return null;
-  const fetched = cached["fetchedAtMs"];
-  if (typeof fetched !== "number" || !Number.isFinite(fetched) || fetched < 0) return null;
+  const fetched = cacheStamp(config);
+  if (fetched === null) return null;
   const five = windowOf(cached["utilization"]["five_hour"]);
   const seven = windowOf(cached["utilization"]["seven_day"]);
   const scoped = scopedWindows(cached["utilization"]["limits"]);

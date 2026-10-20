@@ -175,17 +175,21 @@ describe("the collector registry", () => {
       },
     };
     const fullSources: CollectorSources = { ...sources, registered: () => cached, probe: full };
-    const fieldSets = await Promise.all(
-      TELEMETRY_COLLECTORS.map(async (entry) => {
-        const collect = entry(fullSources);
-        const contributions: Contribution[] = [];
-        for (const nowMs of [T0, T0 + 30_000]) {
-          contributions.push(await collect({ registered: cached, nowMs, at: nowMs / 1000, smooth: (_, v) => v }));
-        }
-        return Array.from(new Set(contributions.flatMap((c) => Object.keys(c.fields))));
-      }),
-    );
-    await rm(dir, { recursive: true, force: true });
+    let fieldSets: string[][];
+    try {
+      fieldSets = await Promise.all(
+        TELEMETRY_COLLECTORS.map(async (entry) => {
+          const collect = entry(fullSources);
+          const contributions: Contribution[] = [];
+          for (const nowMs of [T0, T0 + 30_000]) {
+            contributions.push(await collect({ registered: cached, nowMs, at: nowMs / 1000, smooth: (_, v) => v }));
+          }
+          return Array.from(new Set(contributions.flatMap((c) => Object.keys(c.fields))));
+        }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
     const all = fieldSets.flat();
 
     expect(new Set(all)).toEqual(new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota"]));

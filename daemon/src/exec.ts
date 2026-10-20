@@ -55,6 +55,14 @@ export async function exec(
      * `git-remote-https` on a dead network keeps it for its own connect timeout.
      */
     readonly killGroup?: boolean;
+    /**
+     * With `killGroup`: SIGKILL the group this long after the timeout's SIGTERM.
+     * A child that traps TERM would otherwise hold its caller forever. Opt-in:
+     * the git/ssh callers keep the one SIGTERM.
+     */
+    readonly killAfterMs?: number;
+    /** Receives the child's pid as soon as it exists, so a caller can kill its group on shutdown. */
+    readonly onSpawn?: (pid: number) => void;
   } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
@@ -65,7 +73,9 @@ export async function exec(
     stderr: "pipe",
     detached: opts.killGroup === true,
   });
+  opts.onSpawn?.(proc.pid);
   let timedOut = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
     if (opts.killGroup !== true) {
@@ -77,6 +87,14 @@ export async function exec(
     } catch {
       // group already gone
     }
+    if (opts.killAfterMs === undefined) return;
+    killTimer = setTimeout(() => {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+    }, opts.killAfterMs);
   }, opts.timeoutMs ?? 60_000);
   const sink = proc.stdin;
   if (opts.stdin !== undefined && sink !== undefined && typeof sink !== "number") {
@@ -98,6 +116,7 @@ export async function exec(
     proc.exited,
   ]);
   clearTimeout(timer);
+  clearTimeout(killTimer);
   return { exitCode, stdout, stderr, timedOut };
 }
 

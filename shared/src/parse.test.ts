@@ -825,6 +825,13 @@ describe("store", () => {
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
   });
 
+  test("a decision's candidate basis sourced `session` still parses, for records an older leader wrote; `oauth` is refused", () => {
+    const decision = { at: 1_760_000_000_000, chosen: target, candidates: [candidate] };
+    expect(parseDecision(decision)).toEqual(decision);
+    const oauth = { ...candidate, quota: { observedAt: 1_760_000_000, observer: device, source: "oauth" } };
+    expect(parseDecision({ ...decision, candidates: [oauth] })).toBeNull();
+  });
+
   test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {
     for (const { prefix } of Object.values(STORE_PREFIXES)) expect(isStoreKey(`${prefix}x`)).toBe(true);
     expect(isStoreKey(`task:${"a".repeat(ROUTING_ID_MAX_LENGTH)}`)).toBe(true);

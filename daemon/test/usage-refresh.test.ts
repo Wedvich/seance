@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { importPsk, open, parseMachineStatus, toBase64, type MachineStatus } from "@seance/shared";
@@ -8,6 +8,7 @@ import type { Config } from "../src/config.ts";
 import { scanExclaves, type ExclaveScan } from "../src/exclaves.ts";
 import { exec } from "../src/exec.ts";
 import { startDaemon } from "../src/run.ts";
+import { tmuxOk } from "../src/tmux.ts";
 import { createUsageRefresh, USAGE_ARGS, type UsageRefresh, type UsageRefreshOpts } from "../src/usage-refresh.ts";
 import {
   captureLog,
@@ -26,7 +27,10 @@ const MIN = 60_000;
  * Stands in for `claude -p /usage`: records each run's argv, env and pid, then
  * does what `control.json` says for its exclave — `write` stamps the cache at
  * the control clock as Claude Code would, `leave` exits 0 with the cache
- * untouched, `fail` exits 1, `slow` writes after a beat, `hang` never exits.
+ * untouched, `fail` exits 1 (`failmsg`, `failjson`: with a message), `slow` writes
+ * after a beat, `stamp` moves `fetchedAtMs` over a cache with no parseable
+ * window, `hang` never exits, `trap` never exits and ignores SIGTERM, `orphan`
+ * exits leaving a detached grandchild on its stdout.
  * Bun by shebang, not a bash wrapper: bash adds `PWD`, `SHLVL` and `_`, and the
  * env this records is the assertion.
  */
@@ -44,14 +48,33 @@ const record = (phase) =>
     join(dir, "runs.jsonl"),
     JSON.stringify({ phase, exclave, pid: process.pid, at: performance.timeOrigin + performance.now(), argv: process.argv.slice(2), env: { ...process.env }, cwd: process.cwd() }) + "\\n",
   );
+// Before the start record, so a test that saw it knows TERM is already ignored.
+if (mode === "trap") process.on("SIGTERM", () => {});
 record("start");
-if (mode === "hang") await Bun.sleep(600_000);
+if (mode === "hang" || mode === "trap") await Bun.sleep(600_000);
+if (mode === "orphan") {
+  // A detached grandchild keeps the run's stdout open past the stub's own exit.
+  const child = Bun.spawn(["sleep", "5"], { detached: true, stdout: "inherit", stderr: "inherit" });
+  writeFileSync(join(dir, "grandchild.pid"), String(child.pid));
+  process.exit(0);
+}
 if (mode === "slow") await Bun.sleep(150);
 if (mode === "fail") process.exit(1);
-if (mode === "write" || mode === "slow") {
+if (mode === "failmsg") {
+  console.error("boom\\n  bad   thing");
+  process.exit(1);
+}
+if (mode === "failjson") {
+  console.log(JSON.stringify({ is_error: true, result: "Not logged in\\n" + "y".repeat(500) }));
+  console.error("stderr that the json result outranks");
+  process.exit(1);
+}
+if (mode === "write" || mode === "slow" || mode === "stamp") {
   const file = join(configDir ?? process.env.HOME, ".claude.json");
   const config = JSON.parse(readFileSync(file, "utf8"));
-  config.cachedUsageUtilization = { fetchedAtMs: control.clock, utilization: { five_hour: { utilization: 33 } } };
+  // "stamp": Claude Code refreshed, but the cache holds no window we parse.
+  const utilization = mode === "stamp" ? { five_hour: null } : { five_hour: { utilization: 33 } };
+  config.cachedUsageUtilization = { fetchedAtMs: control.clock, utilization };
   writeFileSync(file, JSON.stringify(config));
 }
 record("end");
@@ -67,7 +90,7 @@ interface Run {
   readonly cwd: string;
 }
 
-type Mode = "write" | "leave" | "fail" | "slow" | "hang";
+type Mode = "write" | "stamp" | "leave" | "fail" | "failmsg" | "failjson" | "slow" | "hang" | "trap" | "orphan";
 
 let base: string;
 let stubDir: string;
@@ -301,18 +324,125 @@ describe("the /usage refresh", () => {
     await cacheAged("default", 11 * MIN);
     await cacheAged("work", 11 * MIN);
     await control({ default: "hang" });
-    const usage = await refresher({ timeoutMs: 300 });
+    // Long enough that a loaded machine has booted the stub before the TERM lands.
+    const usage = await refresher({ timeoutMs: 2_000 });
 
     const lines = await captureLog(async () => {
       usage.poke("default");
       usage.poke("work");
+      await pollUntil(async () => (await started()).length === 1, "the hung run to start");
       await usage.idle();
     });
 
     const [hung, next] = await started();
     expect(next?.exclave).toBe("work");
     expect(alive(hung?.pid ?? 0)).toBe(false);
-    expect(lines.join("\n")).toContain("default failed (timed out after 0.3s)");
+    expect(lines.join("\n")).toContain("default failed (timed out after 2s)");
+  });
+
+  test("a run that ignores SIGTERM is killed after the grace and does not hold the slot", async () => {
+    await cacheAged("default", 11 * MIN);
+    await cacheAged("work", 11 * MIN);
+    await control({ default: "trap" });
+    const usage = await refresher({ timeoutMs: 1_000, killAfterMs: 200 });
+
+    const lines = await captureLog(async () => {
+      usage.poke("default");
+      usage.poke("work");
+      await pollUntil(async () => (await started()).length === 2, "the next exclave's run", 10_000);
+      await usage.idle();
+    });
+
+    const [trapped, next] = await started();
+    expect(next?.exclave).toBe("work");
+    expect(alive(trapped?.pid ?? 0)).toBe(false);
+    expect(lines.join("\n")).toContain("default failed (timed out after 1s)");
+  });
+
+  test("a run whose detached grandchild holds its stdout is abandoned, and the slot frees", async () => {
+    await cacheAged("default", 11 * MIN);
+    await cacheAged("work", 11 * MIN);
+    await control({ default: "orphan" });
+    const usage = await refresher({ timeoutMs: 1_000, killAfterMs: 200 });
+
+    const lines = await captureLog(async () => {
+      usage.poke("default");
+      usage.poke("work");
+      await pollUntil(async () => (await started()).length === 2, "the next exclave's run", 10_000);
+      await usage.idle();
+    });
+
+    expect((await started())[1]?.exclave).toBe("work");
+    expect(lines.join("\n")).toContain("default failed (abandoned after 1.2s, still running)");
+    const grandchild = Number(await readFile(join(stubDir, "grandchild.pid"), "utf8"));
+    process.kill(grandchild, "SIGKILL");
+  });
+
+  test("stop kills a run in flight, so a restart does not leave it running beside the next daemon's", async () => {
+    await cacheAged("default", 11 * MIN);
+    await control({ default: "hang" });
+    const usage = await refresher();
+
+    usage.poke("default");
+    await pollUntil(async () => (await started()).length === 1, "the hung run to start");
+    const pid = (await started())[0]?.pid ?? 0;
+    expect(alive(pid)).toBe(true);
+
+    usage.stop();
+    await pollUntil(() => !alive(pid), "the run's death");
+    await usage.idle();
+  });
+
+  test("a cache whose stamp moved but holds no parseable window is a success, and is not re-run", async () => {
+    await cacheAged("default", 11 * MIN);
+    await control({ default: "stamp" });
+    const usage = await refresher();
+
+    const lines = await captureLog(async () => {
+      usage.poke("default");
+      await usage.idle();
+      usage.poke("default");
+      await usage.idle();
+    });
+
+    expect(await started()).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("usage refresh"))).toEqual([]);
+  });
+
+  test("a failed run's warn carries a bounded one-line excerpt: stderr, or the JSON result over it", async () => {
+    await cacheAged("default", 11 * MIN);
+    await cacheAged("work", 11 * MIN);
+    await control({ default: "failmsg", work: "failjson" });
+
+    const lines = await captureLog(async () => {
+      const usage = await refresher();
+      usage.poke("default");
+      usage.poke("work");
+      await usage.idle();
+    });
+
+    const said = lines.filter((line) => line.includes("usage refresh"));
+    expect(said[0]).toContain("default failed (exit 1, the cache did not move: boom bad thing)");
+    expect(said[1]).toContain("work failed (exit 1, the cache did not move: Not logged in yyy");
+    expect(said[1]).not.toContain("stderr that");
+    expect(said[1]).not.toContain("y".repeat(201));
+  });
+
+  test("a second instance, as after a config reload, neither retries inside the backoff nor warns again", async () => {
+    await cacheAged("default", 11 * MIN);
+    await control({ default: "fail" });
+
+    const lines = await captureLog(async () => {
+      const a = await refresher();
+      a.poke("default");
+      await a.idle();
+      const b = await refresher();
+      b.poke("default");
+      await b.idle();
+    });
+
+    expect(await started()).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("usage refresh"))).toHaveLength(1);
   });
 });
 
@@ -381,7 +511,69 @@ describe("the daemon", () => {
       relay.stop();
     }
   });
+
+  test("a session event from a pane in a stale exclave refreshes it, though the timer is a long way off", async () => {
+    clock = Date.now();
+    await cacheAged("default", 0);
+    await cacheAged("work", 0);
+    await control({});
+    const relay = startTestRelay(TOKEN);
+    const config: Config = {
+      name: "UsageMac",
+      relayUrl: relay.url,
+      bearerToken: TOKEN,
+      psk: PSK,
+      repoRoots: [fixture.root],
+      tmuxSession: "main",
+    };
+    let daemon: { stop(): void } | undefined;
+    try {
+      daemon = await startDaemon({
+        config,
+        backend: createBackend(config, { home }),
+        home,
+        pingIntervalMs: 60_000,
+        pongTimeoutMs: 1_000,
+        baseBackoffMs: 20,
+        telemetryIntervalMs: 100,
+        usageRefresh: { claudeBin: stub, checkIntervalMs: 600_000 },
+      });
+      const sock = join(base, "state", "run", "seanced.sock");
+      await pollUntil(async () => (await stat(sock).catch(() => null)) !== null, "the local socket");
+
+      // Fresh at the start check, stale now: only the pane's report can start a run.
+      await cacheAged("work", 11 * MIN);
+      const input = join(home, "event.json");
+      await writeFile(input, JSON.stringify({ rateLimits: [] }));
+      const main = join(import.meta.dir, "..", "src", "main.ts");
+      const send = `${shq(process.execPath)} ${shq(main)} session-event < ${shq(input)}; exec sleep 600`;
+      await tmuxOk(["new-session", "-d", "-s", "ur", "-c", home, "sleep", "600"]);
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-t",
+        "ur:",
+        "-c",
+        join(home, "work"),
+        "-e",
+        `SEANCE_STATE_DIR=${join(base, "state")}`,
+        "sh",
+        "-c",
+        send,
+      ]);
+
+      await pollUntil(async () => (await started()).length === 1, "the refresh the report poked", 15_000);
+      expect((await started()).map((run) => run.exclave)).toEqual(["work"]);
+    } finally {
+      daemon?.stop();
+      relay.stop();
+    }
+  });
 });
+
+function shq(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 function alive(pid: number): boolean {
   try {
