@@ -149,7 +149,7 @@ describe("completeSkill", () => {
 describe("promptSegments", () => {
   const skills = ["ship", "review"];
   /** Marked runs in brackets, the anchor as `^`. */
-  function painted(prompt: string, anchor: number | null = null): string {
+  function painted(prompt: string, anchor: { start: number; end: number } | null = null): string {
     const segments = promptSegments(prompt, skills, anchor);
     expect(segments.map((segment) => segment.text).join("")).toBe(prompt);
     return segments
@@ -176,8 +176,14 @@ describe("promptSegments", () => {
   });
 
   test("cuts at the anchor, on a marked run or plain text", () => {
-    expect(painted("do /re", 3)).toBe("do ^/re");
-    expect(painted("do /ship x", 3)).toBe("do ^[/ship] x");
-    expect(painted("/re", 0)).toBe("^/re");
+    expect(painted("do /re", { start: 3, end: 6 })).toBe("do ^/re");
+    expect(painted("do /ship x", { start: 3, end: 8 })).toBe("do ^[/ship] x");
+    expect(painted("/re", { start: 0, end: 3 })).toBe("^/re");
+  });
+
+  test("the anchored run is the token alone, trailing text stays outside it", () => {
+    const segments = promptSegments("do /re then more", skills, { start: 3, end: 6 });
+    expect(segments.filter((segment) => segment.anchor).map((segment) => segment.text)).toEqual(["/re"]);
+    expect(painted("do /re then more", { start: 3, end: 6 })).toBe("do ^/re then more");
   });
 });

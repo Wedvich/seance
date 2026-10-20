@@ -81,7 +81,7 @@ export function completeSkill(
   return { prompt: `${before} ${after}`, caret: before.length + 1 };
 }
 
-/** A run of the prompt mirror from offset `start`: `skill` paints it, `anchor` is where the picked token starts. */
+/** A run of the prompt mirror from offset `start`: `skill` paints it, `anchor` is the picked token's own run. */
 export interface PromptSegment {
   readonly start: number;
   readonly text: string;
@@ -93,14 +93,15 @@ export interface PromptSegment {
  * The prompt cut into runs for the field's mirror: every `/name` token (at the
  * start or after whitespace) whose name the index knows is a `skill` run, as
  * Claude Code highlights one — an unknown name still goes as typed, it just
- * isn't marked. Also cut at `anchor` so the view can measure where the token
- * being picked sits. The runs join back to the prompt exactly: the mirror must
+ * isn't marked. Also cut at both ends of `anchor` so the view can measure exactly
+ * the token being picked (a span running on to the prompt's end would report
+ * every line's height). The runs join back to the prompt exactly: the mirror must
  * draw the textarea's text glyph for glyph.
  */
 export function promptSegments(
   prompt: string,
   skills: readonly string[],
-  anchor: number | null,
+  anchor: { readonly start: number; readonly end: number } | null,
 ): readonly PromptSegment[] {
   const cuts = new Set<number>([0, prompt.length]);
   const marked = new Set<number>();
@@ -110,14 +111,16 @@ export function promptSegments(
     cuts.add(start).add(match.index + match[0].length);
     marked.add(start);
   }
-  if (anchor !== null && anchor >= 0 && anchor <= prompt.length) cuts.add(anchor);
+  if (anchor !== null && anchor.start >= 0 && anchor.start < anchor.end && anchor.end <= prompt.length) {
+    cuts.add(anchor.start).add(anchor.end);
+  }
   const sorted = [...cuts].toSorted((a, b) => a - b);
   const segments: PromptSegment[] = [];
   for (let i = 0; i + 1 < sorted.length; i += 1) {
     const from = sorted[i] ?? 0;
     const to = sorted[i + 1] ?? prompt.length;
     if (to <= from) continue;
-    segments.push({ start: from, text: prompt.slice(from, to), skill: marked.has(from), anchor: from === anchor });
+    segments.push({ start: from, text: prompt.slice(from, to), skill: marked.has(from), anchor: anchor !== null && from === anchor.start });
   }
   return segments;
 }

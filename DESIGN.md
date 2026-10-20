@@ -4259,8 +4259,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   completes the token ending at the caret (2026-10-20; first token only before): a `/` at the start
   or after whitespace, no whitespace or second `/` up to the caret, and the caret at the token's
   end with no selection — so `… /sh` mid-prompt opens it, a slash in a word, URL or path
-  (`and/or`, `https://a/b`, `/tmp/x`) never does. The caret is read from the field's input, key,
-  pointer and `selectionchange` events; text written from elsewhere counts as caret-at-end, where
+  (`and/or`, `https://a/b`, `/tmp/x`) never does. The caret is read from the field's `input`, `keyup`,
+  `click`, `pointerup`, `select` and `selectionchange` events; text written from elsewhere counts as caret-at-end, where
   the browser puts it. Matching is prefix first then substring, and picking splices `/name ` in
   place of the token (reusing a space already there) with the caret after it. It sits inline under
   the textarea, which collapses to one line meanwhile — scrolled to the token's line, measured

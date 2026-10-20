@@ -382,7 +382,8 @@ export function SpawnScreen(props: {
   const [dismissed, setDismissed] = useState<{ prompt: string; start: number } | null>(null);
   // Escape hides only until the next edit or another token: once either
   // differs, forget it, or coming back to the same text would stay hidden.
-  if (dismissed !== null && (dismissed.prompt !== form.prompt || dismissed.start !== token?.start)) {
+  // The caret stepping off the token (null) keeps it, so stepping back stays hidden.
+  if (dismissed !== null && (dismissed.prompt !== form.prompt || (token !== null && dismissed.start !== token.start))) {
     setDismissed(null);
   }
   const pickerOpen = token !== null && skills.length > 0 && dismissed === null;
@@ -399,7 +400,7 @@ export function SpawnScreen(props: {
   // by a mirror behind it (same box and metrics, text drawn there instead) that
   // follows its scroll. The scroll event covers user scrolling; the layout
   // effect covers an edit that moves the caret without one.
-  const segments = promptSegments(form.prompt, skills, pickerOpen && token !== null ? token.start : null);
+  const segments = promptSegments(form.prompt, skills, pickerOpen && token !== null ? token : null);
   const promptBackdrop = useRef<HTMLDivElement>(null);
   const tokenAnchor = useRef<HTMLElement>(null);
   const syncBackdrop = (): void => {
@@ -472,6 +473,8 @@ export function SpawnScreen(props: {
   };
   const undoClear = (): void => {
     promptInput.current?.focus();
+    // Same text as before the CLEAR, so the stale caret would still match it.
+    if (promptUndo !== null) setCaret({ prompt: promptUndo, at: promptUndo.length });
     actions.undoClear();
   };
 
@@ -530,7 +533,7 @@ export function SpawnScreen(props: {
               rows={pickerOpen ? 1 : undefined}
               aria-labelledby="prompt-label"
               aria-autocomplete="list"
-              aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
+              aria-controls={pickerOpen && matches.length > 0 ? SKILL_LIST_ID : undefined}
               aria-activedescendant={
                 pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined
               }
