@@ -24,9 +24,14 @@ export interface ExecResult {
  * at a different PATH must not have to reconstruct the exclusion to do it. An
  * `undefined` override unsets the variable: `default`'s Claude config is the
  * one reached *without* `CLAUDE_CONFIG_DIR`, so pointing at it means removal.
+ * `bare` drops the daemon's environment altogether: the child gets `overrides`
+ * alone (the `/usage` refresh, which names every variable it passes).
  */
-export function childEnv(overrides: Readonly<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...overrides };
+export function childEnv(
+  overrides: Readonly<Record<string, string | undefined>> = {},
+  bare = false,
+): NodeJS.ProcessEnv {
+  const env = { ...(bare ? {} : process.env), ...overrides };
   for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete env[key];
   // Children only: the daemon's own process.env must keep it, or a supervisor reload
   // re-resolves the key from another source and silently turns the fleet broker off.
@@ -41,6 +46,8 @@ export async function exec(
     readonly timeoutMs?: number;
     readonly stdin?: string;
     readonly env?: Readonly<Record<string, string | undefined>>;
+    /** The child gets `env` alone, never the daemon's environment (`childEnv`'s `bare`). */
+    readonly bareEnv?: boolean;
     /**
      * Run the child in its own process group and time out the whole group.
      * Otherwise the timeout kills only the child, and the result still waits for
@@ -52,7 +59,7 @@ export async function exec(
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
     cwd: opts.cwd,
-    env: childEnv(opts.env),
+    env: childEnv(opts.env, opts.bareEnv === true),
     stdin: opts.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",

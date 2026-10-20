@@ -66,4 +66,17 @@ describe("exec environment", () => {
       delete process.env["SEANCE_EXEC_UNSET"];
     }
   });
+
+  test("bareEnv hands the child its env alone: nothing of the daemon's, never the credential path", async () => {
+    process.env["SEANCE_EXEC_CANARY"] = "daemon's";
+    try {
+      const result = await exec(["/usr/bin/env"], {
+        env: { ONLY: "this", CREDENTIALS_DIRECTORY: "/run/credentials/seanced.service" },
+        bareEnv: true,
+      });
+      expect(result.stdout.trim().split("\n")).toEqual(["ONLY=this"]);
+    } finally {
+      delete process.env["SEANCE_EXEC_CANARY"];
+    }
+  });
 });
