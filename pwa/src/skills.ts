@@ -120,7 +120,12 @@ export function promptSegments(
     const from = sorted[i] ?? 0;
     const to = sorted[i + 1] ?? prompt.length;
     if (to <= from) continue;
-    segments.push({ start: from, text: prompt.slice(from, to), skill: marked.has(from), anchor: anchor !== null && from === anchor.start });
+    segments.push({
+      start: from,
+      text: prompt.slice(from, to),
+      skill: marked.has(from),
+      anchor: anchor !== null && from === anchor.start,
+    });
   }
   return segments;
 }
