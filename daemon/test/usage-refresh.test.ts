@@ -2,10 +2,22 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { importPsk, open, parseMachineStatus, toBase64, type MachineStatus } from "@seance/shared";
+import { createBackend } from "../src/backend-default.ts";
+import type { Config } from "../src/config.ts";
 import { scanExclaves, type ExclaveScan } from "../src/exclaves.ts";
 import { exec } from "../src/exec.ts";
+import { startDaemon } from "../src/run.ts";
 import { createUsageRefresh, USAGE_ARGS, type UsageRefresh, type UsageRefreshOpts } from "../src/usage-refresh.ts";
-import { captureLog, pollUntil } from "./fixtures.ts";
+import {
+  captureLog,
+  makeGitFixture,
+  pollUntil,
+  usePrivateTmux,
+  type GitFixture,
+  type PrivateTmux,
+} from "./fixtures.ts";
+import { startTestRelay } from "./harness.ts";
 
 const WARM_FLAG = "--stub-warm";
 const MIN = 60_000;
@@ -301,6 +313,73 @@ describe("the /usage refresh", () => {
     expect(next?.exclave).toBe("work");
     expect(alive(hung?.pid ?? 0)).toBe(false);
     expect(lines.join("\n")).toContain("default failed (timed out after 0.3s)");
+  });
+});
+
+describe("the daemon", () => {
+  const PSK = toBase64(new Uint8Array(32).fill(4));
+  const TOKEN = "test-bearer";
+  let privateTmux: PrivateTmux | undefined;
+  let fixture: GitFixture;
+  let appKey: CryptoKey;
+
+  beforeAll(async () => {
+    process.env["SEANCE_STATE_DIR"] = join(base, "state");
+    // The daemon's own CLAUDE_CONFIG_DIR, which a `default` run must not inherit.
+    process.env["CLAUDE_CONFIG_DIR"] = join(base, "ambient-claude");
+    privateTmux = usePrivateTmux(base, "usage-refresh");
+    fixture = await makeGitFixture(base);
+    appKey = await importPsk(PSK);
+  });
+
+  afterAll(async () => {
+    await privateTmux?.dispose();
+    delete process.env["SEANCE_STATE_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+  });
+
+  test("refreshes a stale exclave at start, and the next status carries the refreshed reading", async () => {
+    clock = Date.now();
+    await cacheAged("default", 11 * MIN);
+    await cacheAged("work", 0);
+    await control({});
+    const relay = startTestRelay(TOKEN);
+    const config: Config = {
+      name: "UsageMac",
+      relayUrl: relay.url,
+      bearerToken: TOKEN,
+      psk: PSK,
+      repoRoots: [fixture.root],
+      tmuxSession: "main",
+    };
+    let daemon: { stop(): void } | undefined;
+    try {
+      daemon = await startDaemon({
+        config,
+        backend: createBackend(config, { home }),
+        home,
+        pingIntervalMs: 60_000,
+        pongTimeoutMs: 1_000,
+        baseBackoffMs: 20,
+        telemetryIntervalMs: 100,
+        usageRefresh: { claudeBin: stub },
+      });
+
+      let status: MachineStatus | null = null;
+      const deadline = Date.now() + 10_000;
+      while (status?.quota?.find((q) => q.x === 0)?.h !== 33) {
+        if (Date.now() > deadline) throw new Error(`no refreshed reading; last status ${JSON.stringify(status)}`);
+        // oxlint-disable-next-line no-await-in-loop -- statuses arrive in order
+        status = parseMachineStatus((await open(appKey, await relay.statuses.next(5_000))).payload);
+      }
+
+      const first = await started();
+      expect(first.map((run) => run.exclave)).toEqual(["default"]);
+      expect(first[0]?.env["CLAUDE_CONFIG_DIR"]).toBeUndefined();
+    } finally {
+      daemon?.stop();
+      relay.stop();
+    }
   });
 });
 
