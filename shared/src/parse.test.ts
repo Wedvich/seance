@@ -49,7 +49,10 @@ import {
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
   FLEET_QUOTA_MAX_ACCOUNTS,
+  FLEET_QUOTA_MAX_WINDOWS,
+  FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
+  PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
@@ -74,6 +77,7 @@ import {
   type BatchMembership,
   type BranchState,
   type Candidate,
+  type FleetQuotaRecord,
   type MachineStatus,
   type MetricsSeries,
   type PauseHold,
@@ -100,6 +104,12 @@ const exclave = { id: "default", accountId: "org:acct", extraUsageEnabled: true,
 async function sealedLength(task: Task): Promise<number> {
   const key = await importPsk(toBase64(new Uint8Array(32)));
   const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+  return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
+}
+
+async function sealedRecordLength(op: "quota" | "settings", payload: unknown): Promise<number> {
+  const key = await importPsk(toBase64(new Uint8Array(32)));
+  const plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload } as const;
   return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
 }
 
@@ -1079,7 +1089,14 @@ describe("M4 shapes", () => {
   });
 
   test("a branch name is held to check-ref-format, and to what git would read as anything else", () => {
-    for (const good of ["main", "martin/pen-1-stack", "v1.2", "a@b", "ø".repeat(BRANCH_MAX_LENGTH)]) {
+    for (const good of [
+      "main",
+      "martin/pen-1-stack",
+      "v1.2",
+      "a@b",
+      "ø".repeat(BRANCH_MAX_LENGTH / 2),
+      `${"x".repeat(BRANCH_MAX_LENGTH - 2)}ø`,
+    ]) {
       expect(isBranchName(good)).toBe(true);
     }
     for (const bad of [
@@ -1106,8 +1123,11 @@ describe("M4 shapes", () => {
       "a[",
       "a\\b",
       "a\u0001",
-      "a\u007f",
+      "a\u007F",
       "x".repeat(BRANCH_MAX_LENGTH + 1),
+      // Within BRANCH_MAX_LENGTH UTF-16 units, past it in UTF-8 bytes: git limits the filename's bytes.
+      "ø".repeat(BRANCH_MAX_LENGTH),
+      `${"x".repeat(BRANCH_MAX_LENGTH - 1)}ø`,
       7,
       null,
     ]) {
@@ -1119,7 +1139,27 @@ describe("M4 shapes", () => {
     expect(isSkillName("dataviz")).toBe(true);
     expect(isSkillName("plugin:skill")).toBe(true);
     expect(isSkillName("s".repeat(SKILL_NAME_MAX_LENGTH))).toBe(true);
-    for (const bad of ["", ".hidden", "a/b", "a b", "a\tb", "a\u0000", "s".repeat(SKILL_NAME_MAX_LENGTH + 1), 7]) {
+    for (const bad of [
+      "",
+      ".hidden",
+      "a/b",
+      "a b",
+      "a\tb",
+      "a\u0000",
+      "a\\b",
+      "a*",
+      "a?",
+      'a"b',
+      "a<b",
+      "a>b",
+      "a|b",
+      "a\u0085b",
+      "a\u0080",
+      "a\u009F",
+      "a\u007F",
+      "s".repeat(SKILL_NAME_MAX_LENGTH + 1),
+      7,
+    ]) {
       expect(isSkillName(bad)).toBe(false);
     }
   });
@@ -1139,6 +1179,8 @@ describe("M4 shapes", () => {
       expect(parseRepoEntry({ ...repo, skills })).toEqual(repo);
     }
     expect(parseRepoEntry({ ...repo, skills: tooMany.slice(1) })?.skills).toHaveLength(REPO_MAX_SKILLS);
+    const given = ["ship"];
+    expect(parseRepoEntry({ ...repo, skills: given })?.skills).not.toBe(given);
   });
 
   test("a status names its expired exclaves by index, bounded; an old daemon's names none", () => {
@@ -1146,9 +1188,14 @@ describe("M4 shapes", () => {
     expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("ax");
     const full = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, i) => i);
     expect(parseMachineStatus({ at: 1, scan: 2, ax: full })?.ax).toEqual(full);
-    for (const ax of [[...full, STATUS_MAX_AUTH_EXPIRED], [-1], [1.5], "0", null]) {
+    for (const ax of [[...full, STATUS_MAX_AUTH_EXPIRED], [-1], [1.5], [2, 2], "0", null]) {
       expect(parseMachineStatus({ at: 1, scan: 2, ax })).toBeNull();
     }
+    const given = [1];
+    const sess = [2];
+    const parsed = parseMachineStatus({ at: 1, scan: 2, ax: given, sess });
+    expect(parsed?.ax).not.toBe(given);
+    expect(parsed?.sess).not.toBe(sess);
   });
 
   test("a spec settles until merged or reported, absent read as merged; an edge may wait for done", () => {
@@ -1216,6 +1263,49 @@ describe("M4 shapes", () => {
     }
   });
 
+  test("a fleet entry's scoped windows are bounded in the record, not in a status", () => {
+    const reading: QuotaReading = { s: "cache", at: 1_700_000_000 };
+    const entry = { accountId: "org:acct", observer: "dev-a" };
+    const window = (m: string) => ({ m, p: 10 });
+    const fits = Array.from({ length: FLEET_QUOTA_MAX_WINDOWS }, () =>
+      window("m".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH)),
+    );
+    const good = { version: 1, accounts: [{ ...entry, reading: { ...reading, w: fits } }] };
+    expect(parseFleetQuotaRecord(good)).toEqual(good);
+    for (const w of [[...fits, window("x")], [window("m".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH + 1))]]) {
+      expect(parseFleetQuotaRecord({ version: 1, accounts: [{ ...entry, reading: { ...reading, w } }] })).toBeNull();
+      expect(parseMachineStatus({ at: 1, scan: 2, quota: [{ x: 0, ...reading, w }] })?.quota).toHaveLength(1);
+    }
+  });
+
+  test("a fleet quota record with every field at its bound seals under the store's cap", async () => {
+    const full: FleetQuotaRecord = {
+      version: 1,
+      accounts: Array.from({ length: FLEET_QUOTA_MAX_ACCOUNTS }, (_, i) => ({
+        accountId: `${String(i).padStart(2, "0")}${"ø".repeat(126)}`,
+        observer: "o".repeat(ROUTING_ID_MAX_LENGTH),
+        reading: {
+          s: "session",
+          at: 1_760_000_000,
+          h: 100,
+          d: 100,
+          hr: 1_760_000_000,
+          dr: 1_760_000_000,
+          c: 100,
+          cu: 1_000_000,
+          cl: 1_000_000,
+          w: Array.from({ length: FLEET_QUOTA_MAX_WINDOWS }, () => ({
+            m: "ø".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH),
+            p: 100,
+            r: 1_760_000_000,
+          })),
+        },
+      })),
+    };
+    expect(parseFleetQuotaRecord(full)).toEqual(full);
+    expect(await sealedRecordLength("quota", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
   test("a push endpoint is https on a push service's host, on its default port", () => {
     for (const good of [
       "https://fcm.googleapis.com/fcm/send/abc",
@@ -1225,10 +1315,16 @@ describe("M4 shapes", () => {
     ]) {
       expect(pushEndpoint(good)).toBe(good);
     }
+    expect(pushEndpoint("https://FCM.googleapis.com")).toBe("https://fcm.googleapis.com/");
+    const atBound = `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 27)}`;
+    expect(pushEndpoint(atBound)).toBe(atBound);
     for (const bad of [
       "http://fcm.googleapis.com/fcm/send/abc",
       "https://fcm.googleapis.com:8443/fcm/send/abc",
       "https://notify.windows.com/w",
+      "https://.notify.windows.com/x",
+      "https://a..notify.windows.com/x",
+      `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH)}`,
       "https://evilnotify.windows.com/w",
       "https://fcm.googleapis.com.evil.example/x",
       "https://user@fcm.googleapis.com/x",
@@ -1276,7 +1372,10 @@ describe("M4 shapes", () => {
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
     expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
-    const many = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, () => subscription);
+    const many = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, (_, i) => ({
+      ...subscription,
+      endpoint: `${subscription.endpoint}${i}`,
+    }));
     expect(parseSettingsRecord({ version: 1, subscriptions: many.slice(1) })?.subscriptions).toHaveLength(
       PUSH_MAX_SUBSCRIPTIONS,
     );
@@ -1286,9 +1385,24 @@ describe("M4 shapes", () => {
       { ...settings, linearKey: "" },
       { ...settings, subscriptions: [subscription, { ...subscription, endpoint: "https://example.com/x" }] },
       { ...settings, subscriptions: many },
+      { ...settings, subscriptions: [subscription, { ...subscription }] },
       { ...settings, version: 0 },
     ]) {
       expect(parseSettingsRecord(bad)).toBeNull();
     }
+  });
+
+  test("a settings record with every field at its bound seals under the store's cap", async () => {
+    const full: SettingsRecord = {
+      version: 1,
+      vapid: { publicKey: b64url(65), privateKey: b64url(32) },
+      linearKey: "ø".repeat(LINEAR_KEY_MAX_LENGTH),
+      subscriptions: Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => ({
+        endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 29)}${String(i).padStart(2, "0")}`,
+        keys: { p256dh: b64url(65, true), auth: b64url(16, true) },
+      })),
+    };
+    expect(parseSettingsRecord(full)).toEqual(full);
+    expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 });

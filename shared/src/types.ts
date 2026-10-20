@@ -942,7 +942,10 @@ export interface MachineStatus {
    * budget with quota. An exclave not listed is `ok` or `unknown`, and both
    * route. Never trimmed — `fitStatus` (`daemon/src/status.ts`) takes only quota
    * detail, quota and `sess` — so at most `STATUS_MAX_AUTH_EXPIRED` entries, a
-   * reader refusing more. Absent from older daemons, and when none has expired.
+   * reader refusing more, or a repeated index. Status and info arrive
+   * separately, so an index may name no exclave of the info a reader holds:
+   * range-check against its `exclaves`, as for `sess` and `quota[].x`. Absent
+   * from older daemons, and when none has expired.
    */
   readonly ax?: readonly number[];
 }
@@ -1423,7 +1426,10 @@ export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "tit
    * A skill the task needs (M4, Skills; decided #19), by `isSkillName`: routing
    * restricts to clones and exclaves that have it, when the fleet's inventory
    * knows the name at all. Absent, a prompt starting `/name` is read as the
-   * declaration. An older leader drops it, which routes as an unknown name does.
+   * declaration. An older leader's `parseTaskSpec` rebuilds the spec without it,
+   * and every write that leader makes (reserve, place, settle) seals that spec
+   * back, so the field is lost from the record, not just ignored while it leads.
+   * The authoring item must not write it until leaders are upgraded.
    */
   readonly skill?: string;
 }
@@ -1545,12 +1551,15 @@ export interface TaskSpec extends TaskRequest {
   readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
-  /** Where the work this task builds on lives (M4's stacking fills it; unset today). */
+  /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
   readonly base?: Placement;
   /**
-   * Absent is `merged`. An older leader drops it and settles at the merge, so a
-   * `reported` task enqueued under one finishes early; its `after: "done"`
-   * dependents it holds unreadable regardless (`DEP_AFTER`).
+   * Absent is `merged`. An older leader's `parseTaskSpec` rebuilds the spec
+   * without it and seals that back on every write (reserve, place, settle), so
+   * the field is lost from the record and the task settles at the merge, early
+   * for a `reported` one; its `after: "done"` dependents it holds unreadable
+   * regardless (`DEP_AFTER`). The authoring item must not write it until
+   * leaders are upgraded.
    */
   readonly until?: TaskUntil;
   readonly batch?: BatchMembership;
@@ -1889,11 +1898,22 @@ export interface FleetQuotaEntry {
 }
 
 /**
- * Accounts the fleet quota record holds at most: the relay's 32 machines with
- * two accounts each. A record of 64 entries at every field's bound seals well
- * under `STORE_MAX_CT_LENGTH`.
+ * Accounts the fleet quota record holds at most. Accounts are shared across
+ * machines, so this is distinct accounts, not machines times accounts. Sized to
+ * the sealed bound: 32 entries at every field's bound (2-byte characters in
+ * every free-text field, `FLEET_QUOTA_MAX_WINDOWS` windows each) seal to ~37 KB,
+ * under `STORE_MAX_CT_LENGTH` (40 KiB); 64 would not.
  */
-export const FLEET_QUOTA_MAX_ACCOUNTS = 64;
+export const FLEET_QUOTA_MAX_ACCOUNTS = 32;
+
+/**
+ * Scoped windows (`QuotaReading.w`) one fleet entry holds at most, a model
+ * display name each, at most `FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH` UTF-16 units.
+ * Held in the fleet record's parse only: a `status` from an older daemon
+ * carries `w` unbounded, as before.
+ */
+export const FLEET_QUOTA_MAX_WINDOWS = 4;
+export const FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH = 32;
 
 /**
  * Payload of the fleet quota record (`op: "quota"`, sealed to `"app"` by the
@@ -1908,7 +1928,7 @@ export interface FleetQuotaRecord extends VersionBound {
 /**
  * A Web Push subscription as `PushSubscription.toJSON()` gives it, minus
  * `expirationTime`. `endpoint` is `https:` on a `PUSH_SERVICE_HOSTS` host
- * (`isPushEndpoint`); `p256dh` (65 bytes) and `auth` (16) are base64url, the
+ * (`pushEndpoint`, at most `PUSH_ENDPOINT_MAX_LENGTH`); `p256dh` (65 bytes) and `auth` (16) are base64url, the
  * RFC 8291 keys a payload is encrypted to.
  */
 export interface WebPushSubscription {
@@ -1929,7 +1949,15 @@ export const PUSH_SERVICE_HOSTS = [
   "*.notify.windows.com",
 ] as const;
 
-/** Subscriptions the settings record holds at most: a person's browsers and devices. */
+/**
+ * A push endpoint's length at most. Real ones run a few hundred characters;
+ * the cap is what keeps the settings record under the store's cap: 16
+ * subscriptions at it, with the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
+ * their bounds, seal to ~26 KB of `STORE_MAX_CT_LENGTH` (40 KiB).
+ */
+export const PUSH_ENDPOINT_MAX_LENGTH = 1024;
+
+/** Subscriptions the settings record holds at most, one per endpoint: a person's browsers and devices. */
 export const PUSH_MAX_SUBSCRIPTIONS = 16;
 
 /** The VAPID keypair (RFC 8292), base64url: an uncompressed P-256 point (65 bytes) and its private scalar (32). */

@@ -195,6 +195,18 @@ describe("release", () => {
     expect((await store.get("asking"))?.version).toBe(before?.version);
   });
 
+  test("a `done` session event on a reserved task leaves the reservation alone", async () => {
+    const { store, scheduler, put } = setup(new FakeFleet([]));
+    const { pane: _pane, ...target } = ON_A;
+    await put("held", { state: "reserved", reservation: { ...target, expiresAt: NOW + 60_000 }, reservedAt: NOW });
+    await scheduler.load();
+    const before = await store.get("held");
+    await scheduler.onSession("held", "done", { deviceId: "a", pane: "%1" }, PR);
+    expect(scheduler.task("held")).toMatchObject({ state: "reserved", reservation: target });
+    expect(scheduler.task("held")?.assignment).toBeUndefined();
+    expect((await store.get("held"))?.version).toBe(before?.version);
+  });
+
   test("a lost predecessor is waited on, never failed for", async () => {
     const { clock, scheduler, put } = setup(new FakeFleet([machine("b", { connected: false })]));
     await put("gone", { state: "lost", assignment: { ...ON_A, deviceId: "b" }, absentSince: NOW });
@@ -221,6 +233,19 @@ describe("edges that never release", () => {
       expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
     }
     expect(scheduler.task("grandchild")?.failure?.message).toContain("child");
+  });
+
+  test("a failed or cancelled predecessor fails an `after: done` dependent too", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("broken", { state: "failed", failure: { code: "repo_not_found", message: "gone" } });
+    await put("dropped", { state: "cancelled" });
+    await put("x", after("broken", "done"));
+    await put("y", after("dropped", "done"));
+    await scheduler.load();
+    await pass(scheduler);
+    for (const id of ["x", "y"]) {
+      expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+    }
   });
 
   test("a failure cascades to a fixpoint whatever order the chain was stored in", async () => {

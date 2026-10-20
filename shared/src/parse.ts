@@ -8,10 +8,13 @@ import {
   DONE_SIGNALS,
   EXIT_STATUS_MAX,
   FLEET_QUOTA_MAX_ACCOUNTS,
+  FLEET_QUOTA_MAX_WINDOWS,
+  FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
+  PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   PUSH_SERVICE_HOSTS,
   REPO_MAX_SKILLS,
@@ -164,8 +167,9 @@ function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+/** A fresh copy, never the caller's array: a parsed value must not alias its input. */
 function parseUintList(value: unknown): readonly number[] | null {
-  return Array.isArray(value) && value.every(isUint) ? value : null;
+  return Array.isArray(value) && value.every(isUint) ? [...value] : null;
 }
 
 /**
@@ -224,7 +228,7 @@ export function parseRepoEntry(value: unknown): RepoEntry | null {
  */
 function parseRepoSkills(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value) || value.length > REPO_MAX_SKILLS || !value.every(isSkillName)) return undefined;
-  return value;
+  return [...value];
 }
 
 /**
@@ -237,12 +241,16 @@ function parseRepoSkills(value: unknown): readonly string[] | undefined {
 export function isSkillName(value: unknown): value is string {
   if (typeof value !== "string" || value === "" || value.length > SKILL_NAME_MAX_LENGTH) return false;
   if (value.startsWith(".") || value.includes("/")) return false;
-  return ![...value].some((ch) => isControl(ch) || /\s/u.test(ch));
+  return ![...value].some((ch) => isControl(ch) || SKILL_FORBIDDEN.has(ch) || /\s/u.test(ch));
 }
 
+/** Path separators and glob/shell metacharacters; `:` stays, as plugin skills are `plugin:name`. */
+const SKILL_FORBIDDEN = new Set(["\\", "*", "?", '"', "<", ">", "|"]);
+
+/** C0, DEL and C1 controls (U+0080-U+009F, which `\s` only partly covers). */
 function isControl(ch: string): boolean {
   const code = ch.codePointAt(0) ?? 0;
-  return code < 0x20 || code === 0x7f;
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f);
 }
 
 /** Characters `git check-ref-format` refuses anywhere in a ref, beside controls and space. */
@@ -254,13 +262,16 @@ const REF_FORBIDDEN = new Set(["~", "^", ":", "?", "*", "[", "\\", " "]);
  * `@{` or empty component (so no leading, trailing or doubled `/`); no
  * component starting `.` or ending `.lock`; not ending `.`; not `@`. Plus what
  * `--branch` refuses — a leading `-`, which would read as an option, and `HEAD`.
- * Bounded by `BRANCH_MAX_LENGTH`. The one copy, for every hop that hands a branch
+ * Bounded by `BRANCH_MAX_LENGTH` UTF-8 bytes, since git stores a loose ref as a
+ * file and limits it by filename bytes, not UTF-16 units. The one copy, for every hop that hands a branch
  * to git: the leader, on the predecessor's `Task.branch` before it sends one
  * (decided #4: the base is that branch, never one an app names), and the daemon
  * on `SpawnRequest.baseBranch`.
  */
 export function isBranchName(value: unknown): value is string {
-  if (typeof value !== "string" || value === "" || value.length > BRANCH_MAX_LENGTH) return false;
+  if (typeof value !== "string" || value === "" || new TextEncoder().encode(value).length > BRANCH_MAX_LENGTH) {
+    return false;
+  }
   if (value === "@" || value === "HEAD" || value.startsWith("-") || value.endsWith(".")) return false;
   if (value.includes("..") || value.includes("@{")) return false;
   if ([...value].some((ch) => isControl(ch) || REF_FORBIDDEN.has(ch))) return false;
@@ -429,7 +440,9 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   const { tr } = value;
   if (!isOptionalUint(tr)) return null;
   const ax = value["ax"] === undefined ? undefined : parseUintList(value["ax"]);
-  if (ax === null || (ax !== undefined && ax.length > STATUS_MAX_AUTH_EXPIRED)) return null;
+  if (ax === null || (ax !== undefined && (ax.length > STATUS_MAX_AUTH_EXPIRED || new Set(ax).size !== ax.length))) {
+    return null;
+  }
   return {
     at: value["at"],
     scan: value["scan"],
@@ -1037,7 +1050,14 @@ export function parseAccountRecord(value: unknown): AccountRecord | null {
 function parseFleetQuotaEntry(value: unknown): FleetQuotaEntry | null {
   if (!isRecord(value) || !isAccountId(value["accountId"]) || !isRoutingId(value["observer"])) return null;
   const reading = parseQuotaReading(value["reading"]);
+  // Bounded here, not in `parseQuotaReading`: a status from an older daemon parses as before.
+  const windows = reading?.w;
+  if (windows !== undefined && (windows.length > FLEET_QUOTA_MAX_WINDOWS || !windows.every(boundedWindow))) return null;
   return reading === null ? null : { accountId: value["accountId"], observer: value["observer"], reading };
+}
+
+function boundedWindow(window: ScopedWindow): boolean {
+  return window.m.length <= FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH;
 }
 
 /**
@@ -1066,18 +1086,20 @@ function isBase64UrlBytes(value: unknown, bytes: number): value is string {
 /**
  * A push endpoint a leader may send to: `https:` (`httpsUrl`), on the default
  * port, on a `PUSH_SERVICE_HOSTS` host — for a `*.` entry any subdomain, never
- * the bare host. The parsed form, or null. Checked where the request is parsed,
+ * the bare host, and no empty label. Returns the normalized href (`URL`'s
+ * form), or null; at most `PUSH_ENDPOINT_MAX_LENGTH`. Checked where the request is parsed,
  * so a refused host never reaches the record, and exported so a sender can
  * check a stored one again.
  */
 export function pushEndpoint(value: unknown): string | null {
   const href = httpsUrl(value);
-  if (href === null) return null;
+  if (href === null || href.length > PUSH_ENDPOINT_MAX_LENGTH) return null;
   const url = new URL(href);
   if (url.port !== "") return null;
   const host = url.hostname;
+  if (host.split(".").some((label) => label === "")) return null;
   const allowed = PUSH_SERVICE_HOSTS.some((entry) =>
-    entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
+    entry.startsWith("*.") ? host.length > entry.length - 1 && host.endsWith(entry.slice(1)) : host === entry,
   );
   return allowed ? href : null;
 }
@@ -1136,7 +1158,8 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (subscriptions !== undefined) {
     if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
     const parsed = parseList(subscriptions, parseWebPushSubscription);
-    if (parsed === null) return null;
+    // One subscription per endpoint, as `parseFleetQuotaRecord` has one entry per account.
+    if (parsed === null || new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
     subscribed = parsed;
   }
   return {

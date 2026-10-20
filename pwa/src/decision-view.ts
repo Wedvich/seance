@@ -213,6 +213,7 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "done":
       if (task.leftRunning === true) return `Marked done — its session may still be running${place}.`;
       // Marked by hand: nothing saw it finish, so "finished" would claim too much.
+      if (task.doneBy === "linear") return `Its Linear issue was closed${place}.`;
       return task.doneBy === "manual" ? `Marked done${place}.` : `It finished${place}.`;
     case "failed":
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
@@ -256,6 +257,7 @@ export function queuedBody(task: Task): string {
       return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
     case "done":
       if (task.leftRunning === true) return `Marked done by hand. ${LEFT_RUNNING}`;
+      if (task.doneBy === "linear") return "Its Linear issue was closed, so the scheduler marked it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
       return failedBody(task.failure?.code);
