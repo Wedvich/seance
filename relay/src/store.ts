@@ -7,6 +7,7 @@ import {
   type StoreDeleteFrame,
   type StoreErrorCode,
   type StorePrefix,
+  type StorePrefixRule,
   type StorePutFrame,
   type StoreRecord,
 } from "@seance/shared";
@@ -58,8 +59,11 @@ export interface StoreStorage {
 /** The `STORE_PREFIXES` entry a key falls under. */
 export type StoreRule = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES];
 
+/** Null for a key no rule accepts: an unknown prefix, or another key under a singleton prefix. */
 export function ruleFor(key: string): StoreRule | null {
-  return Object.values(STORE_PREFIXES).find((rule) => key.startsWith(rule.prefix)) ?? null;
+  const rule = Object.values<StorePrefixRule>(STORE_PREFIXES).find((candidate) => key.startsWith(candidate.prefix));
+  if (rule === undefined || (rule.key !== undefined && rule.key !== key)) return null;
+  return rule as StoreRule;
 }
 
 export type StoreAct = "create" | "overwrite" | "delete";
@@ -95,9 +99,18 @@ export function authorize(rule: StoreRule, act: StoreAct, leg: Role, leader: boo
   return rule.appWrite ? null : "forbidden";
 }
 
-/** Whether a create meets the create floor: always on the app leg, and on the daemon leg wherever writes are not term-fenced. */
-export function floorsCreate(rule: StoreRule, leg: Role): boolean {
-  return leg === "app" || !rule.termFenced;
+/**
+ * Whether a write meets the per-socket write floor. Wherever the term fence does
+ * not cover a prefix, creates and overwrites both do, on either leg: the fence
+ * is what bounds a fenced prefix's writes to the one term socket, and without
+ * it a socket looping overwrites burns row writes and fans `store-changed`.
+ * On a fenced prefix only an app's creates meet it (the daemon leg's writes
+ * there are the term holder's own, bounded by caps).
+ */
+export function floorsWrite(rule: StoreRule, act: StoreAct, leg: Role): boolean {
+  if (act === "delete") return false;
+  if (!rule.termFenced) return true;
+  return act === "create" && leg === "app";
 }
 
 /** A per-socket floor's window, kept on the socket's attachment. */
@@ -119,7 +132,7 @@ function admitWindow(prior: RateWindow | undefined, now: number, windowMs: numbe
   return next.count > max ? null : next;
 }
 
-/** The create floor (`floorsCreate`). */
+/** The write floor (`floorsWrite`). */
 export function admitCreate(prior: RateWindow | undefined, now: number): RateWindow | null {
   return admitWindow(prior, now, STORE_CREATE_WINDOW_MS, MAX_STORE_CREATES_PER_WINDOW);
 }
@@ -246,12 +259,12 @@ export class RelayStore {
   }
 
   /**
-   * `createAdmitted` is the caller's verdict on the create floor (always true
-   * where `floorsCreate` is false). It is consulted only after the tombstone and version
-   * checks, so a create retried after it landed reads `version_conflict`, never
+   * `admitted` is the caller's verdict on the write floor (always true where
+   * `floorsWrite` is false). It is consulted only after the tombstone and version
+   * checks, so a write retried after it landed reads `version_conflict`, never
    * `rate_limited` — and the caps come after that for the same reason.
    */
-  async put(key: string, expect: number, env: Envelope, now: number, createAdmitted: boolean): Promise<WriteResult> {
+  async put(key: string, expect: number, env: Envelope, now: number, admitted: boolean): Promise<WriteResult> {
     const rule = ruleFor(key);
     if (rule === null) return { ok: false, code: "invalid_request" };
     const [current, stone] = await Promise.all([
@@ -263,8 +276,8 @@ export class RelayStore {
     const version = current?.version ?? 0;
     if (version !== expect) return REFUSED_CONFLICT;
 
+    if (!admitted) return { ok: false, code: "rate_limited" };
     const create = current === undefined;
-    if (create && !createAdmitted) return { ok: false, code: "rate_limited" };
     const entries: Record<string, StoredRecord | Counts> = { [RECORD_NS + key]: { version: version + 1, env } };
     if (create) {
       const counts = (await this.#storage.get<Counts>(COUNTS_KEY)) ?? NO_COUNTS;

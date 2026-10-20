@@ -391,15 +391,18 @@ Séance's noise is cover for a real intruder.
    (owner decision #14): a register needs a signature on top of the token, so that
    leg is harder to open than the app leg that already has the rights. `quota:` is
    every registered daemon's and no app's. Neither is term-fenced, so creates there
-   meet the create floor on either leg, and nobody deletes under either (#8): their
+   meet the write floor on either leg (overwrites too, where the term fence does not
+   bound them), and nobody deletes under either (#8): their
    keys are deterministic (an HMAC, a singleton), where a tombstone would block the
    one key that names the thing for 30 days, so they are cleared by overwrite. A
    holder can therefore overwrite an alias or the quota record with junk readers
    skip — never read, forge or roll one back — and, the residual, create junk keys
-   up to the prefix's cap (64 under `account:`, the one `quota:` slot) that nothing
-   in the product removes, since deletes are refused: a junk `quota:` key other than
-   the fleet record's holds that prefix's only slot until an operator edits the DO's
-   storage. Rotating the token stops more and clears none. Registry growth is bounded in the DO by a
+   under `account:` up to its cap of 64, which nothing in the product removes, since
+   deletes are refused. The singleton prefixes take one key (`StorePrefixRule.key`:
+   `queue:pause`, `quota:fleet`) and refuse any other `invalid_request`, so a holder
+   cannot squat their only slot; what it can still do is overwrite the real key with
+   junk, which the next honest compare-and-set overwrite replaces (the readers skip
+   what does not open). Rotating the token stops more and clears none. Registry growth is bounded in the DO by a
    32-entry cap that turns away only _unknown_ ids — so a full registry locks
    out machines you have not added yet and never knocks a known one offline —
    plus a per-socket register rate limit, which bounds write rate as the entry
@@ -1557,11 +1560,15 @@ enforces is what it can see: who is asking, the key, a version and a size.
   store frame is handled only once that socket's register has been accepted — one sent right
   behind the register waits for its outcome, as other frames do — and before that every store
   frame, a read included, is answered `store-refused { code: "forbidden" }` (a superseded socket
-  counts as unregistered): under a prefix that is not term-fenced, registration is the daemon
+  counts as unregistered, and so does one whose register failed verify: the earlier identity is
+  cleared before the close, so a frame queued behind the failure is refused): under a prefix that is not term-fenced, registration is the daemon
   leg's whole authority, and a refusal settles the client where a drop would leave it to ride
   `STORE_TIMEOUT_MS` (2026-10-20, store rules v2; until then reads were anyone's and an
   unregistered socket's write read `not_leader`). A put's `env.from` is not compared with the
-  socket's id: the relay is blind and the seal's addressing is the clients' to decide.
+  socket's id: the relay is blind and the seal's addressing is the clients' to decide. Store
+  frames also wait behind an in-flight (re-)register on the same socket, so a write sent right
+  after `resign`'s roleless register reads `not_leader` — the register has
+  already taken the term away — never a write on the old role.
 - **Storage namespaces**, none starting `device:` or equal to `scheduler:term`, so no store key
   — which `STORE_KEY_PATTERN` confines to a known prefix and a routing id — can alias the registry
   or the leader record. Records never reach the registry push and never count toward
@@ -1588,10 +1595,10 @@ enforces is what it can see: who is asking, the key, a version and a size.
   | `queue:`    | daemon | leader, else `not_leader`                   | leader, else `not_leader` | `forbidden`               |           |     |
   | `settings:` | app    | `forbidden`                                 | `forbidden`               | `forbidden`               | no        | 8   |
   | `settings:` | daemon | leader, else `not_leader`                   | leader, else `not_leader` | `forbidden`               |           |     |
-  | `account:`  | app    | allowed, create floor                       | allowed                   | `forbidden`               | no        | 64  |
-  | `account:`  | daemon | allowed, create floor                       | allowed                   | `forbidden`               |           |     |
+  | `account:`  | app    | allowed, write floor                        | allowed, write floor      | `forbidden`               | no        | 64  |
+  | `account:`  | daemon | allowed, write floor                        | allowed, write floor      | `forbidden`               |           |     |
   | `quota:`    | app    | `forbidden`                                 | `forbidden`               | `forbidden`               | no        | 1   |
-  | `quota:`    | daemon | allowed, create floor                       | allowed                   | `forbidden`               |           |     |
+  | `quota:`    | daemon | allowed, write floor                        | allowed, write floor      | `forbidden`               |           |     |
 
   A `term` on an app frame is dropped by the parser, so it authorizes nothing: an app overwrite
   carrying the current term is still `forbidden`; on a prefix that is not term-fenced a daemon's
@@ -1604,14 +1611,17 @@ enforces is what it can see: who is asking, the key, a version and a size.
   a leader op's to write and every PSK holder's to read (#9); `account:` gives every registered
   daemon socket an app's rights (#14: that leg needs a signed register on top of the token, so it
   is harder to open than the app leg), and `quota:` is the daemons' alone — any daemon's, since
-  the fleet quota record is written by each machine on its own cadence. And no daemon creates
+  the fleet quota record is written by each machine on its own cadence. A singleton prefix
+  accepts one key: `queue:` only `queue:pause`, `quota:` only `quota:fleet` (`StorePrefixRule.key`,
+  enforced by `ruleFor` and `STORE_KEY_PATTERN` together), any other `invalid_request`; a cap of
+  one alone let a token holder take the slot with junk and, deletes being refused, keep it. And no daemon creates
   under `task:`, the leader included (2026-10-18, M3 review S4): since `submit` went only apps
   enqueue, and the leader meets no create floor on a fenced prefix, so a create it could make was
   only ever a create-and-delete loop (Threat model, item 3, the seed thief).
 
 - **The order of checks is the contract:** parse (`invalid_request`, `too_large`), then the rule
   (`forbidden`, `not_leader`), then the tombstone and the version (`version_conflict`), then the
-  create floor (`rate_limited`), then the caps (`store_full`: records on a create, tombstones
+  write floor (`rate_limited`), then the caps (`store_full`: records on a create, tombstones
   on a delete), then the write. The version check precedes the floor and the caps so an enqueue
   retried after it landed always reads `version_conflict` — never `rate_limited` or `store_full`
   — and an idempotent retry is recognizable as such even against a full store; a retried delete
@@ -1650,19 +1660,24 @@ enforces is what it can see: who is asking, the key, a version and a size.
   row from before the cap has no `tombstones`: the next delete counts the age index once and
   writes it. A refused prune is the library's to report (`store refused delete …`), and the
   record holds its slot until a delete fits.
-- **The create floor** binds every app-leg create, and daemon-leg creates under a prefix that is
-  not term-fenced (`floorsCreate`): 60 creates per socket per 60 s
+- **The write floor** binds every app-leg create, and every create and overwrite under a prefix
+  the term fence does not cover (`floorsWrite`), on either leg: 60 writes per socket per 60 s
   (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the socket's
-  attachment (written on its first create, so it survives hibernation; a re-register keeps a
+  attachment (written on its first counted write, so it survives hibernation; a re-register keeps a
   daemon socket's) and a fresh socket starting a fresh window — the register limit's
-  counterpart, bounding one connection's spend. Only a create that lands counts: the window is
-  written back after the put returns `ok`, so a `version_conflict`, `store_full` or
-  `rate_limited` leaves it untouched and a refusal cannot reset it. On a fenced prefix the daemon
-  leg meets no floor: only the term holder writes there, and its creates are its own singletons
-  (`queue:`, `settings:`), bounded by their caps. Under `account:` and `quota:` any registered
-  daemon socket creates, and `/daemon` accepts any bearer token plus a self-minted signed
-  register, so the floor binds there as on the app leg (store rules v2, 2026-10-20). Enqueue
-  needs no leader: an app create lands with no daemon connected.
+  counterpart, bounding one connection's spend. Overwrites count where nothing else bounds them:
+  under `account:` and `quota:` a socket looping overwrites would otherwise burn a DO row write
+  each and fan `store-changed` to every app. A daemon writing `quota:` every ~5 minutes and a
+  person renaming an alias sit at a few writes a minute at most, far below it. Only a write that
+  lands counts: the window is written back after the put returns `ok`, so a `version_conflict`,
+  `store_full` or `rate_limited` leaves it untouched and a refusal cannot reset it (the floor
+  sits behind the version check, so a retried write reads `version_conflict`). On a fenced prefix
+  the daemon leg meets no floor: only the term holder writes there, and its writes are its own
+  singletons (`queue:`, `settings:`), bounded by their caps and the term. Under `account:` and
+  `quota:` any registered daemon socket writes, and `/daemon` accepts any bearer token plus a
+  self-minted signed register, so the floor binds there as on the app leg (store rules v2,
+  2026-10-20; the overwrite half added in its review). Enqueue needs no leader: an app create
+  lands with no daemon connected.
 - **Store caps**: a create past its prefix's `cap`, or past `MAX_RECORDS` in all, is
   `store_full` on either leg. The caps (table above) sum to 202 of `MAX_RECORDS`' 256, checked in
   `relay/test/store-rules.test.ts`, so no prefix's fill can starve another's and the 54 left are

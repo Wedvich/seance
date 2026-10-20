@@ -23,7 +23,7 @@ import {
   admitCreate,
   admitList,
   authorize,
-  floorsCreate,
+  floorsWrite,
   ruleFor,
   takeList,
   tombstoneAgeKey,
@@ -133,11 +133,25 @@ describe("prefix rules", () => {
     for (const a of rules) for (const b of rules) if (a !== b) expect(a.prefix.startsWith(b.prefix)).toBe(false);
   });
 
-  test("the create floor binds every app create and daemon creates where writes are not term-fenced", () => {
+  test("the write floor binds every app create, and every create and overwrite where writes are not term-fenced", () => {
     for (const r of rules) {
-      expect(floorsCreate(r, "app")).toBe(true);
-      expect(floorsCreate(r, "daemon")).toBe(!r.termFenced);
+      expect(floorsWrite(r, "create", "app")).toBe(true);
+      expect(floorsWrite(r, "create", "daemon")).toBe(!r.termFenced);
+      expect(floorsWrite(r, "overwrite", "daemon")).toBe(!r.termFenced);
+      expect(floorsWrite(r, "overwrite", "app")).toBe(!r.termFenced);
+      for (const leg of ["app", "daemon"] as const) expect(floorsWrite(r, "delete", leg)).toBe(false);
     }
+  });
+
+  test("a singleton prefix accepts its one key: another key under it has no rule, and the key pattern agrees", () => {
+    for (const r of rules) {
+      if (!("key" in r)) continue;
+      expect(ruleFor(r.key)).toBe(r);
+      expect(ruleFor(`${r.prefix}junk`)).toBeNull();
+      expect(STORE_KEY_PATTERN.test(r.key)).toBe(true);
+      expect(STORE_KEY_PATTERN.test(`${r.prefix}junk`)).toBe(false);
+    }
+    expect(rules.flatMap((r) => ("key" in r ? [r.key] : []))).toEqual(["queue:pause", "quota:fleet"]);
   });
 });
 
@@ -237,7 +251,6 @@ describe("storage namespaces", () => {
     "task:a.b_c-D",
     `task:${"z".repeat(64)}`,
     "queue:pause",
-    "queue:q-000",
     `account:${"f".repeat(64)}`,
     "quota:fleet",
     "settings:vapid",
@@ -415,6 +428,7 @@ describe("RelayStore tombstone cap", () => {
     expect(await store.delete("task:d", 1, NOW)).toEqual({ ok: false, code: "store_full" });
   });
 
+  // RelayStore storage directly: `authorize` refuses this delete on every leg, so no frame reaches it.
   test("a delete under a prefix with no tombstone leaves none and counts none", async () => {
     const { storage, store } = await withTasks("queue:pause");
     expect(await store.delete("queue:pause", 1, NOW)).toMatchObject({ ok: true, version: 1 });
@@ -424,9 +438,11 @@ describe("RelayStore tombstone cap", () => {
   });
 
   test("a create past its prefix's cap is store_full, and other prefixes still create", async () => {
-    const { store } = await withTasks("quota:fleet");
-    expect(await store.put("quota:other", 0, ENV, NOW, true)).toEqual({ ok: false, code: "store_full" });
-    expect(await store.put("quota:fleet", 0, ENV, NOW, true)).toEqual({ ok: false, code: "version_conflict" });
+    const { store } = await withTasks(
+      ...Array.from({ length: STORE_PREFIXES.settings.cap }, (_, i) => `settings:s${i}`),
+    );
+    expect(await store.put("settings:over", 0, ENV, NOW, true)).toEqual({ ok: false, code: "store_full" });
+    expect(await store.put("quota:other", 0, ENV, NOW, true)).toEqual({ ok: false, code: "invalid_request" });
     expect(await store.put("account:a", 0, ENV, NOW, true)).toMatchObject({ ok: true, version: 1 });
   });
 

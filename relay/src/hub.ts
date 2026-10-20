@@ -43,7 +43,7 @@ import {
   admitList,
   authorize,
   RelayStore,
-  floorsCreate,
+  floorsWrite,
   ruleFor,
   takeList,
   type ListBucket,
@@ -161,11 +161,17 @@ interface SocketAttachment {
    * nothing back into it, and it keeps no status (`#leftBy`).
    */
   readonly superseded?: true;
+  /**
+   * Set when a register on this socket failed verify, before it closes: the
+   * identity from an earlier register no longer speaks for it, so a store frame
+   * queued behind the failure is refused like an unregistered socket's.
+   */
+  readonly unverified?: true;
   /** The `store-list` floor's windows by prefix (`admitList`); a re-register keeps them, so it cannot reset the floor. */
   readonly listWindows?: ListWindows;
   /**
-   * The create floor's window (`admitCreate`), spent by creates under a prefix
-   * that is not term-fenced. Kept by a re-register for the same reason.
+   * The write floor's window (`admitCreate`), spent by writes under a prefix
+   * that is not term-fenced, overwrites included. Kept by a re-register for the same reason.
    */
   readonly createWindow?: RateWindow;
   /**
@@ -589,6 +595,7 @@ export class Hub implements DurableObject {
       console.log(`refused register from ${deviceId}: ${verdict}`);
       // Closed, not left open: a daemon re-registers on connect only, and the
       // reason is the one word it gets about why its identity was not accepted.
+      ws.serializeAttachment({ ...attachment, rate, unverified: true } satisfies SocketAttachment);
       ws.close(1000, "register unverified");
       return;
     }
@@ -698,12 +705,12 @@ export class Hub implements DurableObject {
       return;
     }
 
-    // Tentative: only a create that lands is written back to the attachment, so
-    // a refusal of any kind leaves the window as it was. On the daemon leg the
-    // floor binds only where writes are not term-fenced (`floorsCreate`): there
-    // any registered socket creates, while on a fenced prefix the term holder's
-    // creates are its own singletons, bounded by their caps.
-    const floored = act === "create" && floorsCreate(rule, leg);
+    // Tentative: only a write that lands is written back to the attachment, so
+    // a refusal of any kind leaves the window as it was. The floor binds where
+    // writes are not term-fenced (`floorsWrite`): there any registered socket
+    // writes, while on a fenced prefix the term holder's writes are its own,
+    // bounded by caps and by the term.
+    const floored = floorsWrite(rule, act, leg);
     const window = floored ? admitCreate(this.#attachmentOf(ws)?.createWindow, now) : null;
     let result: WriteResult;
     try {
@@ -725,7 +732,8 @@ export class Hub implements DurableObject {
     this.#storeReply(ws, { t: "store-written", re: frame.id, version: result.version });
     const version = frame.t === "store-put" ? result.version : 0;
     if (rule.appWrite) this.#nudgeApps(ws, frame.key, version);
-    await this.#nudgeLeader(ws, frame.key, version);
+    // A frame that held the term is the leader's own write: no read to find the leader. One without a term (a non-fenced prefix) may still be its socket's, which `#nudgeLeader` checks.
+    if (!leader) await this.#nudgeLeader(ws, frame.key, version);
   }
 
   /** Either leg's attachment, for a spread that writes one floor's window back: each leg's carries its own. */
@@ -1104,7 +1112,7 @@ export class Hub implements DurableObject {
   #leaderSocketOf(ws: WebSocket): LeaderSocket | null {
     if (this.#roleOf(ws) !== "daemon") return null;
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
-    if (attachment === null || attachment.superseded === true) return null;
+    if (attachment === null || attachment.superseded === true || attachment.unverified === true) return null;
     const deviceId = attachment.identity?.deviceId;
     return deviceId === undefined ? null : { deviceId, connectedAt: attachment.connectedAt };
   }

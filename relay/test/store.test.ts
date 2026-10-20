@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import {
   connectApp,
   connectDaemon,
+  connectZombieDaemon,
   envelope,
   newDeviceId,
   register,
@@ -514,6 +515,119 @@ describe("relay store: rules, versions and tombstones", () => {
     observer.close();
   });
 
+  test("quota: and queue: take their one key alone; quota:fleet creates", async () => {
+    const observer = await connectApp(rigA.relay());
+    const leader = await rigA.lead(observer);
+    const app = await connectApp(rigA.relay());
+    expect(await put(leader.daemon, "quota:junk", 0, sealed())).toMatchObject(refused("invalid_request"));
+    expect(await put(leader.daemon, "queue:other", 0, sealed(), leader.term)).toMatchObject(refused("invalid_request"));
+    expect(await put(app, "quota:junk", 0, sealed())).toMatchObject(refused("invalid_request"));
+    expect(await ask(app, { t: "store-get", key: "quota:junk" })).toMatchObject(refused("invalid_request"));
+    const current = (await get(app, "quota:fleet"))?.version ?? 0;
+    expect(await put(leader.daemon, "quota:fleet", current, sealed())).toMatchObject(written(current + 1));
+
+    app.close();
+    await rigA.dismiss(observer, leader);
+    observer.close();
+  });
+
+  test("a follower's quota:fleet write nudges the leader, and the leader's own write, with or without the term, does not", async () => {
+    const observer = await connectApp(rigA.relay());
+    const leader = await rigA.lead(observer);
+    const followerId = await newDeviceId();
+    const follower = await rigA.join(observer, followerId, []);
+    const app = await connectApp(rigA.relay());
+    let version = (await get(app, "quota:fleet"))?.version ?? 0;
+
+    expect(await put(follower, "quota:fleet", version, sealed())).toMatchObject(written(version + 1));
+    version += 1;
+    const raw = await leader.daemon.waitFor<{ t: string }>("store-changed", 5_000);
+    expect(parseStoreChanged(raw)).toEqual({ t: "store-changed", key: "quota:fleet", version });
+
+    for (const term of [undefined, leader.term]) {
+      const own = {
+        t: "store-put",
+        key: "quota:fleet",
+        expect: version,
+        env: sealed(),
+        ...(term === undefined ? {} : { term }),
+      };
+      // oxlint-disable-next-line no-await-in-loop -- sequential: each overwrite is at the version the last made
+      expect(await ask(leader.daemon, own, 5_000, "store-changed")).toMatchObject(written(version + 1));
+      version += 1;
+      // oxlint-disable-next-line no-await-in-loop -- a non-event per write
+      await leader.daemon.expectNo("store-changed");
+    }
+    await follower.expectNo("store-changed");
+
+    app.close();
+    await rigA.leave(observer, follower, followerId);
+    await rigA.dismiss(observer, leader);
+    observer.close();
+  });
+
+  // The zombie never reads, so the effect is the evidence: what it wrote, an app reads back.
+  test("store frames on a superseded daemon socket are forbidden: its write never lands", async () => {
+    const observer = await connectApp(rigA.relay());
+    const id = await newDeviceId();
+    const zombie = await connectZombieDaemon(rigA.relay());
+    try {
+      zombie.send(await register(id, { roles: [] }));
+      await registryWhere(observer, connectedIs(id, true));
+      const successor = await connectDaemon(rigA.relay());
+      successor.send(await register(id, { roles: [] }));
+      await until(async () => (await put(successor, accountKey(), 0, sealed())).t === "store-written", "the successor");
+
+      const key = accountKey();
+      zombie.send({ t: "store-put", id: "z-1", key, expect: 0, env: sealed() });
+      await Bun.sleep(500);
+      expect(await get(observer, key)).toBeNull();
+      expect(await put(successor, key, 0, sealed())).toMatchObject(written(1));
+      await rigA.leave(observer, successor, id);
+    } finally {
+      zombie.destroy();
+      observer.close();
+    }
+  });
+
+  test("a store frame right behind a register that fails verify is refused, not served on the earlier identity", async () => {
+    const observer = await connectApp(rigA.relay());
+    const id = await newDeviceId();
+    const zombie = await connectZombieDaemon(rigA.relay());
+    try {
+      zombie.send(await register(id, { roles: [] }));
+      await registryWhere(observer, connectedIs(id, true));
+      const key = accountKey();
+      // A stale timestamp fails verify; the put is queued behind it on the same socket.
+      zombie.send(await register(id, { roles: [], ts: 1 }));
+      zombie.send({ t: "store-put", id: "z-2", key, expect: 0, env: sealed() });
+      await Bun.sleep(500);
+      expect(await get(observer, key)).toBeNull();
+    } finally {
+      zombie.destroy();
+      observer.close();
+    }
+  });
+
+  test("overwrites on account: spend the write floor: past it a socket's overwrite is rate_limited, and a fresh socket starts over", async () => {
+    const app = await connectApp(rigA.relay());
+    const key = accountKey();
+    expect(await put(app, key, 0, sealed())).toMatchObject(written(1));
+    for (let version = 1; version < MAX_STORE_CREATES_PER_WINDOW; version += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential: the floor counts landed writes in order
+      expect(await put(app, key, version, sealed())).toMatchObject(written(version + 1));
+    }
+    expect(await put(app, key, MAX_STORE_CREATES_PER_WINDOW, sealed())).toMatchObject(refused("rate_limited"));
+    // A refusal leaves the record as it was.
+    expect((await get(app, key))?.version).toBe(MAX_STORE_CREATES_PER_WINDOW);
+    const fresh = await connectApp(rigA.relay());
+    expect(await put(fresh, key, MAX_STORE_CREATES_PER_WINDOW, sealed())).toMatchObject(
+      written(MAX_STORE_CREATES_PER_WINDOW + 1),
+    );
+    app.close();
+    fresh.close();
+  }, 30_000);
+
   test("store-changed reaches every other app for an account: write, and the leader for any write its term socket did not make", async () => {
     const observer = await connectApp(rigA.relay());
     const leader = await rigA.lead(observer);
@@ -721,14 +835,14 @@ describe("relay store: caps", () => {
     observer.close();
   }, 90_000);
 
-  test("each prefix stops at its own cap: queue: holds the pause alone, and a full task: leaves the others room", async () => {
+  test("a full task: leaves the other prefixes room, and the singleton prefixes take their one key alone", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
     await fillTasks();
     expect(await put(leader.daemon, "queue:pause", 0, sealed(), leader.term)).toMatchObject(written(1));
-    expect(await put(leader.daemon, "queue:other", 0, sealed(), leader.term)).toMatchObject(refused("store_full"));
+    expect(await put(leader.daemon, "queue:other", 0, sealed(), leader.term)).toMatchObject(refused("invalid_request"));
     expect(await put(leader.daemon, "quota:fleet", 0, sealed())).toMatchObject(written(1));
-    expect(await put(leader.daemon, "quota:other", 0, sealed())).toMatchObject(refused("store_full"));
+    expect(await put(leader.daemon, "quota:other", 0, sealed())).toMatchObject(refused("invalid_request"));
     expect(await put(leader.daemon, "settings:vapid", 0, sealed(), leader.term)).toMatchObject(written(1));
     const app = await connectApp(rigB.relay());
     expect(await put(app, accountCapKey(0), 0, sealed())).toMatchObject(written(1));
@@ -738,7 +852,7 @@ describe("relay store: caps", () => {
   }, 60_000);
 
   // On a prefix that is not term-fenced the daemon leg is as open as the app leg, so it meets the same floor.
-  test("the create floor binds a daemon's account: creates, survives a re-register, and the cap stops the rest", async () => {
+  test("the write floor binds a daemon's account: creates, survives a re-register, and the cap stops the rest", async () => {
     const observer = await connectApp(rigB.relay());
     const id = await newDeviceId();
     const daemon = await rigB.join(observer, id, []);
@@ -748,8 +862,8 @@ describe("relay store: caps", () => {
     }
     const next = accountCapKey(MAX_STORE_CREATES_PER_WINDOW);
     expect(await put(daemon, next, 0, sealed())).toMatchObject(refused("rate_limited"));
-    // Overwrites meet no floor.
-    expect(await put(daemon, accountCapKey(0), 1, sealed())).toMatchObject(written(2));
+    // Overwrites spend the same window where the term fence does not cover the prefix.
+    expect(await put(daemon, accountCapKey(0), 1, sealed())).toMatchObject(refused("rate_limited"));
     daemon.send(await register(id, { roles: [] }));
     expect(await put(daemon, next, 0, sealed())).toMatchObject(refused("rate_limited"));
 

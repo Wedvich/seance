@@ -109,7 +109,7 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   | `queue:pause`     | leader only                    | leader only                          | never       | yes         | 1   | M3    |
   | `settings:<name>` | leader only                    | leader only                          | never       | yes         | 8   | M4    |
   | `account:<hmac>`  | any app, any registered daemon | any app, any registered daemon (CAS) | never       | no          | 64  | M4    |
-  | `quota:<name>`    | any registered daemon          | any registered daemon (CAS)          | never       | no          | 1   | M4    |
+  | `quota:fleet`     | any registered daemon          | any registered daemon (CAS)          | never       | no          | 1   | M4    |
 
   Only `task:` tombstones. App-writable records exist for state a person edits from any client
   with no leader up — an account's alias first. Push subscriptions still need a prefix of their
@@ -416,8 +416,11 @@ precede. Wave 2 waits on the wave-1 item named.
   - a per-prefix tombstone flag, off for deterministic keys;
   - per-prefix caps sized so caps plus singletons fit `MAX_RECORDS`;
   - a delete policy per prefix;
-  - the create floor on the daemon leg for any prefix that is not term-fenced, with store frames
-    handled only after register;
+  - the write floor (creates, and overwrites where the term fence does not cover them) on the
+    daemon leg for any prefix that is not term-fenced, with store frames handled only after
+    register;
+  - singleton prefixes (`queue:`, `quota:`) accept one key (`queue:pause`, `quota:fleet`), so a
+    cap of one cannot be squatted;
   - `store-changed` fanned out to apps for app-writable prefixes (today it reaches only the
     leader);
   - the new prefixes.

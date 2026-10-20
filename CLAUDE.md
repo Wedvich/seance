@@ -162,8 +162,9 @@ green:
   `relay/src/store.ts` names no prefix, a `term` on an app-leg store frame authorizes nothing, a
   daemon-leg write to a term-fenced prefix is fenced on the term and the socket it was issued to
   (`holdsTerm` in `relay/src/leadership.ts`), a `/daemon` socket's store frames are answered only
-  once its register is accepted, every create the term fence does not cover meets the create
-  floor, store records live under their own storage namespaces so no key aliases `device:` or
+  once its register is accepted, every create the term fence does not cover meets the write
+  floor, and so does every overwrite there, a singleton prefix accepts one key (`queue:pause`,
+  `quota:fleet`: a cap of one alone lets a token holder squat the slot), store records live under their own storage namespaces so no key aliases `device:` or
   `scheduler:term`, deletes are refused on every prefix but `task:` (the leader's there, and only
   `task:` keeps tombstones), the app leg creates only under `task:` and `account:` and overwrites
   only under `account:`, and the relay logs no store `env`/`ct` and no

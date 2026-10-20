@@ -299,6 +299,12 @@ export type RegistryView = RegistryEntry & {
  */
 export interface StorePrefixRule {
   readonly prefix: string;
+  /**
+   * The one key the prefix accepts, for a singleton: any other key under it is
+   * `invalid_request`. A cap of one alone lets a token holder take the slot with
+   * junk and, deletes being refused, keep it.
+   */
+  readonly key?: string;
   /** Apps may create (`expect: 0`). */
   readonly appCreate: boolean;
   /** Apps may overwrite (`expect > 0`), by `expect` (CAS). */
@@ -342,6 +348,12 @@ export const MAX_TASKS = 128;
  */
 export const MAX_RECORDS = 256;
 
+/** The one key under `queue:`. */
+export const PAUSE_KEY = "queue:pause";
+
+/** The one key under `quota:`. */
+export const QUOTA_KEY = "quota:fleet";
+
 export const STORE_PREFIXES = {
   /**
    * `task:<id>` → a sealed `TaskRecord`. Any app creates at `expect: 0`, so
@@ -365,6 +377,7 @@ export const STORE_PREFIXES = {
    */
   queue: {
     prefix: "queue:",
+    key: PAUSE_KEY,
     appCreate: false,
     appWrite: false,
     termFenced: true,
@@ -412,6 +425,7 @@ export const STORE_PREFIXES = {
    */
   quota: {
     prefix: "quota:",
+    key: QUOTA_KEY,
     appCreate: false,
     appWrite: false,
     termFenced: false,
@@ -424,16 +438,16 @@ export const STORE_PREFIXES = {
 
 export type StorePrefix = (typeof STORE_PREFIXES)[keyof typeof STORE_PREFIXES]["prefix"];
 
-/** A known prefix, then a routing id — so a key stays a short, boring storage key, and a task id is one as it stands. */
+/**
+ * A known prefix, then a routing id — so a key stays a short, boring storage key,
+ * and a task id is one as it stands — or, for a singleton prefix, its one key.
+ */
 export const STORE_KEY_PATTERN = new RegExp(
-  `^(?:${Object.values(STORE_PREFIXES)
-    .map((rule) => rule.prefix)
-    .join("|")})[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}$`,
+  `^(?:${Object.values<StorePrefixRule>(STORE_PREFIXES)
+    .map((rule) => rule.key ?? `${rule.prefix}[${ROUTING_ID_CHARS}]{1,${ROUTING_ID_MAX_LENGTH}}`)
+    .join("|")})$`,
   "u",
 );
-
-/** The one key under `queue:`. */
-export const PAUSE_KEY = "queue:pause";
 
 /**
  * Ciphertext one record may hold, in UTF-8 bytes — the relay measures bytes,
