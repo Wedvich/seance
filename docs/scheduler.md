@@ -116,26 +116,20 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
 - **Version binding** — the reader's rules (`bindTaskRecord`) are DESIGN.md _Scheduler_, "Task
   records and the app's store leg". They close rollback against a token holder, not the relay
   (DESIGN.md Threat model, item 4).
-- **Stored blobs are an at-rest format, not live frames.** M4's `account` record is sealed to
-  `"app"` under op `account` and, like `task` and `pause-state`, opened only through
-  `openAtRest`, never on a live routing path. A distinct op per kind is what stops a stored record
-  being replayed as a request, or as a record of another kind.
+- **Stored blobs are an at-rest format, not live frames.** M4's `account`, `quota` and
+  `settings` ops and record types are in `AT_REST_OPS` (DESIGN.md _Security model_). The
+  `account` record is sealed to `"app"` and, like `task` and `pause-state`, opened only through
+  `openAtRest`, never on a live routing path.
 - **Daemon → scheduler** (M2, M3): `session-event` and `branch-state`, and the `sessions`
   reply's `ended` and `progress` that back them up, are DESIGN.md Local op socket ("Session
-  events") and _Scheduler_ ("Branch state", "Done detection"). M4 adds an exit status (`failed`
-  from exit status, M4 below).
-- **`SpawnRequest.baseBranch?`** (M4, stacking) — start the worktree from this branch instead of
-  the default. Resolved against the repo's refs, never interpolated; unresolvable is a new code,
-  `base_not_found`. Fetched before launch as the default branch is (`base-fetch.ts`), so a
-  stacked task never starts from a stale `origin/<b>`. An old daemon drops an unknown field
-  silently, and B would start from main, so the leader sends it only to a daemon advertising the
-  `"baseBranch"` capability — required, not optional. How the worktree gets made is the open part
-  (Stacking, below).
-- **App → scheduler ops**: M2 and M3's (`queue`, `route-preview`, `cancel`, `mark-done`,
-  `pause`/`resume`) are DESIGN.md _Wire protocol_, Layer 2. M4 adds `push-subscribe` (Web Push),
-  not in `SCHEDULER_OPS` yet. `enqueue` stays a `store-put`, never a leader op.
-- **`MachineInfo.capabilities`** gains `"baseBranch"`; `status` gains each exclave's auth state
-  (Auth health, below).
+  events") and _Scheduler_ ("Branch state", "Done detection"). M4's exit status is
+  `TaskProgress.exit`, in the schema; acting on it is `failed` from exit status, M4 below.
+- **`SpawnRequest.baseBranch?`**, `base_not_found` and the `"baseBranch"` capability are in the
+  schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
+  base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
+  starts from a stale `origin/<b>`, and how the worktree gets made.
+- **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` included (typed,
+  not in `SCHEDULER_OPS` yet). `enqueue` stays a `store-put`, never a leader op.
 
 ## Daemon changes
 
@@ -397,7 +391,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | Wave | Item                                                               | Depends on                                                             | Size                     |
 | ---- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------ |
 | 0    | Store rules v2 (relay)                                             | the review's S4 store bounds; #29                                      | —                        |
-| 0    | One schema PR for every M4 shape                                   | the owner's calls below                                                | —                        |
+| 0    | One schema PR for every M4 shape — **Done**                        | the owner's calls below                                                | —                        |
 | 0    | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
 | 1    | Authoring surface (new)                                            | —                                                                      | M                        |
@@ -428,12 +422,21 @@ precede. Wave 2 waits on the wave-1 item named.
   M4's first app-side `store-list` (`account:` on open) means any `store-list` rate bucket must be
   per prefix, or it throttles that list against takeover.
 
-- **One schema PR**, every M4 shape in `types.ts` and `parse.ts` at once: the spawn's base fields,
-  `base_not_found` and its capability, the new reason codes, a declared skill on `TaskRequest`,
-  `RepoEntry.skills`, auth in `MachineStatus`, a `linear` done signal, the exit status, the new
-  at-rest ops and record types, and `push-subscribe` — plus #21's `done` session-event state,
-  `until` on the task and `after: "done"`. The prefixes stay unaccepted until store
-  rules v2.
+- **One schema PR**, every M4 shape in `types.ts` and `parse.ts` at once. **Done** 2026-10-20;
+  DESIGN.md _Wire protocol_ ("M4's shapes landed ahead of their items") records each shape and
+  what an older peer does with it. Where it differs from the sketch here:
+  - the stacked base's branch is not a `TaskSpec` field: decided #4 makes it the predecessor's
+    own `Task.branch`, so `TaskSpec.base` stays a placement and the leader holds that branch to
+    `isBranchName` before it sends `baseBranch`;
+  - the exit status rides `TaskProgress.exit` (the `sessions` reply's `progress` and the launch
+    ledger), not `ended` or the session event, whose hook runs before the pane dies;
+  - auth in `MachineStatus` is `ax`, the expired exclaves' indices, never trimmed;
+  - `push-subscribe` is typed and parsed but not in `SCHEDULER_OPS`; a leader answers it
+    `invalid_request` until the Web Push PR adds its handler and `OP_TIMEOUT_MS` entry;
+  - push subscriptions, the VAPID key pair and the Linear key are one `settings` record.
+
+  The prefixes stay unaccepted until store rules v2.
+
 - **Daemon seams.**
   - An injectable `httpFetch` and clock through `startDaemon`, the leader and telemetry. Without them
     auth health, push, Linear and Proxmox can be tested only at the unit tier.
@@ -466,7 +469,8 @@ precede. Wave 2 waits on the wave-1 item named.
 
     The authoring surface writes all three. It is the first act session events gain beyond
     ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_, "Session
-    events", and _Threat model_). A session that lies about being done can do no more than one
+    events", and _Threat model_), as decided and not built. The shapes are in the schema;
+    until this item, ingest refuses `done` and `released` frees `after: "done"` only at `done`. A session that lies about being done can do no more than one
     that exits. `mark-done` stays the manual override.
 - **`failed` from exit status (new, M3 review R3).** Today a session that crashes with no PR
   settles `done` by `session`, and `done` releases every edge (`released` in

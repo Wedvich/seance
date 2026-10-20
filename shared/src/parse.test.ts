@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { importPsk, seal, toBase64 } from "./crypto.ts";
 import {
   bindTaskRecord,
+  isBranchName,
   isMetricsRequest,
+  isSkillName,
+  parseAccountRecord,
+  parseFleetQuotaRecord,
+  parsePushSubscribeReply,
+  parsePushSubscribeRequest,
+  parseSettingsRecord,
+  pushEndpoint,
   isStoreKey,
   isTaskId,
   isTerm,
@@ -36,8 +44,19 @@ import {
 } from "./parse.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
+  ACCOUNT_ALIAS_MAX_LENGTH,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
+  EXIT_STATUS_MAX,
+  FLEET_QUOTA_MAX_ACCOUNTS,
+  FLEET_QUOTA_MAX_WINDOWS,
+  FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
+  LINEAR_KEY_MAX_LENGTH,
+  PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_MAX_SUBSCRIPTIONS,
+  REPO_MAX_SKILLS,
+  SKILL_NAME_MAX_LENGTH,
+  STATUS_MAX_AUTH_EXPIRED,
   DECISION_MAX_CANDIDATES,
   MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
@@ -58,10 +77,14 @@ import {
   type BatchMembership,
   type BranchState,
   type Candidate,
+  type FleetQuotaRecord,
   type MachineStatus,
   type MetricsSeries,
   type PauseHold,
   type QuotaObservation,
+  type QuotaReading,
+  type SettingsRecord,
+  type WebPushSubscription,
   type Reason,
   type SchedulerError,
   type StoreRecord,
@@ -81,6 +104,12 @@ const exclave = { id: "default", accountId: "org:acct", extraUsageEnabled: true,
 async function sealedLength(task: Task): Promise<number> {
   const key = await importPsk(toBase64(new Uint8Array(32)));
   const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+  return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
+}
+
+async function sealedRecordLength(op: "quota" | "settings", payload: unknown): Promise<number> {
+  const key = await importPsk(toBase64(new Uint8Array(32)));
+  const plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload } as const;
   return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
 }
 
@@ -426,7 +455,7 @@ describe("parseTaskSpec", () => {
 
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
-    expect(parseTaskSpec({ ...request, taskId: "x", skill: "y" })).toEqual(request);
+    expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
     for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
       expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
     }
@@ -482,6 +511,7 @@ describe("tasks and their records", () => {
     expect(parseTask(task)).toEqual(task);
     for (const state of ["queued", "blocked"] as const) expect(parseTask({ ...task, state })?.state).toBe(state);
     expect(parseTask({ ...task, state: "done", doneBy: "manual" })?.doneBy).toBe("manual");
+    expect(parseTask({ ...task, state: "done", doneBy: "linear" })?.doneBy).toBe("linear");
   });
 
   test("a progress field that is not exactly its shape nulls the task", () => {
@@ -491,7 +521,7 @@ describe("tasks and their records", () => {
       { ...task, branch: "b".repeat(BRANCH_MAX_LENGTH + 1) },
       { ...task, pushed: false },
       { ...task, escalated: 1 },
-      { ...task, doneBy: "linear" },
+      { ...task, doneBy: "deploy" },
       { ...task, needsInputSince: "soon" },
       { ...task, endedAt: "later" },
       { ...task, id: "task/with-slash" },
@@ -763,6 +793,7 @@ describe("store", () => {
       model: "m".repeat(TASK_REQUEST_LIMITS.model),
       effort: "e".repeat(TASK_REQUEST_LIMITS.effort),
       plan: true,
+      skill: "s".repeat(SKILL_NAME_MAX_LENGTH),
       pin: placement,
       lineage: placement,
       base: placement,
@@ -776,6 +807,7 @@ describe("store", () => {
         url: `https://linear.app/acme/issue/${"s".repeat(80)}`,
       },
       client: "ø".repeat(TASK_SPEC_LIMITS.client),
+      until: "reported",
     },
   };
   const target: Target = { ...placement, clone: "c".repeat(TARGET_LIMITS.clone) };
@@ -1010,6 +1042,7 @@ describe("parseTaskProgressList", () => {
     branch: "worktree-fix-it",
     pushed: true,
     merged: true,
+    exit: 0,
     at: 1,
   } as const;
 
@@ -1030,9 +1063,346 @@ describe("parseTaskProgressList", () => {
       { ...entry, branch: "" },
       { ...entry, taskId: "t:1" },
       { ...entry, at: "now" },
+      { ...entry, exit: EXIT_STATUS_MAX + 1 },
+      { ...entry, exit: -1 },
+      { ...entry, exit: 1.5 },
     ]) {
       expect(parseTaskProgressList([entry, bad])).toBeNull();
     }
     expect(parseTaskProgressList(Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, () => entry))).toBeNull();
+  });
+});
+
+/** base64url of `bytes` bytes, padded or not. */
+function b64url(bytes: number, pad = false): string {
+  const text = btoa(String.fromCharCode(...new Uint8Array(bytes).fill(0xfb)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_");
+  return pad ? text : text.replace(/=+$/u, "");
+}
+
+describe("M4 shapes", () => {
+  const decide = (r: unknown) => ({
+    at: 1,
+    chosen: null,
+    candidates: [{ deviceId: "d", machine: "mac", exclave: "default", rejected: [r] }],
+  });
+
+  test("a branch name is held to check-ref-format, and to what git would read as anything else", () => {
+    for (const good of [
+      "main",
+      "martin/pen-1-stack",
+      "v1.2",
+      "a@b",
+      "ø".repeat(BRANCH_MAX_LENGTH / 2),
+      `${"x".repeat(BRANCH_MAX_LENGTH - 2)}ø`,
+    ]) {
+      expect(isBranchName(good)).toBe(true);
+    }
+    for (const bad of [
+      "",
+      "-x",
+      "HEAD",
+      "@",
+      "a..b",
+      "a@{1}",
+      "a.lock",
+      "a/b.lock/c",
+      "a/.b",
+      ".a",
+      "a/",
+      "/a",
+      "a//b",
+      "a.",
+      "a b",
+      "a~1",
+      "a^",
+      "a:b",
+      "a?",
+      "a*",
+      "a[",
+      "a\\b",
+      "a\u0001",
+      "a\u007F",
+      "x".repeat(BRANCH_MAX_LENGTH + 1),
+      // Within BRANCH_MAX_LENGTH UTF-16 units, past it in UTF-8 bytes: git limits the filename's bytes.
+      "ø".repeat(BRANCH_MAX_LENGTH),
+      `${"x".repeat(BRANCH_MAX_LENGTH - 1)}ø`,
+      7,
+      null,
+    ]) {
+      expect(isBranchName(bad)).toBe(false);
+    }
+  });
+
+  test("a skill name is one path segment and one prompt token, bounded", () => {
+    expect(isSkillName("dataviz")).toBe(true);
+    expect(isSkillName("plugin:skill")).toBe(true);
+    expect(isSkillName("s".repeat(SKILL_NAME_MAX_LENGTH))).toBe(true);
+    for (const bad of [
+      "",
+      ".hidden",
+      "a/b",
+      "a b",
+      "a\tb",
+      "a\u0000",
+      "a\\b",
+      "a*",
+      "a?",
+      'a"b',
+      "a<b",
+      "a>b",
+      "a|b",
+      "a\u0085b",
+      "a\u0080",
+      "a\u009F",
+      "a\u007F",
+      "s".repeat(SKILL_NAME_MAX_LENGTH + 1),
+      7,
+    ]) {
+      expect(isSkillName(bad)).toBe(false);
+    }
+  });
+
+  test("a task declares one skill; an unreadable one nulls the request, and an old app's has none", () => {
+    const minimal: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
+    expect(parseTaskRequest({ ...minimal, skill: "ship" })).toEqual({ ...minimal, skill: "ship" });
+    expect(parseTaskRequest(minimal)).not.toHaveProperty("skill");
+    for (const skill of ["", "a/b", "two words", 7]) expect(parseTaskRequest({ ...minimal, skill })).toBeNull();
+  });
+
+  test("a repo's skills are carried when readable; a bad list costs the field, never the entry", () => {
+    expect(parseRepoEntry({ ...repo, skills: ["ship", "plan"] })).toEqual({ ...repo, skills: ["ship", "plan"] });
+    expect(parseRepoEntry(repo)).toEqual(repo);
+    const tooMany = Array.from({ length: REPO_MAX_SKILLS + 1 }, (_, i) => `s${i}`);
+    for (const skills of [tooMany, ["ok", "a/b"], "ship", [7]]) {
+      expect(parseRepoEntry({ ...repo, skills })).toEqual(repo);
+    }
+    expect(parseRepoEntry({ ...repo, skills: tooMany.slice(1) })?.skills).toHaveLength(REPO_MAX_SKILLS);
+    const given = ["ship"];
+    expect(parseRepoEntry({ ...repo, skills: given })?.skills).not.toBe(given);
+  });
+
+  test("a status names its expired exclaves by index, bounded; an old daemon's names none", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, ax: [0, 3] })).toEqual({ at: 1, scan: 2, ax: [0, 3] });
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("ax");
+    const full = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, i) => i);
+    expect(parseMachineStatus({ at: 1, scan: 2, ax: full })?.ax).toEqual(full);
+    for (const ax of [[...full, STATUS_MAX_AUTH_EXPIRED], [-1], [1.5], [2, 2], "0", null]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, ax })).toBeNull();
+    }
+    const given = [1];
+    const sess = [2];
+    const parsed = parseMachineStatus({ at: 1, scan: 2, ax: given, sess });
+    expect(parsed?.ax).not.toBe(given);
+    expect(parsed?.sess).not.toBe(sess);
+  });
+
+  test("a spec settles until merged or reported, absent read as merged; an edge may wait for done", () => {
+    const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
+    const spec: TaskSpec = { ...request, until: "reported", deps: [{ task: "t-1", after: "done" }] };
+    expect(parseTaskSpec(spec)).toEqual(spec);
+    expect(parseTaskSpec({ ...request, until: "merged" })?.until).toBe("merged");
+    expect(parseTaskSpec(request)).not.toHaveProperty("until");
+    for (const bad of [
+      { ...spec, until: "closed" },
+      { ...spec, until: null },
+      { ...spec, deps: [{ task: "t-1", after: "ended" }] },
+    ]) {
+      expect(parseTaskSpec(bad)).toBeNull();
+    }
+  });
+
+  test("the M4 routing reasons read back; a skill reason without a readable skill drops the reason", () => {
+    const reasons: readonly Reason[] = [
+      { code: "auth_expired" },
+      { code: "base_unpushed" },
+      { code: "skill_absent", skill: "ship" },
+    ];
+    for (const reason of reasons) expect(parseDecision(decide(reason))?.candidates[0]?.rejected).toEqual([reason]);
+    for (const skill of [undefined, "", "a/b"]) {
+      expect(parseDecision(decide({ code: "skill_absent", skill }))?.candidates[0]?.rejected).toEqual([]);
+    }
+  });
+
+  test("an account record names its account and an alias, null when cleared", () => {
+    const record = { version: 2, accountId: "org:acct", alias: "Work" };
+    expect(parseAccountRecord(record)).toEqual(record);
+    expect(parseAccountRecord({ ...record, alias: null, extra: 1 })).toEqual({ ...record, alias: null });
+    expect(parseAccountRecord({ ...record, alias: "a".repeat(ACCOUNT_ALIAS_MAX_LENGTH) })).not.toBeNull();
+    for (const bad of [
+      { ...record, alias: "a".repeat(ACCOUNT_ALIAS_MAX_LENGTH + 1) },
+      { ...record, alias: "" },
+      { ...record, alias: undefined },
+      { ...record, version: 0 },
+      { ...record, accountId: "" },
+    ]) {
+      expect(parseAccountRecord(bad)).toBeNull();
+    }
+  });
+
+  test("the fleet quota record holds one reading per account, strict, without the exclave index", () => {
+    const reading: QuotaReading = { h: 40, d: 10, s: "cache", at: 1_700_000_000 };
+    const entry = { accountId: "org:acct", observer: "dev-a", reading };
+    const record = { version: 1, accounts: [entry, { ...entry, accountId: "org:other" }] };
+    expect(parseFleetQuotaRecord(record)).toEqual(record);
+    expect(parseFleetQuotaRecord({ version: 1, accounts: [{ ...entry, reading: { ...reading, x: 3 } }] })).toEqual({
+      version: 1,
+      accounts: [entry],
+    });
+    const many = Array.from({ length: FLEET_QUOTA_MAX_ACCOUNTS + 1 }, (_, i) => ({ ...entry, accountId: `a:${i}` }));
+    for (const bad of [
+      { version: 1, accounts: [entry, entry] },
+      { version: 1, accounts: many },
+      { version: 1, accounts: [entry, { ...entry, reading: { ...reading, s: "oauth" } }] },
+      { version: 1, accounts: [{ ...entry, observer: "a/b" }] },
+      { version: 0, accounts: [] },
+      { version: 1 },
+    ]) {
+      expect(parseFleetQuotaRecord(bad)).toBeNull();
+    }
+  });
+
+  test("a fleet entry's scoped windows are bounded in the record, not in a status", () => {
+    const reading: QuotaReading = { s: "cache", at: 1_700_000_000 };
+    const entry = { accountId: "org:acct", observer: "dev-a" };
+    const window = (m: string) => ({ m, p: 10 });
+    const fits = Array.from({ length: FLEET_QUOTA_MAX_WINDOWS }, () =>
+      window("m".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH)),
+    );
+    const good = { version: 1, accounts: [{ ...entry, reading: { ...reading, w: fits } }] };
+    expect(parseFleetQuotaRecord(good)).toEqual(good);
+    for (const w of [[...fits, window("x")], [window("m".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH + 1))]]) {
+      expect(parseFleetQuotaRecord({ version: 1, accounts: [{ ...entry, reading: { ...reading, w } }] })).toBeNull();
+      expect(parseMachineStatus({ at: 1, scan: 2, quota: [{ x: 0, ...reading, w }] })?.quota).toHaveLength(1);
+    }
+  });
+
+  test("a fleet quota record with every field at its bound seals under the store's cap", async () => {
+    const full: FleetQuotaRecord = {
+      version: 1,
+      accounts: Array.from({ length: FLEET_QUOTA_MAX_ACCOUNTS }, (_, i) => ({
+        accountId: `${String(i).padStart(2, "0")}${"ø".repeat(126)}`,
+        observer: "o".repeat(ROUTING_ID_MAX_LENGTH),
+        reading: {
+          s: "session",
+          at: 1_760_000_000,
+          h: 100,
+          d: 100,
+          hr: 1_760_000_000,
+          dr: 1_760_000_000,
+          c: 100,
+          cu: 1_000_000,
+          cl: 1_000_000,
+          w: Array.from({ length: FLEET_QUOTA_MAX_WINDOWS }, () => ({
+            m: "ø".repeat(FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH),
+            p: 100,
+            r: 1_760_000_000,
+          })),
+        },
+      })),
+    };
+    expect(parseFleetQuotaRecord(full)).toEqual(full);
+    expect(await sealedRecordLength("quota", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("a push endpoint is https on a push service's host, on its default port", () => {
+    for (const good of [
+      "https://fcm.googleapis.com/fcm/send/abc",
+      "https://updates.push.services.mozilla.com/wpush/v2/abc",
+      "https://web.push.apple.com/QGh",
+      "https://wns2-par02p.notify.windows.com/w/?token=abc",
+    ]) {
+      expect(pushEndpoint(good)).toBe(good);
+    }
+    expect(pushEndpoint("https://FCM.googleapis.com")).toBe("https://fcm.googleapis.com/");
+    const atBound = `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 27)}`;
+    expect(pushEndpoint(atBound)).toBe(atBound);
+    for (const bad of [
+      "http://fcm.googleapis.com/fcm/send/abc",
+      "https://fcm.googleapis.com:8443/fcm/send/abc",
+      "https://notify.windows.com/w",
+      "https://.notify.windows.com/x",
+      "https://a..notify.windows.com/x",
+      `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH)}`,
+      "https://evilnotify.windows.com/w",
+      "https://fcm.googleapis.com.evil.example/x",
+      "https://user@fcm.googleapis.com/x",
+      "https://example.com/push",
+      "fcm.googleapis.com/x",
+      7,
+    ]) {
+      expect(pushEndpoint(bad)).toBeNull();
+    }
+  });
+
+  test("push-subscribe carries a subscription built field by field; its reply is the endpoint, or a refusal", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://web.push.apple.com/QGh",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    expect(parsePushSubscribeRequest({ ...subscription, expirationTime: null })).toEqual(subscription);
+    const padded = { ...subscription, keys: { p256dh: b64url(65, true), auth: b64url(16, true) } };
+    expect(parsePushSubscribeRequest(padded)).toEqual(padded);
+    for (const bad of [
+      { ...subscription, endpoint: "https://example.com/x" },
+      { ...subscription, keys: { ...subscription.keys, p256dh: b64url(64) } },
+      { ...subscription, keys: { ...subscription.keys, auth: b64url(17) } },
+      { ...subscription, keys: { ...subscription.keys, auth: `${b64url(16).slice(1)}+` } },
+      { endpoint: subscription.endpoint },
+    ]) {
+      expect(parsePushSubscribeRequest(bad)).toBeNull();
+    }
+    expect(parsePushSubscribeReply({ endpoint: subscription.endpoint })).toEqual({ endpoint: subscription.endpoint });
+    const full = { ok: false, code: "subscriptions_full", message: "full" } as const;
+    expect(parsePushSubscribeReply(full)).toEqual(full);
+    expect(parsePushSubscribeReply({ endpoint: "https://example.com/x" })).toBeNull();
+  });
+
+  test("the settings record is strict: a part dropped on read would be lost on the next write", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    const settings: SettingsRecord = {
+      version: 4,
+      vapid: { publicKey: b64url(65), privateKey: b64url(32) },
+      linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH),
+      subscriptions: [subscription],
+    };
+    expect(parseSettingsRecord(settings)).toEqual(settings);
+    expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
+    const many = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, (_, i) => ({
+      ...subscription,
+      endpoint: `${subscription.endpoint}${i}`,
+    }));
+    expect(parseSettingsRecord({ version: 1, subscriptions: many.slice(1) })?.subscriptions).toHaveLength(
+      PUSH_MAX_SUBSCRIPTIONS,
+    );
+    for (const bad of [
+      { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(31) } },
+      { ...settings, linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH + 1) },
+      { ...settings, linearKey: "" },
+      { ...settings, subscriptions: [subscription, { ...subscription, endpoint: "https://example.com/x" }] },
+      { ...settings, subscriptions: many },
+      { ...settings, subscriptions: [subscription, { ...subscription }] },
+      { ...settings, version: 0 },
+    ]) {
+      expect(parseSettingsRecord(bad)).toBeNull();
+    }
+  });
+
+  test("a settings record with every field at its bound seals under the store's cap", async () => {
+    const full: SettingsRecord = {
+      version: 1,
+      vapid: { publicKey: b64url(65), privateKey: b64url(32) },
+      linearKey: "ø".repeat(LINEAR_KEY_MAX_LENGTH),
+      subscriptions: Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => ({
+        endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 29)}${String(i).padStart(2, "0")}`,
+        keys: { p256dh: b64url(65, true), auth: b64url(16, true) },
+      })),
+    };
+    expect(parseSettingsRecord(full)).toEqual(full);
+    expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 });

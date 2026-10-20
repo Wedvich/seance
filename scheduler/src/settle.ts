@@ -99,7 +99,7 @@ export function asSeen(current: Task, seen: Task): boolean {
   return PLACED.includes(current.state) && PLACED.includes(seen.state) && sameDevice;
 }
 
-function liveState(state: Exclude<SessionState, "ended">): TaskState {
+function liveState(state: Exclude<SessionState, "ended" | "done">): TaskState {
   return state === "needs-input" ? "needs-input" : "running";
 }
 
@@ -115,6 +115,9 @@ export function sessionChange(
   from: SessionSource | undefined,
   prUrl?: string,
 ): Task | null {
+  // `done` is decided (DESIGN.md "Session events") but its act is not built: ingest refuses it,
+  // and a leader that meets one anyway leaves the task alone rather than read it as running.
+  if (state === "done") return null;
   const pr = prUrl === undefined ? {} : { prUrl };
   if (task.state === "reserved") {
     const at = task.reservation;

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
   APP_ID,
+  BRANCH_MAX_LENGTH,
   METRIC_NAMES,
   parseMetricsReply,
   REPLY_JSON_BUDGET,
@@ -107,6 +108,18 @@ describe("relay ops are audited", () => {
       await createHandler(ctx)(spawnNope({ taskId }));
       expect(logged()).toContain("audit spawn origin=relay rejected");
     }
+  });
+
+  test("any baseBranch is rejected until stacking lands: a spawn must not silently start from the default branch", async () => {
+    for (const baseBranch of ["", "-x", "a..b", "a b", "HEAD", "a.lock", "x".repeat(BRANCH_MAX_LENGTH + 1), 7]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope({ baseBranch }));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+    lines.length = 0;
+    await createHandler(ctx)(spawnNope({ baseBranch: "martin/pen-1-stack" }));
+    expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
   test("a newline in a wire value cannot forge an audit line", async () => {

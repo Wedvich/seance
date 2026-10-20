@@ -88,6 +88,10 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
+  // Fail closed until stacking lands: a spawn that silently started from the default branch
+  // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
+  // holds the name to `isBranchName` instead.
+  if (obj["baseBranch"] !== undefined) return false;
   return true;
 }
 

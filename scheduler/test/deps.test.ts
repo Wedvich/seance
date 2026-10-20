@@ -165,9 +165,46 @@ describe("release", () => {
     await put("manual", { state: "done", doneBy: "manual" });
     await put("opened", after("manual", "opened"));
     await put("merged", after("manual", "merged"));
+    await put("reported", after("manual", "done"));
     await scheduler.load();
     await pass(scheduler);
-    expect(states(scheduler, "opened", "merged")).toEqual({ opened: "ready", merged: "ready" });
+    expect(states(scheduler, "opened", "merged", "reported")).toEqual({
+      opened: "ready",
+      merged: "ready",
+      reported: "ready",
+    });
+  });
+
+  test("after: done is released by done alone — a PR, a push or a merge report does not do it", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("pred", { state: "awaiting-merge", assignment: ON_A, prUrl: PR, pushed: true });
+    await put("next", after("pred", "done"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(states(scheduler, "pred", "next")).toEqual({ pred: "awaiting-merge", next: "blocked" });
+  });
+
+  test("a `done` session event is not acted on yet: the task stays as it was, not read as running", async () => {
+    const { store, scheduler, put } = setup(new FakeFleet([]));
+    await put("asking", { state: "needs-input", assignment: ON_A, needsInputSince: NOW });
+    await scheduler.load();
+    const before = await store.get("asking");
+    await scheduler.onSession("asking", "done", { deviceId: "a", pane: "%1" }, PR);
+    expect(scheduler.task("asking")).toMatchObject({ state: "needs-input" });
+    expect(scheduler.task("asking")?.prUrl).toBeUndefined();
+    expect((await store.get("asking"))?.version).toBe(before?.version);
+  });
+
+  test("a `done` session event on a reserved task leaves the reservation alone", async () => {
+    const { store, scheduler, put } = setup(new FakeFleet([]));
+    const { pane: _pane, ...target } = ON_A;
+    await put("held", { state: "reserved", reservation: { ...target, expiresAt: NOW + 60_000 }, reservedAt: NOW });
+    await scheduler.load();
+    const before = await store.get("held");
+    await scheduler.onSession("held", "done", { deviceId: "a", pane: "%1" }, PR);
+    expect(scheduler.task("held")).toMatchObject({ state: "reserved", reservation: target });
+    expect(scheduler.task("held")?.assignment).toBeUndefined();
+    expect((await store.get("held"))?.version).toBe(before?.version);
   });
 
   test("a lost predecessor is waited on, never failed for", async () => {
@@ -196,6 +233,19 @@ describe("edges that never release", () => {
       expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
     }
     expect(scheduler.task("grandchild")?.failure?.message).toContain("child");
+  });
+
+  test("a failed or cancelled predecessor fails an `after: done` dependent too", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("broken", { state: "failed", failure: { code: "repo_not_found", message: "gone" } });
+    await put("dropped", { state: "cancelled" });
+    await put("x", after("broken", "done"));
+    await put("y", after("dropped", "done"));
+    await scheduler.load();
+    await pass(scheduler);
+    for (const id of ["x", "y"]) {
+      expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+    }
   });
 
   test("a failure cascades to a fixpoint whatever order the chain was stored in", async () => {

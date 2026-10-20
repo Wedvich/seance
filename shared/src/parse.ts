@@ -1,13 +1,26 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
+  ACCOUNT_ALIAS_MAX_LENGTH,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   DECISION_MAX_CANDIDATES,
   DEP_AFTER,
   DONE_SIGNALS,
+  EXIT_STATUS_MAX,
+  FLEET_QUOTA_MAX_ACCOUNTS,
+  FLEET_QUOTA_MAX_WINDOWS,
+  FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
+  LINEAR_KEY_MAX_LENGTH,
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
+  PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_MAX_SUBSCRIPTIONS,
+  PUSH_SERVICE_HOSTS,
+  REPO_MAX_SKILLS,
+  SKILL_NAME_MAX_LENGTH,
+  STATUS_MAX_AUTH_EXPIRED,
+  TASK_UNTIL,
   QUEUE_MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
   ROUTING_ID_PATTERN,
@@ -17,8 +30,17 @@ import {
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
   TASK_SPEC_LIMITS,
+  type AccountRecord,
   type BatchMembership,
   type BatchStrategy,
+  type FleetQuotaEntry,
+  type FleetQuotaRecord,
+  type PushSubscribeReply,
+  type PushSubscribeRequest,
+  type QuotaReading,
+  type SettingsRecord,
+  type VapidKeys,
+  type WebPushSubscription,
   type BranchState,
   type DiscardReply,
   type DiscardRequest,
@@ -145,8 +167,9 @@ function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+/** A fresh copy, never the caller's array: a parsed value must not alias its input. */
 function parseUintList(value: unknown): readonly number[] | null {
-  return Array.isArray(value) && value.every(isUint) ? value : null;
+  return Array.isArray(value) && value.every(isUint) ? [...value] : null;
 }
 
 /**
@@ -187,13 +210,72 @@ export function parseRepoEntry(value: unknown): RepoEntry | null {
   // Both are keys: an empty exclave matches no `ExclaveInfo.id` (which refuses
   // ""), and an empty origin would collide every remote-less repo across machines.
   if (exclave === "" || origin === "") return null;
+  const skills = parseRepoSkills(value["skills"]);
   return {
     name: value["name"],
     path: value["path"],
     defaultBranch,
     ...(exclave === undefined ? {} : { exclave }),
     ...(origin === undefined ? {} : { origin }),
+    ...(skills === undefined ? {} : { skills }),
   };
+}
+
+/**
+ * Lenient, unlike the clone's own fields: a clone that fails nulls the whole
+ * register blob, so a list this build cannot read costs the clone's project
+ * skills — read as unknown, which routes — never the machine.
+ */
+function parseRepoSkills(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.length > REPO_MAX_SKILLS || !value.every(isSkillName)) return undefined;
+  return [...value];
+}
+
+/**
+ * A skill name as a declaration or an inventory may carry it: what a directory
+ * entry the scan lists (no `/`, no leading `.`) and a prompt's first token (no
+ * whitespace) can both be, under `SKILL_NAME_MAX_LENGTH`. `ExclaveInfo.skills`
+ * stays a plain string list: tightening it would cost a machine its exclaves
+ * over one odd directory name.
+ */
+export function isSkillName(value: unknown): value is string {
+  if (typeof value !== "string" || value === "" || value.length > SKILL_NAME_MAX_LENGTH) return false;
+  if (value.startsWith(".") || value.includes("/")) return false;
+  return ![...value].some((ch) => isControl(ch) || SKILL_FORBIDDEN.has(ch) || /\s/u.test(ch));
+}
+
+/** Path separators and glob/shell metacharacters; `:` stays, as plugin skills are `plugin:name`. */
+const SKILL_FORBIDDEN = new Set(["\\", "*", "?", '"', "<", ">", "|"]);
+
+/** C0, DEL and C1 controls (U+0080-U+009F, which `\s` only partly covers). */
+function isControl(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+}
+
+/** Characters `git check-ref-format` refuses anywhere in a ref, beside controls and space. */
+const REF_FORBIDDEN = new Set(["~", "^", ":", "?", "*", "[", "\\", " "]);
+
+/**
+ * A branch name git would take, by `git check-ref-format` on `refs/heads/<name>`
+ * (decided #15): no control character, space or any of `~^:?*[\`; no `..`,
+ * `@{` or empty component (so no leading, trailing or doubled `/`); no
+ * component starting `.` or ending `.lock`; not ending `.`; not `@`. Plus what
+ * `--branch` refuses — a leading `-`, which would read as an option, and `HEAD`.
+ * Bounded by `BRANCH_MAX_LENGTH` UTF-8 bytes, since git stores a loose ref as a
+ * file and limits it by filename bytes, not UTF-16 units. The one copy, for every hop that hands a branch
+ * to git: the leader, on the predecessor's `Task.branch` before it sends one
+ * (decided #4: the base is that branch, never one an app names), and the daemon
+ * on `SpawnRequest.baseBranch`.
+ */
+export function isBranchName(value: unknown): value is string {
+  if (typeof value !== "string" || value === "" || new TextEncoder().encode(value).length > BRANCH_MAX_LENGTH) {
+    return false;
+  }
+  if (value === "@" || value === "HEAD" || value.startsWith("-") || value.endsWith(".")) return false;
+  if (value.includes("..") || value.includes("@{")) return false;
+  if ([...value].some((ch) => isControl(ch) || REF_FORBIDDEN.has(ch))) return false;
+  return value.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 
 export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
@@ -303,7 +385,7 @@ function parseScopedWindow(value: unknown): ScopedWindow | null {
 }
 
 /** A quota observation without its exclave index. */
-export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> | null {
+export function parseQuotaReading(value: unknown): QuotaReading | null {
   if (!isRecord(value)) return null;
   if (!isUint(value["at"]) || !isQuotaSource(value["s"])) return null;
   const { h, d, hr, dr, c } = value;
@@ -357,6 +439,10 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (quota === null) return null;
   const { tr } = value;
   if (!isOptionalUint(tr)) return null;
+  const ax = value["ax"] === undefined ? undefined : parseUintList(value["ax"]);
+  if (ax === null || (ax !== undefined && (ax.length > STATUS_MAX_AUTH_EXPIRED || new Set(ax).size !== ax.length))) {
+    return null;
+  }
   return {
     at: value["at"],
     scan: value["scan"],
@@ -369,6 +455,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(sess === undefined ? {} : { sess }),
     ...(quota === undefined ? {} : { quota }),
     ...(tr === undefined ? {} : { tr }),
+    ...(ax === undefined ? {} : { ax }),
   };
 }
 
@@ -508,7 +595,7 @@ function isBoundedString(value: unknown, max: number): value is string {
  */
 export function parseTaskRequest(value: unknown): TaskRequest | null {
   if (!isRecord(value)) return null;
-  const { repo, mode, prompt, title, model, effort, plan } = value;
+  const { repo, mode, prompt, title, model, effort, plan, skill } = value;
   const limits = TASK_REQUEST_LIMITS;
   if (!isBoundedString(repo, limits.repo) || repo === "") return null;
   if (mode !== "worktree" && mode !== "here") return null;
@@ -518,6 +605,7 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
   if (model !== undefined && (!isBoundedString(model, limits.model) || model === "")) return null;
   if (effort !== undefined && (!isBoundedString(effort, limits.effort) || effort === "")) return null;
   if (plan !== undefined && typeof plan !== "boolean") return null;
+  if (skill !== undefined && !isSkillName(skill)) return null;
   return {
     repo,
     mode,
@@ -526,6 +614,7 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
     ...(plan === undefined ? {} : { plan }),
+    ...(skill === undefined ? {} : { skill }),
   };
 }
 
@@ -594,7 +683,7 @@ function parseLinear(value: unknown): LinearLink | null {
 export function parseTaskSpec(value: unknown): TaskSpec | null {
   const request = parseTaskRequest(value);
   if (request === null || !isRecord(value)) return null;
-  const { pin, lineage, base, batch, deps, linear, client } = value;
+  const { pin, lineage, base, batch, deps, linear, client, until } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
   const continues = lineage === undefined ? undefined : parsePlacement(lineage);
   const builds = base === undefined ? undefined : parsePlacement(base);
@@ -604,6 +693,8 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   if (pinned === null || continues === null || builds === null || member === null || issue === null) return null;
   if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
   if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
+  const settles = until === undefined ? undefined : TASK_UNTIL.find((u) => u === until);
+  if (until !== undefined && settles === undefined) return null;
   return {
     ...request,
     ...(pinned === undefined ? {} : { pin: pinned }),
@@ -613,6 +704,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(edges === undefined ? {} : { deps: edges }),
     ...(issue === undefined ? {} : { linear: issue }),
     ...(client === undefined ? {} : { client }),
+    ...(settles === undefined ? {} : { until: settles }),
   };
 }
 
@@ -653,7 +745,13 @@ function parseReason(value: unknown): Reason | null {
     case "pressure_unknown":
     case "repo_absent":
     case "auth_missing":
+    case "auth_expired":
+    case "base_unpushed":
       return { code };
+    case "skill_absent": {
+      const { skill } = value;
+      return isSkillName(skill) ? { code, skill } : null;
+    }
     case "disk_low":
       return isFiniteNumber(value["freeMib"]) ? { code, freeMib: value["freeMib"] } : null;
     case "pin_mismatch": {
@@ -937,6 +1035,141 @@ export function parsePauseRecord(value: unknown): PauseRecord | null {
   return holds === null ? null : { version: value["version"], holds };
 }
 
+/**
+ * The opened body of an `account:<hmac>` record — shape only. Whether its
+ * `accountId` hashes to the key it was listed under is the reader's, beside
+ * `openAtRest`, as a task's binding is.
+ */
+export function parseAccountRecord(value: unknown): AccountRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"]) || !isAccountId(value["accountId"])) return null;
+  const { alias } = value;
+  if (alias !== null && !isName(alias, ACCOUNT_ALIAS_MAX_LENGTH)) return null;
+  return { version: value["version"], accountId: value["accountId"], alias };
+}
+
+function parseFleetQuotaEntry(value: unknown): FleetQuotaEntry | null {
+  if (!isRecord(value) || !isAccountId(value["accountId"]) || !isRoutingId(value["observer"])) return null;
+  const reading = parseQuotaReading(value["reading"]);
+  // Bounded here, not in `parseQuotaReading`: a status from an older daemon parses as before.
+  const windows = reading?.w;
+  if (windows !== undefined && (windows.length > FLEET_QUOTA_MAX_WINDOWS || !windows.every(boundedWindow))) return null;
+  return reading === null ? null : { accountId: value["accountId"], observer: value["observer"], reading };
+}
+
+function boundedWindow(window: ScopedWindow): boolean {
+  return window.m.length <= FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH;
+}
+
+/**
+ * The opened body of the fleet quota record. Strict, like a store page: its
+ * writers read, compare and write it back, so an entry dropped here would be
+ * an account's reading lost from the fleet. One entry per account.
+ */
+export function parseFleetQuotaRecord(value: unknown): FleetQuotaRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const listed = value["accounts"];
+  if (!Array.isArray(listed) || listed.length > FLEET_QUOTA_MAX_ACCOUNTS) return null;
+  const accounts = parseList(listed, parseFleetQuotaEntry);
+  if (accounts === null || new Set(accounts.map((entry) => entry.accountId)).size !== accounts.length) return null;
+  return { version: value["version"], accounts };
+}
+
+/** base64url of exactly `bytes` bytes, unpadded or fully padded — browsers differ, and both decode alike. */
+function isBase64UrlBytes(value: unknown, bytes: number): value is string {
+  if (typeof value !== "string") return false;
+  const unpadded = Math.ceil((bytes * 4) / 3);
+  const padded = Math.ceil(bytes / 3) * 4;
+  if (value.length !== unpadded && value.length !== padded) return false;
+  return /^[A-Za-z0-9_-]+$/u.test(value.slice(0, unpadded)) && /^=*$/u.test(value.slice(unpadded));
+}
+
+/**
+ * A push endpoint a leader may send to: `https:` (`httpsUrl`), on the default
+ * port, on a `PUSH_SERVICE_HOSTS` host — for a `*.` entry any subdomain, never
+ * the bare host, and no empty label. Returns the normalized href (`URL`'s
+ * form), or null; at most `PUSH_ENDPOINT_MAX_LENGTH`. Checked where the request is parsed,
+ * so a refused host never reaches the record, and exported so a sender can
+ * check a stored one again.
+ */
+export function pushEndpoint(value: unknown): string | null {
+  const href = httpsUrl(value);
+  if (href === null || href.length > PUSH_ENDPOINT_MAX_LENGTH) return null;
+  const url = new URL(href);
+  if (url.port !== "") return null;
+  const host = url.hostname;
+  if (host.split(".").some((label) => label === "")) return null;
+  const allowed = PUSH_SERVICE_HOSTS.some((entry) =>
+    entry.startsWith("*.") ? host.length > entry.length - 1 && host.endsWith(entry.slice(1)) : host === entry,
+  );
+  return allowed ? href : null;
+}
+
+/** An uncompressed P-256 point, and RFC 8291's auth secret. */
+const PUSH_P256DH_BYTES = 65;
+const PUSH_AUTH_BYTES = 16;
+
+function parseWebPushSubscription(value: unknown): WebPushSubscription | null {
+  if (!isRecord(value) || !isRecord(value["keys"])) return null;
+  const endpoint = pushEndpoint(value["endpoint"]);
+  const { p256dh, auth } = value["keys"];
+  if (endpoint === null || !isBase64UrlBytes(p256dh, PUSH_P256DH_BYTES)) return null;
+  return isBase64UrlBytes(auth, PUSH_AUTH_BYTES) ? { endpoint, keys: { p256dh, auth } } : null;
+}
+
+/**
+ * `push-subscribe`, at the leader: the subscription built field by field, its
+ * endpoint held to the push-service allowlist (decided #10), so a forged one
+ * cannot aim the leader at an arbitrary URL.
+ */
+export function parsePushSubscribeRequest(value: unknown): PushSubscribeRequest | null {
+  return parseWebPushSubscription(value);
+}
+
+export function parsePushSubscribeReply(value: unknown): PushSubscribeReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const endpoint = isRecord(value) ? pushEndpoint(value["endpoint"]) : null;
+  return endpoint === null ? null : { endpoint };
+}
+
+const VAPID_PUBLIC_BYTES = 65;
+const VAPID_PRIVATE_BYTES = 32;
+
+function parseVapidKeys(value: unknown): VapidKeys | null {
+  if (!isRecord(value)) return null;
+  const { publicKey, privateKey } = value;
+  if (!isBase64UrlBytes(publicKey, VAPID_PUBLIC_BYTES) || !isBase64UrlBytes(privateKey, VAPID_PRIVATE_BYTES)) {
+    return null;
+  }
+  return { publicKey, privateKey };
+}
+
+/**
+ * The opened body of the settings record. Strict, as the pause record is: the
+ * leader writes it back whole, so a part dropped here — the VAPID key above
+ * all, which every subscription is bound to — would be lost on the next write.
+ */
+export function parseSettingsRecord(value: unknown): SettingsRecord | null {
+  if (!isRecord(value) || !isVersion(value["version"])) return null;
+  const { vapid, linearKey, subscriptions } = value;
+  const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
+  if (keys === null) return null;
+  if (linearKey !== undefined && !isName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
+  let subscribed: readonly WebPushSubscription[] | undefined;
+  if (subscriptions !== undefined) {
+    if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
+    const parsed = parseList(subscriptions, parseWebPushSubscription);
+    // One subscription per endpoint, as `parseFleetQuotaRecord` has one entry per account.
+    if (parsed === null || new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
+    subscribed = parsed;
+  }
+  return {
+    version: value["version"],
+    ...(keys === undefined ? {} : { vapid: keys }),
+    ...(linearKey === undefined ? {} : { linearKey }),
+    ...(subscribed === undefined ? {} : { subscriptions: subscribed }),
+  };
+}
+
 /** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
 export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
@@ -1069,8 +1302,9 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
 
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, exit, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
+  if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
   if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
@@ -1082,6 +1316,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(branch === undefined ? {} : { branch }),
     ...(pushed === undefined ? {} : { pushed }),
     ...(merged === undefined ? {} : { merged }),
+    ...(exit === undefined ? {} : { exit }),
   };
 }
 

@@ -101,6 +101,17 @@ describe("fitStatus", () => {
     }
   });
 
+  test("the expired-login list is never trimmed: routing reads it when every quota field is gone", () => {
+    const expired = { ...status(3), ax: [1, 2] };
+    const { quota: _quota, ...rest } = expired;
+    const fitted = fitStatus(expired, padded({ ...rest, tr: 3 }));
+    expect(fitted.quota).toBeUndefined();
+    expect(fitted.ax).toEqual([1, 2]);
+    const crowded = fitStatus({ ...expired, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.ax).toEqual([1, 2]);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

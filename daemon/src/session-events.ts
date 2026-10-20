@@ -86,6 +86,9 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
   const { state, prUrl, rateLimits, pane } = raw;
   if (state !== undefined && !isSessionState(state)) return null;
+  // `done` is in the schema (#21) ahead of its act, which lands with the authoring surface:
+  // until then ingest refuses it as it did when the state was unknown.
+  if (state === "done") return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (state === undefined && rateLimits === undefined) return null;
