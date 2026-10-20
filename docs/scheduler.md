@@ -41,7 +41,7 @@ stay as they are; the table says which word each one means.
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
-| Proxmox           | Machine pressure = max(container cgroup view, Proxmox node via API); the LXC daemon reads the node view itself and folds it into its own `status`, so no reader needs Proxmox reach                                                                                                                                                                                                         |
+| Proxmox           | Machine pressure = the container's own cgroup and PSI view, read by the LXC daemon and folded into its own `status`; no Proxmox API or token (decided 2026-10-20, M4 #17)                                                                                                                                                                                                                   |
 | Telemetry         | Current snapshot (pressure + latest quota) rides the relay as a sealed `status` frame held on the daemon's socket attachment and pushed to apps + the leader; the relay keeps the last one with the registry entry when the socket goes (M2), so quota outlives a sleeping observer. History stays on each daemon behind a `metrics` op; neither the relay nor the scheduler stores history |
 | At rest           | The queue is sealed envelopes in DO storage: the relay holds id, version and ciphertext, nothing else. No second at-rest scheme                                                                                                                                                                                                                                                             |
 | Skills            | Hard filter on a declared or `/name` skill the fleet's inventory knows (unknown names pass); PWA autocompletes from it                                                                                                                                                                                                                                                                      |
@@ -147,7 +147,7 @@ events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 
   stale, so Claude Code refreshes its own cache and the existing `cache` collector reads the
   result. The daemon holds no token and calls no endpoint (M4 item "`/usage` refresh"). **Done**
   (DESIGN.md, _Daemon_, "Usage refresh").
-- Collectors not yet built — LXC PSI and cgroup views, the Proxmox node view, macOS I/O rates
+- Collectors not yet built — LXC PSI and cgroup views, macOS I/O rates
   (DESIGN.md _Daemon_, "Telemetry").
 
 ## Scheduler (`scheduler/`)
@@ -179,8 +179,8 @@ they now live:
   "Batches"): `skill absent` (M4, _Skills_: a hard filter when declared or the prompt starts with
   `/name`, and only for a name the fleet's inventory knows); stacked base unpushed and not on
   this exclave (M4, _Stacking_); auth expired (M4, _Auth health_).
-- Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The Proxmox
-  node view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
+- Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
+  pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
   deltas per task.
@@ -196,11 +196,11 @@ ends with no PR and a nonzero exit (M4, _`failed` from exit status_) — until t
 is `done` by `session`, which releases every dependent.
 
 **Secrets (M4).** The first draft gave a fixed box a Linear key, a VAPID key and a Proxmox
-token. Under a moving leader: the Proxmox token stays on the LXC daemons, which read their own
-host (above); the VAPID keypair and Linear key live in the store (`settings`), opened by
-whichever daemon leads — the PSK is already the only trust boundary, so sealing them under it
-adds no second one. Who writes `settings`, and who can read it, is open (Settings and Web Push,
-below). Linear polling is optional from day one, since daemon-local merge detection is the
+token. Under a moving leader there is no Proxmox token at all (M4 #17: the LXC daemons read
+only their own container); the VAPID keypair and Linear key live in the store (`settings`),
+opened by whichever daemon leads — the PSK is already the only trust boundary, so sealing them
+under it adds no second one. The leader alone writes `settings`, and every PSK holder can read
+it (Settings and Web Push, below, #9). Linear polling is optional from day one, since daemon-local merge detection is the
 primary done signal.
 
 ## Milestones
@@ -386,30 +386,32 @@ the code, so M4 runs in waves:
 Each item still lands as its own PR with its own DESIGN.md subsection. Budget one follow-up PR per
 item: every M3 item needed one within hours.
 
-**Every recommendation marked _Proposed_ below is the review's, for the owner to confirm before
-that item's code.** None is settled. The numbers (#) are the review's owner-decision list.
+**Every _Decided_ entry below was settled by the owner on 2026-10-20** (the M3 review's R8). Each
+started as the review's recommendation; where the owner chose otherwise, the entry says so. The
+numbers (#) are the review's owner-decision list; #7 and #13 lapsed with the OAuth poll, #1, #2
+and #20 were settled earlier, and #21 was added in the same session.
 
 **Order.** Wave 0 settles the seams the items share. Wave 1 is the items nothing else in M4 has to
 precede. Wave 2 waits on the wave-1 item named.
 
-| Wave | Item                                                                        | Depends on                                                             | Size                     |
-| ---- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------ |
-| 0    | Store rules v2 (relay)                                                      | the review's S4 store bounds; #29                                      | —                        |
-| 0    | One schema PR for every M4 shape                                            | the owner's calls below                                                | —                        |
-| 0    | Daemon seams and test infrastructure                                        | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
-| 0    | #28 (the seed prompt on stdin) and #29 (relay security), rebased and landed | —                                                                      | —                        |
-| 1    | Authoring surface (new)                                                     | —                                                                      | M                        |
-| 1    | Settings and Web Push, in three PRs                                         | store rules v2; the fetch seam                                         | L                        |
-| 1    | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)               | — (spiked 2026-10-20)                                                  | S–M                      |
-| 1    | Skills filter                                                               | —                                                                      | S; M with project skills |
-| 1    | Proxmox node view                                                           | the token decision                                                     | M–L                      |
-| 1    | Account records                                                             | store rules v2                                                         | M                        |
-| 1    | Fleet quota record                                                          | store rules v2                                                         | M                        |
-| 1    | CLI and keyless MCP `auto`                                                  | MCP's enqueue split out                                                | S–M                      |
-| 1    | `failed` from exit status (new)                                             | —                                                                      | S–M                      |
-| 2    | Stacking                                                                    | authoring surface; #28                                                 | L                        |
-| 2    | Auth health                                                                 | `/usage` refresh; Web Push for its alert                               | M                        |
-| 2    | Linear                                                                      | settings; authoring surface                                            | L                        |
+| Wave | Item                                                               | Depends on                                                             | Size                     |
+| ---- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------ |
+| 0    | Store rules v2 (relay)                                             | the review's S4 store bounds; #29                                      | —                        |
+| 0    | One schema PR for every M4 shape                                   | the owner's calls below                                                | —                        |
+| 0    | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
+| 0    | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
+| 1    | Authoring surface (new)                                            | —                                                                      | M                        |
+| 1    | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
+| 1    | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
+| 1    | Skills filter                                                      | —                                                                      | S; M with project skills |
+| 1    | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
+| 1    | Account records                                                    | store rules v2                                                         | M                        |
+| 1    | Fleet quota record                                                 | store rules v2                                                         | M                        |
+| 1    | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
+| 1    | `failed` from exit status (new)                                    | —                                                                      | S–M                      |
+| 2    | Stacking                                                           | authoring surface; #28                                                 | L                        |
+| 2    | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
+| 2    | Linear                                                             | settings; authoring surface                                            | L                        |
 
 **Wave 0.** Owned by the review's relay and daemon sessions, not planned here in full:
 
@@ -429,7 +431,8 @@ precede. Wave 2 waits on the wave-1 item named.
 - **One schema PR**, every M4 shape in `types.ts` and `parse.ts` at once: the spawn's base fields,
   `base_not_found` and its capability, the new reason codes, a declared skill on `TaskRequest`,
   `RepoEntry.skills`, auth in `MachineStatus`, a `linear` done signal, the exit status, the new
-  at-rest ops and record types, and `push-subscribe`. The prefixes stay unaccepted until store
+  at-rest ops and record types, and `push-subscribe` — plus #21's `done` session-event state,
+  `until` on the task and `after: "done"`. The prefixes stay unaccepted until store
   rules v2.
 - **Daemon seams.**
   - An injectable `httpFetch` and clock through `startDaemon`, the leader and telemetry. Without them
@@ -451,6 +454,20 @@ precede. Wave 2 waits on the wave-1 item named.
   bounds a batch index at `createTask`, but no client writes them. Without this item, stacking
   and Linear ship unusable. Exit: a task enqueued from MCP and from the PWA with an
   `after: opened` dep and a batch is admitted with both (e2e).
+  - _Decided (#21), done by self-report:_ a task can stay open past its merge until its own
+    session says it is done — "after X is in prod" is X's session merging, watching the deploy
+    and then reporting. Three shapes, all in the schema PR:
+    - a `done` session-event state, bound to the sender's pane by peer pid like every session
+      event, so a session can finish only its own task;
+    - a per-task `until: "merged" | "reported"` (default `merged`). Under `reported` a merge is
+      recorded but does not settle the task; only the report, `mark-done` or Linear Done does;
+    - `after: "done"` beside `opened` and `merged`, released by the predecessor's `done`
+      whatever settled it.
+
+    The authoring surface writes all three. It is the first act session events gain beyond
+    ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_, "Session
+    events", and _Threat model_). A session that lies about being done can do no more than one
+    that exits. `mark-done` stays the manual override.
 - **`failed` from exit status (new, M3 review R3).** Today a session that crashes with no PR
   settles `done` by `session`, and `done` releases every edge (`released` in
   `scheduler/src/deps.ts`). Under stacking its dependents would start on a branch with nothing
@@ -465,19 +482,24 @@ precede. Wave 2 waits on the wave-1 item named.
   - _The daemon has to make the worktree._ `claude --worktree` creates the worktree itself from
     `origin/<default>`, and no CLI flag overrides that (DESIGN.md "Worktree mode does no git
     preparation"). So "start the worktree from this branch" means the daemon creates it.
-    _Proposed (#3):_ spike whether `claude --worktree <name>` reuses an existing worktree. If it
-    does, run `git worktree add --no-track -B worktree-<name> … origin/<base>` and keep the
-    `.claude/worktrees` layout reap and branch-state rely on.
+    _Decided (#3):_ spike whether `claude --worktree <name>` reuses an existing worktree. Either
+    way the daemon runs `git worktree add --no-track -B worktree-<name> … origin/<base>` and keeps
+    the `.claude/worktrees` layout reap and branch-state rely on; if claude does not reuse it, the
+    daemon runs plain `claude` inside the worktree it made (the owner added this fallback, so the
+    spike's result does not stall stacking on a second decision).
   - _Fetches are keyed by repo, not branch._ `base-fetch.ts` keys its in-flight fetch by common
     dir alone, so two bases in one repo would share one fetch.
-  - _Proposed (#4), which dependency stacks:_ only `after: opened`, the first in `deps` order.
-    While the predecessor's branch is unpushed, restrict the dependent to the predecessor's
-    placement.
-  - _Proposed (#15), validating `baseBranch`:_ `check-ref-format` rules at every hop (today a
+  - _Decided (#4), which dependency stacks:_ only `after: opened`, the first in `deps` order, and
+    only on a pushed predecessor. `released` already frees an `opened` edge only with a PR and a
+    pushed branch; the one way past it is a predecessor `done` without either (`mark-done`, a
+    no-PR session end, a `here` task), and that dependent starts from `origin/<default>` with the
+    preamble saying there was nothing to stack on. No placement restriction (the review's, dropped:
+    it served only that case).
+  - _Decided (#15), validating `baseBranch`:_ `check-ref-format` rules at every hop (today a
     branch name is only length-checked in `shared/src/parse.ts`), and pass
     `refs/remotes/origin/<b>` after `--end-of-options`. Through `shq()` if it ever reaches the
     shell string.
-  - _Proposed (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
+  - _Decided (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
     knows it, so the PR is the handoff.
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
   #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
@@ -536,9 +558,9 @@ precede. Wave 2 waits on the wave-1 item named.
     and served from the blob, never per request. Tightened to directories (or symlinks
     resolving to one) holding a `SKILL.md`, so a stray dir or a dangling dotfiles link stops
     advertising a skill — landed with the autocomplete (PR #167).
-  - _Filter_ (open): only a name somewhere in the fleet's inventory restricts — to the exclaves
+  - _Filter_: only a name somewhere in the fleet's inventory restricts — to the exclaves
     that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
-    anything the inventory skips; cost: a typo routes anywhere rather than failing. _Proposed
+    anything the inventory skips; cost: a typo routes anywhere rather than failing. _Decided
     (#19):_ keep "unknown names pass"; detect `/name` only until a client declares a skill.
   - _Autocomplete_ — **DONE (PR #167)**: union of names across machines and exclaves, from data
     the PWA already holds — needs no leader, which is why it landed before the filter. Names
@@ -548,12 +570,15 @@ precede. Wave 2 waits on the wave-1 item named.
   - _Required, not yet built_: project skills (`<repo>/.claude/skills/`) belong to a clone,
     not an exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until
     then a project-only skill is unknown and passes.
-  - _Proposed (#20):_ park #128 (penalise the default exclave's account) and redo it as a flag
-    on the account record once those land; decide before the skills filter takes `route.ts`.
-- **Proxmox node view** — read by the LXC daemons, folded into their own `status`. An injectable
-  `HostProbe` reaches telemetry through `startDaemon`; missing are cgroup and PSI readers, an API client and
-  token storage. _Proposed (#17):_ a read-only token (PVEAuditor), stored as the PSK is, with a
-  pinned certificate fingerprint.
+  - _Decided (#20):_ #128 (penalise the default exclave's account) is parked, to be redone as a
+    flag on the account record once those land.
+- **LXC pressure view** (was: Proxmox node view; S, was M–L) — read by the LXC daemons, folded
+  into their own `status`. An injectable `HostProbe` reaches telemetry through `startDaemon`;
+  missing are the cgroup and PSI readers, each one more `TELEMETRY_COLLECTORS` entry.
+  _Decided (#17):_ no Proxmox API and no token — only what the container itself sees (its cgroup
+  limits and PSI). The review proposed a read-only PVEAuditor token with a pinned certificate;
+  the owner chose to hold no Proxmox credential at all, at the cost of a node-wide view:
+  pressure from neighbouring containers is invisible except as this one's PSI.
 - **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
   nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the Machines
@@ -563,25 +588,39 @@ precede. Wave 2 waits on the wave-1 item named.
   handler, the new alert kinds and a persisted de-dupe. Push endpoints can take seconds, so never
   await a send in the pass (as `#launch` does for spawns), and read subscriptions once per term,
   not per alert.
-  - _Proposed (#9), who writes `settings`:_ a leader op, not an app-writable prefix.
-    - Record that every PSK holder, the PWA included, can open the Linear token and VAPID key,
-      or seal them to a key apps do not hold.
+  - _Decided (#9), who writes `settings`:_ a leader op, not an app-writable prefix — an app sends
+    the value sealed `from: "app"`, and only the leader writes the record.
+    - Every PSK holder, the PWA included, can open the Linear token and VAPID key; DESIGN.md's
+      threat model records it rather than adding a second key, since the PSK is already the one
+      trust boundary. The Linear key is scoped as narrowly as Linear allows.
     - Apply the review's version floor (S1) to it.
     - Never put it in logs, `queue`, MCP or `status`.
-  - _Proposed (#10), Web Push egress from a dev machine:_
-    - Allow only https push-service hosts: no IP literals, no private ranges, no redirects.
-    - Short timeouts.
+  - _Decided (#10), Web Push egress from a dev machine:_
+    - An allowlist of push-service hosts: `fcm.googleapis.com`,
+      `updates.push.services.mozilla.com`, `web.push.apple.com` and `*.notify.windows.com` —
+      stricter than the review's "any https public host", so a forged subscription cannot aim
+      the leader at an arbitrary URL. A new browser vendor is a one-line change.
+    - https only, no redirects, short timeouts.
     - Ids and state only in payloads.
     - Prune a subscription on 404 or 410.
-  - _Proposed (#11), notification actions:_ clicking opens the Queue screen. iOS ignores
-    actions, and the service worker holds no PSK.
-  - _Proposed (#12), spill de-dupe across leader changes:_ stamp the alerted window on the task
+  - _Decided (#11), notification actions:_ clicking opens the Queue screen at the alert's task,
+    by the task id the payload carries (the owner added the deep link). No actions: iOS ignores
+    them, and the service worker holds no PSK.
+  - _Decided (#12), spill de-dupe across leader changes:_ stamp the alerted window on the task
     record and seed it at takeover. The 31 terms seen in 6 hours would otherwise repeat a push per
     term.
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal. Needs settings
-  and the authoring surface. _Proposed (#18):_ decide which relations count, whether `blocks`
-  means opened or merged, what Linear Done against an open PR means, and whether the leader may
-  add deps.
+  and the authoring surface. _Decided (#18):_
+  - Only `blocks` / `blocked by` count; `related` and `duplicate` carry no order.
+  - A blocks B maps to B `after: "done"` on A (#21), so a block behind a deploy works when A is
+    `until: "reported"`, and is a merge otherwise. Not `opened` (every block would stack) nor
+    `merged` (a deploy could not be waited on).
+  - Linear Done against an open PR settles the task as a manual mark-done would, with a new
+    `doneBy: "linear"`: a person closed the issue, so its dependents release. A later merge
+    changes nothing.
+  - The leader reads relations once, at admission, and writes them into `deps`. A relation added
+    or removed in Linear afterwards does not move a queued task, which keeps one write path for
+    deps.
 - **Account records** — `account:<hmac>` in the store, app-writable (Wire changes, _Store
   ops_), holding `{ accountId, alias }` sealed to `"app"` under op `account`. The key is
   HMAC-SHA-256 over the account's id under a key HKDF derives from the PSK with its own label —
@@ -601,10 +640,13 @@ precede. Wave 2 waits on the wave-1 item named.
     and a standing tombstone refuses every put for 30 days. Account keys are a deterministic HMAC,
     so under today's rules a token holder's delete blocks that alias for 30 days; it is not
     "retyped in a second". Today `parse.test.ts` asserts `account:` is refused.
-  - _Proposed (#8):_ refuse deletes on `account:`, `quota:` and `settings:` as on `queue:`, with no
+  - _Decided (#8):_ refuse deletes on `account:`, `quota:` and `settings:` as on `queue:`, with no
     tombstone; clear by overwrite.
-  - _Proposed (#14):_ record the HKDF salt, label and input. Confirm that `termFenced: false`
-    gives every `/daemon` socket app rights, delete included.
+  - _Decided (#14):_ DESIGN.md records the HKDF salt, label and input. `termFenced: false` gives
+    every `/daemon` socket an app's rights on `account:` — create and overwrite, never delete
+    (#8) — and that is accepted: a daemon socket needs a signed register on top of the bearer
+    token, so it is harder to open than the app leg that already has those rights, and a writer
+    without the PSK writes only records whose `accountId` does not hash to their key.
 - **Fleet quota record** (decided 2026-10-17, no longer conditional) — one record of
   `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) by
   read-open-compare-`expect`: a daemon writes only an observation newer than the one stored, so
@@ -633,7 +675,7 @@ precede. Wave 2 waits on the wave-1 item named.
   filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
   unknown` with its observed-at, carried in `status`, not the register blob (a change there
   re-registers and drops the status, #102). Filter widens to "missing **or expired**"; `unknown`
-  routes, since it is every exclave before its first refresh. _Proposed (#6):_ a compact,
+  routes, since it is every exclave before its first refresh. _Decided (#6):_ a compact,
   never-trimmed list of expired exclaves in `status`, since auth shares about 680 bytes with
   quota. Signals:
   - _A `/usage` refresh that fails on auth._ Claude Code has already tried its own token
@@ -665,7 +707,7 @@ precede. Wave 2 waits on the wave-1 item named.
     actions are fixed; today its `auto` is refused ("needs this machine's own key"). An
     enqueue there is a new broker action, which is a threat-model change (DESIGN.md
     "Fleet broker"); without it, keyless MCP gets no `auto`.
-  - _Proposed (#16):_ ship CLI `--auto` on boxes with the key; defer the broker action.
+  - _Decided (#16):_ ship CLI `--auto` on boxes with the key; defer the broker action.
 
   Raycast attaches the same way. Exit: a CLI `auto` spawn lands as a task with no leader
   up and runs once one leads (e2e); `seanced spawn` without `--auto` still works with the
