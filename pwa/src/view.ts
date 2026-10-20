@@ -240,6 +240,8 @@ export function failureBody(code: string, repo: string, machine: string): string
       return "Couldn't reach the git remote in time. Nothing is running.";
     case "no_default_branch":
       return `Couldn't work out ${repo}'s default branch, so there was nothing to branch from.`;
+    case "base_not_found":
+      return `The branch to stack on isn't on ${machine}'s remote for ${repo}, so there was nothing to branch from.`;
     case "internal_error":
       return "The daemon hit an error before the session started.";
     case "too_large":

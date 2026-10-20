@@ -16,6 +16,7 @@ import type {
   UpdateAvailable,
 } from "@seance/shared";
 import {
+  isBranchName,
   isMetricsRequest,
   isRecord,
   isTaskId,
@@ -88,6 +89,8 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
+  // Held to check-ref-format here as at every hop: git receives it, and a leading `-` is a flag.
+  if (obj["baseBranch"] !== undefined && !isBranchName(obj["baseBranch"])) return false;
   return true;
 }
 
