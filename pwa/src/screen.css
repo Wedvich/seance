@@ -330,8 +330,8 @@
 
 /* ---- skill picker ---- */
 
-/* While picking, the first token is all there is to type, so the card's height
-   goes to rows instead of an empty field. */
+/* While picking, the token being typed is all the field needs to show, so the
+   card's height goes to rows; the screen scrolls that token's line into view. */
 .prompt-field-compact {
   flex: none;
 }

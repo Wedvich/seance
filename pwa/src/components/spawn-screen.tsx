@@ -14,7 +14,7 @@ import {
   type RescanState,
   type SheetKind,
 } from "../state.ts";
-import { completeSkill, matchSkills, skillIndex, skillQuery, skillTokenLength } from "../skills.ts";
+import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
 import { abbreviatePaths, formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
@@ -350,16 +350,43 @@ export function SpawnScreen(props: {
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
 
-  // Open from the prompt text alone, never focus: a tap on a row blurs the
+  // Open from the prompt text and caret, never focus: a tap on a row blurs the
   // textarea before its click lands on some browsers, and a focus-driven picker
   // would be gone by then. Escape hides it until the prompt next changes.
   const skills = useMemo(() => skillIndex(machines), [machines]);
-  const query = skillQuery(form.prompt);
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  // Escape hides only until the next edit: once the prompt differs, forget it,
-  // or typing back to the same text would stay hidden.
-  if (dismissed !== null && dismissed !== form.prompt) setDismissed(null);
-  const pickerOpen = query !== null && skills.length > 0 && dismissed !== form.prompt;
+  // Read against the prompt it was taken from: text written from elsewhere
+  // (UNDO, "Reuse this prompt", a reload) leaves the browser's caret at the end.
+  const [caret, setCaret] = useState<{ prompt: string; at: number | null }>(() => ({
+    prompt: form.prompt,
+    at: form.prompt.length,
+  }));
+  const caretAt = caret.prompt === form.prompt ? caret.at : form.prompt.length;
+  const token = skillToken(form.prompt, caretAt);
+  const query = token?.query ?? null;
+  const readCaret = (): void => {
+    const field = promptInput.current;
+    if (field === null) return;
+    const prompt = field.value;
+    const at = field.selectionStart === field.selectionEnd ? field.selectionStart : null;
+    setCaret((prev) => (prev.prompt === prompt && prev.at === at ? prev : { prompt, at }));
+  };
+  // Arrow keys, taps and IME moves all end here; the element-level events below
+  // cover browsers that fire selectionchange on the document only for some of them.
+  useEffect(() => {
+    const onSelection = (): void => {
+      if (document.activeElement === promptInput.current) readCaret();
+    };
+    document.addEventListener("selectionchange", onSelection);
+    return () => document.removeEventListener("selectionchange", onSelection);
+  }, []);
+  const [dismissed, setDismissed] = useState<{ prompt: string; start: number } | null>(null);
+  // Escape hides only until the next edit or another token: once either
+  // differs, forget it, or coming back to the same text would stay hidden.
+  // The caret stepping off the token (null) keeps it, so stepping back stays hidden.
+  if (dismissed !== null && (dismissed.prompt !== form.prompt || (token !== null && dismissed.start !== token.start))) {
+    setDismissed(null);
+  }
+  const pickerOpen = token !== null && skills.length > 0 && dismissed === null;
   const matches = useMemo(
     () => (pickerOpen && query !== null ? matchSkills(skills, query) : []),
     [pickerOpen, query, skills],
@@ -373,21 +400,47 @@ export function SpawnScreen(props: {
   // by a mirror behind it (same box and metrics, text drawn there instead) that
   // follows its scroll. The scroll event covers user scrolling; the layout
   // effect covers an edit that moves the caret without one.
-  const tokenLength = skillTokenLength(form.prompt, skills);
+  const segments = promptSegments(form.prompt, skills, pickerOpen && token !== null ? token : null);
   const promptBackdrop = useRef<HTMLDivElement>(null);
+  const tokenAnchor = useRef<HTMLElement>(null);
   const syncBackdrop = (): void => {
     if (promptBackdrop.current === null || promptInput.current === null) return;
     promptBackdrop.current.scrollTop = promptInput.current.scrollTop;
   };
-  useLayoutEffect(syncBackdrop, [form.prompt, pickerOpen]);
+  // A pick rewrites the value, which puts the browser's caret at the end;
+  // it belongs after the inserted space, set once the new value is in the DOM.
+  const pendingCaret = useRef<{ prompt: string; caret: number } | null>(null);
+  useLayoutEffect(() => {
+    const field = promptInput.current;
+    const pending = pendingCaret.current;
+    if (field !== null && pending !== null && field.value === pending.prompt) {
+      pendingCaret.current = null;
+      field.setSelectionRange(pending.caret, pending.caret);
+    }
+    // Collapsing to one row keeps the scroll offset clamped to the last line,
+    // not the caret's, so a token edited mid-prompt would be off view: scroll
+    // to where the mirror draws it.
+    const anchor = tokenAnchor.current;
+    if (pickerOpen && field !== null && anchor !== null) {
+      const top = anchor.offsetTop;
+      const bottom = top + anchor.offsetHeight;
+      if (top < field.scrollTop) field.scrollTop = top;
+      else if (bottom > field.scrollTop + field.clientHeight) field.scrollTop = bottom - field.clientHeight;
+    }
+    syncBackdrop();
+  }, [form.prompt, pickerOpen, token?.start]);
   const pickSkill = (name: string): void => {
-    actions.setPrompt(completeSkill(name));
+    if (token === null) return;
+    const next = completeSkill(form.prompt, token, name);
+    pendingCaret.current = next;
+    setCaret({ prompt: next.prompt, at: next.caret });
+    actions.setPrompt(next.prompt);
     promptInput.current?.focus();
   };
   const pickerKey = (event: TargetedKeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!pickerOpen || event.isComposing) return false;
     if (event.key === "Escape") {
-      setDismissed(form.prompt);
+      if (token !== null) setDismissed({ prompt: form.prompt, start: token.start });
       return true;
     }
     // With nothing to pick the prompt goes as typed: Enter is a newline and
@@ -420,6 +473,8 @@ export function SpawnScreen(props: {
   };
   const undoClear = (): void => {
     promptInput.current?.focus();
+    // Same text as before the CLEAR, so the stale caret would still match it.
+    if (promptUndo !== null) setCaret({ prompt: promptUndo, at: promptUndo.length });
     actions.undoClear();
   };
 
@@ -451,8 +506,23 @@ export function SpawnScreen(props: {
           </div>
           <div className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}>
             <div ref={promptBackdrop} className="prompt-input prompt-backdrop" aria-hidden="true">
-              {tokenLength > 0 && <mark className="prompt-skill">{form.prompt.slice(0, tokenLength)}</mark>}
-              {form.prompt.slice(tokenLength)}
+              {segments.map((segment) => {
+                const ref = segment.anchor ? tokenAnchor : undefined;
+                if (segment.skill) {
+                  return (
+                    <mark key={segment.start} ref={ref} className="prompt-skill">
+                      {segment.text}
+                    </mark>
+                  );
+                }
+                return segment.anchor ? (
+                  <span key={segment.start} ref={ref}>
+                    {segment.text}
+                  </span>
+                ) : (
+                  segment.text
+                );
+              })}
               {/* A trailing newline adds no line box in a div; the textarea gives it one. */}
               {form.prompt.endsWith("\n") && " "}
             </div>
@@ -463,13 +533,20 @@ export function SpawnScreen(props: {
               rows={pickerOpen ? 1 : undefined}
               aria-labelledby="prompt-label"
               aria-autocomplete="list"
-              aria-controls={pickerOpen ? SKILL_LIST_ID : undefined}
+              aria-controls={pickerOpen && matches.length > 0 ? SKILL_LIST_ID : undefined}
               aria-activedescendant={
                 pickerOpen && matches.length > 0 ? skillOptionId(SKILL_LIST_ID, active) : undefined
               }
               placeholder="Describe the work — or leave it blank and start empty."
               value={form.prompt}
-              onInput={(event) => actions.setPrompt(event.currentTarget.value)}
+              onInput={(event) => {
+                actions.setPrompt(event.currentTarget.value);
+                readCaret();
+              }}
+              onKeyUp={readCaret}
+              onClick={readCaret}
+              onPointerUp={readCaret}
+              onSelect={readCaret}
               onKeyDown={(event) => {
                 if (pickerKey(event)) {
                   event.preventDefault();
