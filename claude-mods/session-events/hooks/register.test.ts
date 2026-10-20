@@ -113,17 +113,13 @@ describe("reports", () => {
     expect(sent.map((s) => s.report)).toEqual([{ state: "busy", prUrl: "https://github.com/acme/app/pull/12" }]);
   });
 
-  test("rate limits go out when they changed, as the status line has them", async ($, on) => {
+  test("a measure sends nothing: the daemon reads quota from Claude Code's own cache", async ($, on) => {
     const sent = record(on);
-    const rateLimits = [
-      { kind: "five_hour", percentUsed: 23.5, resetsAt: "2026-10-16T18:00:00Z" },
-      { kind: "seven_day", percentUsed: 7 },
-    ];
-    const context = { window: 200_000 } as const;
-    await $.session.measure({ context, rateLimits, changed: ["context"] });
-    await $.session.measure({ context, rateLimits, changed: ["rateLimits"] });
+    const rateLimits = [{ kind: "five_hour", percentUsed: 23.5, resetsAt: "2026-10-16T18:00:00Z" }];
+    await $.session.measure({ context: { window: 200_000 }, rateLimits, changed: ["rateLimits"] });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 1);
-    expect(sent.map((s) => s.report)).toEqual([{ rateLimits }]);
+    expect(sent).toEqual([]);
   });
 
   test("a session in no tmux pane sends nothing: the daemon could only answer unbound", async ($, on) => {

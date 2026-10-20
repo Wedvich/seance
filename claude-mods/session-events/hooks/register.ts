@@ -2,9 +2,8 @@ import type { EngineInterface, Register } from "claude-code";
 
 /**
  * Tells the local seanced what this session is doing, for séance's scheduler
- * (DESIGN.md, "Session events"): busy, idle, waiting on a person, ended; the
- * PR it opened; and the account's rate-limit windows as the session last saw
- * them. Each report is one `seanced session-event` with the event as JSON on
+ * (DESIGN.md, "Session events"): busy, idle, waiting on a person, ended, and
+ * the PR it opened. Each report is one `seanced session-event` with the event as JSON on
  * stdin. The daemon trusts none of it about *which* session this is — it binds
  * the report to a tmux pane by this process tree — so nothing here names a
  * session or a task.
@@ -18,7 +17,6 @@ type State = "busy" | "idle" | "needs-input" | "ended";
 interface Report {
   readonly state?: State;
   readonly prUrl?: string;
-  readonly rateLimits?: readonly { readonly kind: string; readonly percentUsed: number; readonly resetsAt?: string }[];
 }
 
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
@@ -104,19 +102,5 @@ export const register: Register = (on) => {
     if (!CONTINUES.has(e.reason)) send($, { state: "ended" });
     return next(e);
   }).catch(($, e, next) => next(e));
-  // Rate limits as the status line has them, pushed after each turn and when a
-  // window moves a point — the session's own reading of its account's quota.
-  on("session.measure", ($, e, next) => {
-    if (e.changed.includes("rateLimits") && e.rateLimits.length > 0) {
-      send($, {
-        rateLimits: e.rateLimits.map(({ kind, percentUsed, resetsAt }) => ({
-          kind,
-          percentUsed,
-          ...(resetsAt === undefined ? {} : { resetsAt }),
-        })),
-      });
-    }
-    return next(e);
-  });
 };
 // oxlint-enable promise/no-callback-in-promise
