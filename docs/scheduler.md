@@ -32,7 +32,7 @@ stay as they are; the table says which word each one means.
 | Exclave           | Derived: `default` (`~/.claude`) + one per line of `~/.exclaves` (`~/<name>`, `~/.claude-<name>`). Reported per repo in the register blob, and as the blob's `MachineInfo.exclaves` list (account, auth, skills); a repo's location decides its config dir, so `spawn` is unchanged                                                                                                         |
 | Spawn contract    | Unchanged apart from optional `baseBranch` and `taskId`. Scheduler resolves "repo X" → (machine, clone) and calls the existing `spawn`                                                                                                                                                                                                                                                      |
 | Account id        | `organizationUuid:accountUuid` from `<configDir>/.claude.json` (`~/.claude.json` for `default`) — never the email                                                                                                                                                                                                                                                                           |
-| Quota telemetry   | Layered: session-reported `rate_limits` (the mod's `session.measure` tap, landed M2) → OAuth usage endpoint when stale → the config dir's `cachedUsageUtilization` (M1's only source) → last value + `resets_at` floor                                                                                                                                                                      |
+| Quota telemetry   | One source, the config dir's `cachedUsageUtilization` (M1's), which the daemon refreshes through `claude --safe-mode -p /usage` once it is stale (M4) → last value + `resets_at` floor. M4 retires M2's session-reported `rate_limits` and replaces the planned OAuth poll                                                                                                                  |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                                                                                                                                |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
 | Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                                                               |
@@ -142,11 +142,10 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
 What M1–M3 built is DESIGN.md's: _Daemon_ (exclaves, telemetry), Local op socket ("Session
 events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 adds:
 
-- `daemon/src/oauth-quota.ts` (not `shared/src/quota.ts`, the fleet fold readers share): an OAuth
-  usage poll per exclave when the newest session report is older than `quota.staleAfter`
-  (default 10m), adding observations to the same store under the same metric names. **Token
-  never leaves the daemon process** — the same invariant class as the service-delivered PSK.
-  Failure is quiet and non-fatal (unofficial endpoint).
+- `daemon/src/usage-refresh.ts` (not `shared/src/quota.ts`, the fleet fold readers share): runs
+  `claude --safe-mode --output-format json -p /usage` for an exclave whose cached utilization is
+  stale, so Claude Code refreshes its own cache and the existing `cache` collector reads the
+  result. The daemon holds no token and calls no endpoint (M4 item "`/usage` refresh").
 - Collectors not yet built — LXC PSI and cgroup views, the Proxmox node view, macOS I/O rates
   (DESIGN.md _Daemon_, "Telemetry").
 
@@ -211,12 +210,12 @@ where a test can say it. _Gaps_ are what the milestone deliberately leaves manua
 nobody files them as bugs. _Record_ names the DESIGN.md sections it folds into; the plan text it
 replaces is deleted here in the same PR.
 
-| M   | Ships                                                  | One line                                            |
-| --- | ------------------------------------------------------ | --------------------------------------------------- |
-| M1  | Visibility across machines, exclaves and accounts      | See pressure and quota everywhere; no scheduler yet |
-| M2  | Routing + leadership                                   | "spawn this in repo X" without picking a machine    |
-| M3  | Durable queue                                          | Queue a block of work with deps and walk away       |
-| M4  | Stacking, OAuth quota, skills, Proxmox, alerts, Linear | Refinement, in waves                                |
+| M   | Ships                                               | One line                                            |
+| --- | --------------------------------------------------- | --------------------------------------------------- |
+| M1  | Visibility across machines, exclaves and accounts   | See pressure and quota everywhere; no scheduler yet |
+| M2  | Routing + leadership                                | "spawn this in repo X" without picking a machine    |
+| M3  | Durable queue                                       | Queue a block of work with deps and walk away       |
+| M4  | Stacking, `/usage`, skills, Proxmox, alerts, Linear | Refinement, in waves                                |
 
 ### M1 — visibility (done 2026-10-15)
 
@@ -231,7 +230,7 @@ status indexing its own blob and one account folded across both machines.
 
 **Gaps, until later milestones close them.** No scheduler: you pick the exclave by hand and read
 the pressure yourself. Quota comes only from Claude Code's own cached utilization per config dir
-(session reports are M2, the OAuth poll M4), so an exclave shows whatever its last Claude
+(session reports are M2, the `/usage` refresh M4), so an exclave shows whatever its last Claude
 session left, with its observed-at — and nothing at all until one has run there. Proxmox node
 view absent (M4); an LXC reports what `/proc` shows inside the container, with no cgroup or PSI
 read yet.
@@ -274,7 +273,8 @@ leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the
 relay's and the next leader takes it over; item 6 moved the PWA and MCP onto `store-put`.)
 Deps, batches, caps, `pause` and the escalation and spill alerts have landed (items 4a and 5);
 the PWA hears `queue-changed` and keeps a bounded poll as its fallback (item 6). An account nothing has observed yet is `quota unknown` and
-gets no `auto` work until a direct spawn or a session report gives it a reading (M4's OAuth poll).
+gets no `auto` work until a direct spawn or a session report gives it a reading (M4's `/usage`
+refresh gives every signed-in exclave one).
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
 `SCHEDULER_LEADERS` allowlist.
@@ -359,7 +359,8 @@ and the verified leader running an unverified-era task were added at close-out.
 
 **Gaps.** No stacking: every task starts from the default branch, and `TaskSpec.base` stays
 unset. Alerts are PWA-only until M4's Web Push. Linear is not consulted; done comes from local
-merge detection, the session ending, or manual marking. Quota is still session-reported.
+merge detection, the session ending, or manual marking. Quota is still session-reported (until
+M4's `/usage` refresh).
 Batches and hand-declared deps have no authoring surface: the library, the record and the leader
 support them, but neither the PWA nor MCP writes them. A full `task:` listing in one frame is
 unchecked on the iOS WKWebView app leg (DESIGN.md, "The store", _Send size_); paging through the
@@ -375,7 +376,7 @@ report now reach apps, #184; the registry push's shape is otherwise unchanged).
 M4's items are **not independent**. The M3 review (2026-10-18) found four real dependencies in
 the code, so M4 runs in waves:
 
-- Auth health needs the OAuth poll, since the poll's 401 is the signal.
+- Auth health needs the `/usage` refresh, since a refresh that fails on auth is the signal.
 - Web Push and Linear need `settings`.
 - Stacking and Linear need an authoring surface. No client writes `deps`, `batch` or `linear`
   today.
@@ -398,7 +399,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security), rebased and landed | —                                                                      | —                        |
 | 1    | Authoring surface (new)                                                     | —                                                                      | M                        |
 | 1    | Settings and Web Push, in three PRs                                         | store rules v2; the fetch seam                                         | L                        |
-| 1    | OAuth quota poll                                                            | a credentials spike; the fetch seam                                    | M                        |
+| 1    | `/usage` refresh (was: OAuth quota poll)                                    | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1    | Skills filter                                                               | —                                                                      | S; M with project skills |
 | 1    | Proxmox node view                                                           | the token decision                                                     | M–L                      |
 | 1    | Account records                                                             | store rules v2                                                         | M                        |
@@ -406,7 +407,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 1    | CLI and keyless MCP `auto`                                                  | MCP's enqueue split out                                                | S–M                      |
 | 1    | `failed` from exit status (new)                                             | —                                                                      | S–M                      |
 | 2    | Stacking                                                                    | authoring surface; #28                                                 | L                        |
-| 2    | Auth health                                                                 | OAuth poll; Web Push for its alert                                     | M                        |
+| 2    | Auth health                                                                 | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2    | Linear                                                                      | settings; authoring surface                                            | L                        |
 
 **Wave 0.** Owned by the review's relay and daemon sessions, not planned here in full:
@@ -431,12 +432,13 @@ precede. Wave 2 waits on the wave-1 item named.
   rules v2.
 - **Daemon seams.**
   - An injectable `httpFetch` and clock through `startDaemon`, the leader and telemetry. Without them
-    the OAuth poll, auth health, push, Linear and Proxmox can be tested only at the unit tier.
+    auth health, push, Linear and Proxmox can be tested only at the unit tier.
     **Done** — `now`, `httpFetch` and `probe` in `RunOpts` (DESIGN.md, Daemon, "Seams").
   - `probe` passed through `startDaemon` to telemetry. **Done**, with the clock.
   - `run.ts`'s wiring split into a capabilities list and a collector registry. **Done**
     (DESIGN.md, Daemon, "Wiring"). The registry reaches into `telemetry.ts` too: each source is one
-    `TELEMETRY_COLLECTORS` entry, so the OAuth quota poll and the Proxmox readers are each one more.
+    `TELEMETRY_COLLECTORS` entry, so the Proxmox readers are each one more. (The `/usage` refresh
+    adds none: it refreshes the file the `cache` collector already reads.)
   - `e2e/e2e.test.ts` split by area. **Done** — one file per area behind `startSuite` (docs/development.md).
   - A credentials fixture, a helper that pushes a feature branch to the fixture's origin, and a
     push-endpoint stub. **Done** (docs/development.md).
@@ -476,16 +478,50 @@ precede. Wave 2 waits on the wave-1 item named.
     shell string.
   - _Proposed (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
     knows it, so the PR is the handoff.
-- **OAuth quota poll** — `daemon/src/oauth-quota.ts`, token never leaves the daemon. Exit: an
-  idle exclave's quota refreshes within `staleAfter`; a failing endpoint is quiet. Missing today:
-  a credentials reader and `quota.staleAfter` (the fetch seam is in `RunOpts`). `QuotaSource "oauth"` is reserved,
-  and telemetry already layers sources.
-  - _Proposed (#7), exit criterion:_ "while the access token is live" — the daemon never
-    refreshes.
-  - _Proposed (#13), endpoint:_ hard-coded, never an exclave's `ANTHROPIC_BASE_URL` or proxy
-    settings, which a session can write. Read tokens, never refresh, and record the daemon in
-    DESIGN.md as a new keychain reader. Poll only idle exclaves, and mind a macOS keychain read
-    per poll.
+- **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
+  #13 lapse with it) — `daemon/src/usage-refresh.ts` runs
+  `claude --safe-mode --output-format json -p /usage` with the exclave's config dir, and Claude
+  Code refreshes `cachedUsageUtilization` in place. The daemon reads no token, calls no endpoint
+  and never refreshes a login: Claude Code does all three under its own rules, so the
+  rotating-refresh-token hazard that made the poll read-only is gone. Measured on 2.1.304:
+  - _Free._ `total_cost_usd: 0`, zero tokens, `num_turns: 0`, no transcript written.
+  - _Debounced by Claude Code._ `/usage` answers from the cache while `fetchedAtMs` is under 60s
+    old and asks the endpoint only past that, so concurrent refreshes of one config dir reach the
+    endpoint at most once a minute.
+  - _But a process is not cheap._ About 330–390 MiB peak and 5–8s wall with `--safe-mode`,
+    about 490 MiB and 7.5–8.5s without (hooks and MCP servers start). Even a run the debounce
+    answers from the cache costs the whole process. Hence the rules below.
+
+  Rules:
+  - **Never spawn inside the debounce.** The daemon reads `fetchedAtMs` itself (the `cache`
+    collector already does, memoized on mtime) and spawns only when it is older than
+    `quota.staleAfter`, never under 60s. `fetchedAtMs` is the debounce marker; there is no second
+    one of ours.
+  - **`--safe-mode` always**: smaller, faster, and no user hook, plugin or mod runs — including
+    session-events, which would otherwise report from a process that is not a session.
+  - **One spawn at a time per daemon**, with a timeout and a kill: an LXC cannot carry ten
+    400 MiB processes.
+  - **Triggers**: a session event from the exclave (a session there has spent quota) and a
+    `quota.staleAfter` timer for an exclave with none, both subject to the staleness check.
+  - **A built env, never the daemon's**: `HOME`, `PATH`, `USER`, `LOGNAME` and
+    `CLAUDE_CONFIG_DIR` for a non-default exclave. Without `USER`/`LOGNAME` the macOS keychain
+    lookup fails silently and `/usage` prints the `/cost` view with `is_error: false`. The
+    service-delivered credential stays out as in `exec.ts`; `claude` is argv-array exec,
+    resolved by bare name.
+  - **The cache file is the result, not stdout.** A run past the debounce that leaves
+    `fetchedAtMs` unchanged failed, whatever it printed; the daemon logs it once and backs off to
+    the timer. Failure is quiet and non-fatal.
+  - **Retire the `session` source in the same work.** The cache becomes the one source: drop the
+    mod's `session.measure` tap, `SessionQuota` and `session-quota.json`, and stop emitting
+    `s: "session"` (and drop the never-emitted `oauth`). Parsers keep accepting `session` until
+    every daemon has updated: a status from an older daemon still carries it, and refusing it
+    would cost that machine its quota. DESIGN.md "Session events" and _Daemon_ "Telemetry" are
+    rewritten with it.
+
+  Exit: an idle signed-in exclave's quota is never older than `staleAfter` while the daemon
+  runs; no exclave is spawned for twice inside 60s; a failing refresh is quiet (daemon, with a
+  `claude` stub that writes or leaves the cache).
+
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
   - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
     and served from the blob, never per request. Tightened to directories (or symlinks
@@ -583,28 +619,29 @@ precede. Wave 2 waits on the wave-1 item named.
     - It depends on store rules v2, not on account records.
   - _Estimate:_ about 288 get-and-put pairs per daemon a day, roughly 2,900 rows written at 10
     daemons (3% of the free limit).
-- **Auth health** (after the OAuth poll) — `authOk` says only that `.claude.json` names an
+- **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
   filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
   unknown` with its observed-at, carried in `status`, not the register blob (a change there
   re-registers and drops the status, #102). Filter widens to "missing **or expired**"; `unknown`
-  routes, since it is every exclave before its first poll. _Proposed (#6):_ a compact,
+  routes, since it is every exclave before its first refresh. _Proposed (#6):_ a compact,
   never-trimmed list of expired exclaves in `status`, since auth shares about 680 bytes with
   quota. Signals:
-  - _The OAuth poll's 401, read against the access token's `expiresAt`._ A 401 with
-    `expiresAt` still ahead is `expired` (revoked or lapsed); a 401 after it is `unknown` —
-    Claude Code refreshes on next use. **The daemon never refreshes**: refresh tokens rotate,
-    so a daemon refresh would sign the exclave out of Claude Code. (`invalid_grant` comes only
-    from the refresh endpoint, so it is never a signal here.)
+  - _A `/usage` refresh that fails on auth._ Claude Code has already tried its own token
+    refresh by then, so — unlike the OAuth poll's 401, which needed reading against
+    `expiresAt` — the failure means the login is revoked or lapsed. **Unverified:** what such a
+    run prints and exits with (`is_error`, the result text); spike it on a signed-out exclave
+    before relying on it, and tell it apart from the silent `/cost` fallback a missing `USER`
+    causes (the `/usage` refresh, above).
   - _A session that died on auth_ — only if a hook surfaces it, which is unverified; check
     before relying on it.
   - _A `claude setup-token` token_ (`CLAUDE_CODE_OAUTH_TOKEN`) has the one predictable expiry;
     handled only if an exclave runs on one.
 
   `expired` clears to `unknown` when a rescan sees the exclave's `.claude.json` or credentials
-  change (a `/login`); the next poll decides. PWA: "needs `/login`" on the exclave row; a Web
+  change (a `/login`); the next refresh decides. PWA: "needs `/login`" on the exclave row; a Web
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
-  clears after `/login`; an expired access token alone never reads as `expired` (daemon).
+  clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
 
 - **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
   exists already (DESIGN.md "MCP server"). Its `enqueueAuto` is module-private in
@@ -663,9 +700,10 @@ same PR, with the reason.
    reading older than 5h is past its reset and reads 0% — so only the 7d window can drift, and
    only through use the fleet does not see. Fleet accounts are used almost only inside the
    fleet (the owner, 2026-10-16); the rare cloud session is a blip the next session report or
-   OAuth poll overwrites. A cap would fail every time a machine sleeps past it, and on the
+   `/usage` refresh (M4) overwrites. A cap would fail every time a machine sleeps past it, and on the
    account with the most headroom; no cap fails only on unseen use, for one dispatch, until the
-   session's own `rate_limits` report (the session-events mod, M2 item 5) corrects it. Revisit with a 7d-only cap (~24h) if
+   next reading corrects it — the session's own `rate_limits` report (the session-events mod, M2
+   item 5), or after M4 the refresh that session's events trigger. Revisit with a 7d-only cap (~24h) if
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
@@ -771,12 +809,16 @@ same PR, with the reason.
 - **Prompts at rest on Cloudflare.** Sealed under the PSK like `info`, and ciphertext length is
   unpadded, so the relay bounds prompt length — the same concession as live frames. At rest
   only while the task is unfinished (Settled defaults 16).
-- **OAuth usage endpoint** is unofficial; reading tokens per config dir differs by platform
-  (macOS keychain entry naming per config dir is unverified). Session reports are the floor.
-- **Session `rate_limits` cadence** (was: statusline cadence). The tap is `session.measure`,
-  not the statusline, so it reports after each turn and when a window moves a point, rendered
-  or not. An idle session still reports nothing new, which the reset floor and M4's OAuth poll
-  cover.
+- **`/usage` is Claude Code's behaviour, not a contract.** The 60s debounce, the cache shape,
+  the zero cost and the `--safe-mode` flag were read off 2.1.304 (2026-10-20); an update can move
+  any of them. The cache file staying the result is what keeps a change visible: a refresh that
+  stops moving `fetchedAtMs` logs, and the reading ages into the reset floor rather than lying.
+  Its memory (~350 MiB a run) is the other cost, bounded by one spawn at a time and the
+  staleness check.
+- **Session `rate_limits` cadence** (was: statusline cadence), until M4 retires the source. The
+  tap is `session.measure`, not the statusline, so it reports after each turn and when a window
+  moves a point, rendered or not. An idle session still reports nothing new, which the reset
+  floor and M4's `/usage` refresh cover.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
 - **Leader churn is mostly deploys** (looked at 2026-10-16, M2's gap 2). Term 31 within ~6h of
