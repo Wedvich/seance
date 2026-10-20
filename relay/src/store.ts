@@ -1,7 +1,6 @@
 import {
   MAX_RECORDS,
   MAX_STORE_CREATES_PER_WINDOW,
-  MAX_TASKS,
   STORE_CREATE_WINDOW_MS,
   STORE_PREFIXES,
   type Envelope,
@@ -71,25 +70,34 @@ export function actOf(frame: Pick<StorePutFrame | StoreDeleteFrame, "t" | "expec
 }
 
 /**
- * Who may do what, from the prefix's rule: `forbidden` or `not_leader`, else
- * null. `leader` is whether the daemon-leg write holds the term (`holdsTerm`);
- * on the app leg a term authorizes nothing, so the caller passes false.
+ * Who may do what, from the prefix's rule alone: `forbidden` or `not_leader`,
+ * else null. `leader` is whether the daemon-leg write holds the term
+ * (`holdsTerm`); on the app leg a term authorizes nothing, so the caller passes
+ * false. A daemon-leg caller is a registered socket: the hub refuses every store
+ * frame from one that is not before it gets here.
  *
- * Nothing deletes under `queue:`, the leader included: no client deletes the
- * pause (resume overwrites it) and `queue:` keeps no tombstone, so a term
- * holder could otherwise erase a person's pause and re-create it from its own
- * version-1 blob. And no daemon creates under `task:`: since `submit` went only
- * apps enqueue, so the term holder, which meets no create floor, has no creates
- * to churn against its deletes.
+ * The delete policy comes first, so a `never` prefix refuses the leader too:
+ * those keep no tombstone, so a term holder could otherwise erase a person's
+ * pause or alias and re-create it from its own version-1 blob. A prefix that is
+ * not term-fenced gives any registered daemon socket the creates and overwrites
+ * its rule allows the daemon leg; a fenced one, only the term holder.
  */
 export function authorize(rule: StoreRule, act: StoreAct, leg: Role, leader: boolean): StoreErrorCode | null {
-  if (act === "delete" && rule.prefix === STORE_PREFIXES.queue.prefix) return "forbidden";
-  if (leg === "daemon" && rule.termFenced) {
-    if (!leader) return "not_leader";
-    return act === "create" && rule.prefix === STORE_PREFIXES.task.prefix ? "forbidden" : null;
+  if (act === "delete") {
+    if (rule.deletes === "never" || leg === "app") return "forbidden";
+    return leader ? null : "not_leader";
+  }
+  if (leg === "daemon") {
+    if (rule.termFenced && !leader) return "not_leader";
+    return act === "create" && !rule.daemonCreate ? "forbidden" : null;
   }
   if (act === "create") return rule.appCreate ? null : "forbidden";
   return rule.appWrite ? null : "forbidden";
+}
+
+/** Whether a create meets the create floor: always on the app leg, and on the daemon leg wherever writes are not term-fenced. */
+export function floorsCreate(rule: StoreRule, leg: Role): boolean {
+  return leg === "app" || !rule.termFenced;
 }
 
 /** A per-socket floor's window, kept on the socket's attachment. */
@@ -111,25 +119,28 @@ function admitWindow(prior: RateWindow | undefined, now: number, windowMs: numbe
   return next.count > max ? null : next;
 }
 
-/** The app-leg create floor. */
+/** The create floor (`floorsCreate`). */
 export function admitCreate(prior: RateWindow | undefined, now: number): RateWindow | null {
   return admitWindow(prior, now, STORE_CREATE_WINDOW_MS, MAX_STORE_CREATES_PER_WINDOW);
 }
 
 /**
  * The `store-list` floors, which bind every socket but the term holder's. A
- * listing reads every row under its prefix — up to `MAX_TASKS` for `task:` —
- * and Durable Object reads are billed per row against a daily limit (5M on the
- * free plan) past which every storage op fails until 00:00 UTC, registers and
- * routing included. Nothing but a takeover needs a listing today, so the floors
- * are set by that limit, not by a client: the DO-wide bucket refills one list
- * per `LIST_REFILL_MS`, 21,600 a day, which at 128 rows each is 2.8M rows read
- * — about half the limit, the rest left for everything else. The per-socket
- * window keeps one looping client from spending the whole bucket.
+ * listing reads every row under its prefix — up to its `cap` — and Durable
+ * Object reads are billed per row against a daily limit (5M on the free plan)
+ * past which every storage op fails until 00:00 UTC, registers and routing
+ * included. So the floors are set by that limit, not by a client. Both are per
+ * prefix, so an app's `account:` list on open never spends what a `task:` list
+ * needs. The DO-wide bucket refills one list per `LIST_REFILL_MS` per prefix,
+ * 10,800 a day each; every prefix listed full at that rate reads at most
+ * 10,800 × `MAX_RECORDS` (the caps' bound), 2.8M rows — about half the limit,
+ * the rest left for everything else. (4 s held that for `task:` alone; five
+ * prefixes halved it.) The per-socket window keeps one looping client from
+ * spending a whole bucket.
  */
 export const LIST_WINDOW_MS = 60_000;
 export const MAX_LISTS_PER_WINDOW = 4;
-export const LIST_REFILL_MS = 4_000;
+export const LIST_REFILL_MS = 8_000;
 export const LIST_BURST = 16;
 
 export function admitList(prior: RateWindow | undefined, now: number): RateWindow | null {
@@ -164,9 +175,6 @@ export const MAX_TOMBSTONES = 4_096;
 export function tombstoneAgeKey(at: number, key: string): string {
   return `${TOMBSTONE_AGE_NS}${String(at).padStart(16, "0")}:${key}`;
 }
-
-/** `queue:` is bounded only by `MAX_RECORDS`. */
-export const PREFIX_CAPS: Readonly<Partial<Record<StorePrefix, number>>> = { [STORE_PREFIXES.task.prefix]: MAX_TASKS };
 
 interface StoredRecord {
   readonly version: number;
@@ -238,8 +246,8 @@ export class RelayStore {
   }
 
   /**
-   * `createAdmitted` is the caller's verdict on the app-leg create floor (always
-   * true on the daemon leg). It is consulted only after the tombstone and version
+   * `createAdmitted` is the caller's verdict on the create floor (always true
+   * where `floorsCreate` is false). It is consulted only after the tombstone and version
    * checks, so a create retried after it landed reads `version_conflict`, never
    * `rate_limited` — and the caps come after that for the same reason.
    */
@@ -261,7 +269,7 @@ export class RelayStore {
     if (create) {
       const counts = (await this.#storage.get<Counts>(COUNTS_KEY)) ?? NO_COUNTS;
       if (counts.total >= MAX_RECORDS) return { ok: false, code: "store_full" };
-      if ((counts.prefixes[rule.prefix] ?? 0) >= (PREFIX_CAPS[rule.prefix] ?? MAX_RECORDS)) {
+      if ((counts.prefixes[rule.prefix] ?? 0) >= rule.cap) {
         return { ok: false, code: "store_full" };
       }
       const next = bumped(counts, rule.prefix, 1);
@@ -282,7 +290,7 @@ export class RelayStore {
 
   /**
    * A missing key is `version_conflict` whatever `expect` is, as in
-   * `MemoryQueueStore`. Under a prefix apps may create into, the delete leaves a
+   * `MemoryQueueStore`. Under a prefix whose rule has `tombstone`, the delete leaves a
    * tombstone and purges up to `PURGE_BATCH` expired ones, oldest first: storage
    * stays bounded by a window of deletes without an alarm, and the one alarm
    * (the sweep's) is armed only while daemons are connected. One that would
@@ -309,11 +317,11 @@ export class RelayStore {
     }
 
     const standing = Math.max(0, (counts.tombstones ?? (await this.#countTombstones())) - purged);
-    if (rule.appCreate && standing >= this.#maxTombstones) return { ok: false, code: "store_full" };
+    if (rule.tombstone && standing >= this.#maxTombstones) return { ok: false, code: "store_full" };
     const entries: Record<string, StoredRecord | Tombstone | Counts | string> = {
-      [COUNTS_KEY]: { ...bumped(counts, rule.prefix, -1), tombstones: standing + (rule.appCreate ? 1 : 0) },
+      [COUNTS_KEY]: { ...bumped(counts, rule.prefix, -1), tombstones: standing + (rule.tombstone ? 1 : 0) },
     };
-    if (rule.appCreate) {
+    if (rule.tombstone) {
       entries[TOMBSTONE_NS + key] = { version: current.version, at: now };
       entries[tombstoneAgeKey(now, key)] = key;
     }

@@ -864,7 +864,7 @@ describe("store", () => {
     expect(parseDecision({ ...decision, candidates: [oauth] })).toBeNull();
   });
 
-  test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {
+  test("keys are a known prefix and a routing id; an unknown prefix is no key", () => {
     for (const { prefix } of Object.values(STORE_PREFIXES)) expect(isStoreKey(`${prefix}x`)).toBe(true);
     expect(isStoreKey(`task:${"a".repeat(ROUTING_ID_MAX_LENGTH)}`)).toBe(true);
     for (const bad of [
@@ -872,7 +872,7 @@ describe("store", () => {
       "task:",
       "task:a:b",
       "task:a/b",
-      "account:abc",
+      "push:abc",
       "device:abc",
       "scheduler:term",
       "TASK:a",

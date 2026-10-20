@@ -1,11 +1,11 @@
 import {
   APP_ID,
-  MAX_RECORDS,
   MAX_STORE_CREATES_PER_WINDOW,
   MAX_TASKS,
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
+  STORE_PREFIXES,
   parseStoreChanged,
   parseStoreReply,
   type Envelope,
@@ -62,9 +62,16 @@ function taskKey(tag = "t"): string {
   return `task:${tag}-${tasks}`;
 }
 
+let accounts = 0;
+
+function accountKey(): string {
+  accounts += 1;
+  return `account:a-${accounts}`;
+}
+
 /** Fixed keys for the caps suite, which fills a fresh relay each test. */
 const capKey = (i: number): string => `task:c-${String(i).padStart(3, "0")}`;
-const queueKey = (i: number): string => `queue:q-${String(i).padStart(3, "0")}`;
+const accountCapKey = (i: number): string => `account:c-${String(i).padStart(3, "0")}`;
 
 /**
  * One store request and its reply, parsed by the shared client parser: a reply
@@ -391,19 +398,35 @@ describe("relay store: rules, versions and tombstones", () => {
     observer.close();
   });
 
-  test("an unregistered daemon socket reads, and its write is not_leader rather than dropped", async () => {
+  // Registration is the daemon leg's authority wherever writes are not term-fenced, so nothing on that leg
+  // is answered before it — reads included. Refused rather than dropped, so the client settles.
+  test("an unregistered daemon socket's store frames are forbidden, reads included, until its register lands", async () => {
+    const observer = await connectApp(rigA.relay());
     const stranger = await connectDaemon(rigA.relay());
     const key = taskKey();
-    expect(await list(stranger, "task:")).toBeInstanceOf(Array);
+    expect(await ask(stranger, { t: "store-list", prefix: "task:" })).toMatchObject(refused("forbidden"));
+    expect(await ask(stranger, { t: "store-get", key })).toMatchObject(refused("forbidden"));
+    expect(await put(stranger, key, 0, sealed(), 1)).toMatchObject(refused("forbidden"));
+    expect(await put(stranger, accountKey(), 0, sealed())).toMatchObject(refused("forbidden"));
+    expect(await del(stranger, key, 1, 1)).toMatchObject(refused("forbidden"));
+    // A parse refusal meets the same gate: the socket has no rights to be told about yet.
+    expect(await ask(stranger, { t: "store-put", key: "device:x", expect: 0, env: sealed() })).toMatchObject(
+      refused("forbidden"),
+    );
+
+    // A store frame right behind the register meets its outcome, not the socket as it was before it.
+    const id = await newDeviceId();
+    stranger.send(await register(id, { roles: [] }));
     expect(await get(stranger, key)).toBeNull();
-    expect(await put(stranger, key, 0, sealed(), 1)).toMatchObject(refused("not_leader"));
-    expect(await put(stranger, key, 0, sealed())).toMatchObject(refused("not_leader"));
-    expect(await del(stranger, key, 1, 1)).toMatchObject(refused("not_leader"));
-    stranger.close();
+    expect(await list(stranger, "task:")).toBeInstanceOf(Array);
+    await rigA.leave(observer, stranger, id);
+    observer.close();
   });
 
   test("a frame with no usable id is dropped and the socket stays usable; one with an id and a bad field is refused", async () => {
-    const daemon = await connectDaemon(rigA.relay());
+    const observer = await connectApp(rigA.relay());
+    const daemonId = await newDeviceId();
+    const daemon = await rigA.join(observer, daemonId, []);
     const app = await connectApp(rigA.relay());
     for (const client of [daemon, app]) {
       client.send({ t: "store-put" });
@@ -416,8 +439,8 @@ describe("relay store: rules, versions and tombstones", () => {
       for (const frame of [
         { t: "store-get", key: "device:x" },
         { t: "store-get", key: "scheduler:term" },
-        { t: "store-put", key: "account:x", expect: 0, env: sealed() },
-        { t: "store-list", prefix: "account:" },
+        { t: "store-put", key: "push:x", expect: 0, env: sealed() },
+        { t: "store-list", prefix: "push:" },
         { t: "store-put", key: taskKey(), expect: -1, env: sealed() },
         { t: "store-delete", key: taskKey(), expect: 1.5 },
       ]) {
@@ -430,8 +453,107 @@ describe("relay store: rules, versions and tombstones", () => {
     const whole = await list(app, "task:");
     const paged = await ask(app, { t: "store-list", prefix: "task:", after: "task:z" });
     expect(paged).toEqual({ t: "store-listed", re: paged.re, records: whole });
-    daemon.close();
+    await rigA.leave(observer, daemon, daemonId);
     app.close();
+    observer.close();
+  });
+
+  test("account: apps and registered daemons create and overwrite by expect; nobody deletes, the leader included", async () => {
+    const observer = await connectApp(rigA.relay());
+    const leader = await rigA.lead(observer);
+    const followerId = await newDeviceId();
+    const follower = await rigA.join(observer, followerId, []);
+    const app = await connectApp(rigA.relay());
+    const key = accountKey();
+    expect(await put(app, key, 0, sealed())).toMatchObject(written(1));
+    expect(await put(follower, key, 1, sealed())).toMatchObject(written(2));
+    expect(await put(app, key, 1, sealed())).toMatchObject(refused("version_conflict"));
+    expect(await put(app, key, 2, sealed())).toMatchObject(written(3));
+    // Not term-fenced: the term changes nothing, on either leg.
+    expect(await put(leader.daemon, key, 3, sealed(), leader.term)).toMatchObject(written(4));
+    const daemonMade = accountKey();
+    expect(await put(follower, daemonMade, 0, sealed())).toMatchObject(written(1));
+
+    expect(await del(app, key, 4)).toMatchObject(refused("forbidden"));
+    expect(await del(follower, key, 4)).toMatchObject(refused("forbidden"));
+    expect(await del(leader.daemon, key, 4, leader.term)).toMatchObject(refused("forbidden"));
+    expect((await get(app, key))?.version).toBe(4);
+    const listed = await list(app, "account:");
+    expect(listed.map((record) => record.key)).toEqual(expect.arrayContaining([key, daemonMade]));
+
+    app.close();
+    await rigA.leave(observer, follower, followerId);
+    await rigA.dismiss(observer, leader);
+    observer.close();
+  });
+
+  test("quota: any registered daemon writes it and no app does; settings: is the term holder's alone; neither deletes", async () => {
+    const observer = await connectApp(rigA.relay());
+    const leader = await rigA.lead(observer);
+    const followerId = await newDeviceId();
+    const follower = await rigA.join(observer, followerId, []);
+    const app = await connectApp(rigA.relay());
+
+    expect(await put(app, "quota:fleet", 0, sealed())).toMatchObject(refused("forbidden"));
+    expect(await put(follower, "quota:fleet", 0, sealed())).toMatchObject(written(1));
+    expect(await put(leader.daemon, "quota:fleet", 1, sealed())).toMatchObject(written(2));
+    expect(await put(app, "quota:fleet", 2, sealed())).toMatchObject(refused("forbidden"));
+    expect(await del(follower, "quota:fleet", 2)).toMatchObject(refused("forbidden"));
+    expect(await del(leader.daemon, "quota:fleet", 2, leader.term)).toMatchObject(refused("forbidden"));
+
+    expect(await put(app, "settings:vapid", 0, sealed())).toMatchObject(refused("forbidden"));
+    expect(await put(follower, "settings:vapid", 0, sealed(), leader.term)).toMatchObject(refused("not_leader"));
+    expect(await put(leader.daemon, "settings:vapid", 0, sealed(), leader.term)).toMatchObject(written(1));
+    expect(await put(leader.daemon, "settings:vapid", 1, sealed(), leader.term)).toMatchObject(written(2));
+    expect(await del(leader.daemon, "settings:vapid", 2, leader.term)).toMatchObject(refused("forbidden"));
+    expect((await get(app, "settings:vapid"))?.version).toBe(2);
+
+    app.close();
+    await rigA.leave(observer, follower, followerId);
+    await rigA.dismiss(observer, leader);
+    observer.close();
+  });
+
+  test("store-changed reaches every other app for an account: write, and the leader for any write its term socket did not make", async () => {
+    const observer = await connectApp(rigA.relay());
+    const leader = await rigA.lead(observer);
+    const followerId = await newDeviceId();
+    const follower = await rigA.join(observer, followerId, []);
+    const writer = await connectApp(rigA.relay());
+    const reader = await connectApp(rigA.relay());
+    const key = accountKey();
+    const changed = (client: Client): Promise<unknown> =>
+      client.waitFor<{ t: string }>("store-changed", 5_000).then(parseStoreChanged);
+
+    // The writer hears nothing about its own write, before or after its reply.
+    const create = { t: "store-put", key, expect: 0, env: sealed() };
+    expect(await ask(writer, create, 5_000, "store-changed")).toMatchObject(written(1));
+    expect(await changed(reader)).toEqual({ t: "store-changed", key, version: 1 });
+    expect(await changed(leader.daemon)).toEqual({ t: "store-changed", key, version: 1 });
+    await writer.expectNo("store-changed");
+
+    // A daemon's write reaches every app and the leader; the leader's own reaches the apps, not itself.
+    expect(await put(follower, key, 1, sealed())).toMatchObject(written(2));
+    expect(await changed(writer)).toMatchObject({ key, version: 2 });
+    expect(await changed(reader)).toMatchObject({ key, version: 2 });
+    expect(await changed(leader.daemon)).toMatchObject({ key, version: 2 });
+    const own = { t: "store-put", key, expect: 2, env: sealed() };
+    expect(await ask(leader.daemon, own, 5_000, "store-changed")).toMatchObject(written(3));
+    expect(await changed(reader)).toMatchObject({ key, version: 3 });
+    await leader.daemon.expectNo("store-changed");
+
+    // `task:` is no app-writable prefix: the leader hears an enqueue, no app does.
+    const task = taskKey();
+    expect(await put(writer, task, 0, sealed())).toMatchObject(written(1));
+    expect(await changed(leader.daemon)).toMatchObject({ key: task, version: 1 });
+    await reader.expectNo("store-changed");
+    await follower.expectNo("store-changed");
+
+    writer.close();
+    reader.close();
+    await rigA.leave(observer, follower, followerId);
+    await rigA.dismiss(observer, leader);
+    observer.close();
   });
 
   test("size: a create holds less than an overwrite, on both legs, and the bounds themselves land", async () => {
@@ -599,18 +721,49 @@ describe("relay store: caps", () => {
     observer.close();
   }, 90_000);
 
-  test("MAX_RECORDS bounds the total across prefixes: queue: keys count with the tasks", async () => {
+  test("each prefix stops at its own cap: queue: holds the pause alone, and a full task: leaves the others room", async () => {
     const observer = await connectApp(rigB.relay());
     const leader = await rigB.lead(observer);
     await fillTasks();
-    for (let i = 0; i < MAX_RECORDS - MAX_TASKS; i += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the total
-      expect(await put(leader.daemon, queueKey(i), 0, sealed(), leader.term)).toMatchObject(written(1));
-    }
-    expect(await put(leader.daemon, queueKey(MAX_RECORDS), 0, sealed(), leader.term)).toMatchObject(
-      refused("store_full"),
-    );
+    expect(await put(leader.daemon, "queue:pause", 0, sealed(), leader.term)).toMatchObject(written(1));
+    expect(await put(leader.daemon, "queue:other", 0, sealed(), leader.term)).toMatchObject(refused("store_full"));
+    expect(await put(leader.daemon, "quota:fleet", 0, sealed())).toMatchObject(written(1));
+    expect(await put(leader.daemon, "quota:other", 0, sealed())).toMatchObject(refused("store_full"));
+    expect(await put(leader.daemon, "settings:vapid", 0, sealed(), leader.term)).toMatchObject(written(1));
+    const app = await connectApp(rigB.relay());
+    expect(await put(app, accountCapKey(0), 0, sealed())).toMatchObject(written(1));
+    app.close();
     await rigB.dismiss(observer, leader);
+    observer.close();
+  }, 60_000);
+
+  // On a prefix that is not term-fenced the daemon leg is as open as the app leg, so it meets the same floor.
+  test("the create floor binds a daemon's account: creates, survives a re-register, and the cap stops the rest", async () => {
+    const observer = await connectApp(rigB.relay());
+    const id = await newDeviceId();
+    const daemon = await rigB.join(observer, id, []);
+    for (let i = 0; i < MAX_STORE_CREATES_PER_WINDOW; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential: the floor counts landed creates in order
+      expect(await put(daemon, accountCapKey(i), 0, sealed())).toMatchObject(written(1));
+    }
+    const next = accountCapKey(MAX_STORE_CREATES_PER_WINDOW);
+    expect(await put(daemon, next, 0, sealed())).toMatchObject(refused("rate_limited"));
+    // Overwrites meet no floor.
+    expect(await put(daemon, accountCapKey(0), 1, sealed())).toMatchObject(written(2));
+    daemon.send(await register(id, { roles: [] }));
+    expect(await put(daemon, next, 0, sealed())).toMatchObject(refused("rate_limited"));
+
+    // A fresh socket starts over, and the prefix's cap takes it from there.
+    const cap = STORE_PREFIXES.account.cap;
+    const fresh = await connectDaemon(rigB.relay());
+    fresh.send(await register(id, { roles: [] }));
+    await daemon.waitClosed(5_000);
+    for (let i = MAX_STORE_CREATES_PER_WINDOW; i < cap; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential fill to the cap
+      expect(await put(fresh, accountCapKey(i), 0, sealed())).toMatchObject(written(1));
+    }
+    expect(await put(fresh, accountCapKey(cap), 0, sealed())).toMatchObject(refused("store_full"));
+    await rigB.leave(observer, fresh, id);
     observer.close();
   }, 60_000);
 });
@@ -678,6 +831,17 @@ describe("relay store: list floors", () => {
     await rigD.dismiss(observer, leader);
     observer.close();
   }, 30_000);
+
+  test("both floors are per prefix: a socket past its task: lists still lists account:", async () => {
+    const app = await connectApp(rigD.relay());
+    for (let i = 0; i < MAX_LISTS_PER_WINDOW; i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential: the floor counts lists in order
+      expect((await listReply(app)).t).toBe("store-listed");
+    }
+    expect(await listReply(app)).toMatchObject(refused("rate_limited"));
+    expect((await ask(app, { t: "store-list", prefix: "account:" })).t).toBe("store-listed");
+    app.close();
+  });
 
   test("ten sockets spend the DO-wide bucket between them, and the next term's takeover list still lands", async () => {
     const observer = await connectApp(rigD.relay());
