@@ -791,13 +791,15 @@ export const CAPABILITIES = { metrics: "metrics", taskId: "taskId" } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
 
-export const QUOTA_SOURCES = ["session", "oauth", "cache"] as const;
+export const QUOTA_SOURCES = ["cache", "session"] as const;
 
 /**
- * Where a quota number came from, newest wins per account: `session` is a
- * running session's statusline report, `oauth` the usage endpoint poll (M4),
- * `cache` the `cachedUsageUtilization` Claude Code itself leaves in the
- * exclave's `.claude.json` — M1's only source, and the floor for an idle exclave.
+ * Where a quota number came from, newest wins per account: `cache` is the
+ * `cachedUsageUtilization` Claude Code itself leaves in the exclave's
+ * `.claude.json`, which the daemon keeps fresh with a `/usage` run (M4) — the
+ * one source a daemon emits. `session` was a running session's own rate-limit
+ * report (M2–M4), still read because an older daemon's status carries it, and
+ * so does a decision record's `QuotaBasis` at rest.
  */
 export type QuotaSource = (typeof QUOTA_SOURCES)[number];
 

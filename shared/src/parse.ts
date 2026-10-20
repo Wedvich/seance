@@ -302,7 +302,7 @@ function parseScopedWindow(value: unknown): ScopedWindow | null {
   return { m: value["m"], p: value["p"], ...(r === undefined ? {} : { r }) };
 }
 
-/** A quota observation without its exclave index — the shape a daemon keeps per exclave id. */
+/** A quota observation without its exclave index. */
 export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> | null {
   if (!isRecord(value)) return null;
   if (!isUint(value["at"]) || !isQuotaSource(value["s"])) return null;

@@ -14,11 +14,8 @@ import {
   parsePanePids,
   peerBindingProblem,
   parseSessionEventFrame,
-  quotaFromRateLimits,
   type BoundPane,
 } from "./session-events.ts";
-import { SessionQuota } from "./session-quota.ts";
-import { newestQuota } from "./telemetry.ts";
 
 const frame = (fields: object): object => ({ v: 1, kind: "session-event", ...fields });
 
@@ -33,10 +30,51 @@ describe("parseSessionEventFrame", () => {
     expect(parseSessionEventFrame(frame({}))).toBeNull();
     expect(parseSessionEventFrame(frame({ state: "asleep" }))).toBeNull();
     expect(parseSessionEventFrame({ v: 2, kind: "session-event", state: "busy" })).toBeNull();
-    expect(parseSessionEventFrame(frame({ rateLimits: [{ kind: "five_hour", percentUsed: "50" }] }))).toBeNull();
-    expect(
-      parseSessionEventFrame(frame({ rateLimits: Array.from({ length: 9 }, () => ({ kind: "x", percentUsed: 1 })) })),
-    ).toBeNull();
+  });
+
+  test("an older mod's rate-limit report is read as bare activity, its numbers never kept", () => {
+    const legacy = frame({ rateLimits: [{ kind: "five_hour", percentUsed: 50 }], pane: "%1" });
+    expect(parseSessionEventFrame(legacy)).toEqual({ v: 1, kind: "session-event", pane: "%1" });
+    expect(parseSessionEventFrame(frame({ state: "idle", rateLimits: "junk" }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "idle",
+    });
+  });
+});
+
+describe("activity", () => {
+  const panes: readonly BoundPane[] = [
+    { id: "%1", pid: 10, dead: false, taskId: null, path: "/home/u/work/repo" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", path: "/home/u/repo" },
+  ];
+  const exclaves = [
+    { id: "default", root: "/home/u", configDir: "/home/u/.claude", configFile: "/home/u/.claude.json" },
+    { id: "work", root: "/home/u/work", configDir: "/home/u/.claude-work", configFile: "/x" },
+  ];
+
+  test("every bound event pokes its pane's exclave, task or not; an unbound one pokes nothing", async () => {
+    const poked: string[] = [];
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => exclaves,
+      forward: (event) => void forwarded.push(event),
+      onActivity: (exclave) => void poked.push(exclave),
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    try {
+      expect(await events.handle(frame({ pane: "%1", rateLimits: [] }), null)).toEqual({ ok: true });
+      expect(await events.handle(frame({ pane: "%2", state: "busy" }), null)).toEqual({ ok: true });
+      expect(await events.handle(frame({ pane: "%9", state: "busy" }), null)).toEqual({ ok: false, code: "unbound" });
+      expect(poked).toEqual(["work", "default"]);
+      // The rate-limit report had no task and no state: nothing goes to the scheduler for it.
+      expect(forwarded.map((e) => e.taskId)).toEqual(["t1"]);
+    } finally {
+      events.stop();
+    }
   });
 });
 
@@ -59,38 +97,6 @@ test("parent parsing survives a comm with spaces and parens", () => {
       [11, 10],
     ]),
   );
-});
-
-describe("quotaFromRateLimits", () => {
-  test("rounds, clamps, stamps receive time, and skips kinds that are not quota windows", () => {
-    expect(
-      quotaFromRateLimits(
-        [
-          { kind: "five_hour", percentUsed: 23.5, resetsAt: "2026-10-16T18:00:00Z" },
-          { kind: "seven_day", percentUsed: 104 },
-          { kind: "spend_limit", percentUsed: 50 },
-        ],
-        1_000_999,
-      ),
-    ).toEqual({ s: "session", at: 1000, h: 24, d: 100, hr: Date.parse("2026-10-16T18:00:00Z") / 1000 });
-    expect(quotaFromRateLimits([{ kind: "spend_limit", percentUsed: 50 }], 0)).toBeNull();
-  });
-});
-
-describe("newestQuota", () => {
-  const cache = { x: 0, s: "cache" as const, at: 100, h: 50, d: 20, w: [{ m: "Fable", p: 30 }] };
-  test("a newer report wins and the cache fills the windows it lacks; an older one loses", () => {
-    expect(newestQuota(cache, { x: 0, s: "session", at: 200, h: 60 })).toEqual({
-      x: 0,
-      s: "session",
-      at: 200,
-      h: 60,
-      d: 20,
-      w: [{ m: "Fable", p: 30 }],
-    });
-    expect(newestQuota(cache, { x: 0, s: "session", at: 50, h: 1 })).toEqual(cache);
-    expect(newestQuota(null, null)).toBeNull();
-  });
 });
 
 describe("EndedTasks", () => {
@@ -263,9 +269,7 @@ describe("coalescing", () => {
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
       exclaves: () => [],
-      accountOf: () => null,
       forward: (event) => void forwarded.push(event),
-      quota: SessionQuota.memory(),
       ended: new EndedTasks(),
       coalesceMs,
       // A host that names no peer: the fallback binding, by the frame's own pane.
@@ -312,9 +316,7 @@ describe("the PR URL is kept for the scheduler's progress", () => {
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
       exclaves: () => [],
-      accountOf: () => null,
       forward: () => {},
-      quota: SessionQuota.memory(),
       ended,
       coalesceMs: 0,
       hostNamesPeers: () => false,

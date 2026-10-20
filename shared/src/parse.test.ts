@@ -248,6 +248,13 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, mem: null })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, s: "guess" }] })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ x: 0, s: "session" }] })).toBeNull();
+    // Reserved for an OAuth poll that was never built, and never emitted.
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, s: "oauth" }] })).toBeNull();
+  });
+
+  test("a session-sourced reading from a daemon that predates the /usage refresh still parses", () => {
+    const legacy: MachineStatus = { ...status, quota: [{ ...quota, s: "session" }] };
+    expect(parseMachineStatus(legacy)).toEqual(legacy);
   });
 
   test("requires the scan stamp that binds indexes to a register blob", () => {
@@ -816,6 +823,13 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("a decision's candidate basis sourced `session` still parses, for records an older leader wrote; `oauth` is refused", () => {
+    const decision = { at: 1_760_000_000_000, chosen: target, candidates: [candidate] };
+    expect(parseDecision(decision)).toEqual(decision);
+    const oauth = { ...candidate, quota: { observedAt: 1_760_000_000, observer: device, source: "oauth" } };
+    expect(parseDecision({ ...decision, candidates: [oauth] })).toBeNull();
   });
 
   test("keys are a known prefix and a routing id; account records stay reserved until M4", () => {

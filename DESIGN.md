@@ -569,8 +569,10 @@ Séance's noise is cover for a real intruder.
    A spawned session also runs as the daemon's user and can write what telemetry
    reads — `.claude.json`, `~/.exclaves`, the skills dirs — so it can spoof its
    own exclave's account and quota view. Through the session-events mod it can
-   also report its own state, PR and rate limits. That too is a claim about
-   itself, bound to its own pane (Local op socket, "Session events"). The
+   also report its own state and PR. That too is a claim about itself, bound to
+   its own pane (Local op socket, "Session events"); its only other effect is
+   asking for its exclave's `/usage` refresh, which runs only on a stale reading
+   (Daemon, "Usage refresh"). The
    scheduler routes on the quota figures, so a session that lies about its
    account's usage steers where the next task lands. It cannot reach past what
    that one account's reading decides.
@@ -610,7 +612,9 @@ nothing checked it. The last is the gap they leave.
   literal: no wire-supplied text reaches the command line, so there is nothing
   to quote. A future flag carrying wire _text_ is back under the rule. `taskId`
   never enters the shell string at all: it is an argv value to `tmux set-option`,
-  and bounded to `TASK_ID_PATTERN` before it gets that far.
+  and bounded to `TASK_ID_PATTERN` before it gets that far. The `/usage` refresh's
+  claude run takes no wire or frame value at all: fixed argv, and an env built from
+  the exclave scan alone (Daemon, "Usage refresh").
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
   effort, plan mode when on, task id when present (and, on `task_running`, the
   session it collided with), prompt length and prompt SHA-256 prefix — never the
@@ -666,11 +670,11 @@ nothing checked it. The last is the gap they leave.
   unlike the prompt, are logged verbatim). `launched.json`, the launch ledger
   (task ids and launch times, plus each worktree task's progress: clone and
   worktree paths, branch, PR URL; Local op socket, "Session events", Scheduler,
-  "Branch state"), is written 0600 the same way, temp file first, and so is `session-quota.json` (the last
-  quota each exclave's sessions reported, "Session events"), and `version-floor.json` (the
+  "Branch state"), is written 0600 the same way, temp file first, and so is `version-floor.json` (the
   leader's version per store key, Scheduler, "The queue store"). `metrics.sqlite` and its `-wal` and
   `-shm` join them: the database is created as an empty 0600 file before SQLite
-  opens it, and SQLite gives the files it spawns the database's mode. All
+  opens it, and SQLite gives the files it spawns the database's mode. (A retired
+  `session-quota.json` may remain from older versions, unread.) All
   created at 0600 rather than
   written and chmod'd, so no umask-mode window exists. Enforced as explicit
   modes and not as a `UMask=` in the unit, deliberately: the daemon may
@@ -2817,7 +2821,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - **Seams** (M4 readiness, R6): `startDaemon` takes `now`, `httpFetch` and `probe` (`RunOpts`), and
   hands the clock and `httpFetch` to the leader and telemetry, `probe` to telemetry; defaults are
   `Date.now`, the global `fetch` and `hostProbe`. They are what lets a daemon-tier test
-  (`daemon/test/seams.test.ts`) drive what the daemon reports — and M4's OAuth poll, push, Linear
+  (`daemon/test/seams.test.ts`) drive what the daemon reports — and M4's push, Linear
   and Proxmox readers be tested there rather than only at the unit tier. The clock is wiring time
   (scan stamps, runtime.json, the reap schedule, telemetry's sample time, the leader's); a sealed
   envelope's `ts` stays on the wall clock, since replay windows judge it. The leader's clock also
@@ -2834,12 +2838,12 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   register blob, the handler context, the leader, the relay client, the updater — and hands the
   rest to two modules, as `leader.ts` hands its adapters and request handlers off. The
   **capabilities list** (`DAEMON_CAPABILITIES` in `run-capabilities.ts`) is the optional
-  subsystems started once the relay client exists — the fleet broker, session events, branch
-  states, the rescan and reap schedules — each a function of one context returning its `stop`
+  subsystems started once the relay client exists — the fleet broker, session events, the
+  `/usage` refresh's timer, branch states, the rescan and reap schedules — each a function of one context returning its `stop`
   and, for the broker and session events, the handler it serves on the local op socket. They
   start in list order and stop in reverse; the local op socket starts after all of them, over
   the handlers they brought, and its allowlist is unchanged. `run-collectors.ts` is the one place
-  telemetry's dependencies are named — disk paths, the registered blob, sessions, session quota,
+  telemetry's dependencies are named — disk paths, the registered blob, sessions,
   the probe, the clock and `httpFetch` — together with the beat that sends each sample as `status`.
   The **collector registry** they feed is `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`), as
   `leader.ts` hands its adapters and request handlers to their own modules: one entry per source
@@ -2856,8 +2860,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   lives beside `createTelemetry`, which defaults to it, rather than in `run-collectors.ts`: tests
   build the full set without the daemon's wiring, and `telemetry.ts` importing the wiring would be
   a cycle. An M4
-  subsystem (the OAuth poll, push) is one more capability; an M4 status source (the OAuth quota
-  poll's observations, auth health, a Proxmox cgroup/PSI view) is one more registry entry, plus a
+  subsystem (push) is one more capability, as the `/usage` refresh was; an M4 status source
+  (auth health, a Proxmox cgroup/PSI view) is one more registry entry, plus a
   `TelemetrySources` field if it needs a dependency not yet passed. What stays
   in `run.ts` on purpose: `schedulerGuard` and the ledger and version-floor memos, module-level
   so a config reload's second `startDaemon` shares them.
@@ -3230,10 +3234,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
   running sessions per exclave (by pane path, so a session outside every
   registered repo still counts where it sits) and the newest quota observation
-  per exclave — from M2, the newer of a running session's own `rate_limits`
-  report (source `session`; Local op socket, "Session events") and what Claude Code
-  itself cached in each exclave's
-  `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
+  per exclave — what Claude Code itself cached in each exclave's
+  `.claude.json`, kept fresh by the `/usage` refresh (below) (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
   is not cached, and `c`, usage credits spent as a percent of the monthly cap from
   `extra_usage`'s amounts and rounded for the card — absent when credits are off or uncapped —
@@ -3322,6 +3324,43 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
   (sleep gaps); a positional store schema (a new metric must cost nothing but a
   name).
+- **Usage refresh** (`daemon/src/usage-refresh.ts`, added 2026-10-20 for scheduler M4): the
+  daemon keeps each signed-in exclave's `cachedUsageUtilization` fresh by having Claude Code
+  rewrite it: `claude --safe-mode --output-format json -p /usage` with `HOME` and, for a named
+  exclave, `CLAUDE_CONFIG_DIR` set. The daemon holds no token, calls no endpoint and never
+  refreshes a login; Claude Code does all three under its own rules, and the `cache` collector
+  reads the result as before. A run is a whole Claude Code process (~350 MiB, 5–8 s) even when
+  Claude Code answers from its cache, so it runs only for a reading older than `staleAfter`
+  (`STALE_AFTER_MS`, 10 min; floored at 60 s, Claude Code's own debounce, inside which a run
+  moves nothing), judged on the wall clock against `fetchedAtMs`, which is the debounce marker:
+  the daemon keeps none of its own. What asks: every bound session event pokes its exclave
+  (Local op socket, "Session events"), and a timer pokes every exclave each minute, so one with
+  no session running is still refreshed. So a healthy exclave's reading is at most `staleAfter`
+  plus a minute plus a run old, plus the runs queued ahead of it on the shared lane (each up to
+  the timeout), and unbounded while its runs fail. Signed out (`authOk` false) never runs. One run at a time in the process, across a
+  config reload's two daemons too, so a small LXC never carries two. A run is killed with its
+  process group after 60 s (SIGTERM, then SIGKILL after 5 s for a child that traps it), and
+  abandoned a second past that even if a detached grandchild still holds its pipes, so a
+  wedged run cannot hold the lane; the group is signalled only while its leader is unreaped
+  (afterwards its id may be reused), and a run's output is capped at 64 KiB. `stop()` sends
+  a run in flight the same TERM-then-KILL, so a restart never leaves one beside the next
+  daemon's and a mid-write kill does not truncate `.claude.json`; a process exiting right
+  after `stop()` leaves a TERM-trapping run to the orphan's own devices. Success is the cache's stamp (`fetchedAtMs`, read on its own,
+  whether or not a window parses) moving, not the exit code or stdout; a failure backs that
+  exclave off for `staleAfter` (state process-wide, like the lane), warns once per streak, with a
+  bounded one-line excerpt of the run's JSON `result`, else stderr (for a non-zero exit, a timeout
+  or an exit 0 that left the cache unmoved), and says when it recovers. The
+  refresh is not a spawn — no session, no pane, no prompt, fixed argv — so it carries no audit
+  origin; failures are logged once per streak. Exec rules (threat model): fixed argv, `exec.ts`'s `bareEnv` so the child gets only
+  `HOME`, `PATH`, `USER`/`LOGNAME` (from the passwd entry: without them Claude Code's macOS
+  keychain read fails and `/usage` prints the `/cost` view) and `CLAUDE_CONFIG_DIR`, never the
+  daemon's environment or a service-delivered credential; `--safe-mode` always, so no user hook,
+  plugin or mod — the session-events mod included — runs in it. Limitation: the built env
+  carries no proxy or CA variables (`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`), so a
+  host that reaches the API only through a proxy gets no refresh; widening the env is a
+  threat-model change. On only through
+  `RunOpts.usageRefresh`, which `main.ts` always passes: tests run against a real home and must
+  not spawn claude by surprise.
 - **Session detection**: list all tmux panes across all sessions, dedup by
   window id (grouped sessions repeat windows), count a window as a session by
   one predicate, `isRegistered` in `sessions.ts`, which the spawn path shares.
@@ -4593,14 +4632,14 @@ an unprivileged LXC). The e2e suite runs a keyless MCP against two real daemons,
 ### Session events (`daemon/src/session-events.ts`) — added 2026-10-16, scheduler M2 item 5
 
 The scheduler needs to hear what a session is doing when it happens: busy, idle,
-waiting on a person, ended, the PR it opened. Its quota fold also needs the session's
-own rate-limit reading. The `claude-mods/session-events` mod reports these to the
+waiting on a person, ended, the PR it opened. The `claude-mods/session-events` mod reports these to the
 local daemon, and the daemon forwards task sessions' states to the leader. This is
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, rateLimits?, pane?}`, routed on `kind` before the `Plain` check, as
-  broker frames are. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
+  state?, prUrl?, pane?}`, routed on `kind` before the `Plain` check, as
+  broker frames are. A frame with `rateLimits` and no state, from a mod that predates
+  2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
   reaches the socket through `seanced session-event` (JSON on stdin). A hooks module
   runs with no Node and no sockets of its own, so it runs that command through
@@ -4614,11 +4653,15 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   is unset: such a session is in no pane the daemon could bind it to, so every report
   would be `unbound` (below) at the cost of a Bun start and the daemon's tmux and
   parent-walk reads. The daemon still binds every report that does arrive.
-- **Ingest-only.** The handler stores (session quota, the ended-task memory) and
-  forwards (to the leader). It never spawns, despawns or runs a command shaped by
-  a frame. Its only subprocesses are fixed-argv reads: `tmux list-panes`, and on
+- **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
+  leader). Its one other effect is a poke at the `/usage` refresh for the bound
+  pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
+  cached reading is stale, with a fixed argv and an env built from the scan — no
+  frame field reaches either. It never despawns or runs a command shaped by
+  a frame. Its own only subprocesses are fixed-argv reads: `tmux list-panes`, and on
   macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
-  No frame field reaches any argv.
+  No frame field reaches any argv. The one indirect run is the `/usage` refresh above:
+  poked, staleness-gated, fixed argv, built env.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
@@ -4680,7 +4723,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   records the checked URL in the launch ledger (`EndedTasks.notePr`, for a task launched here
   only), where `progress` carries it to a leader that missed the event.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
-  for a pane with no task id goes nowhere but the quota store. The first event in a
+  for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the
   newest state and a PR URL seen earlier in the window. The daemon seals the event
   to `"scheduler"` (`sendToScheduler`). With no leader the relay drops it. On the
@@ -4689,33 +4732,18 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   events reach the term two ways"). A leader
   change loses nothing that matters, because `sessions` carries the same facts,
   below.
-- **Rate limits come from the engine, not a statusline wrapper.** The mod hooks
-  `session.measure`, which pushes the status line's own `rateLimits` (five-hour and
-  seven-day `percentUsed` with ISO resets) after each main-thread turn and whenever a
-  window moves a whole point, whether or not a status line renders. The daemon turns
-  them into a `session` quota observation for the pane's exclave, stamped with its
-  receive time. `SessionQuota` (`daemon/src/session-quota.ts`) keeps the newest per
-  exclave, under the account the exclave was signed into when it came in, and on disk
-  (`session-quota.json` in `stateDir()`, added 2026-10-17). In memory alone, every
-  restart — each self-update — dropped it: an account with no session running fell
-  back to a cache days old, and the machine's next `status` replaced the snapshot the
-  relay kept with that older reading. The fleet fold could not undo it, since the
-  newer reading no longer existed anywhere. The account is kept because the key is the
-  exclave: a reading answers only for the account it was read under, and a reading
-  under a new login replaces it whatever the stamps say. Temp file and rename, no
-  fsync, coalesced to one write behind the one in flight — a reading lost to a power
-  cut costs freshness, unlike the launch ledger's write-ahead. A reading older than a
-  week has passed every window and is dropped at load. The telemetry
-  tick takes the newer of it and the config dir's cache (`newestQuota`), the older
-  filling what the newer lacks (`mergeQuota`, `shared/src/quota.ts`): per-model `w`
-  by model name, and a five-hour or seven-day window (with its reset) left out. That is
-  safe because a reading is a lower bound: use only raises it until reset, and a passed
-  reset reads 0%. Readers fold across machines by the same rule. The observation rides
-  `status` under the same metric names. Rejected: wrapping each exclave's
-  `statusLine.command` in `settings.json`. It would rewrite the user's config in
-  every exclave and owe an exact restore on uninstall. It would also put a process
-  in the status line's path, and it would still report only when the status line
-  happened to render (docs/scheduler.md, Risks).
+- **Rate limits are no longer reported** (retired 2026-10-20). From M2 the mod hooked
+  `session.measure` and sent the status line's `rateLimits`, which the daemon kept per
+  exclave as a `session` quota observation (`SessionQuota`, persisted to
+  `session-quota.json` in `stateDir()` from 2026-10-17) and merged with the cache. It
+  gave a reading only while a session ran, and the `/usage` refresh (Daemon, "Usage
+  refresh") now keeps the cache itself fresh for every signed-in exclave, so the one
+  source is Claude Code's own. A `session-quota.json` left by an older daemon is never
+  read again and is left in place, not deleted; readers still parse a `session`
+  observation from a daemon that predates the change (`QUOTA_SOURCES`). Rejected then,
+  and still: wrapping each exclave's `statusLine.command` in `settings.json`, which
+  rewrites the user's config in every exclave and reports only when the status line
+  renders (docs/scheduler.md, Risks).
 - **`sessions` carries `ended` and `ledgerSince`, the double-spawn backstop and its
   proof.** Suppose a spawn lands, its reply is lost, and the session ends inside the
   120 s reservation, with its `ended` event lost too. The TTL check would then find no
@@ -4958,7 +4986,7 @@ version breaks the build.
 Function-hook plugins ("mods") for the Claude Code sessions séance spawns. Two
 today: **tmux-rename**, which keeps a `/rename` tagged and renames the session's
 tmux window to the untagged name; and **session-events** (scheduler M2), which
-reports the session's state, the PR it opened and its rate limits to the local
+reports the session's state and the PR it opened to the local
 daemon. Its design is under Local op socket, "Session events". The bullets below
 are tmux-rename's, except where they say mods.
 

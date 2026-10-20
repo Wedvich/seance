@@ -8,11 +8,8 @@ import type { ExclaveScan } from "../src/exclaves.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "../src/handlers.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
-import { MetricsStore } from "../src/metrics-store.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "../src/session-event-frame.ts";
 import { createSessionEvents, EndedTasks, listPanePids, type SessionEvents } from "../src/session-events.ts";
-import { SessionQuota } from "../src/session-quota.ts";
-import { createTelemetry } from "../src/telemetry.ts";
 import { tmuxOk } from "../src/tmux.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
@@ -35,8 +32,8 @@ let scan: ExclaveScan;
 const forwarded: SessionEvent[] = [];
 /** Every frame the socket handed the handler, with the kernel's pid and the reply. */
 const handled: { readonly peer: number | null; readonly reply: unknown }[] = [];
-let quota: SessionQuota;
-let quotaPath: string;
+/** Every exclave a bound event poked, in order: the `/usage` refresh's trigger. */
+const poked: string[] = [];
 const ended = new EndedTasks();
 
 /** A backend with no sessions of its own: the `ended` field is what is under test. */
@@ -54,10 +51,6 @@ const handlerCtx: HandlerContext = {
   tasks: ended,
 };
 
-function accountOf(exclave: string): string | null {
-  return scan.info.find((info) => info.id === exclave)?.accountId ?? null;
-}
-
 function shq(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -68,8 +61,6 @@ beforeAll(async () => {
   sockPath = join(stateDir, "run", "seanced.sock");
   await mkdir(join(base, "work"), { recursive: true });
   privateTmux = usePrivateTmux(base, "evt");
-  quotaPath = join(stateDir, "session-quota.json");
-  quota = await SessionQuota.open(quotaPath);
   await tmuxOk(["new-session", "-d", "-s", "evt", "-c", base, "sleep", "600"]);
 
   scan = {
@@ -91,9 +82,8 @@ beforeAll(async () => {
   events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => scan.exclaves,
-    accountOf,
     forward: (event) => void forwarded.push(event),
-    quota,
+    onActivity: (exclave) => void poked.push(exclave),
     ended,
     // Coalescing has its own unit test; here every event goes out at once.
     coalesceMs: 0,
@@ -289,9 +279,7 @@ await Bun.connect({ unix: ${JSON.stringify(sockPath)}, socket: {
       createSessionEvents({
         panes: listPanePids,
         exclaves: () => scan.exclaves,
-        accountOf,
         forward: (event) => void forwarded.push(event),
-        quota,
         ended,
         coalesceMs: 0,
         hostNamesPeers: () => hostNamesPeers,
@@ -334,42 +322,19 @@ describe("PR URLs", () => {
   });
 });
 
-describe("rate limits", () => {
-  test("a session's report through `seanced session-event` becomes a quota observation in status, and outlives the daemon", async () => {
-    const resets = "2026-10-16T18:00:00.000Z";
-    const input = join(base, "quota.json");
-    await writeFile(
-      input,
-      JSON.stringify({
-        rateLimits: [
-          { kind: "five_hour", percentUsed: 42.4, resetsAt: resets },
-          { kind: "seven_day", percentUsed: 10 },
-          { kind: "spend_limit", percentUsed: 99 },
-        ],
-      }),
-    );
-    // No task on this pane: quota is the exclave's whatever the session, and nothing is forwarded.
+describe("activity", () => {
+  test("a report through `seanced session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
+    const input = join(base, "legacy.json");
+    // What a session started before the mod dropped its rate-limit tap still sends.
+    await writeFile(input, JSON.stringify({ rateLimits: [{ kind: "five_hour", percentUsed: 42.4 }] }));
+    // No task on this pane: activity is the exclave's whatever the session.
     const cli = `${shq(process.execPath)} ${shq(MAIN)} session-event < ${shq(input)}`;
-    const sender = await senderPane("quota", join(base, "work"), cli);
-    const before = forwarded.length;
+    const sender = await senderPane("legacy", join(base, "work"), cli);
+    const before = { poked: poked.length, forwarded: forwarded.length, handled: handled.length };
     await sender.go();
-    await pollUntil(() => quota.get("work", "org:acct") !== undefined, "the report to land", 10_000);
-    expect(forwarded.length).toBe(before);
-
-    const telemetry = createTelemetry(MetricsStore.memory(), {
-      diskPaths: [base],
-      registered: () => ({ scan: 1, exclaves: scan }),
-      sessions: () => Promise.resolve([]),
-      sessionQuota: (exclave, account) => quota.get(exclave, account),
-    });
-    const snapshot = await telemetry.tick();
-    const observation = { s: "session" as const, at: expect.any(Number), h: 42, d: 10, hr: Date.parse(resets) / 1000 };
-    expect(snapshot.quota).toEqual([{ x: 1, ...observation }]);
-
-    // A restart (every self-update) reads it back rather than falling to the cache.
-    await quota.flushed();
-    const reopened = await SessionQuota.open(quotaPath);
-    expect(reopened.get("work", "org:acct")).toEqual(observation);
-    expect(reopened.get("work", "org:other")).toBeUndefined();
+    await pollUntil(() => handled.length > before.handled, "the report to be handled", 10_000);
+    expect(handled.at(-1)?.reply).toEqual({ ok: true });
+    expect(poked.slice(before.poked)).toEqual(["work"]);
+    expect(forwarded.length).toBe(before.forwarded);
   });
 });

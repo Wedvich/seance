@@ -67,7 +67,7 @@ const SEVEN_DAYS_S = 7 * 86_400;
  * so it is taken only from a reading less than one window length older — else
  * a long-asleep machine's reading would pin the account forever. Credits `c`
  * never carry a reset, so they fill only from a reading in `newer`'s credit
- * month: only the cache reports them, and a newer session report must not
+ * month: a reading without them (an older daemon's session report) must not
  * erase them. The percent and its amounts travel together, like a window and
  * its reset.
  */

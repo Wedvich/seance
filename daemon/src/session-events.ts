@@ -4,7 +4,6 @@ import {
   isSessionState,
   isTaskId,
   quote,
-  type QuotaObservation,
   type SessionEvent,
   type SessionState,
   type TaskProgress,
@@ -15,7 +14,6 @@ import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { LaunchLedger, type LaunchSite } from "./launch-ledger.ts";
 import { log } from "./log.ts";
-import type { SessionQuota } from "./session-quota.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -24,9 +22,13 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
  * events"): what the `claude-mods/session-events` mod reports about the session
  * it runs in, through `seanced session-event`. Ingest-only — the handler stores
- * and forwards; nothing here spawns, despawns or runs a command shaped by the
- * frame. Its only subprocesses are fixed-argv reads: `tmux list-panes` and, on
- * macOS where `proc_pidinfo` will not answer a hop, `ps` for the parent walk.
+ * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
+ * refresh's trigger, which decides alone whether anything runs); nothing here
+ * spawns, despawns or runs a command shaped by the frame. Its own only
+ * subprocesses are fixed-argv reads: `tmux list-panes` and, on macOS where
+ * `proc_pidinfo` will not answer a hop, `ps` for the parent walk. The one
+ * indirect run is the `/usage` refresh the poke may start (staleness-gated,
+ * fixed argv, built env).
  *
  * Every field of a frame is untrusted. The run directory admits any process of
  * this user, and every session is this user, so a frame could name any pane or
@@ -43,19 +45,12 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * daemon that predates the kind drops it as malformed.
  */
 
-/** One rate-limit window as Claude Code reports it (`session.measure`'s `rateLimits`). */
-export interface RateLimitReport {
-  readonly kind: string;
-  readonly percentUsed: number;
-  readonly resetsAt?: string;
-}
-
 export interface SessionEventFrame {
   readonly v: typeof SESSION_EVENT_VERSION;
   readonly kind: typeof SESSION_EVENT_KIND;
+  /** Absent only on an older mod's rate-limit report: activity, nothing else. */
   readonly state?: SessionState;
   readonly prUrl?: string;
-  readonly rateLimits?: readonly RateLimitReport[];
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
 }
@@ -78,35 +73,27 @@ export function isSessionEventFrameKind(raw: unknown): boolean {
   return isRecord(raw) && raw["kind"] === SESSION_EVENT_KIND;
 }
 
-const MAX_RATE_LIMITS = 8;
 const MAX_FIELD = 64;
 
+/**
+ * A frame with no `state` is still read when it carries `rateLimits`: a session
+ * started before the mod dropped its rate-limit tap keeps that hook loaded until
+ * it restarts (or `/reload-plugins`), and its reports are activity in its
+ * exclave — the refresh's trigger — rather than malformed frames to warn about.
+ * The numbers themselves are never read: the config dir's cache is the one source.
+ */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
   const { state, prUrl, rateLimits, pane } = raw;
   if (state !== undefined && !isSessionState(state)) return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
-  let limits: RateLimitReport[] | undefined;
-  if (rateLimits !== undefined) {
-    if (!Array.isArray(rateLimits) || rateLimits.length > MAX_RATE_LIMITS) return null;
-    limits = [];
-    for (const item of rateLimits) {
-      if (!isRecord(item)) return null;
-      const { kind, percentUsed, resetsAt } = item;
-      if (typeof kind !== "string" || kind.length > MAX_FIELD) return null;
-      if (typeof percentUsed !== "number" || !Number.isFinite(percentUsed)) return null;
-      if (resetsAt !== undefined && (typeof resetsAt !== "string" || resetsAt.length > MAX_FIELD)) return null;
-      limits.push({ kind, percentUsed, ...(resetsAt === undefined ? {} : { resetsAt }) });
-    }
-  }
-  if (state === undefined && limits === undefined) return null;
+  if (state === undefined && rateLimits === undefined) return null;
   return {
     v: SESSION_EVENT_VERSION,
     kind: SESSION_EVENT_KIND,
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
-    ...(limits === undefined ? {} : { rateLimits: limits }),
     ...(pane === undefined ? {} : { pane }),
   };
 }
@@ -149,35 +136,6 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
 export async function listPanePids(): Promise<readonly BoundPane[]> {
   const result = await tmux(["list-panes", "-a", "-F", PANE_PID_FORMAT]);
   return result.exitCode === 0 ? parsePanePids(result.stdout) : [];
-}
-
-/**
- * `rateLimits` as a `session` observation. Stamped with the daemon's receive
- * time — the report rides the turn it came from — never a time the frame names.
- * Unknown kinds (a gateway's `spend_limit`) are not quota windows and are skipped.
- */
-export function quotaFromRateLimits(
-  limits: readonly RateLimitReport[],
-  nowMs: number,
-): Omit<QuotaObservation, "x"> | null {
-  const window = (kind: string): { readonly p: number; readonly r?: number } | null => {
-    const limit = limits.find((l) => l.kind === kind);
-    if (limit === undefined) return null;
-    const p = Math.min(100, Math.max(0, Math.round(limit.percentUsed)));
-    const resetsMs = limit.resetsAt === undefined ? Number.NaN : Date.parse(limit.resetsAt);
-    return Number.isFinite(resetsMs) && resetsMs >= 0 ? { p, r: Math.floor(resetsMs / 1000) } : { p };
-  };
-  const five = window("five_hour");
-  const seven = window("seven_day");
-  if (five === null && seven === null) return null;
-  return {
-    s: "session",
-    at: Math.floor(nowMs / 1000),
-    ...(five === null ? {} : { h: five.p }),
-    ...(seven === null ? {} : { d: seven.p }),
-    ...(five?.r === undefined ? {} : { hr: five.r }),
-    ...(seven?.r === undefined ? {} : { dr: seven.r }),
-  };
 }
 
 /**
@@ -397,11 +355,13 @@ export const COALESCE_MS = 5_000;
 export interface SessionEventDeps {
   readonly panes: () => Promise<readonly BoundPane[]>;
   readonly exclaves: () => readonly Exclave[];
-  /** The account an exclave is signed into, as the last scan read it; a quota reading is kept under it. */
-  readonly accountOf: (exclave: string) => string | null;
   /** Sealed to the scheduler and sent; fire-and-forget, so nothing comes back. */
   readonly forward: (event: SessionEvent) => void;
-  readonly quota: SessionQuota;
+  /**
+   * Every bound event, task or not: a session in this exclave has spent quota.
+   * The `/usage` refresh's poke, which runs nothing while the cache is fresh.
+   */
+  readonly onActivity?: (exclave: string) => void;
   readonly ended: EndedTasks;
   readonly now?: () => number;
   readonly coalesceMs?: number;
@@ -483,10 +443,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       }
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
-      if (frame.rateLimits !== undefined) {
-        const observation = quotaFromRateLimits(frame.rateLimits, at);
-        if (observation !== null) deps.quota.record(exclave, deps.accountOf(exclave), observation);
-      }
+      if (!stopped) deps.onActivity?.(exclave);
       if (frame.state === undefined || pane.taskId === null || stopped) return { ok: true };
       if (frame.state === "ended") deps.ended.ended(pane.taskId);
       const prUrl = frame.prUrl === undefined ? null : httpsUrl(frame.prUrl);

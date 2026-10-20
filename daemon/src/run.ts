@@ -28,12 +28,12 @@ import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { EndedTasks } from "./session-events.ts";
-import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import type { Fetch } from "./seams.ts";
 import type { HostProbe, Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
+import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 export interface DaemonHandle {
@@ -76,6 +76,13 @@ export interface RunOpts {
    * main.ts passes `{}`.
    */
   readonly selfUpdate?: SelfUpdateOpts;
+  /**
+   * Enables the `/usage` refresh (`usage-refresh.ts`): a stale exclave's quota
+   * cache is refreshed by a `claude -p /usage` run. Off unless supplied — tests
+   * run against a real home and must not spawn claude by surprise; main.ts
+   * passes `{}`.
+   */
+  readonly usageRefresh?: UsageRefreshOpts;
   /**
    * Tests seed one store across terms and shorten the tick; absent, the leader
    * runs on the relay store.
@@ -303,10 +310,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     return MetricsStore.memory();
   });
 
-  // Session events (the session-events mod): quota reports fold into telemetry,
-  // ended tasks into the `sessions` reply, and task sessions' states go to the
-  // leader. Built before the handler context, which reads the two stores.
-  const sessionQuota = await SessionQuota.open();
+  // Session events (the session-events mod): ended tasks fold into the `sessions`
+  // reply, and task sessions' states go to the leader. Built before the handler
+  // context, which reads the store.
   const endedTasks = await endedTasksFor(launchLedgerPath());
 
   // One context, a handler per inbound surface. The relay leg and the local op
@@ -337,7 +343,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       config,
       registered: () => registered,
       sessions: () => handlerCtx.backend.sessions(state.repos),
-      sessionQuota,
       now,
       httpFetch,
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
@@ -467,9 +472,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     leader,
     backend: handlerCtx.backend,
     endedTasks,
-    sessionQuota,
     repos: () => state.repos,
     exclaveScan: () => exclaveScan,
+    usageRefresh:
+      opts.usageRefresh === undefined
+        ? null
+        : createUsageRefresh({ ...opts.usageRefresh, scan: () => exclaveScan, home }),
     rescan,
     lastReapAt: () => state.lastReapAt,
     reaped: async (at) => {

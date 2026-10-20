@@ -14,7 +14,7 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import type { RelayClient } from "./relay-client.ts";
 import { createSessionEvents, listPanePids, peerBindingProblem, type EndedTasks } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
-import type { SessionQuota } from "./session-quota.ts";
+import type { UsageRefresh } from "./usage-refresh.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
 /**
@@ -34,9 +34,10 @@ export interface WiringCtx {
   readonly leader: Leader;
   readonly backend: SessionBackend;
   readonly endedTasks: EndedTasks;
-  readonly sessionQuota: SessionQuota;
   readonly repos: () => readonly RepoEntry[];
   readonly exclaveScan: () => ExclaveScan;
+  /** Null unless `RunOpts.usageRefresh` enabled it; session events poke it, its own capability runs its timer. */
+  readonly usageRefresh: UsageRefresh | null;
   readonly rescan: () => Promise<unknown>;
   readonly lastReapAt: () => number | undefined;
   /** Persists `lastReapAt` through the daemon's one `state`. */
@@ -97,7 +98,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
-    accountOf: (exclave) => ctx.exclaveScan().info.find((info) => info.id === exclave)?.accountId ?? null,
     // The leader reaches itself in process, never by a relay round trip. A
     // daemon that just lost the role still sends to "scheduler", which the
     // relay routes to whoever leads now.
@@ -113,10 +113,19 @@ const sessionEvents: DaemonCapability = (ctx) => {
       }
       void ctx.client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
     },
-    quota: ctx.sessionQuota,
     ended: ctx.endedTasks,
+    // Activity is when a reading matters; the refresh spawns only if it is stale.
+    onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
   });
   return { stop: events.stop, local: { sessionEvents: events.handle } };
+};
+
+/** The refresh's own timer, for exclaves no session is active in. */
+const usageRefresh: DaemonCapability = (ctx) => {
+  const refresh = ctx.usageRefresh;
+  if (refresh === null) return { stop: (): void => {} };
+  refresh.start();
+  return { stop: refresh.stop };
 };
 
 const branchStates: DaemonCapability = (ctx) =>
@@ -192,13 +201,13 @@ const reapSchedule: DaemonCapability = (ctx) => {
 
 /**
  * The capabilities list: started in this order once the relay client exists,
- * stopped in reverse. A subsystem M4 adds (the OAuth poll, push) is one more
- * entry. The local op socket is not one: it is the surface the entries'
+ * stopped in reverse. A subsystem M4 adds (push) is one more entry. The local op socket is not one: it is the surface the entries'
  * `local` handlers are served on, started after all of them.
  */
 export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
   fleetBroker,
   sessionEvents,
+  usageRefresh,
   branchStates,
   rescanSchedule,
   reapSchedule,

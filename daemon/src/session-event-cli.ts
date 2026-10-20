@@ -11,7 +11,7 @@ const EVENT_TIMEOUT_MS = 2_000;
 
 /**
  * `seanced session-event`: one event from the session-events mod, read as JSON
- * on stdin (`state`, `prUrl`, `rateLimits`), sent to the local daemon as a
+ * on stdin (`state`, `prUrl`), sent to the local daemon as a
  * `session-event` frame. Silent and always exit 0 — a session must never see
  * its own telemetry fail — and it waits for the daemon's answer before exiting,
  * because the daemon binds the event by walking this process's parents, which

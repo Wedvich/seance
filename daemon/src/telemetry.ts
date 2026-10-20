@@ -1,6 +1,6 @@
 import { readFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import type { MachineStatus, QuotaObservation, SessionEntry } from "@seance/shared";
+import type { MachineStatus, SessionEntry } from "@seance/shared";
 import type { ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -13,15 +13,15 @@ import {
   type TickContext,
 } from "./telemetry-collectors.ts";
 
-export { MIN_CPU_WINDOW_MS, newestQuota, QUOTA_CLOCK_SKEW_MS, readCachedQuota } from "./telemetry-collectors.ts";
+export { MIN_CPU_WINDOW_MS, QUOTA_CLOCK_SKEW_MS, readCachedQuota } from "./telemetry-collectors.ts";
 
 /**
  * What a `status` tick measures (DESIGN.md, "Telemetry"): cpu, memory and disk
  * pressure as whole percent, each smoothed over ~SMOOTHING_MS daemon-side so no
  * reader keeps a window of its own; disk free and I/O rates; running sessions
- * per exclave; and the newest quota observation per exclave — what Claude Code
- * cached in each exclave's `.claude.json`, or a running session's own
- * `rate_limits` report (`session-events.ts`) when that is newer.
+ * per exclave; and each exclave's quota observation — what Claude Code cached
+ * in its `.claude.json`, which the `/usage` refresh (`usage-refresh.ts`) keeps
+ * from going stale.
  * Every sample also lands in the metrics store under `METRIC_NAMES`.
  * Each is one entry in `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`).
  *
@@ -68,8 +68,6 @@ export interface TelemetrySources {
   /** Read once at the start of each tick: the stamp and the list `sess` and `quota` index into. */
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
-  /** The newest session-reported quota for an exclave id under its account (`SessionQuota.get`); absent, the cache is the only source. */
-  readonly sessionQuota?: (exclave: string, account: string | null) => Omit<QuotaObservation, "x"> | undefined;
   readonly probe?: HostProbe;
   /** The clock a `tick` without an explicit time reads; defaults to `Date.now`. */
   readonly now?: () => number;

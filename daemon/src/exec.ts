@@ -24,14 +24,33 @@ export interface ExecResult {
  * at a different PATH must not have to reconstruct the exclusion to do it. An
  * `undefined` override unsets the variable: `default`'s Claude config is the
  * one reached *without* `CLAUDE_CONFIG_DIR`, so pointing at it means removal.
+ * `bare` drops the daemon's environment altogether: the child gets `overrides`
+ * alone (the `/usage` refresh, which names every variable it passes).
  */
-export function childEnv(overrides: Readonly<Record<string, string | undefined>> = {}): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...overrides };
+export function childEnv(
+  overrides: Readonly<Record<string, string | undefined>> = {},
+  bare = false,
+): NodeJS.ProcessEnv {
+  const env = { ...(bare ? {} : process.env), ...overrides };
   for (const [key, value] of Object.entries(overrides)) if (value === undefined) delete env[key];
   // Children only: the daemon's own process.env must keep it, or a supervisor reload
   // re-resolves the key from another source and silently turns the fleet broker off.
   delete env["CREDENTIALS_DIRECTORY"];
   return env;
+}
+
+/** Drains `stream` but keeps only the first `cap` bytes; no cap keeps everything. */
+async function readText(stream: ReadableStream<Uint8Array>, cap: number | undefined): Promise<string> {
+  if (cap === undefined) return new Response(stream).text();
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  for await (const chunk of stream) {
+    if (kept >= cap) continue;
+    const part = chunk.subarray(0, cap - kept);
+    chunks.push(part);
+    kept += part.length;
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 export async function exec(
@@ -41,6 +60,8 @@ export async function exec(
     readonly timeoutMs?: number;
     readonly stdin?: string;
     readonly env?: Readonly<Record<string, string | undefined>>;
+    /** The child gets `env` alone, never the daemon's environment (`childEnv`'s `bare`). */
+    readonly bareEnv?: boolean;
     /**
      * Run the child in its own process group and time out the whole group.
      * Otherwise the timeout kills only the child, and the result still waits for
@@ -48,18 +69,63 @@ export async function exec(
      * `git-remote-https` on a dead network keeps it for its own connect timeout.
      */
     readonly killGroup?: boolean;
+    /**
+     * With `killGroup`: SIGKILL the group this long after the timeout's SIGTERM.
+     * A child that traps TERM would otherwise hold its caller forever. Opt-in:
+     * the git/ssh callers keep the one SIGTERM.
+     *
+     * Also makes the group signalled only while its leader is unreaped: once the
+     * leader's exit is reported the group id is reserved only as long as some
+     * member lives, so it may name an unrelated group and no timer here (nor a
+     * caller, via `onExit`) may signal it. A descendant that outlives its leader
+     * and traps TERM is the price.
+     */
+    readonly killAfterMs?: number;
+    /** Receives the child's pid as soon as it exists, so a caller can kill its group on shutdown. */
+    readonly onSpawn?: (pid: number) => void;
+    /** Called once the child has been reaped, whatever its pipes are still doing: the pid is no longer the caller's to signal. */
+    readonly onExit?: () => void;
+    /** Keep only this many bytes of each of stdout and stderr; the rest is read and dropped. */
+    readonly maxOutputBytes?: number;
   } = {},
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...argv], {
     cwd: opts.cwd,
-    env: childEnv(opts.env),
+    env: childEnv(opts.env, opts.bareEnv === true),
     stdin: opts.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
     detached: opts.killGroup === true,
   });
+  const strict = opts.killGroup === true && opts.killAfterMs !== undefined;
+  let exited = false;
   let timedOut = false;
-  const timer = setTimeout(() => {
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  void proc.exited.then(() => {
+    exited = true;
+    if (strict) {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+    }
+    opts.onExit?.();
+  });
+  try {
+    opts.onSpawn?.(proc.pid);
+  } catch (err) {
+    // A caller that cannot track the child must not leave it running unmanaged.
+    if (opts.killGroup === true) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+    }
+    proc.kill("SIGKILL");
+    throw err;
+  }
+  timer = setTimeout(() => {
+    if (strict && exited) return;
     timedOut = true;
     if (opts.killGroup !== true) {
       proc.kill();
@@ -70,6 +136,15 @@ export async function exec(
     } catch {
       // group already gone
     }
+    if (opts.killAfterMs === undefined) return;
+    killTimer = setTimeout(() => {
+      if (exited) return;
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+    }, opts.killAfterMs);
   }, opts.timeoutMs ?? 60_000);
   const sink = proc.stdin;
   if (opts.stdin !== undefined && sink !== undefined && typeof sink !== "number") {
@@ -86,11 +161,14 @@ export async function exec(
     }
   }
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readText(proc.stdout, opts.maxOutputBytes),
+    readText(proc.stderr, opts.maxOutputBytes),
     proc.exited,
   ]);
   clearTimeout(timer);
+  // Strict mode's SIGKILL timer outlives the pipes (a TERM-trapping member may have closed
+  // its stdio) and is cleared only when the leader is reaped, above.
+  if (!strict) clearTimeout(killTimer);
   return { exitCode, stdout, stderr, timedOut };
 }
 

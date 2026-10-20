@@ -185,8 +185,10 @@ green:
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
-  one connection whose pid came back null.
-  Giving it any act, or taking a session or task id from the frame, is the same kind of
+  one connection whose pid came back null. Its one effect past ingest is poking the bound
+  exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
+  fixed argv and an env built from the scan — no frame field reaches either.
+  Giving it any other act, or taking a session or task id from the frame, is the same kind of
   change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
