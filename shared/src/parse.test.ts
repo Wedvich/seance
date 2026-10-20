@@ -253,7 +253,7 @@ describe("parseMachineStatus", () => {
   });
 
   test("a session-sourced reading from a daemon that predates the /usage refresh still parses", () => {
-    const legacy = { ...status, quota: [{ ...quota, s: "session" }] };
+    const legacy: MachineStatus = { ...status, quota: [{ ...quota, s: "session" }] };
     expect(parseMachineStatus(legacy)).toEqual(legacy);
   });
 

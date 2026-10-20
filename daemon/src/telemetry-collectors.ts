@@ -1,12 +1,5 @@
 import { readFile, stat as statFile } from "node:fs/promises";
-import {
-  isRecord,
-  mergeQuota,
-  METRIC_NAMES,
-  type QuotaObservation,
-  type ScopedWindow,
-  type SessionEntry,
-} from "@seance/shared";
+import { isRecord, METRIC_NAMES, type QuotaObservation, type ScopedWindow, type SessionEntry } from "@seance/shared";
 import { exclaveOf, type ExclaveScan } from "./exclaves.ts";
 import type { Sample } from "./metrics-store.ts";
 import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from "./telemetry.ts";
@@ -17,7 +10,7 @@ import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from
  * own modules. `createTelemetry` owns what all entries share — the tick queue,
  * `at`, the time-aware smoothing, the one store write; an entry owns its read,
  * its state across ticks, and the fields and samples it contributes. A new
- * source (M4's OAuth quota poll, a Proxmox cgroup/PSI reader) is one more entry
+ * source (M4's auth health, a Proxmox cgroup/PSI reader) is one more entry
  * in `TELEMETRY_COLLECTORS`, plus a `TelemetrySources` field if it needs a dep
  * `run-collectors.ts` doesn't pass yet.
  */
@@ -149,23 +142,15 @@ function sessionsCollector(sources: CollectorSources): Collect {
   };
 }
 
-function quotaCollector(sources: CollectorSources): Collect {
+function quotaCollector(): Collect {
   const quotaReader = cachedQuotaReader();
   return async (tick) => {
     const scan = tick.registered.exclaves;
     const cached = await Promise.all(scan.exclaves.map((exclave, x) => quotaReader(exclave.configFile, x, tick.nowMs)));
-    const reported = scan.exclaves.map((exclave, x) => {
-      const observation = sources.sessionQuota?.(exclave.id, scan.info[x]?.accountId ?? null);
-      return observation === undefined ? null : { ...observation, x };
-    });
-    const observations = scan.exclaves
-      .map((_, x) => newestQuota(cached[x] ?? null, reported[x] ?? null))
-      .filter((q): q is QuotaObservation => q !== null);
-    // Each source at its own stamp, not the merged one: the cache's per-model
-    // windows must not land in the history at a session report's time.
+    const observations = cached.filter((q): q is QuotaObservation => q !== null);
+    // At the reading's own stamp, not the tick's: a cache an hour old is an hour-old point.
     const samples: Sample[] = [];
-    for (const q of [...cached, ...reported]) {
-      if (q === null) continue;
+    for (const q of observations) {
       const exclave = scan.exclaves[q.x];
       if (exclave === undefined) continue;
       const account = scan.info[q.x]?.accountId ?? null;
@@ -276,25 +261,12 @@ function countSessions(sessions: readonly SessionEntry[], scan: ExclaveScan): re
 }
 
 /**
- * One exclave's observation for the status: the newer of the cache and a
- * session's report, the other filling the windows it lacks (`mergeQuota`) — a
- * report carries no per-model windows, and may lack a window the cache has.
- */
-export function newestQuota(
-  cached: QuotaObservation | null,
-  reported: QuotaObservation | null,
-): QuotaObservation | null {
-  if (reported === null) return cached;
-  if (cached === null) return reported;
-  return cached.at > reported.at ? mergeQuota(cached, reported) : mergeQuota(reported, cached);
-}
-
-/**
  * `readCachedQuota` memoized on the file's stat: `.claude.json` carries project
  * history and runs to megabytes, while the block read from it changes only when
- * Claude Code refreshes it — not worth a parse per exclave per tick.
+ * Claude Code refreshes it — not worth a parse per exclave per tick, nor per
+ * session event in the `/usage` refresh's staleness check.
  */
-function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promise<QuotaObservation | null> {
+export function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promise<QuotaObservation | null> {
   const memo = new Map<string, { readonly key: string; readonly quota: QuotaObservation | null }>();
   return async (file, x, nowMs) => {
     const info = await statFile(file).catch(() => null);
@@ -316,11 +288,11 @@ function cachedQuotaReader(): (file: string, x: number, nowMs: number) => Promis
  * window, stamped `fetchedAtMs`, plus the `limits` list, whose `weekly_scoped`
  * entries are the per-model weekly caps (the "Current week (Fable)" bar; the
  * model id is not cached, only its display name), and `extra_usage` for the
- * credits spent (`creditsOf`). Nothing else in the file is read, and M1 has
- * no other source (session reports are M2, the OAuth poll M4). An exclave no
- * session has run in has no observation — absent, so readers fall back to
- * another daemon's view of the same account. A stamp past `nowMs` is capped
- * at `QUOTA_CLOCK_SKEW_MS` ahead of it.
+ * credits spent (`creditsOf`). Nothing else in the file is read, and it is the
+ * only source: the `/usage` refresh (`usage-refresh.ts`) has Claude Code
+ * rewrite it once it is stale. An exclave with no cache yet has no
+ * observation — absent, so readers fall back to another daemon's view of the
+ * same account. A stamp past `nowMs` is capped at `QUOTA_CLOCK_SKEW_MS` ahead of it.
  */
 export async function readCachedQuota(
   file: string,

@@ -28,7 +28,6 @@ import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
 import { EndedTasks } from "./session-events.ts";
-import { SessionQuota } from "./session-quota.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import type { Fetch } from "./seams.ts";
@@ -303,10 +302,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     return MetricsStore.memory();
   });
 
-  // Session events (the session-events mod): quota reports fold into telemetry,
-  // ended tasks into the `sessions` reply, and task sessions' states go to the
-  // leader. Built before the handler context, which reads the two stores.
-  const sessionQuota = await SessionQuota.open();
+  // Session events (the session-events mod): ended tasks fold into the `sessions`
+  // reply, and task sessions' states go to the leader. Built before the handler
+  // context, which reads the store.
   const endedTasks = await endedTasksFor(launchLedgerPath());
 
   // One context, a handler per inbound surface. The relay leg and the local op
@@ -337,7 +335,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       config,
       registered: () => registered,
       sessions: () => handlerCtx.backend.sessions(state.repos),
-      sessionQuota,
       now,
       httpFetch,
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
@@ -467,7 +464,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     leader,
     backend: handlerCtx.backend,
     endedTasks,
-    sessionQuota,
     repos: () => state.repos,
     exclaveScan: () => exclaveScan,
     rescan,

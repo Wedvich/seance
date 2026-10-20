@@ -14,7 +14,6 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import type { RelayClient } from "./relay-client.ts";
 import { createSessionEvents, listPanePids, peerBindingProblem, type EndedTasks } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
-import type { SessionQuota } from "./session-quota.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
 /**
@@ -34,7 +33,6 @@ export interface WiringCtx {
   readonly leader: Leader;
   readonly backend: SessionBackend;
   readonly endedTasks: EndedTasks;
-  readonly sessionQuota: SessionQuota;
   readonly repos: () => readonly RepoEntry[];
   readonly exclaveScan: () => ExclaveScan;
   readonly rescan: () => Promise<unknown>;
@@ -97,7 +95,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
-    accountOf: (exclave) => ctx.exclaveScan().info.find((info) => info.id === exclave)?.accountId ?? null,
     // The leader reaches itself in process, never by a relay round trip. A
     // daemon that just lost the role still sends to "scheduler", which the
     // relay routes to whoever leads now.
@@ -113,7 +110,6 @@ const sessionEvents: DaemonCapability = (ctx) => {
       }
       void ctx.client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
     },
-    quota: ctx.sessionQuota,
     ended: ctx.endedTasks,
   });
   return { stop: events.stop, local: { sessionEvents: events.handle } };

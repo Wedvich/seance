@@ -3,7 +3,6 @@ import type { Config } from "./config.ts";
 import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
 import type { Fetch } from "./seams.ts";
-import type { SessionQuota } from "./session-quota.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
 
@@ -12,14 +11,13 @@ import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts
  * tick's collectors use, named in one place rather than inline in `startDaemon`.
  * The collectors themselves are `TELEMETRY_COLLECTORS` (`telemetry-collectors.ts`),
  * which `createTelemetry` defaults to so its direct callers build the same set. A
- * field M4 adds to the status (auth health, the OAuth quota poll, a Proxmox node
- * view) is one entry there, plus its dependency here if it needs a new one.
+ * field M4 adds to the status (auth health, a Proxmox node view) is one entry
+ * there, plus its dependency here if it needs a new one.
  */
 export interface CollectorDeps {
   readonly config: Config;
   readonly registered: () => Registered;
   readonly sessions: () => Promise<readonly SessionEntry[]>;
-  readonly sessionQuota: SessionQuota;
   readonly now: () => number;
   readonly httpFetch: Fetch;
   readonly probe?: HostProbe;
@@ -54,7 +52,6 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     diskPaths: collectors.config.repoRoots,
     registered: collectors.registered,
     sessions: collectors.sessions,
-    sessionQuota: (exclave, account) => collectors.sessionQuota.get(exclave, account),
     now: collectors.now,
     httpFetch: collectors.httpFetch,
     // Once per collector: a persistent failure is structural, and every beat would repeat it.

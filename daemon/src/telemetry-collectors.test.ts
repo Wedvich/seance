@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { METRIC_NAMES } from "@seance/shared";
 import { MetricsStore } from "./metrics-store.ts";
 import {
@@ -90,17 +93,17 @@ describe("the collector registry", () => {
     const failures: { readonly collector: string; readonly err: unknown }[] = [];
     const telemetry = createTelemetry(MetricsStore.memory(), {
       ...sources,
-      sessionQuota: () => {
-        throw new Error("quota bug");
+      sessions: () => {
+        throw new Error("sessions bug");
       },
       onCollectorError: (collector, err) => failures.push({ collector, err }),
     });
 
     const snapshot = await telemetry.tick(T0);
 
-    expect(snapshot).toEqual({ at: T0 / 1000, scan: 1, mem: 75, disk: 90, free: 10 * 1024, sess: [1] });
-    expect(failures.map((f) => f.collector)).toEqual(["quotaCollector"]);
-    expect(String(failures[0]?.err)).toContain("quota bug");
+    expect(snapshot).toEqual({ at: T0 / 1000, scan: 1, mem: 75, disk: 90, free: 10 * 1024 });
+    expect(failures.map((f) => f.collector)).toEqual(["sessionsCollector"]);
+    expect(String(failures[0]?.err)).toContain("sessions bug");
   });
 
   test("a hook that throws does not fail the tick", async () => {
@@ -142,7 +145,20 @@ describe("the collector registry", () => {
   });
 
   test("the default entries contribute disjoint field keys", async () => {
-    // Fake sources that make every entry contribute: a cpu delta, an I/O delta, a quota report.
+    // Fake sources that make every entry contribute: a cpu delta, an I/O delta, a cached quota.
+    const dir = await mkdtemp(join(tmpdir(), "seance-collectors-"));
+    const configFile = join(dir, ".claude.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({ cachedUsageUtilization: { fetchedAtMs: T0, utilization: { five_hour: { utilization: 10 } } } }),
+    );
+    const cached: Registered = {
+      ...registered,
+      exclaves: {
+        ...registered.exclaves,
+        exclaves: registered.exclaves.exclaves.map((exclave) => ({ ...exclave, configFile })),
+      },
+    };
     let busy = 0;
     let idle = 0;
     let bytes = 0;
@@ -158,21 +174,18 @@ describe("the collector registry", () => {
         return { read: bytes, write: bytes };
       },
     };
-    const fullSources: CollectorSources = {
-      ...sources,
-      probe: full,
-      sessionQuota: () => ({ s: "session", at: T0 / 1000, h: 10 }),
-    };
+    const fullSources: CollectorSources = { ...sources, registered: () => cached, probe: full };
     const fieldSets = await Promise.all(
       TELEMETRY_COLLECTORS.map(async (entry) => {
         const collect = entry(fullSources);
         const contributions: Contribution[] = [];
         for (const nowMs of [T0, T0 + 30_000]) {
-          contributions.push(await collect({ registered, nowMs, at: nowMs / 1000, smooth: (_, v) => v }));
+          contributions.push(await collect({ registered: cached, nowMs, at: nowMs / 1000, smooth: (_, v) => v }));
         }
         return Array.from(new Set(contributions.flatMap((c) => Object.keys(c.fields))));
       }),
     );
+    await rm(dir, { recursive: true, force: true });
     const all = fieldSets.flat();
 
     expect(new Set(all)).toEqual(new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota"]));
