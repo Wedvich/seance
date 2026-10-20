@@ -156,7 +156,7 @@ describe("the collector registry", () => {
       ...registered,
       exclaves: {
         ...registered.exclaves,
-        exclaves: registered.exclaves.exclaves.map((exclave) => ({ ...exclave, configFile })),
+        exclaves: [{ id: "default", root: "/home/u", configDir: "/nonexistent/.claude", configFile }],
       },
     };
     let busy = 0;
