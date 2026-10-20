@@ -371,8 +371,9 @@ describe("the /usage refresh", () => {
     const [trapped, next] = await started();
     expect(next?.exclave).toBe("work");
     expect(alive(trapped?.pid ?? 0)).toBe(false);
-    // The slot frees only after TERM at the timeout and KILL after the grace.
-    expect((next?.at ?? 0) - (trapped?.at ?? 0)).toBeGreaterThanOrEqual(2_000 + 200);
+    // The slot frees only after KILL, a grace past the TERM. The stub stamps `start` after booting,
+    // which can eat most of the timeout on a loaded runner, so only the grace is a safe lower bound.
+    expect((next?.at ?? 0) - (trapped?.at ?? 0)).toBeGreaterThanOrEqual(200);
     expect(lines.join("\n")).toContain("default failed (timed out after 2s)");
   });
 
