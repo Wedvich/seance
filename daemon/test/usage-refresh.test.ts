@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { importPsk, open, parseMachineStatus, toBase64, type MachineStatus } from "@seance/shared";
@@ -203,7 +203,7 @@ describe("the /usage refresh", () => {
     const user = userInfo().username;
     for (const run of first) {
       expect(run.argv).toEqual([...USAGE_ARGS]);
-      expect(run.cwd).toBe(home);
+      expect(run.cwd).toBe(await realpath(home)); // macOS: the stub reports /private/var for /var
     }
     const path = process.env["PATH"] ?? "";
     expect(first[0]?.env).toEqual({ HOME: home, PATH: path, USER: user, LOGNAME: user });
