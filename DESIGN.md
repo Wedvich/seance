@@ -673,7 +673,8 @@ nothing checked it. The last is the gap they leave.
   "Branch state"), is written 0600 the same way, temp file first, and so is `version-floor.json` (the
   leader's version per store key, Scheduler, "The queue store"). `metrics.sqlite` and its `-wal` and
   `-shm` join them: the database is created as an empty 0600 file before SQLite
-  opens it, and SQLite gives the files it spawns the database's mode. All
+  opens it, and SQLite gives the files it spawns the database's mode. (A retired
+  `session-quota.json` may remain from older versions, unread.) All
   created at 0600 rather than
   written and chmod'd, so no umask-mode window exists. Enforced as explicit
   modes and not as a `UMask=` in the unit, deliberately: the daemon may
@@ -3334,16 +3335,26 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   moves nothing), judged on the wall clock against `fetchedAtMs`, which is the debounce marker:
   the daemon keeps none of its own. What asks: every bound session event pokes its exclave
   (Local op socket, "Session events"), and a timer pokes every exclave each minute, so one with
-  no session running is still refreshed. So a reading is at most `staleAfter` plus a minute plus
-  a run old. Signed out (`authOk` false) never runs. One run at a time in the process, across a
+  no session running is still refreshed. So a healthy exclave's reading is at most `staleAfter`
+  plus a minute plus a run old, plus the runs queued ahead of it on the shared lane (each up to
+  the timeout), and unbounded while its runs fail. Signed out (`authOk` false) never runs. One run at a time in the process, across a
   config reload's two daemons too, so a small LXC never carries two. A run is killed with its
-  process group after 60 s. Success is the cache's stamp moving, not the exit code or stdout; a
-  failure backs that exclave off for `staleAfter`, warns once per streak and says when it
-  recovers. Exec rules (threat model): fixed argv, `exec.ts`'s `bareEnv` so the child gets only
+  process group after 60 s (SIGTERM, then SIGKILL after 5 s for a child that traps it), and
+  abandoned a second past that even if a detached grandchild still holds its pipes, so a
+  wedged run cannot hold the lane; `stop()` kills a run in flight, so a restart never leaves
+  one beside the next daemon's. Success is the cache's stamp (`fetchedAtMs`, read on its own,
+  whether or not a window parses) moving, not the exit code or stdout; a failure backs that
+  exclave off for `staleAfter` (state process-wide, like the lane), warns once per streak, with a
+  bounded one-line excerpt of the run's stderr or JSON `result`, and says when it recovers. The
+  refresh is not a spawn — no session, no pane, no prompt, fixed argv — so it carries no audit
+  origin; failures are logged once per streak. Exec rules (threat model): fixed argv, `exec.ts`'s `bareEnv` so the child gets only
   `HOME`, `PATH`, `USER`/`LOGNAME` (from the passwd entry: without them Claude Code's macOS
   keychain read fails and `/usage` prints the `/cost` view) and `CLAUDE_CONFIG_DIR`, never the
   daemon's environment or a service-delivered credential; `--safe-mode` always, so no user hook,
-  plugin or mod — the session-events mod included — runs in it. On only through
+  plugin or mod — the session-events mod included — runs in it. Limitation: the built env
+  carries no proxy or CA variables (`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`), so a
+  host that reaches the API only through a proxy gets no refresh; widening the env is a
+  threat-model change. On only through
   `RunOpts.usageRefresh`, which `main.ts` always passes: tests run against a real home and must
   not spawn claude by surprise.
 - **Session detection**: list all tmux panes across all sessions, dedup by
@@ -4643,9 +4654,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
   cached reading is stale, with a fixed argv and an env built from the scan — no
   frame field reaches either. It never despawns or runs a command shaped by
-  a frame. Its only subprocesses are fixed-argv reads: `tmux list-panes`, and on
+  a frame. Its own only subprocesses are fixed-argv reads: `tmux list-panes`, and on
   macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
-  No frame field reaches any argv.
+  No frame field reaches any argv. The one indirect run is the `/usage` refresh above:
+  poked, staleness-gated, fixed argv, built env.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun

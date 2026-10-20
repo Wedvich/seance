@@ -24,9 +24,11 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * it runs in, through `seanced session-event`. Ingest-only — the handler stores
  * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
  * refresh's trigger, which decides alone whether anything runs); nothing here
- * spawns, despawns or runs a command shaped by the frame. Its only subprocesses
- * are fixed-argv reads: `tmux list-panes` and, on macOS where `proc_pidinfo`
- * will not answer a hop, `ps` for the parent walk.
+ * spawns, despawns or runs a command shaped by the frame. Its own only
+ * subprocesses are fixed-argv reads: `tmux list-panes` and, on macOS where
+ * `proc_pidinfo` will not answer a hop, `ps` for the parent walk. The one
+ * indirect run is the `/usage` refresh the poke may start (staleness-gated,
+ * fixed argv, built env).
  *
  * Every field of a frame is untrusted. The run directory admits any process of
  * this user, and every session is this user, so a frame could name any pane or

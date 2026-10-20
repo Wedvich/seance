@@ -274,8 +274,8 @@ leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the
 relay's and the next leader takes it over; item 6 moved the PWA and MCP onto `store-put`.)
 Deps, batches, caps, `pause` and the escalation and spill alerts have landed (items 4a and 5);
 the PWA hears `queue-changed` and keeps a bounded poll as its fallback (item 6). An account nothing has observed yet is `quota unknown` and
-gets no `auto` work until a direct spawn or a session report gives it a reading (M4's `/usage`
-refresh gives every signed-in exclave one).
+gets no `auto` work until a direct spawn gives it a reading (M4's `/usage` refresh gives every
+signed-in exclave one).
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
 `SCHEDULER_LEADERS` allowlist.
@@ -524,7 +524,10 @@ precede. Wave 2 waits on the wave-1 item named.
   `claude` stub that writes or leaves the cache).
 
   As built: `quota.staleAfter` is a daemon constant (`STALE_AFTER_MS`, 10 min), not yet a config
-  key; the timer checks every minute, so the bound is `staleAfter` plus a minute plus one run.
+  key; the timer checks every minute, so a healthy exclave is at most `staleAfter` plus a minute
+  plus a run old — plus the runs queued ahead of it on the process-wide lane (each up to the
+  timeout, 60 s, then SIGKILL after 5 s) — and unbounded while its runs fail (backed off for
+  `staleAfter` per attempt, state process-wide so a config reload does not reset it).
   `session-quota.json` is left on disk unread rather than deleted.
 
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
@@ -819,7 +822,9 @@ same PR, with the reason.
   any of them. The cache file staying the result is what keeps a change visible: a refresh that
   stops moving `fetchedAtMs` logs, and the reading ages into the reset floor rather than lying.
   Its memory (~350 MiB a run) is the other cost, bounded by one spawn at a time and the
-  staleness check.
+  staleness check. Each refresh is also a full Claude Code process that writes the exclave's
+  `.claude.json` alongside live sessions, so it inherits Claude Code's own concurrent-writer
+  behaviour for that file.
 - **Session `rate_limits` cadence** — retired with the source (2026-10-20): the `/usage`
   refresh's timer covers an exclave no session is active in.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
