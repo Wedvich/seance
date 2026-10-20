@@ -248,6 +248,13 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, mem: null })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, s: "guess" }] })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ x: 0, s: "session" }] })).toBeNull();
+    // Reserved for an OAuth poll that was never built, and never emitted.
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, s: "oauth" }] })).toBeNull();
+  });
+
+  test("a session-sourced reading from a daemon that predates the /usage refresh still parses", () => {
+    const legacy = { ...status, quota: [{ ...quota, s: "session" }] };
+    expect(parseMachineStatus(legacy)).toEqual(legacy);
   });
 
   test("requires the scan stamp that binds indexes to a register blob", () => {
