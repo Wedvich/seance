@@ -27,13 +27,29 @@ export function skillIndex(machines: readonly Machine[]): readonly string[] {
   return [...names].toSorted(collator.compare);
 }
 
+/** The `/name` token the caret is completing: `prompt.slice(start, end)`, `end` at the caret. */
+export interface SkillToken {
+  readonly start: number;
+  readonly end: number;
+  readonly query: string;
+}
+
 /**
- * The partial name while the prompt is still its first token after a `/` —
- * the picker completes that token only, like Claude Code's. Null otherwise.
+ * The token the picker completes: a `/` at the start or after whitespace, then
+ * non-whitespace up to the caret, the caret at the token's end. So `… /sh|`
+ * opens anywhere in the prompt, but a slash inside a word or URL (`and/or`,
+ * `https://a/b`) never does, nor a second `/` (`/tmp/x`): skill names are dir
+ * names, so that is a path. Null for a selection range (`caret` null).
  */
-export function skillQuery(prompt: string): string | null {
-  const match = /^\/(\S*)$/u.exec(prompt);
-  return match === null ? null : (match[1] ?? "");
+export function skillToken(prompt: string, caret: number | null): SkillToken | null {
+  if (caret === null || caret < 0 || caret > prompt.length) return null;
+  if (/\S/u.test(prompt.charAt(caret))) return null;
+  let start = caret;
+  while (start > 0 && /\S/u.test(prompt.charAt(start - 1))) start -= 1;
+  if (prompt.charAt(start) !== "/") return null;
+  const query = prompt.slice(start + 1, caret);
+  if (query.includes("/")) return null;
+  return { start, end: caret, query };
 }
 
 /** Case-insensitive; names starting with the query first, then names containing it. */
@@ -49,18 +65,59 @@ export function matchSkills(skills: readonly string[], query: string): readonly 
   return [...prefix, ...inner];
 }
 
-/** The prompt after picking: the name as the whole first token, space included so typing carries on. */
-export function completeSkill(name: string): string {
-  return `/${name} `;
+/**
+ * The prompt after picking: the token becomes `/name` followed by a space, so
+ * typing carries on, reusing one already there rather than doubling it.
+ * `caret` sits past that space.
+ */
+export function completeSkill(
+  prompt: string,
+  token: SkillToken,
+  name: string,
+): { readonly prompt: string; readonly caret: number } {
+  const before = `${prompt.slice(0, token.start)}/${name}`;
+  const after = prompt.slice(token.end);
+  if (after.startsWith(" ")) return { prompt: before + after, caret: before.length + 1 };
+  return { prompt: `${before} ${after}`, caret: before.length + 1 };
+}
+
+/** A run of the prompt mirror from offset `start`: `skill` paints it, `anchor` is where the picked token starts. */
+export interface PromptSegment {
+  readonly start: number;
+  readonly text: string;
+  readonly skill: boolean;
+  readonly anchor: boolean;
 }
 
 /**
- * Length of the leading `/name` the prompt field paints as a skill: first
- * token only, and only a name the index knows, as Claude Code highlights. 0
- * when none — an unknown name still goes as typed, it just isn't marked.
+ * The prompt cut into runs for the field's mirror: every `/name` token (at the
+ * start or after whitespace) whose name the index knows is a `skill` run, as
+ * Claude Code highlights one — an unknown name still goes as typed, it just
+ * isn't marked. Also cut at `anchor` so the view can measure where the token
+ * being picked sits. The runs join back to the prompt exactly: the mirror must
+ * draw the textarea's text glyph for glyph.
  */
-export function skillTokenLength(prompt: string, skills: readonly string[]): number {
-  const match = /^\/(\S+)(?=\s|$)/u.exec(prompt);
-  if (match === null || !skills.includes(match[1] ?? "")) return 0;
-  return match[0].length;
+export function promptSegments(
+  prompt: string,
+  skills: readonly string[],
+  anchor: number | null,
+): readonly PromptSegment[] {
+  const cuts = new Set<number>([0, prompt.length]);
+  const marked = new Set<number>();
+  for (const match of prompt.matchAll(/(^|\s)\/(\S+)/gu)) {
+    if (!skills.includes(match[2] ?? "")) continue;
+    const start = match.index + (match[1] ?? "").length;
+    cuts.add(start).add(match.index + match[0].length);
+    marked.add(start);
+  }
+  if (anchor !== null && anchor >= 0 && anchor <= prompt.length) cuts.add(anchor);
+  const sorted = [...cuts].toSorted((a, b) => a - b);
+  const segments: PromptSegment[] = [];
+  for (let i = 0; i + 1 < sorted.length; i += 1) {
+    const from = sorted[i] ?? 0;
+    const to = sorted[i + 1] ?? prompt.length;
+    if (to <= from) continue;
+    segments.push({ start: from, text: prompt.slice(from, to), skill: marked.has(from), anchor: from === anchor });
+  }
+  return segments;
 }

@@ -4250,20 +4250,26 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the field lost. CLEAR also blurs the textarea — an empty field is nothing to
   type into, and on a phone the keyboard should go with the text — while UNDO
   focuses it again, caret at the end, so the draft can be picked back up.
-- **A `/` first in the prompt opens a skill picker** (scheduler M4, _Skills_, 2026-10-17). It
+- **A `/name` token in the prompt opens a skill picker** (scheduler M4, _Skills_, 2026-10-17). It
   lists the union of skill names across every machine and exclave — `MachineInfo.exclaves[].skills`
   from the register blobs the app already holds, offline machines included — so it needs no
   leader and works on a direct pick as on `auto`. Names only, no descriptions and no
   machine list: the blob carries every name to every app, and descriptions would grow it per
-  skill; placement is the M4 routing filter's job, so the list stays a plain union. Like Claude Code's picker it
-  completes the first token only (open while the prompt is `/` plus no whitespace), matching
-  prefix first then substring, and picking writes `/name ` with the space. It sits inline under
-  the textarea, which collapses to one line meanwhile, rather than in an overlay the on-screen
+  skill; placement is the M4 routing filter's job, so the list stays a plain union. It
+  completes the token ending at the caret (2026-10-20; first token only before): a `/` at the start
+  or after whitespace, no whitespace or second `/` up to the caret, and the caret at the token's
+  end with no selection — so `… /sh` mid-prompt opens it, a slash in a word, URL or path
+  (`and/or`, `https://a/b`, `/tmp/x`) never does. The caret is read from the field's input, key,
+  pointer and `selectionchange` events; text written from elsewhere counts as caret-at-end, where
+  the browser puts it. Matching is prefix first then substring, and picking splices `/name ` in
+  place of the token (reusing a space already there) with the caret after it. It sits inline under
+  the textarea, which collapses to one line meanwhile — scrolled to the token's line, measured
+  off the mirror below, since a collapse alone leaves the last line in view — rather than in an overlay the on-screen
   keyboard could cover; it opens from the prompt text, never focus, and its rows take
   `pointerdown` without default so a tap neither blurs the field nor drops the keyboard. With
   matches, Enter and Tab pick and never spawn; with none it says the name goes as typed and the
   keys behave as without it — an unknown name is not an error (M4's routing filter, still open, will let it pass).
-  A known name as the first token is painted in the accent colour, as Claude Code marks one; a
+  Every known `/name` token (at the start or after whitespace) is painted in the accent colour, as Claude Code marks one; a
   textarea can't style its own text, so a mirror behind it with the same metrics draws the
   glyphs and follows its scroll, and the field keeps only caret, selection and input.
 
