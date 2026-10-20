@@ -145,7 +145,8 @@ events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 
 - `daemon/src/usage-refresh.ts` (not `shared/src/quota.ts`, the fleet fold readers share): runs
   `claude --safe-mode --output-format json -p /usage` for an exclave whose cached utilization is
   stale, so Claude Code refreshes its own cache and the existing `cache` collector reads the
-  result. The daemon holds no token and calls no endpoint (M4 item "`/usage` refresh").
+  result. The daemon holds no token and calls no endpoint (M4 item "`/usage` refresh"). **Done**
+  (DESIGN.md, _Daemon_, "Usage refresh").
 - Collectors not yet built — LXC PSI and cgroup views, the Proxmox node view, macOS I/O rates
   (DESIGN.md _Daemon_, "Telemetry").
 
@@ -360,7 +361,7 @@ and the verified leader running an unverified-era task were added at close-out.
 **Gaps.** No stacking: every task starts from the default branch, and `TaskSpec.base` stays
 unset. Alerts are PWA-only until M4's Web Push. Linear is not consulted; done comes from local
 merge detection, the session ending, or manual marking. Quota is still session-reported (until
-M4's `/usage` refresh).
+M4's `/usage` refresh; closed 2026-10-20).
 Batches and hand-declared deps have no authoring surface: the library, the record and the leader
 support them, but neither the PWA nor MCP writes them. A full `task:` listing in one frame is
 unchecked on the iOS WKWebView app leg (DESIGN.md, "The store", _Send size_); paging through the
@@ -399,7 +400,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security), rebased and landed | —                                                                      | —                        |
 | 1    | Authoring surface (new)                                                     | —                                                                      | M                        |
 | 1    | Settings and Web Push, in three PRs                                         | store rules v2; the fetch seam                                         | L                        |
-| 1    | `/usage` refresh (was: OAuth quota poll)                                    | — (spiked 2026-10-20)                                                  | S–M                      |
+| 1    | `/usage` refresh (was: OAuth quota poll) — **Done**                         | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1    | Skills filter                                                               | —                                                                      | S; M with project skills |
 | 1    | Proxmox node view                                                           | the token decision                                                     | M–L                      |
 | 1    | Account records                                                             | store rules v2                                                         | M                        |
@@ -479,7 +480,7 @@ precede. Wave 2 waits on the wave-1 item named.
   - _Proposed (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
     knows it, so the PR is the handoff.
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
-  #13 lapse with it) — `daemon/src/usage-refresh.ts` runs
+  #13 lapse with it; **Done** 2026-10-20, recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
   `claude --safe-mode --output-format json -p /usage` with the exclave's config dir, and Claude
   Code refreshes `cachedUsageUtilization` in place. The daemon reads no token, calls no endpoint
   and never refreshes a login: Claude Code does all three under its own rules, so the
@@ -521,6 +522,10 @@ precede. Wave 2 waits on the wave-1 item named.
   Exit: an idle signed-in exclave's quota is never older than `staleAfter` while the daemon
   runs; no exclave is spawned for twice inside 60s; a failing refresh is quiet (daemon, with a
   `claude` stub that writes or leaves the cache).
+
+  As built: `quota.staleAfter` is a daemon constant (`STALE_AFTER_MS`, 10 min), not yet a config
+  key; the timer checks every minute, so the bound is `staleAfter` plus a minute plus one run.
+  `session-quota.json` is left on disk unread rather than deleted.
 
 - **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
   - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
@@ -699,11 +704,11 @@ same PR, with the reason.
 7. **No age cap on a quota reading** beyond the reset rule. The 5h window bounds itself — a
    reading older than 5h is past its reset and reads 0% — so only the 7d window can drift, and
    only through use the fleet does not see. Fleet accounts are used almost only inside the
-   fleet (the owner, 2026-10-16); the rare cloud session is a blip the next session report or
+   fleet (the owner, 2026-10-16); the rare cloud session is a blip the next
    `/usage` refresh (M4) overwrites. A cap would fail every time a machine sleeps past it, and on the
    account with the most headroom; no cap fails only on unseen use, for one dispatch, until the
-   next reading corrects it — the session's own `rate_limits` report (the session-events mod, M2
-   item 5), or after M4 the refresh that session's events trigger. Revisit with a 7d-only cap (~24h) if
+   next reading corrects it — the `/usage` refresh a session's events or the minute timer
+   trigger (M4; before it, the session's own `rate_limits` report). Revisit with a 7d-only cap (~24h) if
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
@@ -815,10 +820,8 @@ same PR, with the reason.
   stops moving `fetchedAtMs` logs, and the reading ages into the reset floor rather than lying.
   Its memory (~350 MiB a run) is the other cost, bounded by one spawn at a time and the
   staleness check.
-- **Session `rate_limits` cadence** (was: statusline cadence), until M4 retires the source. The
-  tap is `session.measure`, not the statusline, so it reports after each turn and when a window
-  moves a point, rendered or not. An idle session still reports nothing new, which the reset
-  floor and M4's `/usage` refresh cover.
+- **Session `rate_limits` cadence** — retired with the source (2026-10-20): the `/usage`
+  refresh's timer covers an exclave no session is active in.
 - **Stacked rebases**: when A changes in review, B's branch drifts. v1 does nothing
   automatic; the dependent's preamble names the base so the session can rebase.
 - **Leader churn is mostly deploys** (looked at 2026-10-16, M2's gap 2). Term 31 within ~6h of
