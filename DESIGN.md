@@ -572,7 +572,9 @@ Séance's noise is cover for a real intruder.
    also report its own state and PR. That too is a claim about itself, bound to
    its own pane (Local op socket, "Session events"); its only other effect is
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
-   (Daemon, "Usage refresh"). The
+   (Daemon, "Usage refresh"). Decided for M4, not built (#21): it will also report its
+   own task `done`, which settles a `until: "reported"` task and releases `after: "done"`
+   dependents. A session that lies about being done can do no more than one that exits. The
    scheduler routes on the quota figures, so a session that lies about its
    account's usage steers where the next task lands. It cannot reach past what
    that one account's reading decides.
@@ -702,7 +704,9 @@ nothing checked it. The last is the gap they leave.
   (`getPause` in `daemon/src/queue-store.ts`); one that fails any of it fails
   closed, as a whole-queue hold (Scheduler, "Pause"). Both bindings hold against a
   token holder, not the relay, which can serve an older version at its own
-  version (Threat model, item 4).
+  version (Threat model, item 4). M4's `account`, `quota` (the fleet quota record) and
+  `settings` are `AT_REST_OPS` ops too, each with its own parser, so one cannot stand in
+  for another or for a `task`; no store prefix accepts them yet (store rules v2).
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -712,7 +716,8 @@ nothing checked it. The last is the gap they leave.
   one same-uid process mislabelling another session's state on its own machine, is
   recorded under "Session events" (Local op socket). This frame kind widens the
   socket. A new kind, or a new act for this one, is a threat-model change like the
-  broker's.
+  broker's. One is decided, not built: a `done` report finishing the sender's own task
+  (#21, "Session events"). Until it lands, ingest refuses the state.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -910,7 +915,10 @@ The Durable Object persists a machine registry:
   `tr`, the count of quota entries dropped (0 when only detail went, absent
   when nothing did), because a trimmed-away exclave otherwise reads as one
   with no quota observed — and a scheduler filtering on quota would let an
-  over-threshold account through. Sent every 30s whether or not an app is watching:
+  over-threshold account through. `ax` (M4, auth health; nothing sends it yet) lists the
+  exclave indices whose login has expired, at most `STATUS_MAX_AUTH_EXPIRED`. The trim
+  never touches it — it touches only quota detail, quota and `sess` — since an exclave whose
+  expired login went unreported would read as signed in. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -1002,6 +1010,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                              |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                         | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                   |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state") | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                   |
+| records `account` / `quota` / `settings` (at rest)                  | not yet written: each is its M4 item's (account records, fleet quota record, settings)                                                                                                                | `openAtRest` with its op, then `parseAccountRecord` / `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); no store prefix accepts them until store rules v2                                                                                                                                                       |
+| op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                           | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle; its handler will parse with `parsePushSubscribeRequest`                                                                                                                                                                      |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1233,11 +1243,20 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId?, baseBranch? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
   rides only on `task_running`: the `SessionEntry.id` already running the
   request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
-  `capabilities`, since an old daemon ignores the field and spawns a duplicate. The
+  `capabilities`, since an old daemon ignores the field and spawns a duplicate.
+  `baseBranch` (M4, stacking; in the schema, not acted on yet) is the branch a stacked
+  worktree starts from, refused `base_not_found` when origin has no such branch. It is
+  held to `isBranchName` (`shared/src/parse.ts`: `git check-ref-format` on
+  `refs/heads/<b>`, no leading `-`, not `HEAD`) at every hop: the daemon's
+  `isSpawnRequest` rejects the spawn today, and the leader is to check the predecessor's
+  `Task.branch` before sending it (stacking), since a task record's branch is only
+  length-checked. Advertised as
+  `"baseBranch"`, and required: an old daemon drops the field and starts from the
+  default branch. The
   verdict embeds a refreshed session list so the PWA updates without a
   second round trip. That list is polled (2s cap) until it holds the window
   just announced: detection keys off claude's process title, which it can set
@@ -1297,7 +1316,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   lists every `task:` record the leader cannot read, whatever the filter, as `{ taskId,
   version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
   the holds are): what fills the store without ever running.
-- `route-preview { repo, mode, prompt?, title?, model?, effort?, plan? }` (`TaskRequest`: a
+- `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, skill? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
 - **There is no `submit`** (removed in M3 item 6; M2's op took a `TaskRequest` and answered the
@@ -1328,9 +1347,36 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   `op=discard … task=… version=… ok`, or with its refusal. The person's remedy for junk a
   bearer-token holder planted and for records sealed under an old PSK, which no reader deletes
   on its own and which hold the store's slots until someone does.
+- `push-subscribe { endpoint, keys: { p256dh, auth } }` (`PushSubscribeRequest`, a Web Push
+  subscription) → `{ endpoint }`, or `subscriptions_full` past `PUSH_MAX_SUBSCRIPTIONS`
+  (M4, Web Push; in the schema, not in `SCHEDULER_OPS`, so a leader answers it
+  `invalid_request` until its handler lands). The endpoint is `https:` on the default port,
+  on a `PUSH_SERVICE_HOSTS` host (a `*.` entry is a subdomain, never the bare host), checked
+  where the request is parsed (`pushEndpoint`), so a PSK holder cannot aim the leader's
+  sends at an arbitrary URL. Subscriptions live in the `settings` record.
 - `queue-changed { at, tasks? }` runs the other way: the leader's term leg sends it `to: "app"`,
   fire-and-forget, when something an app would show changed (Scheduler, "The leader"). It is
   not a request and has no reply; an app re-reads `queue` on it.
+
+**M4's shapes landed ahead of their items** (2026-10-20, the schema PR): every field and
+record below parses today, and nothing acts on one until its item does. All are optional, so
+an old peer's frames parse as before. Mixed versions:
+
+- `TaskRequest.skill` (a declared skill, `isSkillName`) and `TaskSpec.until` (`"merged"`,
+  the default, or `"reported"`, #21): an older leader drops both, so a `reported` task under
+  one settles at its merge, and routing ignores its skill.
+- `after: "done"` (#21, released only by a `done` predecessor) and `doneBy: "linear"`: an
+  older leader reads a task carrying either as malformed, and holds it unreadable, never
+  running it, until a leader that knows them takes over (Scheduler, "The queue store").
+- `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
+  list costs the field, never the entry or the machine. `MachineStatus.ax` (the exclave
+  indices whose login has expired) is strict and capped. An old app ignores both.
+- `TaskProgress.exit` (a session's exit status, 0–255), in the `sessions` reply's `progress`
+  and the launch ledger: an older leader drops it.
+- Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
+  leader drops an unknown reason from a decision and keeps the candidate.
+- `session-event` `done` is refused at ingest and ignored by the leader (Local op socket,
+  "Session events"), as a daemon that predates it refuses any unknown state.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -1907,8 +1953,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Routing caps" below; or `scope:
-  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). Skill and
-  stacked-base filters are M4's. Pressure
+  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). M4's
+  `skill_absent` (naming the skill), `base_unpushed` and `auth_expired` are read and worded
+  already; no filter emits them yet. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
   every status alike, through `newestQuotaByAccount` and `effectivePct` — the
@@ -2119,7 +2166,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   when one never can. An edge releases when its predecessor is `done`, whatever settled
   it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
   `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
-  "merged"` only at `done`, a merge being what makes a task done. A `failed` or
+  "merged"` only at `done`, a merge being what makes a task done. `after: "done"` (#21,
+  M4; no client writes it yet) releases only at `done` too, the same as `merged` until a
+  `until: "reported"` task has a merged-but-open state of its own. A `failed` or
   `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
   predecessor with a PR and a pushed branch fails `opened` too. A dependent already
   released has left `blocked` and is not judged again, so an outcome can depend on whether a
@@ -4466,7 +4515,8 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   fleet broker below is the one deliberate exception, served only by a daemon
   whose key is service-delivered, and says so. The `session-event` kind below
   grants no act at all. It is ingest, and what it ingests is bound to the
-  sender's own pane.
+  sender's own pane. Its first act, a `done` report for the sender's own task, is
+  decided and not built ("Session events").
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -4664,6 +4714,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
   No frame field reaches any argv. The one indirect run is the `/usage` refresh above:
   poked, staleness-gated, fixed argv, built env.
+- **`done`: decided, not built** (#21, decided 2026-10-20; in the schema since the M4 schema
+  PR). A session reports that its task is finished, so a task can stay open past its merge
+  ("after X is in prod" is X's session merging, watching the deploy, then reporting). The
+  state is in `SESSION_STATES`, but `parseSessionEventFrame` refuses it, as it refused it
+  when the state was unknown, and the leader's `sessionChange` leaves a task as it is on
+  one. The decided act, landing with the authoring surface: the leader settles the
+  sender's task `done`, bound by peer pid like every event, so a session can finish only its
+  own task. Under `until: "reported"` it is the one settle beside `mark-done` and Linear
+  Done; `after: "done"` dependents release on it. It is the first act beyond ingest, so a
+  threat-model change (Threat model, item 6). A session that lies about being done can do
+  no more than one that exits, and `mark-done` stays the manual override.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
