@@ -385,7 +385,21 @@ Séance's noise is cover for a real intruder.
    pause with junk, which readers handle as an unreadable record (the
    scheduler's concern, not the relay's): the leader reads it as the whole
    queue held until a resume, so junk can stop dispatch — which a term holder
-   could do anyway — but never lift a pause (Scheduler, "Pause"). Registry growth is bounded in the DO by a
+   could do anyway — but never lift a pause (Scheduler, "Pause"). Store rules v2
+   (2026-10-20, M4) add two prefixes the token reaches. `account:` is app-writable,
+   create and overwrite by `expect`, and so is every registered `/daemon` socket
+   (owner decision #14): a register needs a signature on top of the token, so that
+   leg is harder to open than the app leg that already has the rights. `quota:` is
+   every registered daemon's and no app's. Neither is term-fenced, so creates there
+   meet the create floor on either leg, and nobody deletes under either (#8): their
+   keys are deterministic (an HMAC, a singleton), where a tombstone would block the
+   one key that names the thing for 30 days, so they are cleared by overwrite. A
+   holder can therefore overwrite an alias or the quota record with junk readers
+   skip — never read, forge or roll one back — and, the residual, create junk keys
+   up to the prefix's cap (64 under `account:`, the one `quota:` slot) that nothing
+   in the product removes, since deletes are refused: a junk `quota:` key other than
+   the fleet record's holds that prefix's only slot until an operator edits the DO's
+   storage. Rotating the token stops more and clears none. Registry growth is bounded in the DO by a
    32-entry cap that turns away only _unknown_ ids — so a full registry locks
    out machines you have not added yet and never knocks a known one offline —
    plus a per-socket register rate limit, which bounds write rate as the entry
@@ -1005,12 +1019,12 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                    | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes                                                              | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                               | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
-| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's daemon socket after an app-leg write                                                                                                               | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged`                                                                                                                                                                                                                  |
+| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                   | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); apps drop it until account records handle it                                                                                                                                                |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                         | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                         | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state") | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
-| records `account` / `quota` / `settings` (at rest)                  | not yet written: each is its M4 item's (account records, fleet quota record, settings)                                                                                                                | `openAtRest` with its op, then `parseAccountRecord` / `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); no store prefix accepts them until store rules v2                                                                                                                                                         |
+| records `account` / `quota` / `settings` (at rest)                  | not yet written: each is its M4 item's (account records, fleet quota record, settings)                                                                                                                | `openAtRest` with its op, then `parseAccountRecord` / `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:`, `quota:fleet` and `settings:` (_Scheduler_, "The store")                                                                                                                         |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                           | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -1105,7 +1119,9 @@ requesting socket only.
   the answer to a leaked token; the caps (`MAX_DEVICES`, the register rate
   limit) still bound cost rather than defend. Queued tasks are not rebuilt the
   way registry entries are, so this reasoning does not extend to them: the token
-  cannot delete one, only add junk within the caps (Scheduler, "The store").
+  cannot delete one, only add junk within the caps (Scheduler, "The store"). Nor
+  to `account:` and `quota:` records, which it can overwrite but nobody can
+  delete (Threat model, item 3).
 - **Uninstalling deregisters the machine, and does it as an app-role client.**
   `seanced uninstall` sends the same `forget` on `/app` that the PWA's bin does
   (`daemon/src/deregister.ts`), after the service is stopped and before the links
@@ -1529,18 +1545,23 @@ apps read and write with plaintext Layer 1 frames. The relay never opens a recor
 enforces is what it can see: who is asking, the key, a version and a size.
 
 - **Four requests, four replies, on both legs.** `store-list { id, prefix }` answers
-  `store-listed { re, records }`: every live record under `task:` or `queue:`, ascending by key, as
+  `store-listed { re, records }`: every live record under the prefix, ascending by key, as
   one frame (checked in production 2026-10-18, sized in _Send size_ below; paging stays
   open — an `after` is ignored and answered whole, and `parseStoreReply` refuses a reply carrying
   `next`). `store-get { id, key }` answers
   `store-record { re, record }`, `null` for an absent or tombstoned key. `store-put` and
   `store-delete` answer `store-written { re, version }` — the new version, or the version a delete
   removed — or `store-refused { re, code }`. Parsed and bounded in `relay/src/wire.ts`, ruled in
-  `relay/src/store.ts`, dispatched by `#onStoreFrame` in `hub.ts`. Reads are anyone's, an
-  unregistered daemon socket's included, though a list meets floors (_List floors_, below); an
-  unregistered socket's write fails `holdsTerm` (it has
-  no identity) and is answered `not_leader`, not dropped. A put's `env.from` is not compared with
-  the socket's id: the relay is blind and the seal's addressing is the clients' to decide.
+  `relay/src/store.ts`, dispatched by `#onStoreFrame` in `hub.ts`. Reads are any app's and any
+  registered daemon socket's, though a list meets floors (_List floors_, below). On `/daemon`, a
+  store frame is handled only once that socket's register has been accepted — one sent right
+  behind the register waits for its outcome, as other frames do — and before that every store
+  frame, a read included, is answered `store-refused { code: "forbidden" }` (a superseded socket
+  counts as unregistered): under a prefix that is not term-fenced, registration is the daemon
+  leg's whole authority, and a refusal settles the client where a drop would leave it to ride
+  `STORE_TIMEOUT_MS` (2026-10-20, store rules v2; until then reads were anyone's and an
+  unregistered socket's write read `not_leader`). A put's `env.from` is not compared with the
+  socket's id: the relay is blind and the seal's addressing is the clients' to decide.
 - **Storage namespaces**, none starting `device:` or equal to `scheduler:term`, so no store key
   — which `STORE_KEY_PATTERN` confines to a known prefix and a routing id — can alias the registry
   or the leader record. Records never reach the registry push and never count toward
@@ -1553,27 +1574,44 @@ enforces is what it can see: who is asking, the key, a version and a size.
   | `store-tomb-at:<16-digit at>:<key>` | the store key                                          | age index: tombstone keys sort by key, so a bounded purge needs one by age           |
   | `store-meta:counts`                 | `{ total, prefixes: { "task:": n, ... }, tombstones }` | kept counts: every DO `list` reads values, and a full `task:` is large (_Send size_) |
 
-- **Who may write**, per `STORE_PREFIXES` and the leg:
+- **Who may write**, per `STORE_PREFIXES` and the leg. Each prefix's rule carries every policy
+  the relay applies — `appCreate`, `appWrite`, `termFenced`, `daemonCreate`, `deletes`,
+  `tombstone`, `cap` — and `relay/src/store.ts` names no prefix (store rules v2, 2026-10-20). A
+  daemon here is a registered socket; "leader" is the socket the current term was issued to,
+  with that term on the frame (`holdsTerm`).
 
-  | Prefix   | Leg    | create (`expect: 0`)                            | overwrite (`expect > 0`)                        | delete      |
-  | -------- | ------ | ----------------------------------------------- | ----------------------------------------------- | ----------- |
-  | `task:`  | app    | allowed                                         | `forbidden`                                     | `forbidden` |
-  | `task:`  | daemon | `not_leader`, or `forbidden` for the leader     | leader socket + current term, else `not_leader` | same        |
-  | `queue:` | app    | `forbidden`                                     | `forbidden`                                     | `forbidden` |
-  | `queue:` | daemon | leader socket + current term, else `not_leader` | same                                            | `forbidden` |
+  | Prefix      | Leg    | create (`expect: 0`)                        | overwrite (`expect > 0`)  | delete                    | Tombstone | Cap |
+  | ----------- | ------ | ------------------------------------------- | ------------------------- | ------------------------- | --------- | --- |
+  | `task:`     | app    | allowed                                     | `forbidden`               | `forbidden`               | yes       | 128 |
+  | `task:`     | daemon | `not_leader`, or `forbidden` for the leader | leader, else `not_leader` | leader, else `not_leader` |           |     |
+  | `queue:`    | app    | `forbidden`                                 | `forbidden`               | `forbidden`               | no        | 1   |
+  | `queue:`    | daemon | leader, else `not_leader`                   | leader, else `not_leader` | `forbidden`               |           |     |
+  | `settings:` | app    | `forbidden`                                 | `forbidden`               | `forbidden`               | no        | 8   |
+  | `settings:` | daemon | leader, else `not_leader`                   | leader, else `not_leader` | `forbidden`               |           |     |
+  | `account:`  | app    | allowed, create floor                       | allowed                   | `forbidden`               | no        | 64  |
+  | `account:`  | daemon | allowed, create floor                       | allowed                   | `forbidden`               |           |     |
+  | `quota:`    | app    | `forbidden`                                 | `forbidden`               | `forbidden`               | no        | 1   |
+  | `quota:`    | daemon | allowed, create floor                       | allowed                   | `forbidden`               |           |     |
 
   A `term` on an app frame is dropped by the parser, so it authorizes nothing: an app overwrite
-  carrying the current term is still `forbidden`. The relay refuses every delete under `queue:`,
-  the leader's included: no client deletes the pause (resume overwrites it), and `queue:` keeps no
-  tombstone, so a delete could only be a term holder silently erasing a person's pause, or
-  re-creating it from its own version-1 blob (Threat model, item 3). And no daemon creates under
-  `task:`, the leader included (2026-10-18, M3 review S4): since `submit` went only apps
-  enqueue, and the leader meets no create floor, so a create it could make was only ever a
-  create-and-delete loop (Threat model, item 3, the seed thief).
+  carrying the current term is still `forbidden`; on a prefix that is not term-fenced a daemon's
+  term is ignored the same way. The delete policy is checked first, so `deletes: "never"`
+  refuses the leader too. On `queue:` no client deletes the pause (resume overwrites it), and
+  with no tombstone a delete could only be a term holder silently erasing a person's pause, or
+  re-creating it from its own version-1 blob (Threat model, item 3). `settings:`, `account:` and
+  `quota:` are the same (owner decision #8): deterministic keys, where a tombstone would block
+  the one key that names the thing for 30 days, so they are cleared by overwrite. `settings:` is
+  a leader op's to write and every PSK holder's to read (#9); `account:` gives every registered
+  daemon socket an app's rights (#14: that leg needs a signed register on top of the token, so it
+  is harder to open than the app leg), and `quota:` is the daemons' alone — any daemon's, since
+  the fleet quota record is written by each machine on its own cadence. And no daemon creates
+  under `task:`, the leader included (2026-10-18, M3 review S4): since `submit` went only apps
+  enqueue, and the leader meets no create floor on a fenced prefix, so a create it could make was
+  only ever a create-and-delete loop (Threat model, item 3, the seed thief).
 
 - **The order of checks is the contract:** parse (`invalid_request`, `too_large`), then the rule
   (`forbidden`, `not_leader`), then the tombstone and the version (`version_conflict`), then the
-  app create floor (`rate_limited`), then the caps (`store_full`: records on a create, tombstones
+  create floor (`rate_limited`), then the caps (`store_full`: records on a create, tombstones
   on a delete), then the write. The version check precedes the floor and the caps so an enqueue
   retried after it landed always reads `version_conflict` — never `rate_limited` or `store_full`
   — and an idempotent retry is recognizable as such even against a full store; a retried delete
@@ -1589,8 +1627,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
   fits beside it with a 10-candidate decision; past that the leader cuts the stored decision. The
   cap was 32 KiB until 2026-10-17 (M2 review), when a full create left the leader no room for its
   own fields and its first write would have been `too_large`, leaving the task `queued` for good.
-- **Tombstones**, under `task:` only — the one prefix apps may create into, so the one where a
-  delete could otherwise be undone by re-creating from an old authentic blob. A delete leaves
+- **Tombstones**, under `task:` only — `tombstone` on its rule, the one prefix both creatable by
+  apps and deletable, so the one where a delete could otherwise be undone by re-creating from an
+  old authentic blob. The other prefixes refuse deletes, so have nothing to guard. A delete leaves
   `{ version, at }` and no env, for `STORE_TOMBSTONE_MS`: a put there is `version_conflict` at any
   `expect`, `get` reads `null`, `list` leaves the key out, and it counts toward neither record cap
   (it has one of its own, below). A put
@@ -1611,43 +1650,61 @@ enforces is what it can see: who is asking, the key, a version and a size.
   row from before the cap has no `tombstones`: the next delete counts the age index once and
   writes it. A refused prune is the library's to report (`store refused delete …`), and the
   record holds its slot until a delete fits.
-- **The create floor is the app leg's alone**: 60 creates per socket per 60 s
-  (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the app socket's
-  attachment (written on its first create, so it survives hibernation) and a fresh socket starting
-  a fresh window — the register limit's counterpart, bounding one connection's spend. Only a
-  create that lands counts: the window is written back after the put returns `ok`, so a
-  `version_conflict`, `store_full` or `rate_limited` leaves it untouched and a refusal cannot reset
-  it. No floor on the daemon leg: every write there is term-fenced, so only the leader writes, and
-  it creates no task, only its `queue:` singletons. Enqueue needs no leader: an app create lands
-  with no daemon connected.
-  **Constraint on M4:** the floor applies on the app leg only because every prefix is term-fenced
-  today. A prefix with `termFenced: false` (M4's `account:`) must extend the floor to daemon-leg
-  creates, since `/daemon` accepts any bearer token.
-- **Store caps**: a create past `MAX_TASKS` under `task:`, or past `MAX_RECORDS` in all, is
-  `store_full` on either leg. `queue:` is bounded only by the total. A delete past
-  `MAX_TOMBSTONES` is `store_full` too (_Tombstones_).
+- **The create floor** binds every app-leg create, and daemon-leg creates under a prefix that is
+  not term-fenced (`floorsCreate`): 60 creates per socket per 60 s
+  (`MAX_STORE_CREATES_PER_WINDOW`, `STORE_CREATE_WINDOW_MS`), the window on the socket's
+  attachment (written on its first create, so it survives hibernation; a re-register keeps a
+  daemon socket's) and a fresh socket starting a fresh window — the register limit's
+  counterpart, bounding one connection's spend. Only a create that lands counts: the window is
+  written back after the put returns `ok`, so a `version_conflict`, `store_full` or
+  `rate_limited` leaves it untouched and a refusal cannot reset it. On a fenced prefix the daemon
+  leg meets no floor: only the term holder writes there, and its creates are its own singletons
+  (`queue:`, `settings:`), bounded by their caps. Under `account:` and `quota:` any registered
+  daemon socket creates, and `/daemon` accepts any bearer token plus a self-minted signed
+  register, so the floor binds there as on the app leg (store rules v2, 2026-10-20). Enqueue
+  needs no leader: an app create lands with no daemon connected.
+- **Store caps**: a create past its prefix's `cap`, or past `MAX_RECORDS` in all, is
+  `store_full` on either leg. The caps (table above) sum to 202 of `MAX_RECORDS`' 256, checked in
+  `relay/test/store-rules.test.ts`, so no prefix's fill can starve another's and the 54 left are
+  room for a prefix M4 has yet to name (push subscriptions). Why each: `task:` is `MAX_TASKS`;
+  `queue:` holds the pause and nothing else; `settings:` a handful of leader-held singletons (the
+  VAPID keypair, the Linear key); `account:` one per Claude account the fleet signs into, far past
+  a personal fleet's handful; `quota:` the one fleet record (one per account would tell the relay
+  when each is in use). A delete past `MAX_TOMBSTONES` is `store_full` too (_Tombstones_).
 - **List floors** (2026-10-18, M3 review S4). A `store-list` reads every row under its prefix,
   128 for a full `task:`, and Durable Object reads are billed per row against a daily limit: 5M
   on the free plan, past which every storage op fails until 00:00 UTC, registers and routing
   included. Unrated, that was minutes of one looping token holder or a buggy client. So every
   socket but the term holder's spends two floors, and past either the list is `rate_limited`: a
-  per-socket window of 4 lists a minute (`MAX_LISTS_PER_WINDOW`, on the attachment as the create
-  floor's is, kept across a re-register), and a DO-wide token bucket per prefix holding 16 and
-  refilling one per 4 s (`LIST_BURST`, `LIST_REFILL_MS`). The bucket sets the bound: 21,600
-  lists a day, 2.8M rows at 128 each, about half the free limit. Exempt is the socket the
-  current term was issued to — a list carries no term — so a takeover is never refused; nothing
-  else lists today. The bucket is in memory, since storing it would write a row per list to guard
-  the rows a list reads; eviction resets it, which needs an idle spell no looping client allows. A
-  refusal spends neither floor and logs `store refused t=store-list leg=… code=rate_limited`.
-  Per prefix so that M4's `account:`, which apps list on open, cannot be throttled by `task:`.
+  per-socket window of 4 lists a minute per prefix (`MAX_LISTS_PER_WINDOW`, on the attachment as
+  the create floor's is, kept across a re-register), and a DO-wide token bucket per prefix
+  holding 16 and refilling one per 8 s (`LIST_BURST`, `LIST_REFILL_MS`). Both are per prefix so
+  that M4's `account:`, which apps list on open, never spends what a `task:` list needs, and the
+  reverse. The bucket sets the bound: 10,800 lists a day per prefix, and every prefix listed full
+  at that rate reads at most 10,800 × `MAX_RECORDS` (the caps' bound), 2.8M rows, about half the
+  free limit. The refill was 4 s until 2026-10-20, which held that bound for `task:` alone; with
+  five prefixes it would have read 4.4M (store rules v2). Exempt is the socket the current term
+  was issued to — a list carries no term — so a takeover is never refused. The bucket is in
+  memory, since storing it would write a row per list to guard the rows a list reads; eviction
+  resets it, which needs an idle spell no looping client allows. A refusal spends neither floor
+  and logs `store refused t=store-list leg=… code=rate_limited`.
   `store-get` stays unrated: one row each, so its bound is the socket's message rate, which
   nothing caps — a residual (Threat model, item 3).
 - **`store-changed { key, version }`** goes to the leader's daemon socket — the one its term was
-  issued to, found among the non-superseded daemon sockets — after every successful **app-leg**
-  write, which is always a create: app-leg deletes are `forbidden`. Daemon-leg writes are the leader socket's by construction, so a
-  write the leader did not make is an app-leg write. Nothing goes to followers, nothing for the
-  leader's own writes, and nothing with no leader connected: the next leader reconciles from
-  `store-list` at takeover. `#nudgeLeader` in `hub.ts` sends it.
+  issued to, found among the non-superseded daemon sockets — after every successful write that
+  socket did not make: an app's, or under a prefix that is not term-fenced another daemon's (a
+  follower's `quota:` write). Until store rules v2 every daemon-leg write was the leader's by
+  construction, so only app-leg writes nudged; `quota:` and `account:` ended that premise, so the
+  rule is now the writing socket, not the leg. Nothing goes to followers, nothing for the term
+  socket's own writes, and nothing with no leader connected: the next leader reconciles from
+  `store-list` at takeover. The leader acts only on `task:` keys (`Leader.onStoreChanged`).
+  `#nudgeLeader` in `hub.ts` sends it. After a write under an `appWrite` prefix (`account:`), on
+  either leg, it also goes to every app socket but the writer (`#nudgeApps`), so an alias set in
+  one client shows in another; `task:` is creatable by apps but not app-writable, and its changes
+  reach apps as the leader's `queue-changed`. Only send failures are logged — a line per fan-out
+  would be a timeline of edits. An app-client from before this drops the frame
+  (`wire dropped reason=frame`): it has no `re`, so it is no reply; handling it is the account
+  records' item.
 - **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…`, with no `key=` on
   `version_conflict` (the normal answer to an enqueue retry and to leader races, so a key with a
   time would link task ids to retries) — and none for an accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
@@ -1692,8 +1749,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
 - **Older and newer clients.** Unknown fields are ignored (`after` on a list); an unknown `t`
   parses to null and is dropped; a store frame with no usable `id` is dropped and logged, the
   socket stays usable (the relay cannot answer what it cannot correlate); one with an `id` and a
-  bad field is answered `invalid_request`. `account:` is `invalid_request` until M4 adds the
-  prefix to `STORE_PREFIXES`.
+  bad field is answered `invalid_request`, as is an unknown prefix. An older client's
+  `STORE_KEY_PATTERN` knows only the prefixes it was built with, so it rejects a newer prefix's
+  key locally; the relay accepts what its own `STORE_PREFIXES` lists.
 - **Atomicity.** `RelayStore` reads, then writes with storage-only awaits: DO input gates deliver
   no other event while a storage operation is pending, and writes issued with no `await` between
   them commit together — the rule `#register`'s count-then-put relies on. The put's record and

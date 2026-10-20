@@ -100,18 +100,21 @@ store leg", "The queue store", "The leader"). All shapes land in `shared/src/typ
 schema of record; where a sketch here disagrees with it, `types.ts` wins. What M4 adds:
 
 - **Store ops** (M3; DESIGN.md _Scheduler_, "The store"). Who may write is a rule per key
-  prefix, applied by the relay. M4 adds prefixes:
+  prefix, applied by the relay; store rules v2 (M4 wave 0, below) put every policy on the
+  prefix's `STORE_PREFIXES` entry and added M4's prefixes:
 
-  | Prefix           | Create          | Overwrite / delete               | Term-fenced | Lands |
-  | ---------------- | --------------- | -------------------------------- | ----------- | ----- |
-  | `task:<id>`      | any app, leader | leader only                      | yes         | M3    |
-  | `queue:pause`    | leader only     | leader overwrites; never deleted | yes         | M3    |
-  | `account:<hmac>` | any app         | any app, by `expect` (CAS)       | no          | M4    |
+  | Prefix            | Create                         | Overwrite                            | Delete      | Term-fenced | Cap | Lands |
+  | ----------------- | ------------------------------ | ------------------------------------ | ----------- | ----------- | --- | ----- |
+  | `task:<id>`       | any app                        | leader only                          | leader only | yes         | 128 | M3    |
+  | `queue:pause`     | leader only                    | leader only                          | never       | yes         | 1   | M3    |
+  | `settings:<name>` | leader only                    | leader only                          | never       | yes         | 8   | M4    |
+  | `account:<hmac>`  | any app, any registered daemon | any app, any registered daemon (CAS) | never       | no          | 64  | M4    |
+  | `quota:<name>`    | any registered daemon          | any registered daemon (CAS)          | never       | no          | 1   | M4    |
 
-  App-writable records exist for state a person edits from any client with no leader up — an
-  account's alias first. M4's `settings`, push subscriptions and the fleet quota record need
-  prefixes of their own in `STORE_PREFIXES`, decided with each item, under one policy that
-  lands before any of them ("Store rules v2", M4 below).
+  Only `task:` tombstones. App-writable records exist for state a person edits from any client
+  with no leader up — an account's alias first. Push subscriptions still need a prefix of their
+  own, decided with Settings and Web Push, within the 54 records the caps leave of
+  `MAX_RECORDS`.
 
 - **Version binding** — the reader's rules (`bindTaskRecord`) are DESIGN.md _Scheduler_, "Task
   records and the app's store leg". They close rollback against a token holder, not the relay
@@ -390,7 +393,7 @@ precede. Wave 2 waits on the wave-1 item named.
 
 | Wave | Item                                                               | Depends on                                                             | Size                     |
 | ---- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------ |
-| 0    | Store rules v2 (relay)                                             | the review's S4 store bounds; #29                                      | —                        |
+| 0    | Store rules v2 (relay) — **Done**                                  | the review's S4 store bounds; #29                                      | —                        |
 | 0    | One schema PR for every M4 shape — **Done**                        | the owner's calls below                                                | —                        |
 | 0    | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
@@ -409,7 +412,7 @@ precede. Wave 2 waits on the wave-1 item named.
 
 **Wave 0.** Owned by the review's relay and daemon sessions, not planned here in full:
 
-- **Store rules v2**, one relay PR before any new prefix:
+- **Store rules v2** — **Done**, one relay PR before any new prefix:
   - a per-prefix tombstone flag, off for deterministic keys;
   - per-prefix caps sized so caps plus singletons fit `MAX_RECORDS`;
   - a delete policy per prefix;
@@ -421,6 +424,21 @@ precede. Wave 2 waits on the wave-1 item named.
 
   M4's first app-side `store-list` (`account:` on open) means any `store-list` rate bucket must be
   per prefix, or it throttles that list against takeover.
+
+  _As built (2026-10-20):_ each `STORE_PREFIXES` rule carries `appCreate`, `appWrite`,
+  `termFenced`, `daemonCreate`, `deletes` (`leader` | `never`), `tombstone` and `cap`, and
+  `relay/src/store.ts` names no prefix. New prefixes `settings:` (leader only, #9), `account:`
+  (apps and registered daemons, #14) and `quota:` (registered daemons); deletes refused on all but
+  `task:` (#8). Caps: 128 / 1 / 8 / 64 / 1 (`task:`, `queue:`, `settings:`, `account:`,
+  `quota:`), 202 of 256. Store frames on `/daemon` before an accepted register are
+  `forbidden`, reads included. `store-changed` goes to the leader for any write its term socket
+  did not make, and to other apps for `account:` writes; the app-client drops it until account
+  records handle it. Both list floors are per prefix, and the bucket's refill moved 4 s → 8 s so
+  every prefix listed full stays about half the free daily reads. The ciphertext caps were
+  already measured in bytes on the relay since #29; nothing else enforces them on untrusted
+  input. Residual: with deletes refused, a token holder's junk under `account:` or `quota:` holds
+  its slots until an operator edits the DO's storage (DESIGN.md Threat model, item 3).
+  DESIGN.md _Scheduler_, "The store", is the record.
 
 - **One schema PR**, every M4 shape in `types.ts` and `parse.ts` at once. **Done** 2026-10-20;
   DESIGN.md _Wire protocol_ ("M4's shapes landed ahead of their items") records each shape and
@@ -435,7 +453,7 @@ precede. Wave 2 waits on the wave-1 item named.
     `invalid_request` until the Web Push PR adds its handler and `OP_TIMEOUT_MS` entry;
   - push subscriptions, the VAPID key pair and the Linear key are one `settings` record.
 
-  The prefixes stay unaccepted until store rules v2.
+  Store rules v2, above, accepts the prefixes.
 
 - **Daemon seams.**
   - An injectable `httpFetch` and clock through `startDaemon`, the leader and telemetry. Without them
@@ -640,10 +658,10 @@ precede. Wave 2 waits on the wave-1 item named.
   account id — clearing an alias falls back to the email. Exit: an alias set in one client shows
   in another; a record whose `accountId` does not hash to its key is ignored (shared + e2e).
   Record: DESIGN.md _Threat model_ (the HKDF label, what the key reveals).
-  - _Correction (R2), deleting an alias:_ the relay tombstones every prefix apps can create into,
-    and a standing tombstone refuses every put for 30 days. Account keys are a deterministic HMAC,
-    so under today's rules a token holder's delete blocks that alias for 30 days; it is not
-    "retyped in a second". Today `parse.test.ts` asserts `account:` is refused.
+  - _Correction (R2), deleting an alias:_ the relay tombstoned every prefix apps could create
+    into, and a standing tombstone refuses every put for 30 days. Account keys are a deterministic
+    HMAC, so under those rules a token holder's delete would have blocked that alias for 30 days.
+    Store rules v2 resolved it by #8 below: no delete, no tombstone; `account:` is accepted.
   - _Decided (#8):_ refuse deletes on `account:`, `quota:` and `settings:` as on `queue:`, with no
     tombstone; clear by overwrite.
   - _Decided (#14):_ DESIGN.md records the HKDF salt, label and input. `termFenced: false` gives
@@ -851,10 +869,11 @@ same PR, with the reason.
   exists (rotate) — which stops new junk but clears none: junk stays until removed by hand, and
   a full `task:` refuses every enqueue until a person clears the unreadable records from the Queue screen (`discard`; DESIGN.md Threat model, item 3, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
   M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
-  M4's account records add a smaller one: being app-writable, a token holder can delete an
-  alias or overwrite it with junk that readers skip — but not read, forge or roll one back. Under
-  today's tombstones a delete blocks that alias for 30 days rather than being retyped in a second
-  (M4, _Account records_). Holding the leader's term would be a larger act — next item.
+  M4's account records add a smaller one: being app-writable, a token holder can overwrite an
+  alias with junk that readers skip — but not read, forge or roll one back, and not delete it,
+  since `account:` refuses deletes (#8); the next real edit overwrites the junk. It can also create
+  junk account keys up to the prefix's cap, which nothing in the product removes (DESIGN.md
+  Threat model, item 3). Holding the leader's term would be a larger act — next item.
 - **Leader capture** (decided 2026-10-16, M2 and M3's gate; built). A bearer-token holder could
   mint a capable id and outlast a real leader's socket. The relay now nominates only
   `SCHEDULER_LEADERS`, a Worker secret, and apps believe a nominee only with its `lead-proof`. The
