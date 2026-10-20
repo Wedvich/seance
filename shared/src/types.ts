@@ -803,8 +803,8 @@ export type QuotaSource = (typeof QUOTA_SOURCES)[number];
 
 /**
  * One account's newest quota observation on this daemon. Keys are short and
- * every number an integer: the whole `status` must fit a DO socket attachment
- * (2 KiB, shared with the socket's identity), and the inputs are already
+ * every number an integer: the whole `status` is padded to `STATUS_MAX_CT_LENGTH`
+ * and sent to every app every 30s, and the inputs are already
  * smoothed or stepped, so a float would claim precision nobody has.
  */
 export interface ScopedWindow {
@@ -842,14 +842,13 @@ export interface QuotaObservation {
    */
   readonly c?: number;
   /**
-   * Credits spent and the monthly cap in hundredths of `cc` (4104 is $41.04),
-   * whatever exponent the cache used — the daemon rescales, readers divide by
-   * 100. For the card's "$41.04 of $50.00". All three or none, and only beside `c`.
+   * Credits spent and the monthly cap in cents (4104 is $41.04) — credits are
+   * USD — whatever exponent the cache used: the daemon rescales, readers divide
+   * by 100. What routing decides spent on (`c` rounds), and the card's "$41 of
+   * $50". Both or neither, and only beside `c`.
    */
   readonly cu?: number;
   readonly cl?: number;
-  /** ISO 4217 code, as the cache names it. */
-  readonly cc?: string;
   readonly s: QuotaSource;
   /** Observed at, unix seconds. */
   readonly at: number;

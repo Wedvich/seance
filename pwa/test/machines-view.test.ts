@@ -163,9 +163,9 @@ describe("deriveMachines", () => {
   });
 
   test("credits show only while a window is full, a past reset not counting; spent of cap in whole units", () => {
-    type Window = { h?: number; hr?: number; w?: { m: string; p: number }[]; cu?: number };
+    type Window = { h?: number; hr?: number; w?: { m: string; p: number }[]; cu?: number; at?: number };
     const labels = (window: Window): string[] => {
-      const quota = [{ x: 0, s: "cache" as const, at: S - 60, d: 40, c: 84, cu: 4177, cl: 5000, cc: "USD", ...window }];
+      const quota = [{ x: 0, s: "cache" as const, at: S - 60, d: 40, c: 84, cu: 4177, cl: 5000, ...window }];
       const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
       return account?.bars.map((bar) => [bar.label, `${bar.pct}%`, bar.note].join(" ").trim()) ?? [];
     };
@@ -173,9 +173,11 @@ describe("deriveMachines", () => {
     expect(labels({ h: 100 })).toEqual(["5h 100%", "7d 40%", "Credits 84% $42 of $50"]);
     expect(labels({ h: 100, hr: S - 1 })).toEqual(["5h 0% reset", "7d 40%"]);
     expect(labels({ w: [{ m: "Fable", p: 100 }] })).toEqual(["7d 40%", "7d Fable 100%", "Credits 84% $42 of $50"]);
-    // A trimmed status keeps `c` but loses the amounts: the note is empty.
-    const trimmed = labels({ h: 100, cu: undefined });
-    expect(trimmed.at(-1)).toBe("Credits 84%");
+    // A daemon that predates the amounts sends `c` alone: the note is empty.
+    const bare = labels({ h: 100, cu: undefined });
+    expect(bare.at(-1)).toBe("Credits 84%");
+    // Credits reset at 00:00 UTC on the 1st: last month's figure shows no bar.
+    expect(labels({ h: 100, at: Date.UTC(2027, 0, 1) / 1000 - 1 })).toEqual(["5h 100%", "7d 40%"]);
   });
 
   // The newest observer is asleep, or predates `metrics`: any online host still

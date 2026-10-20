@@ -230,8 +230,8 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, w: [{ m: "Fable", p: 25, r: -1 }] }] })).toBeNull();
   });
 
-  test("credit amounts come all three or none, and only beside the percent", () => {
-    const credits = { c: 82, cu: 4104, cl: 5000, cc: "USD" };
+  test("credit amounts come both or neither, and only beside the percent", () => {
+    const credits = { c: 82, cu: 4104, cl: 5000 };
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...credits }] })?.quota?.[0]).toEqual({
       ...quota,
       ...credits,
@@ -239,9 +239,8 @@ describe("parseMachineStatus", () => {
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, c: 82 }] })).not.toBeNull();
     const { c: _c, ...amounts } = credits;
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...amounts }] })).toBeNull();
-    const { cc: _cc, ...uncoded } = credits;
-    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...uncoded }] })).toBeNull();
-    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...credits, cc: "usd" }] })).toBeNull();
+    const { cl: _cl, ...uncapped } = credits;
+    expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...uncapped }] })).toBeNull();
     expect(parseMachineStatus({ ...status, quota: [{ ...quota, ...credits, cu: 41.5 }] })).toBeNull();
   });
 

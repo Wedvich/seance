@@ -359,27 +359,25 @@ export async function readCachedQuota(
 /**
  * Credits spent as whole percent of the monthly cap, from the minor-unit
  * amounts rather than `utilization`, which the cache leaves null at zero spent;
- * the amounts beside it, rescaled from the cache's exponent to hundredths, when
- * the cache names their currency and exponent. Null when credits are off or
+ * the amounts beside it, rescaled from the cache's exponent to cents, when
+ * the cache names the exponent. Credits are USD, so its `currency` goes unread. Null when credits are off or
  * uncapped: no cap, no percentage.
  */
-function creditsOf(extra: unknown): Pick<QuotaObservation, "c" | "cu" | "cl" | "cc"> | null {
+function creditsOf(extra: unknown): Pick<QuotaObservation, "c" | "cu" | "cl"> | null {
   if (!isRecord(extra) || extra["is_enabled"] !== true) return null;
   const used = extra["used_credits"];
   const limit = extra["monthly_limit"];
   if (typeof used !== "number" || !Number.isFinite(used) || used < 0) return null;
   if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return null;
   const c = extra["spend_limit_reached"] === true ? 100 : Math.min(100, Math.round((used / limit) * 100));
-  const currency = extra["currency"];
   const places = extra["decimal_places"];
-  if (typeof currency !== "string" || !/^[A-Z]{3}$/u.test(currency)) return { c };
   if (typeof places !== "number" || !Number.isInteger(places) || places < 0 || places > 4) return { c };
-  // Spent rounds down, so a finer currency never reads as more spent than it was.
+  // Spent rounds down, so a finer exponent never reads as more spent than it was.
   const scale = 10 ** (2 - places);
   const cu = Math.floor(used * scale);
   const cl = Math.round(limit * scale);
   if (!Number.isSafeInteger(cu) || !Number.isSafeInteger(cl)) return { c };
-  return { c, cu, cl, cc: currency };
+  return { c, cu, cl };
 }
 
 function scopedWindows(limits: unknown): readonly ScopedWindow[] {

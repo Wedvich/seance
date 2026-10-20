@@ -140,7 +140,6 @@ describe("createTelemetry", () => {
           c: 82,
           cu: 4104,
           cl: 5000,
-          cc: "USD",
         },
       ],
     });
@@ -402,28 +401,28 @@ describe("readCachedQuota", () => {
         JSON.stringify({ cachedUsageUtilization: { fetchedAtMs: 5_000, utilization: { extra_usage: extra } } }),
       );
       const q = await readCachedQuota(file, 0);
-      return q === null ? undefined : { c: q.c, cu: q.cu, cl: q.cl, cc: q.cc };
+      return q === null ? undefined : { c: q.c, cu: q.cu, cl: q.cl };
     };
     const on = { is_enabled: true, monthly_limit: 5000, currency: "USD", decimal_places: 2 };
     // Zero spent leaves the cache's `utilization` null; the amounts still say 0%.
-    const usd = { cl: 5000, cc: "USD" };
-    expect(await credits({ ...on, used_credits: 0, utilization: null })).toEqual({ c: 0, cu: 0, ...usd });
+    const cap = { cl: 5000 };
+    expect(await credits({ ...on, used_credits: 0, utilization: null })).toEqual({ c: 0, cu: 0, ...cap });
     // The percent rounds; the amounts stay exact, so $49.99 reads as such beside 100%.
-    expect(await credits({ ...on, used_credits: 4999 })).toEqual({ c: 100, cu: 4999, ...usd });
+    expect(await credits({ ...on, used_credits: 4999 })).toEqual({ c: 100, cu: 4999, ...cap });
     expect(await credits({ ...on, used_credits: 10, spend_limit_reached: true })).toMatchObject({ c: 100 });
     // Another exponent is rescaled to hundredths, spent rounding down.
     expect(await credits({ ...on, used_credits: 41_049, monthly_limit: 50_000, decimal_places: 3 })).toEqual({
       c: 82,
       cu: 4104,
-      ...usd,
+      ...cap,
     });
     expect(await credits({ ...on, used_credits: 41, monthly_limit: 50, decimal_places: 0 })).toEqual({
       c: 82,
       cu: 4100,
-      ...usd,
+      ...cap,
     });
-    // A currency or exponent the cache doesn't name leaves the percent alone.
-    expect(await credits({ ...on, used_credits: 2500, currency: null })).toEqual({ c: 50 });
+    // An exponent the cache doesn't name leaves the percent alone; the currency is never read.
+    expect(await credits({ ...on, used_credits: 2500, currency: null })).toEqual({ c: 50, cu: 2500, ...cap });
     expect(await credits({ ...on, used_credits: 2500, decimal_places: undefined })).toEqual({ c: 50 });
     expect(await credits({ ...on, used_credits: 4104, is_enabled: false })).toBeUndefined();
     expect(await credits({ ...on, used_credits: 4104, monthly_limit: null })).toBeUndefined();

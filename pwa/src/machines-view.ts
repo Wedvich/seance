@@ -5,6 +5,7 @@ import {
   METRIC_NAMES,
   MIN_FREE_MIB,
   newestQuotaByAccount,
+  sameCreditMonth,
   schedulerRole,
   type ExclaveInfo,
   type Machine,
@@ -253,27 +254,30 @@ function quotaBar(label: string, pct: number, resetsAt: number | undefined, now:
 /**
  * Credits show only while a window is full: that is when use spills into them,
  * and until then they are a monthly figure nothing on the card is spending.
+ * Last month's figure says nothing about this one's, so it shows no bar.
  */
 function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
   const bars: QuotaBar[] = [];
   if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
   if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
   for (const window of observation.w ?? []) bars.push(quotaBar(`7d ${window.m}`, window.p, window.r, now));
-  if (observation.c === undefined || !bars.some((bar) => bar.pct >= 100)) return bars;
+  if (observation.c === undefined || !sameCreditMonth(observation.at, now / 1000)) return bars;
+  if (!bars.some((bar) => bar.pct >= 100)) return bars;
   return [...bars, creditsBar(observation)];
 }
+
+const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
 /**
  * A percent like every other row, with "$42 of $50" where a reset goes: the
  * fraction is what the row answers, and whole units keep the note inside the
  * column's floor, so a card spilling into credits keeps its track length.
  * Without amounts (trimmed, or a daemon that predates them) the note is empty.
- * The daemon sends hundredths, whatever the currency.
+ * The daemon sends cents.
  */
-function creditsBar({ c, cu, cl, cc }: QuotaObservation): QuotaBar {
+function creditsBar({ c, cu, cl }: QuotaObservation): QuotaBar {
   const bar = gauge("Credits", c ?? 0);
-  if (cu === undefined || cl === undefined || cc === undefined) return { ...bar, note: null };
-  const money = new Intl.NumberFormat("en-US", { style: "currency", currency: cc, maximumFractionDigits: 0 });
+  if (cu === undefined || cl === undefined) return { ...bar, note: null };
   return { ...bar, note: `${money.format(cu / 100)} of ${money.format(cl / 100)}` };
 }
 

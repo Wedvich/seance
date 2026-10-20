@@ -808,8 +808,8 @@ The Durable Object persists a machine registry:
 - **The status bound is 1.5 KiB** (2026-10-20, raised from 1 KiB). The 1 KiB came from
   Cloudflare's 2 KiB attachment cap, shared with the identity; that cap is now 16 KiB.
   What bounds it instead is cost: every status is padded to the bound, sent every 30s to
-  every app and carried once per live machine in the `registry` push. 1.5 KiB holds five
-  exclaves' quota with every field (credit amounts included), six without the amounts.
+  every app and carried once per live machine in the `registry` push. 1.5 KiB holds six
+  exclaves' quota with every field, seven without the per-model windows.
   Rejected: 2 KiB (eight exclaves) — headroom no machine needs, paid on every frame. The
   relay must deploy before any daemon built with the new bound, or that daemon's statuses
   over 1 KiB are refused until it does.
@@ -848,7 +848,7 @@ The Durable Object persists a machine registry:
   blob) and a separate per-account store (a new write, and an account record
   is M4's). Bounded at `STATUS_MAX_CT_LENGTH` (1.5 KiB of ciphertext, checked in
   `relay/src/wire.ts`; the daemon trims its blob to fit, `daemon/src/status.ts`,
-  credit amounts first) and floored per socket at `STATUS_MIN_INTERVAL_MS`
+  per-model windows first) and floored per socket at `STATUS_MIN_INTERVAL_MS`
   like `register`'s rate limit; under the floor is dropped, not closed. A
   register clears the socket's snapshot — it indexes the blob just replaced —
   and the floor with it, so the status the daemon sends right after every
@@ -1930,9 +1930,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   a task's share of a week is a fraction of its share of five hours); the filter additionally treats a window resetting within 15 min as
   empty. An exclave with extra usage on is scored past the line and its candidate
   carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off. Credits
-  spent to the cap (`c` at 100 on the account's reading) can't take a spill, so that exclave is
+  spent to the cap (`cu` reaching `cl` on the account's reading; `c` at 100 only from a daemon
+  that predates the amounts — `c` rounds for the card, so it alone can say 100 with credits
+  left) can't take a spill, so that exclave is
   `quota_over_line` with `creditsSpent` instead. A reading without `c` (a daemon that predates
-  it, or a trimmed status) still spills: refusing it would stop every spill until the fleet
+  it, or a trimmed status), or one from before this UTC month (credits reset then), still spills: refusing it would stop every spill until the fleet
   upgrades, and the spill alert still says credits are being spent.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
 - **Seats** (2026-10-18, docs/scheduler.md Settled defaults 17). `SchedulerConfig.seats`
@@ -3234,9 +3236,10 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   `.claude.json` (`cachedUsageUtilization`: the 5h and 7d windows, and the
   per-model weekly caps from its `limits`, keyed by display name since the id
   is not cached, and `c`, usage credits spent as a percent of the monthly cap from
-  `extra_usage`'s amounts — absent when credits are off or uncapped — with `cu`/`cl`/`cc`,
-  spent and cap in hundredths of their currency (the daemon rescales from the cache's
-  exponent, so readers always divide by 100), when the cache names both; source `cache`, stamped at its fetch time, capped a minute past
+  `extra_usage`'s amounts and rounded for the card — absent when credits are off or uncapped —
+  with `cu`/`cl`, spent and cap in cents (credits are USD, so the cache's `currency` goes
+  unread; the daemon rescales from its exponent, so readers always divide by 100), when the
+  cache names the exponent; source `cache`, stamped at its fetch time, capped a minute past
   now so one far-future stamp can't stay "newest" for an account). The three pressure
   numbers are smoothed daemon-side over ~2 min with a time-aware weight, so a
   laptop back from sleep resets to its first reading instead of trusting a stale
@@ -3294,7 +3297,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   rescan while a re-register happens only on a changed set, and a reader drops
   a status whose stamp disagrees with the blob it holds — and trimmed to the
   relay's bound when a machine's exclaves outgrow it (`daemon/src/status.ts`:
-  credit amounts, then per-model windows, then reset stamps, then quota from the last exclave down,
+  per-model windows, then reset stamps, then quota from the last exclave down — never the
+  credits alone, which routing reads —
   marking the status with `tr`; pressure and sessions always fit, and the trim
   is logged once) and then padded to one sealed length. Sent after
   each register too, re-arming the beat so the next lands past the relay's
@@ -3952,7 +3956,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the cache only through `/usage`, so a machine whose newer cache never saw one must not
   erase another's; a window with no reset fills only from a reading under one window length
   older, since nothing else would ever expire it; credits `c` carry no reset (the cache
-  doesn't say when the month turns), so they fill from a reading under 31 days older.
+  doesn't say when the month turns), so they are taken to reset at 00:00 UTC on the 1st
+  (`sameCreditMonth`): they fill only from a reading in the same UTC month, and routing
+  and the card read last month's as unknown, never as spent.
   A Credits bar (percent of the cap like every row, "$42 of $50" in whole units where
   a reset goes) shows only while one of the card's windows, per-model weeklies included, reads
   100% after the reset floor — that is when use spills into credits, and until then the

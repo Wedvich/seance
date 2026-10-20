@@ -296,7 +296,7 @@ describe("filter", () => {
 
     // Spending credits that are already at the cap would launch a task that can't run.
     test("extra usage on but credits spent: filtered, never spilled; credits unreported still spill", () => {
-      const over = (credits: { c?: number }): ReturnType<typeof only> =>
+      const over = (credits: { c?: number; cu?: number; cl?: number; at?: number }): ReturnType<typeof only> =>
         only(
           decide([
             machine("a", {
@@ -312,6 +312,12 @@ describe("filter", () => {
       expect(spent.spill).toBeUndefined();
       expect(over({ c: 99 }).spill).toEqual({ window: "5h", projectedPct: 100 });
       expect(over({}).spill).toEqual({ window: "5h", projectedPct: 100 });
+      // The amounts decide when present: the percent rounds, so 100 there can leave credits to spend.
+      expect(over({ c: 100, cu: 4980, cl: 5000 }).spill).toEqual({ window: "5h", projectedPct: 100 });
+      expect(over({ c: 100, cu: 5000, cl: 5000 }).spill).toBeUndefined();
+      // Credits reset at 00:00 UTC on the 1st: last month's spent reads as unknown, not spent.
+      const lastMonth = Date.UTC(2027, 0, 1) / 1000 - 1;
+      expect(over({ c: 100, cu: 5000, cl: 5000, at: lastMonth }).spill).toEqual({ window: "5h", projectedPct: 100 });
     });
 
     test("extra usage unknown (null) reads as off", () => {

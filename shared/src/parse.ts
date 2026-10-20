@@ -310,7 +310,7 @@ export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> |
   if (!isOptionalUint(h) || !isOptionalUint(d) || !isOptionalUint(hr) || !isOptionalUint(dr)) return null;
   if (!isOptionalUint(c)) return null;
   const credits = parseCreditAmounts(value);
-  if (credits === null || (c === undefined && credits.cc !== undefined)) return null;
+  if (credits === null || (c === undefined && credits.cu !== undefined)) return null;
   const w = value["w"] === undefined ? undefined : parseList(value["w"], parseScopedWindow);
   if (w === null) return null;
   return {
@@ -326,14 +326,12 @@ export function parseQuotaReading(value: unknown): Omit<QuotaObservation, "x"> |
   };
 }
 
-const CURRENCY_CODE = /^[A-Z]{3}$/u;
-
-/** `cu`, `cl` and `cc` together or not at all: an amount without its currency or cap reads as nothing. */
-function parseCreditAmounts(value: Record<string, unknown>): Pick<QuotaObservation, "cu" | "cl" | "cc"> | null {
-  const { cu, cl, cc } = value;
-  if (cu === undefined && cl === undefined && cc === undefined) return {};
-  if (!isUint(cu) || !isUint(cl) || typeof cc !== "string" || !CURRENCY_CODE.test(cc)) return null;
-  return { cu, cl, cc };
+/** `cu` and `cl` together or not at all: spent without its cap reads as nothing. */
+function parseCreditAmounts(value: Record<string, unknown>): Pick<QuotaObservation, "cu" | "cl"> | null {
+  const { cu, cl } = value;
+  if (cu === undefined && cl === undefined) return {};
+  if (!isUint(cu) || !isUint(cl)) return null;
+  return { cu, cl };
 }
 
 function parseQuotaObservation(value: unknown): QuotaObservation | null {
