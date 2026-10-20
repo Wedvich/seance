@@ -400,7 +400,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security), rebased and landed | —                                                                      | —                        |
 | 1    | Authoring surface (new)                                                     | —                                                                      | M                        |
 | 1    | Settings and Web Push, in three PRs                                         | store rules v2; the fetch seam                                         | L                        |
-| 1    | `/usage` refresh (was: OAuth quota poll) — **Done**                         | — (spiked 2026-10-20)                                                  | S–M                      |
+| 1    | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)               | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1    | Skills filter                                                               | —                                                                      | S; M with project skills |
 | 1    | Proxmox node view                                                           | the token decision                                                     | M–L                      |
 | 1    | Account records                                                             | store rules v2                                                         | M                        |
@@ -480,7 +480,7 @@ precede. Wave 2 waits on the wave-1 item named.
   - _Proposed (#5), the handoff preamble:_ drop the transcript path from v1. Nothing on the leader
     knows it, so the PR is the handoff.
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
-  #13 lapse with it; **Done** 2026-10-20, recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
+  #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
   `claude --safe-mode --output-format json -p /usage` with the exclave's config dir, and Claude
   Code refreshes `cachedUsageUtilization` in place. The daemon reads no token, calls no endpoint
   and never refreshes a login: Claude Code does all three under its own rules, so the
