@@ -36,7 +36,6 @@ import {
   type PushSubscribeRequest,
   type QuotaReading,
   type SettingsRecord,
-  type TaskBase,
   type VapidKeys,
   type WebPushSubscription,
   type BranchState,
@@ -256,7 +255,9 @@ const REF_FORBIDDEN = new Set(["~", "^", ":", "?", "*", "[", "\\", " "]);
  * component starting `.` or ending `.lock`; not ending `.`; not `@`. Plus what
  * `--branch` refuses — a leading `-`, which would read as an option, and `HEAD`.
  * Bounded by `BRANCH_MAX_LENGTH`. The one copy, for every hop that hands a branch
- * to git: `SpawnRequest.baseBranch` and `TaskBase.branch`.
+ * to git: the leader, on the predecessor's `Task.branch` before it sends one
+ * (decided #4: the base is that branch, never one an app names), and the daemon
+ * on `SpawnRequest.baseBranch`.
  */
 export function isBranchName(value: unknown): value is string {
   if (typeof value !== "string" || value === "" || value.length > BRANCH_MAX_LENGTH) return false;
@@ -619,15 +620,6 @@ function parsePlacement(value: unknown): Placement | null {
   return isRoutingId(deviceId) && isPlacementField(exclave) ? { deviceId, exclave } : null;
 }
 
-/** A placement, and the branch a stacked task starts from — held to `isBranchName`, since git acts on it. */
-function parseBase(value: unknown): TaskBase | null {
-  const placement = parsePlacement(value);
-  if (placement === null || !isRecord(value)) return null;
-  const { branch } = value;
-  if (branch === undefined) return placement;
-  return isBranchName(branch) ? { ...placement, branch } : null;
-}
-
 function parsePin(value: unknown): TaskSpec["pin"] | null {
   if (!isRecord(value)) return null;
   const { deviceId, exclave } = value;
@@ -681,7 +673,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const { pin, lineage, base, batch, deps, linear, client, until } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
   const continues = lineage === undefined ? undefined : parsePlacement(lineage);
-  const builds = base === undefined ? undefined : parseBase(base);
+  const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const edges = deps === undefined ? undefined : parseList(deps, parseDep);
   const issue = linear === undefined ? undefined : parseLinear(linear);

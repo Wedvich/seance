@@ -1531,16 +1531,6 @@ export const TASK_SPEC_LIMITS = {
 } as const;
 
 /**
- * Where the work a task builds on lives (M4, stacking): the placement drives
- * `dependency_distance`, and `branch`, by `isBranchName`, is the predecessor's
- * branch its worktree starts from (`SpawnRequest.baseBranch`). An older leader
- * keeps the placement and drops `branch`.
- */
-export interface TaskBase extends Placement {
-  readonly branch?: string;
-}
-
-/**
  * What settles a task (M4, decided #21). `merged`, the default: its merge, as
  * today. `reported`: a merge is recorded but settles nothing; only its
  * session's `done` report, `mark-done` or Linear Done does.
@@ -1556,7 +1546,7 @@ export interface TaskSpec extends TaskRequest {
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
   /** Where the work this task builds on lives (M4's stacking fills it; unset today). */
-  readonly base?: TaskBase;
+  readonly base?: Placement;
   /**
    * Absent is `merged`. An older leader drops it and settles at the merge, so a
    * `reported` task enqueued under one finishes early; its `after: "done"`

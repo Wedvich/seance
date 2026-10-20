@@ -29,6 +29,8 @@ describe("parseSessionEventFrame", () => {
     });
     expect(parseSessionEventFrame(frame({}))).toBeNull();
     expect(parseSessionEventFrame(frame({ state: "asleep" }))).toBeNull();
+    // In the schema ahead of its act (#21): ingest refuses it as it did any unknown state.
+    expect(parseSessionEventFrame(frame({ state: "done", pane: "%1" }))).toBeNull();
     expect(parseSessionEventFrame({ v: 2, kind: "session-event", state: "busy" })).toBeNull();
   });
 
