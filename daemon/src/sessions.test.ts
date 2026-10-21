@@ -147,6 +147,7 @@ interface InfoLine {
   readonly ours?: string;
   readonly dead?: string;
   readonly deadTime?: string;
+  readonly deadStatus?: string;
   readonly titled?: string;
   readonly name?: string;
   readonly task?: string;
@@ -162,6 +163,7 @@ function infoLine(fields: InfoLine): string {
     fields.ours ?? "1",
     fields.dead ?? "0",
     fields.deadTime ?? "",
+    fields.deadStatus ?? "",
     fields.titled ?? "1",
     fields.name ?? "task",
     fields.task ?? "",
@@ -183,6 +185,7 @@ describe("parsePaneInfo", () => {
         ours: true,
         dead: false,
         deadAt: null,
+        deadStatus: null,
         titled: true,
         command: "claude",
         path: "/Users/m/repos/seance",
@@ -195,12 +198,25 @@ describe("parsePaneInfo", () => {
         ours: true,
         dead: true,
         deadAt: 1_760_000_000_000,
+        deadStatus: null,
         titled: false,
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
       },
     ]);
+  });
+
+  test("an exit status only for a dead pane, and only one a process can exit with", () => {
+    const status = (fields: Partial<InfoLine>): number | null | undefined =>
+      parsePaneInfo(infoLine({ pane: "%1", ...fields }))[0]?.deadStatus;
+    expect(status({ dead: "1", deadStatus: "3" })).toBe(3);
+    expect(status({ dead: "1", deadStatus: "0" })).toBe(0);
+    // A signal death: tmux leaves the field empty.
+    expect(status({ dead: "1", deadStatus: "" })).toBeNull();
+    expect(status({ dead: "1", deadStatus: "256" })).toBeNull();
+    expect(status({ dead: "1", deadStatus: "-1" })).toBeNull();
+    expect(status({ dead: "0", deadStatus: "1" })).toBeNull();
   });
 
   test("a dead pane on a tmux without pane_dead_time has no death time rather than a bogus one", () => {

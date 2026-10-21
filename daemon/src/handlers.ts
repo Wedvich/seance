@@ -71,6 +71,11 @@ export interface TaskLaunches {
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
   readonly progress: () => readonly TaskProgress[];
+  /**
+   * Notes each dead task pane's exit status, then closes the pane (`exit-status.ts`).
+   * Never throws. Absent, a dead pane stays until reap.
+   */
+  readonly harvestExits?: () => Promise<void>;
   readonly report: (carried: ReadonlySet<string>) => {
     readonly ended: readonly string[];
     readonly ledgerSince: number;
@@ -304,9 +309,14 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
  * can run for a minute; a PWA refresh or an MCP `get_sessions` behind it would
  * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. `progress`
  * is the leader's to read too, and is sent on the same side, trimmed to fit.
+ *
+ * Dead task panes are harvested first, for every caller: a pane that dies
+ * after it is then listed as a session (its task still running), and one
+ * harvested has its exit in `progress` — the leader never reads it as neither.
  */
 async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<SessionsResponse> {
   if (scheduler) await ctx.tasks?.settled();
+  await ctx.tasks?.harvestExits?.();
   const sessions = await ctx.backend.sessions(ctx.getRepos());
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };

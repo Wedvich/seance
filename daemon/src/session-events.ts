@@ -12,10 +12,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
+import { harvestExits } from "./exit-status.ts";
 import { LaunchLedger, type LaunchSite } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
+import { listPanes } from "./sessions.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -253,9 +255,18 @@ export class EndedTasks {
     await this.#ledger.note(taskId, { prUrl });
   }
 
-  /** `SessionsResponse.progress`: what the ledger holds of each launched task's PR and branch. */
+  /** `SessionsResponse.progress`: what the ledger holds of each launched task's PR, branch and exit. */
   progress(): readonly TaskProgress[] {
     return this.#ledger.progress();
+  }
+
+  /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
+  async harvestExits(): Promise<void> {
+    await harvestExits({
+      panes: listPanes,
+      note: (taskId, exit) => this.#ledger.note(taskId, { exit }),
+      close: (paneId) => tmux(["kill-pane", "-t", paneId]),
+    });
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */

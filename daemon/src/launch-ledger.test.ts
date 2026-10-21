@@ -377,4 +377,24 @@ describe("LaunchLedger progress notes", () => {
     ]);
     expect(parseTaskProgressList(progress)).not.toBeNull();
   });
+
+  test("an exit status survives a reopen, reaches progress alone, and a relaunch starts without it", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.note("t1", { exit: 3 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, exit: 3 }]);
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.progress()).toEqual([{ taskId: "t1", at: 9, exit: 3 }]);
+    // A later note keeps it; a value no process exits with is not read back.
+    await reopened.note("t1", { branch: "b" });
+    expect(reopened.notes()[0]?.exit).toBe(3);
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].exit = 256;
+    await writeFile(path, JSON.stringify(file));
+    expect((await LaunchLedger.open(path, () => 11)).notes()[0]).not.toHaveProperty("exit");
+
+    await reopened.startNote("t1");
+    expect(reopened.progress()).toEqual([]);
+  });
 });

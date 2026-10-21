@@ -6,13 +6,16 @@ import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
-import { listClaudeSessions } from "../src/sessions.ts";
+import { LaunchLedger } from "../src/launch-ledger.ts";
+import { EndedTasks } from "../src/session-events.ts";
+import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
 import { sessionName, spawnSession, type SpawnOptions } from "../src/spawn.ts";
 import { FIELD_SEP, tmux, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
   makeClaudeStub,
   makeGitFixture,
+  pollUntil,
   usePrivateTmux,
   type ClaudeStub,
   type GitFixture,
@@ -443,6 +446,43 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       WAIT,
     );
     await killWindow(again.window);
+  });
+
+  test("a task session's nonzero exit stays on its dead pane until noted, then the pane goes; a clean exit closes it", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    try {
+      await ledger.record("task-crash");
+      const crashed = await spawnSession(
+        { repo: "myrepo", mode: "here", title: "Task Crash", taskId: "task-crash" },
+        repos,
+        WAIT,
+      );
+      const pane = (await waitForSession(crashed.window))?.id ?? "";
+      await tmux(["send-keys", "-t", pane, "-l", "/crash 3"]);
+      await tmux(["send-keys", "-t", pane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
+      expect((await paneInfo(pane))?.deadStatus).toBe(3);
+
+      await tasks.harvestExits();
+      expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-crash", exit: 3 })]);
+      expect(await paneInfo(pane)).toBeNull();
+
+      const clean = await spawnSession(
+        { repo: "myrepo", mode: "here", title: "Task Clean", taskId: "task-clean" },
+        repos,
+        WAIT,
+      );
+      const cleanPane = (await waitForSession(clean.window))?.id ?? "";
+      await tmux(["send-keys", "-t", cleanPane, "-l", "/exit"]);
+      await tmux(["send-keys", "-t", cleanPane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(cleanPane)) === null, `pane ${cleanPane} closed`);
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await killWindow("Task Crash");
+      await killWindow("Task Clean");
+    }
   });
 
   test("two concurrent spawns for one task start exactly one session", async () => {

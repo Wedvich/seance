@@ -1,4 +1,4 @@
-import { isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
+import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
 import { capturePane, FIELD_SEP, listAllPanes, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
 
@@ -138,6 +138,8 @@ export interface PaneInfo {
   readonly dead: boolean;
   /** When the pane died, epoch ms; null while alive, or on a tmux without `pane_dead_time`. */
   readonly deadAt: number | null;
+  /** Its process's exit status once dead (`pane_dead_status`, 0–255); null while alive, and for a signal death. */
+  readonly deadStatus: number | null;
   readonly titled: boolean;
   readonly command: string;
   readonly path: string;
@@ -174,6 +176,7 @@ const PANE_INFO_FORMAT = [
   OURS,
   "#{pane_dead}",
   "#{pane_dead_time}",
+  "#{pane_dead_status}",
   PANE_TITLED,
   `#{s/[${FIELD_SEP}]/-/:window_name}`,
   TASK_FIELD,
@@ -185,9 +188,11 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
   const seen = new Set<string>();
   const panes: PaneInfo[] = [];
   for (const line of raw.split("\n")) {
-    const [paneId, windowId, command, ours, dead, deadTime, titled, windowName, task, ...rest] = line.split(FIELD_SEP);
+    const [paneId, windowId, command, ours, dead, deadTime, deadStatus, titled, windowName, task, ...rest] =
+      line.split(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
-    if (deadTime === undefined || windowName === undefined || task === undefined || rest.length === 0) continue;
+    if (deadTime === undefined || deadStatus === undefined || windowName === undefined || task === undefined) continue;
+    if (rest.length === 0) continue;
     // Grouped sessions repeat every pane; a split's panes are distinct.
     if (seen.has(paneId)) continue;
     seen.add(paneId);
@@ -199,6 +204,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       ours: ours === "1",
       dead: dead === "1",
       deadAt: dead === "1" && deadSeconds > 0 ? deadSeconds * 1000 : null,
+      deadStatus: dead === "1" ? exitStatus(deadStatus) : null,
       titled: titled === "1",
       command,
       path: rest.join(FIELD_SEP),
@@ -206,6 +212,13 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
     });
   }
   return panes;
+}
+
+/** tmux prints the status only for a process that exited; a signal death leaves the field empty. */
+function exitStatus(raw: string): number | null {
+  if (!/^\d{1,3}$/u.test(raw)) return null;
+  const status = Number(raw);
+  return status <= EXIT_STATUS_MAX ? status : null;
 }
 
 /**
