@@ -390,6 +390,37 @@ describe("a task's launch is recorded before it runs", () => {
     expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
   });
 
+  test("a sessions reply harvests after listing and before it reads progress, so a pane dying between is never in neither", async () => {
+    const events: string[] = [];
+    let harvested = false;
+    const { backend } = taskBackend(() => Promise.resolve());
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => {
+        events.push("progress");
+        return harvested ? [{ taskId: "t-1", exit: 3, at: 1 }] : [];
+      },
+      harvestExits: () => {
+        events.push("harvest");
+        harvested = true;
+        return Promise.resolve();
+      },
+    };
+    const listing: SessionBackend = {
+      ...backend,
+      sessions: () => {
+        events.push("list");
+        return Promise.resolve([]);
+      },
+    };
+    const reply = await sessionsOf(createHandler({ ...ctx, backend: listing, tasks }));
+    expect(events).toEqual(["list", "harvest", "progress"]);
+    expect(reply.progress).toEqual([expect.objectContaining({ taskId: "t-1", exit: 3 })]);
+  });
+
   describe("a scheduler spawn for a task the ledger holds as launched", () => {
     const dispatch = (taskId: string, client: string = SCHEDULER_CLIENT): Plain =>
       request("spawn", { repo: "myrepo", mode: "here", taskId, client });

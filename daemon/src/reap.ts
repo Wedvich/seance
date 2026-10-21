@@ -54,6 +54,8 @@ export interface ReapOptions {
   /** A worktree younger than this is kept, whatever else holds. */
   readonly minAgeMs: number;
   readonly audit: ReapAudit;
+  /** The daemon's `harvestExits`: only the process owning the launch ledger can note a status, so the CLI passes none. */
+  readonly harvest?: () => Promise<void>;
   readonly now?: number;
   /** Stops between repos — the daemon's stop() ends a scheduled run here. */
   readonly signal?: AbortSignal;
@@ -161,6 +163,8 @@ function inside(dir: string, path: string): boolean {
 export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   const now = opts.now ?? Date.now();
   if (!opts.dryRun) await opts.audit.start(opts.repos.length);
+  // Exit statuses noted first: a dead task pane holding one is skipped below, so none would be closed at all.
+  if (!opts.dryRun) await opts.harvest?.();
 
   // tmux first: answering an exit prompt lets claude leave its worktree, and
   // the pane check below then sees the cwd gone.

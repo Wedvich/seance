@@ -310,14 +310,16 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
  * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. `progress`
  * is the leader's to read too, and is sent on the same side, trimmed to fit.
  *
- * Dead task panes are harvested first, for every caller: a pane that dies
- * after it is then listed as a session (its task still running), and one
- * harvested has its exit in `progress` — the leader never reads it as neither.
+ * Dead task panes are harvested after the listing and before `progress` is
+ * read, for every caller. A dead pane is not listed (tmux gives it no cwd), so
+ * a pane dying before the listing is harvested, its exit in `progress`; one
+ * dying after was listed alive. Harvested first instead, a pane dying between
+ * the two reads would be in neither — the leader would settle it `done`.
  */
 async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<SessionsResponse> {
   if (scheduler) await ctx.tasks?.settled();
-  await ctx.tasks?.harvestExits?.();
   const sessions = await ctx.backend.sessions(ctx.getRepos());
+  await ctx.tasks?.harvestExits?.();
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };
   const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { harvestExits, owesExit } from "./exit-status.ts";
+import { harvestExits, owesExit, whileRegistering } from "./exit-status.ts";
 import type { PaneInfo } from "./sessions.ts";
 
 function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
@@ -23,7 +23,7 @@ describe("harvestExits", () => {
   test("notes a dead task pane's status before closing it, and leaves every other pane alone", async () => {
     const events: string[] = [];
     await harvestExits({
-      panes: () =>
+      list: () =>
         Promise.resolve([
           pane("%1", { deadStatus: 3 }),
           // A signal death: nothing to note, but the pane is still ours to close.
@@ -36,10 +36,10 @@ describe("harvestExits", () => {
         ]),
       note: (taskId, exit) => {
         events.push(`note ${taskId} ${exit}`);
-        return Promise.resolve();
+        return Promise.resolve(true);
       },
-      close: (paneId) => {
-        events.push(`close ${paneId}`);
+      close: (closing) => {
+        events.push(`close ${closing.paneId}`);
         return Promise.resolve();
       },
     });
@@ -51,11 +51,25 @@ describe("harvestExits", () => {
   test("a failed pane read harvests nothing and does not throw", async () => {
     let touched = false;
     await harvestExits({
-      panes: () => Promise.reject(new Error("protocol version mismatch")),
+      list: () => Promise.reject(new Error("protocol version mismatch")),
       note: () => Promise.resolve((touched = true)),
       close: () => Promise.resolve((touched = true)),
     });
     expect(touched).toBe(false);
+  });
+
+  test("a pane whose task is not in this ledger is left for reap; one a spawn still awaits is left to it", async () => {
+    const closed: string[] = [];
+    const deps = {
+      list: () => Promise.resolve([pane("%1"), pane("%2", { windowId: "@awaited" })]),
+      note: (taskId: string) => Promise.resolve(taskId !== "task-1"),
+      close: (p: { paneId: string }) => Promise.resolve(closed.push(p.paneId)),
+    };
+    await whileRegistering("@awaited", () => harvestExits(deps));
+    expect(closed).toEqual([]);
+    // Once the spawn is past registration its pane is harvestable again.
+    await harvestExits(deps);
+    expect(closed).toEqual(["%2"]);
   });
 });
 

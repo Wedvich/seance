@@ -10,7 +10,8 @@ import {
   type UpdateAvailable,
 } from "@seance/shared";
 import { homedir } from "node:os";
-import { daemonSink, ensureAuditLog } from "./audit.ts";
+import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
+import { tmuxHarvestPanes } from "./exit-status.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
 import {
@@ -149,7 +150,9 @@ const schedulerGuard = new ReplayGuard();
 function endedTasksFor(path: string): Promise<EndedTasks> {
   let tasks = endedTasksByLedger.get(path);
   if (tasks === undefined) {
-    tasks = LaunchLedger.open(path).then((ledger) => new EndedTasks(ledger));
+    tasks = LaunchLedger.open(path).then(
+      (ledger) => new EndedTasks(ledger, Date.now, tmuxHarvestPanes(reapAudit("harvest", daemonSink))),
+    );
     endedTasksByLedger.set(path, tasks);
   }
   return tasks;

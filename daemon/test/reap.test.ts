@@ -5,7 +5,9 @@ import { join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { reapAudit, type AuditSink } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
+import { tmuxHarvestPanes } from "../src/exit-status.ts";
 import { resolveCommonDir } from "../src/gitdir.ts";
+import { LaunchLedger } from "../src/launch-ledger.ts";
 import {
   DAY_MS,
   formatReport,
@@ -18,7 +20,8 @@ import {
 import { transcriptDir } from "../src/reap-git.ts";
 import { scanRepos } from "../src/scan.ts";
 import { classifyPane, listPanes } from "../src/sessions.ts";
-import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";
+import { EndedTasks } from "../src/session-events.ts";
+import { resolveTargetSession, TASK_OPTION, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
   makeClaudeStub,
@@ -506,6 +509,38 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
       expect(report.openPanes).toContainEqual(expect.objectContaining({ paneId: live, state: "live" }));
       expect(formatReport(report).join("\n")).toContain(`seanced despawn ${live}`);
       await tmuxOk(["kill-pane", "-t", live]);
+    },
+    DEATH_STAMP_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a dead registered task pane holding an exit status is left open without a harvest; with one it is noted, closed and audited as harvest",
+    async () => {
+      const repo = await freshRepo();
+      const dead = await openWindow(`tmux wait-for reap-owes; exec ${stub.failing} --remote-control`);
+      await tmuxOk(["set-option", "-w", "-t", dead, "remain-on-exit", "on"]);
+      await tmuxOk(["set-option", "-p", "-t", dead, TASK_OPTION, "t-owes"]);
+      await tmuxOk(["select-pane", "-t", dead, "-T", "claude session"]);
+      await tmuxOk(["wait-for", "-S", "reap-owes"]);
+      await untilDeathStamped(dead);
+
+      const bare = await reap(repo);
+      expect(bare.closedPanes.map((pane) => pane.paneId)).not.toContain(dead);
+      expect(bare.openPanes).toContainEqual(expect.objectContaining({ paneId: dead, state: "dead" }));
+      expect(await paneExists(dead)).toBe(true);
+
+      const ledger = LaunchLedger.memory();
+      await ledger.record("t-owes");
+      const audited: string[] = [];
+      const tasks = new EndedTasks(
+        ledger,
+        Date.now,
+        tmuxHarvestPanes(reapAudit("harvest", (line) => void audited.push(line))),
+      );
+      await reap(repo, { harvest: () => tasks.harvestExits() });
+      expect(ledger.progress()).toEqual([expect.objectContaining({ taskId: "t-owes", exit: 2 })]);
+      expect(await paneExists(dead)).toBe(false);
+      expect(audited).toEqual([expect.stringContaining(`audit reap origin=harvest closed-pane pane=${dead} `)]);
     },
     DEATH_STAMP_TEST_TIMEOUT_MS,
   );

@@ -5,6 +5,7 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
+import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
 import { isRegistered, listPanes, paneRunningTask } from "./sessions.ts";
 import {
@@ -399,7 +400,9 @@ async function spawnUntracked(
     }
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
-    registered = await awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined);
+    registered = await whileRegistering(windowId, () =>
+      awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined),
+    );
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }

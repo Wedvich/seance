@@ -659,7 +659,9 @@ nothing checked it. The last is the gap they leave.
   formatter (`despawnAudit`), under the same origins. Reap destroys
   things — worktrees, branches, windows — and audits each one (`reapAudit`)
   under `cli` or under `schedule`, the fourth origin, which is the daemon's own
-  timer: a 3am cleanup must not read as someone at the desk. `leader` is the
+  timer: a 3am cleanup must not read as someone at the desk. `harvest` is the daemon
+  closing a dead task pane once its exit status is noted (Daemon, "Exit status"), on the
+  same `closed-pane` line as reap's. `leader` is the
   daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
   "The leader") — distinct from `local`, which says a peer on the op socket asked,
   and from the `client=scheduler` other machines log under `relay`; the leader's
@@ -3590,12 +3592,20 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - **Exit status** (2026-10-21, M4; `daemon/src/exit-status.ts`, `ended` in `done.ts`). Once
   claude registers, a task spawn's window keeps `remain-on-exit failed`, so a clean exit closes
   it exactly as before and any other leaves the pane dead with tmux's `pane_dead_status`. Every
-  `sessions` reply first notes each dead, registered task pane's status in the launch ledger and
-  then closes the pane (`harvestExits`), so the status outlives the pane and a restart, and
-  `progress` carries it: a pane dying after that pass is still in the reply's session list (its
-  task running), never in neither. A pane dead before its title went up is `spawnSession`'s, as
-  before; reap leaves a dead task pane holding a status to the daemon (`owesExit`), since closing
-  it first would lose the status. The live `ended` event cannot carry the status: the mod's
+  `sessions` reply, after it lists panes and before it reads `progress`, notes each dead,
+  registered task pane's status in the launch ledger and then closes the pane (`harvestExits`),
+  so the status outlives the pane and a restart, and `progress` carries it. A dead pane drops out
+  of the list (tmux gives it no cwd), so the order matters: one dying before the listing is
+  harvested and in `progress`, one dying after was listed alive (its task running) — harvested
+  first, a pane dying between the two reads would be in neither. A pane whose task is not in this
+  daemon's ledger is left (the status has nowhere to go). Each close is audited
+  (`origin=harvest`). A pane dead before its title went up is `spawnSession`'s, as before, and so
+  is a window whose spawn is still polling for registration (`whileRegistering`), which harvest
+  skips so it cannot steal the `claude_died` capture. Reap skips a dead task pane holding a status
+  (`owesExit`), since closing it first would lose the status, and the daemon's reap timer runs
+  `harvestExits` before it so such panes do not linger when no `sessions` is asked for; the CLI's
+  reap, in a process that does not own the ledger, leaves them. The tmux calls are injected where
+  `EndedTasks` is built (`tmuxHarvestPanes`), so only the daemon's wiring touches tmux. The live `ended` event cannot carry the status: the mod's
   SessionEnd hook runs before the process exits. So a leader settles a PR-less `ended` from a
   machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
   reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine

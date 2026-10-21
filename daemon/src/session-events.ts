@@ -12,12 +12,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
-import { harvestExits } from "./exit-status.ts";
+import { harvestExits, type HarvestPanes } from "./exit-status.ts";
 import { LaunchLedger, type LaunchSite } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
-import { listPanes } from "./sessions.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -196,10 +195,13 @@ export class EndedTasks {
   readonly #inFlight = new Set<Promise<void>>();
   readonly #launches = new Map<string, Launches>();
   readonly #now: () => number;
+  readonly #panes: HarvestPanes | undefined;
 
-  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now) {
+  /** `panes` is the tmux side of `harvestExits`; without it harvest does nothing. */
+  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now, panes?: HarvestPanes) {
     this.#ledger = ledger;
     this.#now = now;
+    this.#panes = panes;
   }
 
   /**
@@ -262,11 +264,8 @@ export class EndedTasks {
 
   /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
   async harvestExits(): Promise<void> {
-    await harvestExits({
-      panes: listPanes,
-      note: (taskId, exit) => this.#ledger.note(taskId, { exit }),
-      close: (paneId) => tmux(["kill-pane", "-t", paneId]),
-    });
+    if (this.#panes === undefined) return;
+    await harvestExits({ ...this.#panes, note: (taskId, exit) => this.#ledger.note(taskId, { exit }) });
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */

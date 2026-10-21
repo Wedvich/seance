@@ -7,6 +7,8 @@ import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
+import { reapAudit } from "../src/audit.ts";
+import { tmuxHarvestPanes } from "../src/exit-status.ts";
 import { EndedTasks } from "../src/session-events.ts";
 import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
 import { sessionName, spawnSession, type SpawnOptions } from "../src/spawn.ts";
@@ -451,7 +453,12 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   test("a task session's nonzero exit stays on its dead pane until noted, then the pane goes; a clean exit closes it", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
     const ledger = LaunchLedger.memory();
-    const tasks = new EndedTasks(ledger);
+    const audited: string[] = [];
+    const tasks = new EndedTasks(
+      ledger,
+      Date.now,
+      tmuxHarvestPanes(reapAudit("harvest", (line) => void audited.push(line))),
+    );
     try {
       await ledger.record("task-crash");
       const crashed = await spawnSession(
@@ -468,6 +475,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       await tasks.harvestExits();
       expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-crash", exit: 3 })]);
       expect(await paneInfo(pane)).toBeNull();
+      expect(audited).toEqual([expect.stringContaining(`audit reap origin=harvest closed-pane pane=${pane} `)]);
 
       const clean = await spawnSession(
         { repo: "myrepo", mode: "here", title: "Task Clean", taskId: "task-clean" },
