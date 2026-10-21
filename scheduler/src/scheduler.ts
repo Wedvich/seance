@@ -183,6 +183,13 @@ export class Scheduler {
    * registry push. Memory only.
    */
   readonly #quiet = new Map<string, boolean>();
+  /**
+   * deviceId → when the last `sessions` that answered ok was asked (not
+   * answered: a pane that died while the call was out may still be listed).
+   * `#settleEndings` reads it: a deadline settles a session only once a read
+   * begun after it still listed it. Memory only.
+   */
+  readonly #listedAt = new Map<string, number>();
   #sweptAt: number;
   #fault: { readonly err: unknown } | null = null;
   #ticking: Promise<void> | null = null;
@@ -321,6 +328,7 @@ export class Scheduler {
     this.#leanFailed.clear();
     this.#unansweredSince.clear();
     this.#quiet.clear();
+    this.#listedAt.clear();
     await this.#check(this.tasks().filter(answerable));
   }
 
@@ -815,13 +823,30 @@ export class Scheduler {
    */
   async #settleEndings(): Promise<void> {
     const now = this.#now();
-    const due = [...this.#ending].filter(([, at]) => now - at >= this.#config.endingTimeoutMs);
+    const due = [...this.#ending].filter(
+      ([id, at]) => now - at >= this.#config.endingTimeoutMs && !this.#awaited(id, at),
+    );
     await Promise.all(
       due.map(async ([id]) => {
         this.#ending.delete(id);
         await this.#update(id, (current) => (PLACED.includes(current.state) ? settledEnd(current, undefined) : null));
       }),
     );
+  }
+
+  /**
+   * Whether a deadline-past `#ending` task still waits for its machine: a
+   * check out may carry the exit (a late answer would be dropped once the
+   * task settled), and so may the next one, until a read begun after the
+   * deadline has listed the session. A disconnected machine answers nothing
+   * (`#due` skips it), so the deadline alone settles its task.
+   */
+  #awaited(id: string, deferredAt: number): boolean {
+    const task = this.#held.get(id)?.task;
+    const deviceId = task === undefined ? undefined : deviceOf(task);
+    if (deviceId === undefined || !this.#connected(deviceId)) return false;
+    if (this.#checks.has(deviceId)) return true;
+    return (this.#listedAt.get(deviceId) ?? -Infinity) < deferredAt + this.#config.endingTimeoutMs;
   }
 
   /**
@@ -890,7 +915,9 @@ export class Scheduler {
    * before an event landed could undo it.
    */
   async #checkDevice(deviceId: string, tasks: readonly Task[]): Promise<void> {
+    const asked = this.#now();
     const reply = await this.#fleet.sessions(deviceId);
+    if (reply.ok) this.#listedAt.set(deviceId, asked);
     this.#heard(deviceId, reply);
     await Promise.all(
       tasks.map((seen) =>

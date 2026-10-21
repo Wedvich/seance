@@ -89,7 +89,9 @@ export interface SchedulerConfig {
    * that machine's answer to stop listing the session (`#ending`). Past it the
    * task settles as the event would have without an exit: a claude that stays
    * alive after its SessionEnd hook must not hold its slot, and be asked about,
-   * for good.
+   * for good. Well past `sweepIntervalMs` plus a `sessions` op (10s): the
+   * deadline also waits for a check out and one begun after it, so a late
+   * exit is not dropped, and only a disconnected machine settles on it alone.
    */
   readonly endingTimeoutMs: number;
   /**
@@ -134,7 +136,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
   sweepIntervalMs: 120_000,
-  endingTimeoutMs: 120_000,
+  endingTimeoutMs: 300_000,
   keepFinished: 50,
   pruneAt: 96,
 };
