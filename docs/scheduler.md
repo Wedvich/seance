@@ -507,7 +507,7 @@ precede. Wave 2 waits on the wave-1 item named.
   status. A task window now keeps `remain-on-exit failed`; the status rides the ledger and
   `progress` (`TaskProgress.exit`), noted before the dead pane is closed by every `sessions`
   reply. The leader settles a PR-less `ended` from a machine advertising `exitStatus` by that
-  machine's next answer, checked every pass until the session is gone, so the event path and the
+  machine's next answer, asked at once and then every pass until the session is gone, so the event path and the
   sweep are one path; a nonzero exit fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
   status", records the rest and what was rejected.
 

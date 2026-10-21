@@ -436,7 +436,10 @@ export class Scheduler {
     await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl, awaitsExit));
     if (state !== "ended" || !awaitsExit) return;
     const held = this.#held.get(taskId)?.task;
-    if (held !== undefined && PLACED.includes(held.state)) this.#ending.add(taskId);
+    if (held === undefined || !PLACED.includes(held.state)) return;
+    this.#ending.add(taskId);
+    // Asked now, not at the next timed pass: the answer is what settles it, and frees its slot.
+    this.tick().catch(this.#onError);
   }
 
   #reportsExit(deviceId: string): boolean {

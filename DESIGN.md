@@ -3599,8 +3599,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   SessionEnd hook runs before the process exits. So a leader settles a PR-less `ended` from a
   machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
   reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine
-  every pass (`#ending`) until a reply no longer lists the session, since a check landing while
-  claude is still shutting down does. That makes the event path and the sweep one path. An end
+  at once, then every pass (`#ending`) until a reply no longer lists the session, since a check
+  landing while claude is still shutting down does. That makes the event path and the sweep one path. An end
   with a PR known settles on the event as before; the status counts only when neither a PR nor a
   believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). No status — 0, which
   under `failed` closes the window and is never seen, a signal death (tmux prints no status), a

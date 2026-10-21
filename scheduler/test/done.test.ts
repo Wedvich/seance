@@ -92,49 +92,47 @@ describe("a session's exit status", () => {
       machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus] }),
     ]);
 
+  const dying = { id: "%1", window: "w", repo: "app", path: "/wt/t", taskId: "t" } as const;
+
   test("from a machine that reports it, a PR-less end waits for the answer: nonzero fails the task and its dependents", async () => {
     const { fleet, scheduler, put } = setup(reporting());
     await put("t", { assignment: ON_A });
     await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
     await scheduler.load();
+    // Asked at once; claude is still shutting down, so its session is still listed.
+    fleet.sessionsReply = () => ({ ok: true, sessions: [dying] });
     await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
+    expect(fleet.sessionCalls).toEqual(["a"]);
     expect(scheduler.task("t")?.state).toBe("running");
 
+    // Asked again on the next pass, sweep or not.
     fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 1 })] });
     await pass(scheduler);
-    expect(fleet.sessionCalls).toEqual(["a"]);
+    expect(fleet.sessionCalls).toEqual(["a", "a"]);
     expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed" } });
     expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 
-  test("a check that still lists the dying session is asked again next pass; exit 0 is done", async () => {
+  test("exit 0 is done, and a settled task is no longer asked for between sweeps", async () => {
     const { fleet, scheduler, put } = setup(reporting());
     await put("t", { assignment: ON_A });
     await scheduler.load();
-    await scheduler.onSession("t", "ended", FROM_A);
-    fleet.sessionsReply = () => ({
-      ok: true,
-      sessions: [{ id: "%1", window: "w", repo: "app", path: "/wt/t", taskId: "t" }],
-    });
-    await pass(scheduler);
-    expect(scheduler.task("t")?.state).toBe("running");
-
     fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 0 })] });
-    await pass(scheduler);
-    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+    await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
-    // Settled: no longer asked for between sweeps.
     await pass(scheduler);
-    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+    expect(fleet.sessionCalls).toEqual(["a"]);
   });
 
   test("no status in the answer (a signal, an old tmux) is done, as before", async () => {
     const { fleet, scheduler, put } = setup(reporting());
     await put("t", { assignment: ON_A });
     await scheduler.load();
-    await scheduler.onSession("t", "ended", FROM_A);
     fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"] });
-    await pass(scheduler);
+    await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
   });
 
@@ -164,7 +162,7 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")?.state).toBe("awaiting-merge");
   });
 
-  test("an end that resolves a reservation runs it on the reporting pane until the answer", async () => {
+  test("an end that resolves a reservation places it on the reporting pane, and the answer settles it", async () => {
     const { fleet, scheduler, put } = setup(reporting());
     await put("t", {
       state: "reserved",
@@ -172,7 +170,9 @@ describe("a session's exit status", () => {
       reservedAt: NOW,
     });
     await scheduler.load();
+    fleet.sessionsReply = () => ({ ok: true, sessions: [dying] });
     await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
     expect(scheduler.task("t")).toMatchObject({ state: "running", assignment: { deviceId: "a", pane: "%1" } });
     fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 1 })] });
     await pass(scheduler);
