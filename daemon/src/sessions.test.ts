@@ -218,6 +218,10 @@ describe("parsePaneInfo", () => {
     // A signal death reads as the shell reports it, 128 + signal.
     expect(status({ dead: "1", deadSignal: "9" })).toBe(137);
     expect(status({ dead: "1", deadSignal: "11" })).toBe(139);
+    // macOS tmux names it (sys_signame), glibc tmux numbers it.
+    expect(status({ dead: "1", deadSignal: "kill" })).toBe(137);
+    expect(status({ dead: "1", deadSignal: "SIGSEGV" })).toBe(139);
+    expect(status({ dead: "1", deadSignal: "bogus" })).toBeNull();
     expect(status({ dead: "1", deadSignal: "0" })).toBeNull();
     expect(status({ dead: "1", deadSignal: "200" })).toBeNull();
     expect(status({ dead: "0", deadSignal: "9" })).toBeNull();

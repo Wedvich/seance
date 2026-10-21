@@ -1,3 +1,4 @@
+import { constants } from "node:os";
 import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
 import { capturePane, FIELD_SEP, listAllPanes, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
@@ -233,10 +234,18 @@ function exitStatus(raw: string, signal: string): number | null {
     const status = Number(raw);
     return status <= EXIT_STATUS_MAX ? status : null;
   }
-  if (!/^\d{1,3}$/u.test(signal)) return null;
-  const n = Number(signal);
+  const n = signalNumber(signal);
   // Past 127 it is no signal, and 128 + n would leave 0–255.
-  return n >= 1 && n <= 127 ? 128 + n : null;
+  return n !== null && n >= 1 && n <= 127 ? 128 + n : null;
+}
+
+/** tmux names the signal where the libc has `sys_signame` (macOS: `kill`) and numbers it elsewhere (glibc: `9`). */
+function signalNumber(raw: string): number | null {
+  if (/^\d{1,3}$/u.test(raw)) return Number(raw);
+  const name = /^(?:SIG)?([A-Z0-9]{2,10})$/u.exec(raw.toUpperCase())?.[1];
+  if (name === undefined) return null;
+  const known: Record<string, number | undefined> = constants.signals;
+  return known[`SIG${name}`] ?? null;
 }
 
 /**

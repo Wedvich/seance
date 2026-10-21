@@ -361,6 +361,12 @@ describe("reap: worktrees and branches (real git)", () => {
     await mkdir(join(worktree, "src"));
     await age(worktree);
     const paneId = await openWindow("sleep 120", join(worktree, "src"));
+    // tmux prints the id once forked, before the child has chdir'd; under load the first listing can still show the server's cwd.
+    await pollUntil(
+      async () =>
+        (await listPanes()).some((pane) => pane.paneId === paneId && pane.path.endsWith("/worktrees/busy/src")),
+      "pane in the worktree",
+    );
 
     const [result] = (await reap(repo)).repos;
     expect(result?.inUse).toEqual([worktree]);
