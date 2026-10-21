@@ -112,15 +112,20 @@ describe("LaunchLedger", () => {
     const ledger = await LaunchLedger.open(path, () => 1);
     // A directory where the file should be: every write fails at the rename.
     await mkdir(join(path, "x"), { recursive: true });
-    const first = ledger.record("dup");
-    const second = ledger.record("dup");
-    // Both handled before any await: `second` can reject before `first`'s await
-    // returns, and an unhandled rejection fails the test whatever it asserts.
-    const firstRejects = expect(first).rejects.toThrow();
-    const secondRejects = expect(second).rejects.toThrow();
-    await firstRejects;
+    // Handlers go on in the same tick the writes start: `expect(p).rejects` may attach its own
+    // only after an await, and a rejection nothing handles by then fails the whole file.
+    const first = ledger.record("dup").then(
+      () => null,
+      (err: unknown) => ({ err }),
+    );
+    const second = ledger.record("dup").then(
+      () => null,
+      (err: unknown) => ({ err }),
+    );
+    const firstOutcome = await first;
+    expect(firstOutcome).not.toBeNull();
     expect(ledger.ids()).toContain("dup");
-    await secondRejects;
+    expect(await second).not.toBeNull();
     // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
     expect(ledger.ids()).toContain("dup");
   });
