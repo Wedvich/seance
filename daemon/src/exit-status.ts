@@ -1,8 +1,8 @@
 import type { PaneInfo } from "./sessions.ts";
 
 /**
- * A task session's exit status, for `failed` from exit status (DESIGN.md,
- * "Done detection"). A task spawn's window keeps `remain-on-exit failed` once
+ * A task session's exit status, for `failed` from exit status (DESIGN.md, Daemon,
+ * "Exit status"). A task spawn's window keeps `remain-on-exit failed` once
  * claude has registered (`spawn.ts`), so a clean exit closes it as before and
  * any other leaves the pane dead, holding `pane_dead_status`. The status is
  * noted in the launch ledger, where `progress` carries it to the leader and a

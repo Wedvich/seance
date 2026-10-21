@@ -1394,7 +1394,11 @@ an old peer's frames parse as before. Mixed versions:
   list costs the field, never the entry or the machine. `MachineStatus.ax` (the exclave
   indices whose login has expired) is strict and capped. An old app ignores both.
 - `TaskProgress.exit` (a session's exit status, 0–255), in the `sessions` reply's `progress`
-  and the launch ledger: an older leader drops it.
+  and the launch ledger: an older leader drops it. Acted on since 2026-10-21 (Daemon, "Exit
+  status"), with two shapes of its own: the `exitStatus` capability, which an older leader
+  ignores (it settles a PR-less `ended` on the event, as before), and the `session_failed`
+  failure code, which an older leader or app reads leniently (`parseTaskRecord` takes any
+  bounded code); an older PWA words it as a spawn refusal.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done` is refused at ingest and ignored by the leader (Local op socket,
@@ -2306,7 +2310,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   A session that ends with a PR known — the
   event's `prUrl`, the one its record holds, or its machine's `progress` — is
   `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
-  it is `done`, `doneBy: "session"`. A live session's newer PR URL is recorded even when
+  it is `done`, `doneBy: "session"` — unless its machine reports a nonzero exit status
+  (`TaskProgress.exit`), when it is `failed`, `session_failed`, and its dependents fail
+  `dependency_failed` rather than start on a branch with nothing pushed (M4, `failed` from exit
+  status, M3 review R3; Daemon, "Exit status"). A live session's newer PR URL is recorded even when
   its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
   the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
   within one branch, so the first pushed report with a PR releases `opened` for good — and
@@ -2720,7 +2727,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   noted but never sent when the process exits is recovered only through `progress`, which the
   leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of
-  PR URL, branch, pushed or merged, without paths or tips; an entry that would not pass
+  PR URL, branch, pushed, merged or exit status (since 2026-10-21, Daemon, "Exit status"), without
+  paths or tips; an entry that would not pass
   `parseTaskProgressList` is left out, since one bad entry nulls the leader's whole list.
   `at` is the last change, never refreshed by an unchanged pass, so an idle branch costs no ledger
   write per minute. The reply is held to 44 000 bytes of JSON (`REPLY_JSON_BUDGET`, the queue
@@ -3579,6 +3587,32 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   platform-specific parsing for what a format string already answers);
   pre-answering more dialogs — `trust.ts` does that for the one gate whose config
   key is known, and detection is what covers the ones that aren't.
+- **Exit status** (2026-10-21, M4; `daemon/src/exit-status.ts`, `ended` in `done.ts`). Once
+  claude registers, a task spawn's window keeps `remain-on-exit failed`, so a clean exit closes
+  it exactly as before and any other leaves the pane dead with tmux's `pane_dead_status`. Every
+  `sessions` reply first notes each dead, registered task pane's status in the launch ledger and
+  then closes the pane (`harvestExits`), so the status outlives the pane and a restart, and
+  `progress` carries it: a pane dying after that pass is still in the reply's session list (its
+  task running), never in neither. A pane dead before its title went up is `spawnSession`'s, as
+  before; reap leaves a dead task pane holding a status to the daemon (`owesExit`), since closing
+  it first would lose the status. The live `ended` event cannot carry the status: the mod's
+  SessionEnd hook runs before the process exits. So a leader settles a PR-less `ended` from a
+  machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
+  reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine
+  every pass (`#ending`) until a reply no longer lists the session, since a check landing while
+  claude is still shutting down does. That makes the event path and the sweep one path. An end
+  with a PR known settles on the event as before; the status counts only when neither a PR nor a
+  believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). No status — 0, which
+  under `failed` closes the window and is never seen, a signal death (tmux prints no status), a
+  tmux older than 3.2 (which refuses `failed`, so the window gets `off`), a pane someone closed by
+  hand, an older daemon — settles `done` as before. A despawn is not told apart: its `/exit` exits
+  0 (measured on 2.1.295) and its kill destroys the pane, leaving no status, and `cancel` and
+  `mark-done` write their own state. Rejected: holding the `ended` forward in the daemon until the
+  pane died (the leader would still need the answer to read the status, and a hold cannot be
+  awaited in the ingest handler — the hook's process is claude's child, so claude would not exit
+  until it timed out); the status on `ended` or the session event (an older leader reads
+  `ended` entries as bare ids, and the hook has no status to give); a shell wrapper recording
+  `$?` (séance `exec`s claude, which the pane classifier and `OURS` rely on).
 - **Pane classifier** (added 2026-10-09, `classifyPane` in `sessions.ts`): what a
   pane is _doing_, for the code that acts on sessions rather than lists them —
   closing one window (`despawn`) and cleaning up after many (`reap`). Six states:
@@ -3704,7 +3738,9 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 - **Windows first.** Séance windows only (`OURS`); a hand-started pane is never
   reap's to close. A `dead` pane goes once it has been dead a minute — younger,
   it may be `spawnSession`'s own, held by remain-on-exit while it checks
-  registration (a tmux with no `pane_dead_time` leaves it alone). A claude on
+  registration (a tmux with no `pane_dead_time` leaves it alone). A dead task
+  pane still holding an exit status is left to the daemon, which notes it
+  before closing the pane (Daemon, "Exit status"). A claude on
   the worktree exit prompt is re-classified right before the key, then
   answered with Enter on Keep: it exits and the window closes, and the
   worktree it kept goes through the rules below on a later run, once it is

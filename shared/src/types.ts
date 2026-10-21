@@ -935,7 +935,7 @@ export interface MachineInfo {
  * only to a daemon advertising this. No daemon does yet. `exitStatus`: its
  * `sessions` `progress` carries `TaskProgress.exit` — a leader then settles a
  * PR-less `ended` event by that machine's next answer, not by the event, whose
- * hook runs before the pane dies (DESIGN.md, "Done detection").
+ * hook runs before the pane dies (DESIGN.md, Daemon, "Exit status").
  */
 export const CAPABILITIES = {
   metrics: "metrics",
