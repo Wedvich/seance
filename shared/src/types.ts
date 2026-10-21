@@ -932,9 +932,17 @@ export interface MachineInfo {
  * field — a daemon without it spawns a duplicate rather than refusing one.
  * `baseBranch`: the spawn field (M4, stacking) — a daemon without it drops the
  * field and starts the worktree from the default branch, so a leader sends it
- * only to a daemon advertising this. No daemon does yet.
+ * only to a daemon advertising this. No daemon does yet. `exitStatus`: its
+ * `sessions` `progress` carries `TaskProgress.exit` — a leader then settles a
+ * PR-less `ended` event by that machine's next answer, not by the event, whose
+ * hook runs before the pane dies (DESIGN.md, Daemon, "Exit status").
  */
-export const CAPABILITIES = { metrics: "metrics", taskId: "taskId", baseBranch: "baseBranch" } as const;
+export const CAPABILITIES = {
+  metrics: "metrics",
+  taskId: "taskId",
+  baseBranch: "baseBranch",
+  exitStatus: "exitStatus",
+} as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
 
@@ -1396,8 +1404,9 @@ export interface TaskProgress {
    * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
    * entry that already survives restarts, so the sweep and a takeover read one
-   * value. Absent while the pane lives, for a status tmux did not give, and from
-   * older daemons — a reader then settles as today.
+   * value. Absent while the pane lives, for a status tmux did not give (a
+   * signal), after a clean exit (its window keeps only a failed pane, so a 0 is
+   * never seen), and from older daemons — a reader then settles as today.
    */
   readonly exit?: number;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
@@ -2107,6 +2116,9 @@ export interface SettingsRecord extends VersionBound {
  * stops holding a slot and can be pruned. Its session may
  * still be running there. `merge_expired`: `awaiting-merge` past `mergeExpiryMs`
  * with no merge. Its `after: "merged"` dependents fail with it.
+ * `session_failed`: its session exited nonzero (`TaskProgress.exit`) with no
+ * PR and no merge seen, so its dependents fail rather than start on a branch
+ * with nothing on it.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2116,6 +2128,7 @@ export const TASK_FAILURE_CODES = [
   "queue_expired",
   "lost_expired",
   "merge_expired",
+  "session_failed",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];

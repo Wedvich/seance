@@ -7,7 +7,9 @@
  * - `repl` — an idle claude with an input box, keyed as 2.1.295 measured: one
  *   Esc does *not* clear a draft (it only arms "Esc again to clear"), Ctrl+C
  *   does, `/exit` + Enter exits — via the dialog when `--worktree` is in argv —
- *   and Enter on anything else submits it as a prompt.
+ *   and Enter on anything else submits it as a prompt. `/crash <n>` + Enter
+ *   exits with status n, as a claude that died mid-task would; `/kill <n>`
+  dies of signal n instead (an OOM kill), which tmux reports apart from a status.
  * - `deaf` — ignores every key and SIGHUP, as a wedged claude would.
  *
  * On the dialog, Enter takes the preselected Keep and exits 0; Esc cancels back
@@ -68,6 +70,10 @@ function press(key: string): void {
     atPrompt = true;
     return;
   }
+  const crash = /^\/crash (\d+)$/u.exec(draft);
+  if (crash !== null) process.exit(Number(crash[1]));
+  const kill = /^\/kill (\d+)$/u.exec(draft);
+  if (kill !== null) process.kill(process.pid, Number(kill[1]));
   if (draft !== "") note(`submitted ${draft}`);
   draft = "";
 }

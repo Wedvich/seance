@@ -126,7 +126,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
 - **Daemon → scheduler** (M2, M3): `session-event` and `branch-state`, and the `sessions`
   reply's `ended` and `progress` that back them up, are DESIGN.md Local op socket ("Session
   events") and _Scheduler_ ("Branch state", "Done detection"). M4's exit status is
-  `TaskProgress.exit`, in the schema; acting on it is `failed` from exit status, M4 below.
+  `TaskProgress.exit`, acted on by `failed` from exit status (M4 below, **Done**; DESIGN.md
+  _Daemon_, "Exit status").
 - **`SpawnRequest.baseBranch?`**, `base_not_found` and the `"baseBranch"` capability are in the
   schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
   base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
@@ -188,9 +189,9 @@ same `onAlert` fires a Web Push ("Spending credits on <account> for <task>"), on
 per window, not per task; the de-dupe outliving a leader change is M4's (Settings and Web Push,
 below).
 
-**Done detection, ahead.** Linear Done (M4, if linked, polled), and `failed` for a session that
-ends with no PR and a nonzero exit (M4, _`failed` from exit status_) — until then a PR-less end
-is `done` by `session`, which releases every dependent.
+**Done detection, ahead.** Linear Done (M4, if linked, polled). A session that ends with no PR
+and a nonzero exit is `failed` since M4's _`failed` from exit status_, which fails its
+dependents; a PR-less end with a clean or unknown exit is still `done` by `session`.
 
 **Secrets (M4).** The first draft gave a fixed box a Linear key, a VAPID key and a Proxmox
 token. Under a moving leader there is no Proxmox token at all (M4 #17: the LXC daemons read
@@ -405,7 +406,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 1    | Account records                                                    | store rules v2                                                         | M                        |
 | 1    | Fleet quota record                                                 | store rules v2                                                         | M                        |
 | 1    | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
-| 1    | `failed` from exit status (new)                                    | —                                                                      | S–M                      |
+| 1    | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 2    | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2    | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2    | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -500,6 +501,18 @@ precede. Wave 2 waits on the wave-1 item named.
   cheap source. Carry it in the launch ledger or in `ended`, so the event path and the sweep
   agree. Exit: a session that exits nonzero with no PR is `failed` and fails its dependents; one
   that exits zero is `done` (scheduler + daemon).
+
+  _As built (2026-10-21):_ **Done.** The premise was half right: `remain-on-exit` was on only
+  while a spawn waited for registration, then off, so a registered session's pane closed with its
+  status. A task window now keeps `remain-on-exit failed`; the status rides the ledger and
+  `progress` (`TaskProgress.exit`), noted before the dead pane is closed by every `sessions`
+  reply. The leader settles a PR-less `ended` from a machine advertising `exitStatus` by that
+  machine's next answer, asked at once and then every pass until the session is gone (at most
+  `endingTimeoutMs`, 5 min, then it settles as if no exit were known — once a check out has
+  answered and a read begun after it still lists the session; a machine that is not connected
+  settles on the deadline alone, never `lost` at the defaults), so the event path and the sweep are one path; a nonzero exit (a signal death as `128 + signal`) fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
+  status", records the rest and what was rejected.
+
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.

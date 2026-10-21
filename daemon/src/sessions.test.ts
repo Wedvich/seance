@@ -147,6 +147,8 @@ interface InfoLine {
   readonly ours?: string;
   readonly dead?: string;
   readonly deadTime?: string;
+  readonly deadStatus?: string;
+  readonly deadSignal?: string;
   readonly titled?: string;
   readonly name?: string;
   readonly task?: string;
@@ -162,6 +164,8 @@ function infoLine(fields: InfoLine): string {
     fields.ours ?? "1",
     fields.dead ?? "0",
     fields.deadTime ?? "",
+    fields.deadStatus ?? "",
+    fields.deadSignal ?? "",
     fields.titled ?? "1",
     fields.name ?? "task",
     fields.task ?? "",
@@ -183,6 +187,7 @@ describe("parsePaneInfo", () => {
         ours: true,
         dead: false,
         deadAt: null,
+        deadStatus: null,
         titled: true,
         command: "claude",
         path: "/Users/m/repos/seance",
@@ -195,12 +200,34 @@ describe("parsePaneInfo", () => {
         ours: true,
         dead: true,
         deadAt: 1_760_000_000_000,
+        deadStatus: null,
         titled: false,
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
       },
     ]);
+  });
+
+  test("an exit status only for a dead pane, and only one a process can exit with", () => {
+    const status = (fields: Partial<InfoLine>): number | null | undefined =>
+      parsePaneInfo(infoLine({ pane: "%1", ...fields }))[0]?.deadStatus;
+    expect(status({ dead: "1", deadStatus: "3" })).toBe(3);
+    expect(status({ dead: "1", deadStatus: "0" })).toBe(0);
+    expect(status({ dead: "1", deadStatus: "" })).toBeNull();
+    // A signal death reads as the shell reports it, 128 + signal.
+    expect(status({ dead: "1", deadSignal: "9" })).toBe(137);
+    expect(status({ dead: "1", deadSignal: "11" })).toBe(139);
+    // macOS tmux names it (sys_signame), glibc tmux numbers it.
+    expect(status({ dead: "1", deadSignal: "kill" })).toBe(137);
+    expect(status({ dead: "1", deadSignal: "SIGSEGV" })).toBe(139);
+    expect(status({ dead: "1", deadSignal: "bogus" })).toBeNull();
+    expect(status({ dead: "1", deadSignal: "0" })).toBeNull();
+    expect(status({ dead: "1", deadSignal: "200" })).toBeNull();
+    expect(status({ dead: "0", deadSignal: "9" })).toBeNull();
+    expect(status({ dead: "1", deadStatus: "256" })).toBeNull();
+    expect(status({ dead: "1", deadStatus: "-1" })).toBeNull();
+    expect(status({ dead: "0", deadStatus: "1" })).toBeNull();
   });
 
   test("a dead pane on a tmux without pane_dead_time has no death time rather than a bogus one", () => {

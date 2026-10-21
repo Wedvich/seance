@@ -175,6 +175,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
           dryRun: false,
           minAgeMs: settings.minAgeDays * DAY_MS,
           audit: reapAudit("schedule", daemonSink),
+          harvest: () => ctx.endedTasks.harvestExits(),
           signal: abort.signal,
           pruneLogPath: pruneLogPath(),
         }),

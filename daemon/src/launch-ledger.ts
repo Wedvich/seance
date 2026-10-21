@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   BRANCH_MAX_LENGTH,
+  EXIT_STATUS_MAX,
   httpsUrl,
   isRecord,
   isTaskId,
@@ -22,7 +23,7 @@ import { stateDir } from "./paths.ts";
  * prompt never reaches it.
  *
  * It also keeps per-task progress — the launch's repo and worktree path, the
- * last-seen branch, sticky pushed and merged, the PR URL — for
+ * last-seen branch, sticky pushed and merged, the PR URL, the exit status — for
  * `SessionsResponse.progress` and the branch-state emitter. That is not
  * write-ahead: noted after the fact, best-effort, and a failed write costs the
  * note, never the proof. It is v1 plus an optional top-level `progress` array,
@@ -69,6 +70,8 @@ export interface TaskNote {
   readonly pushed?: true;
   readonly merged?: true;
   readonly prUrl?: string;
+  /** The session's exit status, noted from its dead pane before the pane is closed (`exit-status.ts`). */
+  readonly exit?: number;
 }
 
 export interface NotedTask extends TaskNote {
@@ -102,7 +105,7 @@ function boundedText(value: unknown, max: number): string | undefined {
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
 function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   if (!isRecord(raw)) return null;
-  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, prUrl } = raw;
+  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, prUrl, exit } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
   const pathText = boundedText(path, PATH_MAX_LENGTH);
@@ -121,7 +124,12 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(pushed === true ? { pushed: true as const } : {}),
     ...(merged === true ? { merged: true as const } : {}),
     ...(url === undefined ? {} : { prUrl: url }),
+    ...(isExitStatus(exit) ? { exit } : {}),
   };
+}
+
+function isExitStatus(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= EXIT_STATUS_MAX;
 }
 
 function parseLedger(raw: unknown): LedgerFile | null {
@@ -176,6 +184,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
         : {}),
     ...(patch.tip !== undefined ? { tip: patch.tip } : base?.tip !== undefined ? { tip: base.tip } : {}),
     ...(patch.prUrl !== undefined ? { prUrl: patch.prUrl } : base?.prUrl !== undefined ? { prUrl: base.prUrl } : {}),
+    ...(patch.exit !== undefined ? { exit: patch.exit } : base?.exit !== undefined ? { exit: base.exit } : {}),
     ...(patch.ahead === true || base?.ahead === true ? { ahead: true as const } : {}),
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
@@ -189,6 +198,7 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.branch === b.branch &&
     a.tip === b.tip &&
     a.prUrl === b.prUrl &&
+    a.exit === b.exit &&
     a.ahead === b.ahead &&
     a.pushed === b.pushed &&
     a.merged === b.merged
@@ -390,7 +400,8 @@ export class LaunchLedger {
         note.prUrl === undefined &&
         note.branch === undefined &&
         note.pushed === undefined &&
-        note.merged === undefined
+        note.merged === undefined &&
+        note.exit === undefined
       )
         continue;
       const entry: TaskProgress = {
@@ -400,6 +411,7 @@ export class LaunchLedger {
         ...(note.branch === undefined ? {} : { branch: note.branch }),
         ...(note.pushed === undefined ? {} : { pushed: note.pushed }),
         ...(note.merged === undefined ? {} : { merged: note.merged }),
+        ...(note.exit === undefined ? {} : { exit: note.exit }),
       };
       if (parseTaskProgressList([entry]) === null) {
         warnProgressDropped();

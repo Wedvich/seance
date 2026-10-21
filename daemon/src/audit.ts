@@ -361,11 +361,12 @@ export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broke
 }
 
 /**
- * What ran a reap: the human at the keyboard (`cli`), or the daemon's own timer
- * (`schedule`). A new surface, so a new origin — never `cli` reused for the
- * timer, which would make a 3am cleanup read as someone at the desk.
+ * What ran a reap: the human at the keyboard (`cli`), the daemon's own timer
+ * (`schedule`), or the daemon closing a dead task pane after noting its exit
+ * status (`harvest`, `exit-status.ts`). A new surface, so a new origin — never
+ * `cli` reused for the timer, which would make a 3am cleanup read as someone at the desk.
  */
-export type ReapOrigin = "cli" | "schedule";
+export type ReapOrigin = "cli" | "schedule" | "harvest";
 
 export interface ReapAudit {
   readonly start: (repos: number) => Promise<void>;

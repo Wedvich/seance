@@ -112,15 +112,20 @@ describe("LaunchLedger", () => {
     const ledger = await LaunchLedger.open(path, () => 1);
     // A directory where the file should be: every write fails at the rename.
     await mkdir(join(path, "x"), { recursive: true });
-    const first = ledger.record("dup");
-    const second = ledger.record("dup");
-    // Both handled before any await: `second` can reject before `first`'s await
-    // returns, and an unhandled rejection fails the test whatever it asserts.
-    const firstRejects = expect(first).rejects.toThrow();
-    const secondRejects = expect(second).rejects.toThrow();
-    await firstRejects;
+    // Handlers go on in the same tick the writes start: `expect(p).rejects` may attach its own
+    // only after an await, and a rejection nothing handles by then fails the whole file.
+    const first = ledger.record("dup").then(
+      () => null,
+      (err: unknown) => ({ err }),
+    );
+    const second = ledger.record("dup").then(
+      () => null,
+      (err: unknown) => ({ err }),
+    );
+    const firstOutcome = await first;
+    expect(firstOutcome).not.toBeNull();
     expect(ledger.ids()).toContain("dup");
-    await secondRejects;
+    expect(await second).not.toBeNull();
     // Both failed and nothing launched: kept, it reads as ran-and-ended, never as never-started.
     expect(ledger.ids()).toContain("dup");
   });
@@ -376,5 +381,25 @@ describe("LaunchLedger progress notes", () => {
       { taskId: "c", at: 9, prUrl: "https://example.com/pr/3" },
     ]);
     expect(parseTaskProgressList(progress)).not.toBeNull();
+  });
+
+  test("an exit status survives a reopen, reaches progress alone, and a relaunch starts without it", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.note("t1", { exit: 3 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, exit: 3 }]);
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.progress()).toEqual([{ taskId: "t1", at: 9, exit: 3 }]);
+    // A later note keeps it; a value no process exits with is not read back.
+    await reopened.note("t1", { branch: "b" });
+    expect(reopened.notes()[0]?.exit).toBe(3);
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].exit = 256;
+    await writeFile(path, JSON.stringify(file));
+    expect((await LaunchLedger.open(path, () => 11)).notes()[0]).not.toHaveProperty("exit");
+
+    await reopened.startNote("t1");
+    expect(reopened.progress()).toEqual([]);
   });
 });

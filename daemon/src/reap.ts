@@ -5,6 +5,7 @@ import type { RepoEntry } from "@seance/shared";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
+import { owesExit } from "./exit-status.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import { runDir } from "./paths.ts";
@@ -53,6 +54,8 @@ export interface ReapOptions {
   /** A worktree younger than this is kept, whatever else holds. */
   readonly minAgeMs: number;
   readonly audit: ReapAudit;
+  /** The daemon's `harvestExits`: only the process owning the launch ledger can note a status, so the CLI passes none. */
+  readonly harvest?: () => Promise<void>;
   readonly now?: number;
   /** Stops between repos — the daemon's stop() ends a scheduled run here. */
   readonly signal?: AbortSignal;
@@ -160,6 +163,8 @@ function inside(dir: string, path: string): boolean {
 export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   const now = opts.now ?? Date.now();
   if (!opts.dryRun) await opts.audit.start(opts.repos.length);
+  // Exit statuses noted first: a dead task pane holding one is skipped below, so none would be closed at all.
+  if (!opts.dryRun) await opts.harvest?.();
 
   // tmux first: answering an exit prompt lets claude leave its worktree, and
   // the pane check below then sees the cwd gone.
@@ -203,8 +208,9 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
     const note = { paneId: pane.paneId, window: pane.windowName };
     const state = await classifyPane(pane);
     if (state === "dead") {
-      // No death time (an old tmux) can't be told from spawn's own pane: leave it.
-      if (pane.deadAt === null || now - pane.deadAt < deadMinAge) return { open: { ...note, state } };
+      // No death time (an old tmux) can't be told from spawn's own pane: leave it. A task pane
+      // holding an exit status is the daemon's to note first (`harvestExits`), or the status is lost.
+      if (pane.deadAt === null || now - pane.deadAt < deadMinAge || owesExit(pane)) return { open: { ...note, state } };
       if (!opts.dryRun) {
         const killed = await tmux(["kill-pane", "-t", pane.paneId]);
         if (killed.exitCode !== 0) return { open: { ...note, state } };

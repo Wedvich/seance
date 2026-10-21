@@ -71,6 +71,11 @@ export interface TaskLaunches {
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
   readonly progress: () => readonly TaskProgress[];
+  /**
+   * Notes each dead task pane's exit status, then closes the pane (`exit-status.ts`).
+   * Never throws. Absent, a dead pane stays until reap.
+   */
+  readonly harvestExits?: () => Promise<void>;
   readonly report: (carried: ReadonlySet<string>) => {
     readonly ended: readonly string[];
     readonly ledgerSince: number;
@@ -304,10 +309,17 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
  * can run for a minute; a PWA refresh or an MCP `get_sessions` behind it would
  * time out at `OP_TIMEOUT_MS.sessions` for fields it never reads. `progress`
  * is the leader's to read too, and is sent on the same side, trimmed to fit.
+ *
+ * Dead task panes are harvested after the listing and before `progress` is
+ * read, for every caller. A dead pane is not listed (tmux gives it no cwd), so
+ * a pane dying before the listing is harvested, its exit in `progress`; one
+ * dying after was listed alive. Harvested first instead, a pane dying between
+ * the two reads would be in neither — the leader would settle it `done`.
  */
 async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<SessionsResponse> {
   if (scheduler) await ctx.tasks?.settled();
   const sessions = await ctx.backend.sessions(ctx.getRepos());
+  await ctx.tasks?.harvestExits?.();
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };
   const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));

@@ -1,4 +1,5 @@
 import {
+  CAPABILITIES,
   DECISION_MAX_CANDIDATES,
   quote,
   type BranchState,
@@ -11,7 +12,7 @@ import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./aler
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
-import { branchChange } from "./done.ts";
+import { branchChange, ended as settledEnd } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
@@ -28,7 +29,17 @@ import {
 import { codeUnitOrder } from "./order.ts";
 import { prunable } from "./prune.ts";
 import { accountResetAt, route, type Decision } from "./route.ts";
-import { answerable, asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
+import {
+  answerable,
+  asSeen,
+  deviceOf,
+  holds,
+  sessionChange,
+  settle,
+  verdict,
+  waitsForExit,
+  type SessionSource,
+} from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
@@ -146,6 +157,14 @@ export class Scheduler {
    */
   #returned = new Set<string>();
   /**
+   * Tasks whose session's PR-less `ended` came from a machine that reports exit
+   * statuses (`onSession`): each pass checks their machine until its answer
+   * settles them, since a check landing before the pane died still lists the
+   * session. Memory only — a takeover checks every placed task anyway.
+   */
+  /** Task id → when its PR-less `ended` was deferred to its machine's next answer. */
+  readonly #ending = new Map<string, number>();
+  /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
    * log every time. Cleared on takeover.
@@ -164,6 +183,13 @@ export class Scheduler {
    * registry push. Memory only.
    */
   readonly #quiet = new Map<string, boolean>();
+  /**
+   * deviceId → when the last `sessions` that answered ok was asked (not
+   * answered: a pane that died while the call was out may still be listed).
+   * `#settleEndings` reads it: a deadline settles a session only once a read
+   * begun after it still listed it. Memory only.
+   */
+  readonly #listedAt = new Map<string, number>();
   #sweptAt: number;
   #fault: { readonly err: unknown } | null = null;
   #ticking: Promise<void> | null = null;
@@ -302,6 +328,7 @@ export class Scheduler {
     this.#leanFailed.clear();
     this.#unansweredSince.clear();
     this.#quiet.clear();
+    this.#listedAt.clear();
     await this.#check(this.tasks().filter(answerable));
   }
 
@@ -418,10 +445,29 @@ export class Scheduler {
    * is checked against where the task was placed, so a machine can move only
    * the tasks it was given; without `from` (a host that cannot say) a reserved
    * task is left to its verdict or its TTL. `prUrl` is the event's: a session
-   * that ends with one is `awaiting-merge`, not `done`.
+   * that ends with one is `awaiting-merge`, not `done`. One that ends with no
+   * PR known, from a machine advertising `exitStatus`, waits for that
+   * machine's answer (`sessionChange`, `#ending`): its exit says `failed` or
+   * `done`.
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
-    await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl));
+    const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);
+    let defers = false;
+    await this.#update(taskId, (task) => {
+      defers = waitsForExit(task, state, from, prUrl, awaitsExit);
+      return sessionChange(task, state, from, prUrl, awaitsExit);
+    });
+    if (!defers) return;
+    const held = this.#held.get(taskId)?.task;
+    if (held === undefined || !PLACED.includes(held.state)) return;
+    if (!this.#ending.has(taskId)) this.#ending.set(taskId, this.#now());
+    // Asked now, not at the next timed pass: the answer is what settles it, and frees its slot.
+    this.tick().catch(this.#onError);
+  }
+
+  #reportsExit(deviceId: string): boolean {
+    const machine = this.#fleet.machines().find((m) => m.deviceId === deviceId);
+    return machine?.capabilities?.includes(CAPABILITIES.exitStatus) === true;
   }
 
   /**
@@ -579,6 +625,7 @@ export class Scheduler {
   }
 
   async #pass(): Promise<void> {
+    await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());
     await this.#expire();
@@ -757,13 +804,49 @@ export class Scheduler {
         const deviceId = task.assignment?.deviceId ?? "";
         const since = this.#absentSince.get(deviceId);
         if (task.state === "lost" || since === undefined || now - since < this.#config.lostAfterMs) return;
-        await this.#update(task.id, (current) =>
-          current.state !== "lost" && PLACED.includes(current.state) && current.assignment?.deviceId === deviceId
-            ? advance(current, "lost", { absentSince: since })
-            : null,
-        );
+        // Its session ended, and only its exit was awaited: `lost` would fail dependents at `lost_expired` for a session that is over.
+        const settling = this.#ending.has(task.id);
+        await this.#update(task.id, (current) => {
+          if (current.state === "lost" || !PLACED.includes(current.state)) return null;
+          if (current.assignment?.deviceId !== deviceId) return null;
+          return settling ? settledEnd(current, undefined) : advance(current, "lost", { absentSince: since });
+        });
+        if (settling) this.#ending.delete(task.id);
       }),
     );
+  }
+
+  /**
+   * A task whose `ended` waited on its exit past `endingTimeoutMs` settles as
+   * the event would have without one (`ended`): a claude still alive after its
+   * SessionEnd hook is no failure to read, and must not hold its slot for good.
+   */
+  async #settleEndings(): Promise<void> {
+    const now = this.#now();
+    const due = [...this.#ending].filter(
+      ([id, at]) => now - at >= this.#config.endingTimeoutMs && !this.#awaited(id, at),
+    );
+    await Promise.all(
+      due.map(async ([id]) => {
+        this.#ending.delete(id);
+        await this.#update(id, (current) => (PLACED.includes(current.state) ? settledEnd(current, undefined) : null));
+      }),
+    );
+  }
+
+  /**
+   * Whether a deadline-past `#ending` task still waits for its machine: a
+   * check out may carry the exit (a late answer would be dropped once the
+   * task settled), and so may the next one, until a read begun after the
+   * deadline has listed the session. A disconnected machine answers nothing
+   * (`#due` skips it), so the deadline alone settles its task.
+   */
+  #awaited(id: string, deferredAt: number): boolean {
+    const task = this.#held.get(id)?.task;
+    const deviceId = task === undefined ? undefined : deviceOf(task);
+    if (deviceId === undefined || !this.#connected(deviceId)) return false;
+    if (this.#checks.has(deviceId)) return true;
+    return (this.#listedAt.get(deviceId) ?? -Infinity) < deferredAt + this.#config.endingTimeoutMs;
   }
 
   /**
@@ -773,7 +856,8 @@ export class Scheduler {
    * `awaiting-merge` task on a machine back from an absence, whose
    * `branch-state`s went nowhere meanwhile; and, once per `sweepIntervalMs`,
    * every running or `awaiting-merge` task on a connected machine — the only
-   * way a task whose `ended` or `merged` event was lost ever finishes. None on
+   * way a task whose `ended` or `merged` event was lost ever finishes; and
+   * every pass, a task whose `ended` waits on its exit (`#ending`). None on
    * a machine whose check is still out, or that went unanswered since the last
    * sweep (`#quiet`); a machine skipped keeps its return for the pass that asks it.
    */
@@ -790,6 +874,10 @@ export class Scheduler {
     const skipped = (deviceId: string): boolean => this.#checks.has(deviceId) || this.#quiet.has(deviceId);
     const returned = this.#returned;
     this.#returned = new Set([...returned].filter(skipped));
+    for (const id of this.#ending.keys()) {
+      const task = this.#held.get(id)?.task;
+      if (task === undefined || !PLACED.includes(task.state)) this.#ending.delete(id);
+    }
     return this.tasks().filter((t) => {
       const deviceId = deviceOf(t);
       if (!answerable(t) || deviceId === undefined || skipped(deviceId)) return false;
@@ -797,7 +885,7 @@ export class Scheduler {
         return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
       }
       if (!connected.has(deviceId)) return false;
-      return t.state === "lost" || sweep || returned.has(deviceId);
+      return t.state === "lost" || sweep || returned.has(deviceId) || this.#ending.has(t.id);
     });
   }
 
@@ -827,7 +915,9 @@ export class Scheduler {
    * before an event landed could undo it.
    */
   async #checkDevice(deviceId: string, tasks: readonly Task[]): Promise<void> {
+    const asked = this.#now();
     const reply = await this.#fleet.sessions(deviceId);
+    if (reply.ok) this.#listedAt.set(deviceId, asked);
     this.#heard(deviceId, reply);
     await Promise.all(
       tasks.map((seen) =>

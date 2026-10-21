@@ -565,6 +565,7 @@ const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
     "merge_expired",
     "Tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.",
   ],
+  ["session_failed", "Tasks waiting on it failed with it. Its transcript on that machine says why."],
 ]);
 
 export function failedBody(code: string | undefined): string {

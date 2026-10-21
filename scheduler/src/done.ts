@@ -8,7 +8,7 @@ import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
  * Pure: the scheduler writes what these return.
  */
 
-type Progress = Pick<TaskProgress, "prUrl" | "branch" | "pushed" | "merged">;
+type Progress = Pick<TaskProgress, "prUrl" | "branch" | "pushed" | "merged" | "exit">;
 
 /**
  * What `entry` may say of `task`. A `here` task's branch is the checkout's,
@@ -76,7 +76,10 @@ export function progressed(task: Task, entry: Progress | undefined): Task {
  * A task whose session ended, with `fields` (the event's or the answer's) and
  * the machine's `progress` entry, if any: merged → `done` by `merged`; a PR
  * open → `awaiting-merge`, which frees its slot and keeps `after: "merged"`
- * dependents waiting; neither → `done` by `session`.
+ * dependents waiting; neither, and a nonzero exit → `failed`
+ * (`session_failed`), which fails its dependents; neither and no such exit
+ * (0, or none known) → `done` by `session`. The exit counts only there: what
+ * a merge or a PR shows landed stands however the session ended.
  */
 export function ended(task: Task, entry: Progress | undefined, fields: TaskFields = {}): Task {
   const view: Task = { ...task, ...fields };
@@ -84,6 +87,11 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   const known = seen === undefined ? view : absorb(view, seen);
   if (seen?.merged === true && hasWork(known)) return advance(known, "done", { doneBy: "merged" });
   if (known.prUrl !== undefined) return advance(known, "awaiting-merge");
+  const exit = seen?.exit;
+  if (exit !== undefined && exit !== 0) {
+    const message = `its session exited with status ${exit} and reported no pull request`;
+    return advance(known, "failed", { failure: { code: "session_failed", message } });
+  }
   return advance(known, "done", { doneBy: "session" });
 }
 

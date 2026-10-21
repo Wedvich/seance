@@ -5,6 +5,7 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from
 import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
+import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
 import { isRegistered, listPanes, paneRunningTask } from "./sessions.ts";
 import {
@@ -227,8 +228,14 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
  * as soon as it happens; reaching the deadline means only "alive but not
  * registered", the shape of a claude sitting on a dialog no remote can answer.
  * Ported from /spawn.
+ *
+ * Past it a task's window keeps `remain-on-exit failed`: a clean exit closes it
+ * as any window closes, and any other leaves the pane dead with its status for
+ * `harvestExits` (`exit-status.ts`) to note before it closes it. A tmux older
+ * than 3.2 refuses `failed`; that window gets `off`, and its task settles by
+ * its PR alone, as before exit statuses.
  */
-async function awaitRegistration(windowId: string, waitMs: number): Promise<boolean> {
+async function awaitRegistration(windowId: string, waitMs: number, task: boolean): Promise<boolean> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
   const deadline = Bun.nanoseconds() + waitMs * 1e6;
   let dead = false;
@@ -255,7 +262,8 @@ async function awaitRegistration(windowId: string, waitMs: number): Promise<bool
     await tmux(["kill-window", "-t", windowId]);
     throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
-  await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
+  const kept = task && (await tmux(["set-option", "-w", "-t", windowId, "remain-on-exit", "failed"])).exitCode === 0;
+  if (!kept) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
   return titled;
 }
 
@@ -392,7 +400,9 @@ async function spawnUntracked(
     }
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
-    registered = await awaitRegistration(windowId, opts.waitMs ?? 5_000);
+    registered = await whileRegistering(windowId, () =>
+      awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined),
+    );
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }

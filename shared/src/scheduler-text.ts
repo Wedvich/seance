@@ -143,6 +143,7 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
   lost_expired:
     "its machine stayed away too long, so the scheduler stopped waiting for it — its session may still be running there",
   merge_expired: "no merge of its pull request was seen in time, so the scheduler stopped waiting for one",
+  session_failed: "its session exited with an error and reported no pull request",
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 

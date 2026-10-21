@@ -104,25 +104,53 @@ function liveState(state: Exclude<SessionState, "ended" | "done">): TaskState {
 }
 
 /**
+ * Whether `from`, the machine `task` is on, reports an `ended` that waits for
+ * its exit (`sessionChange`'s `awaitsExit`): no PR known, and the task is that
+ * machine's — a foreign sender defers nothing, so nothing waits on it.
+ */
+export function waitsForExit(
+  task: Task,
+  state: SessionState,
+  from: SessionSource | undefined,
+  prUrl: string | undefined,
+  awaitsExit: boolean,
+): boolean {
+  if (state !== "ended" || !awaitsExit || from === undefined || prUrl !== undefined || task.prUrl !== undefined) {
+    return false;
+  }
+  const at = task.state === "reserved" ? task.reservation : PLACED.includes(task.state) ? task.assignment : undefined;
+  return at?.deviceId === from.deviceId;
+}
+
+/**
  * A session event, with the PR URL it carried. A session that ended settles as
  * `ended` does (`awaiting-merge` with a PR, else `done`); one still live moves
  * between `running` and `needs-input`, and records a new PR URL even when its
  * state stands — `after: "opened"` and `awaiting-merge` read it.
+ *
+ * `awaitsExit`: the sender's daemon reports exit statuses (`CAPABILITIES.exitStatus`).
+ * Its `ended` with no PR known then settles nothing: the event's hook runs
+ * before the pane dies, so only the machine's next `sessions` answer can say
+ * whether the session failed. A reservation it resolves is `running` on the
+ * reporting pane meanwhile; a placed task only takes the pane, if it had none.
  */
 export function sessionChange(
   task: Task,
   state: SessionState,
   from: SessionSource | undefined,
   prUrl?: string,
+  awaitsExit = false,
 ): Task | null {
   // `done` is decided (DESIGN.md "Session events") but its act is not built: ingest refuses it,
   // and a leader that meets one anyway leaves the task alone rather than read it as running.
   if (state === "done") return null;
   const pr = prUrl === undefined ? {} : { prUrl };
+  const deferred = waitsForExit(task, state, from, prUrl, awaitsExit);
   if (task.state === "reserved") {
     const at = task.reservation;
     if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return null;
     const fields = { assignment: assignmentOf(at, { id: from.pane }), ...pr };
+    if (deferred) return advance(task, "running", fields);
     return state === "ended" ? ended(task, undefined, fields) : advance(task, liveState(state), fields);
   }
   // A lost task's machine speaking for it is the proof `lost` waits for.
@@ -134,6 +162,7 @@ export function sessionChange(
   // An assignment with no pane (never confirmed, or a `task_running` verdict) takes the event's.
   const named = assignment !== undefined && assignment.pane === undefined && from !== undefined;
   const fields = { ...(named ? { assignment: { ...assignment, pane: from.pane } } : {}), ...pr };
+  if (deferred) return named ? { ...task, ...fields } : null;
   if (state === "ended") return ended(task, undefined, fields);
   const to = liveState(state);
   if (task.state !== to) return advance(task, to, fields);
