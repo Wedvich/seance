@@ -250,7 +250,7 @@ describe("taskHeadline", () => {
   test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
     const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
     // These have their own headlines: the task may have reached a machine, or did and ran.
-    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired"]);
+    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired", "session_failed"]);
     for (const code of TASK_FAILURE_CODES.filter((c) => !own.has(c))) {
       expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
     }
@@ -259,6 +259,9 @@ describe("taskHeadline", () => {
     );
     expect(taskHeadline(failed("merge_expired"), machines, NOW)).toBe(
       "No merge seen for its PR — the scheduler gave up waiting.",
+    );
+    expect(taskHeadline({ ...failed("session_failed"), assignment: at }, machines, NOW)).toBe(
+      "Its session exited with an error on Mac · default, with no PR.",
     );
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",

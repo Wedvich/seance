@@ -566,5 +566,8 @@ describe("failedBody", () => {
     // The task is failed and terminal (a failed task can't be marked done), so the advice is to resubmit what waited on it.
     expect(failedBody("merge_expired")).toContain("submit the tasks that waited on it again");
     expect(failedBody("merge_expired")).not.toContain("by hand");
+    // It ran and ended: its dependents are the news, and "Nothing is running." would say less.
+    expect(failedBody("session_failed")).toContain("exited with an error");
+    expect(failedBody("session_failed")).toContain("Tasks waiting on it failed with it.");
   });
 });
