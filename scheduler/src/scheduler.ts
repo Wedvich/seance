@@ -1,4 +1,5 @@
 import {
+  CAPABILITIES,
   DECISION_MAX_CANDIDATES,
   quote,
   type BranchState,
@@ -145,6 +146,13 @@ export class Scheduler {
    * to no one, and `progress` holds it.
    */
   #returned = new Set<string>();
+  /**
+   * Tasks whose session's PR-less `ended` came from a machine that reports exit
+   * statuses (`onSession`): each pass checks their machine until its answer
+   * settles them, since a check landing before the pane died still lists the
+   * session. Memory only — a takeover checks every placed task anyway.
+   */
+  readonly #ending = new Set<string>();
   /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
@@ -418,10 +426,22 @@ export class Scheduler {
    * is checked against where the task was placed, so a machine can move only
    * the tasks it was given; without `from` (a host that cannot say) a reserved
    * task is left to its verdict or its TTL. `prUrl` is the event's: a session
-   * that ends with one is `awaiting-merge`, not `done`.
+   * that ends with one is `awaiting-merge`, not `done`. One that ends with no
+   * PR known, from a machine advertising `exitStatus`, waits for that
+   * machine's answer (`sessionChange`, `#ending`): its exit says `failed` or
+   * `done`.
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
-    await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl));
+    const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);
+    await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl, awaitsExit));
+    if (state !== "ended" || !awaitsExit) return;
+    const held = this.#held.get(taskId)?.task;
+    if (held !== undefined && PLACED.includes(held.state)) this.#ending.add(taskId);
+  }
+
+  #reportsExit(deviceId: string): boolean {
+    const machine = this.#fleet.machines().find((m) => m.deviceId === deviceId);
+    return machine?.capabilities?.includes(CAPABILITIES.exitStatus) === true;
   }
 
   /**
@@ -773,7 +793,8 @@ export class Scheduler {
    * `awaiting-merge` task on a machine back from an absence, whose
    * `branch-state`s went nowhere meanwhile; and, once per `sweepIntervalMs`,
    * every running or `awaiting-merge` task on a connected machine — the only
-   * way a task whose `ended` or `merged` event was lost ever finishes. None on
+   * way a task whose `ended` or `merged` event was lost ever finishes; and
+   * every pass, a task whose `ended` waits on its exit (`#ending`). None on
    * a machine whose check is still out, or that went unanswered since the last
    * sweep (`#quiet`); a machine skipped keeps its return for the pass that asks it.
    */
@@ -790,6 +811,10 @@ export class Scheduler {
     const skipped = (deviceId: string): boolean => this.#checks.has(deviceId) || this.#quiet.has(deviceId);
     const returned = this.#returned;
     this.#returned = new Set([...returned].filter(skipped));
+    for (const id of this.#ending) {
+      const task = this.#held.get(id)?.task;
+      if (task === undefined || !PLACED.includes(task.state)) this.#ending.delete(id);
+    }
     return this.tasks().filter((t) => {
       const deviceId = deviceOf(t);
       if (!answerable(t) || deviceId === undefined || skipped(deviceId)) return false;
@@ -797,7 +822,7 @@ export class Scheduler {
         return t.reservation !== undefined && t.reservation.expiresAt <= now && !this.#dispatches.has(t.id);
       }
       if (!connected.has(deviceId)) return false;
-      return t.state === "lost" || sweep || returned.has(deviceId);
+      return t.state === "lost" || sweep || returned.has(deviceId) || this.#ending.has(t.id);
     });
   }
 

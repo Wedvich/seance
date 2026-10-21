@@ -25,7 +25,7 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * event from it, or no such session — or a cancel, which cannot reach a
  * machine that is gone and so leaves its session as it is. A task lost from
  * `running` with no session has ended, as takeover settles a running task whose
- * session is gone (`awaiting-merge` with a PR open, else `done`). One lost from `reserved` (`reservedAt` kept) never had its
+ * session is gone (`awaiting-merge` with a PR open, `failed` on a nonzero exit, else `done`). One lost from `reserved` (`reservedAt` kept) never had its
  * spawn confirmed: with no session it is `ready` again only when the machine's
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
  * is legal for that task alone, and `advance` refuses it for any other. `done` from `queued`, `blocked` or `ready` is `mark-done`'s alone: no signal ever settles never-placed work, and it always wins. `lost`

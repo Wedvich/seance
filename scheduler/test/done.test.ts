@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { BranchState, DespawnRequest, DespawnResponse, TaskProgress } from "@seance/shared";
+import {
+  CAPABILITIES,
+  type BranchState,
+  type DespawnRequest,
+  type DespawnResponse,
+  type TaskProgress,
+} from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -77,6 +83,100 @@ describe("a session that ends", () => {
     expect((await store.get(task.id))?.version).toBe(before + 1);
     await scheduler.onSession(task.id, "ended", FROM_A);
     expect(scheduler.task(task.id)?.state).toBe("awaiting-merge");
+  });
+});
+
+describe("a session's exit status", () => {
+  const reporting = (): FakeFleet =>
+    new FakeFleet([
+      machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus] }),
+    ]);
+
+  test("from a machine that reports it, a PR-less end waits for the answer: nonzero fails the task and its dependents", async () => {
+    const { fleet, scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", FROM_A);
+    expect(scheduler.task("t")?.state).toBe("running");
+
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 1 })] });
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual(["a"]);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed" } });
+    expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
+  test("a check that still lists the dying session is asked again next pass; exit 0 is done", async () => {
+    const { fleet, scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", FROM_A);
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [{ id: "%1", window: "w", repo: "app", path: "/wt/t", taskId: "t" }],
+    });
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("running");
+
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 0 })] });
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
+    // Settled: no longer asked for between sweeps.
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+  });
+
+  test("no status in the answer (a signal, an old tmux) is done, as before", async () => {
+    const { fleet, scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", FROM_A);
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"] });
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("a PR or a believed merge outranks a nonzero exit", async () => {
+    const { fleet, scheduler, put } = setup(reporting());
+    await put("pr", { assignment: ON_A });
+    await put("merged", { assignment: { ...ON_A, pane: "%2" } });
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      ended: ["pr", "merged"],
+      progress: [
+        progress("pr", { prUrl: PR, exit: 2 }),
+        progress("merged", { branch: "m", pushed: true, merged: true, exit: 137 }),
+      ],
+    });
+    await scheduler.takeover();
+    expect(scheduler.task("pr")?.state).toBe("awaiting-merge");
+    expect(scheduler.task("merged")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
+  test("an end with a PR settles on the event, whatever the machine reports", async () => {
+    const { scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", FROM_A, PR);
+    expect(scheduler.task("t")?.state).toBe("awaiting-merge");
+  });
+
+  test("an end that resolves a reservation runs it on the reporting pane until the answer", async () => {
+    const { fleet, scheduler, put } = setup(reporting());
+    await put("t", {
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 60_000 },
+      reservedAt: NOW,
+    });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", FROM_A);
+    expect(scheduler.task("t")).toMatchObject({ state: "running", assignment: { deviceId: "a", pane: "%1" } });
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 1 })] });
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("failed");
   });
 });
 
