@@ -1,5 +1,5 @@
 import type { ReapAudit } from "./audit.ts";
-import { listPanes, type PaneInfo } from "./sessions.ts";
+import { listPanes, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
 
 /**
@@ -16,7 +16,7 @@ import { tmux } from "./tmux.ts";
  * pane that dies before the listing is harvested here and in `progress`, and
  * one that dies after it was listed alive: either way the leader sees the task
  * running or its exit, never neither. Reap's timer runs it too
- * (`ReapOptions.harvest`), so panes nobody asks about do not linger.
+ * (`ReapOptions.harvest`) when it is on (`intervalHours` is 0 by default).
  *
  * Registered panes only: one that died before its title went up is
  * `spawnSession`'s, which captures and closes it itself — and so is one whose
@@ -57,6 +57,9 @@ export function tmuxHarvestPanes(audit: Pick<ReapAudit, "closedPane">): HarvestP
   return {
     list: listPanes,
     close: async (pane) => {
+      // Pane ids restart from %0 with the tmux server: the one listed may be another window's by now.
+      const fresh = await paneInfo(pane.paneId);
+      if (fresh === null || !fresh.dead || fresh.windowId !== pane.windowId || fresh.taskId !== pane.taskId) return;
       if ((await tmux(["kill-pane", "-t", pane.paneId])).exitCode !== 0) return;
       await audit.closedPane(pane.paneId, pane.windowName, "exit-status");
     },
@@ -64,7 +67,7 @@ export function tmuxHarvestPanes(audit: Pick<ReapAudit, "closedPane">): HarvestP
 }
 
 export interface HarvestDeps extends HarvestPanes {
-  /** False when the task is not in this daemon's ledger: its status has nowhere to go, so the pane stays for reap. */
+  /** False when the task is not in this daemon's ledger (evicted, retracted, replaced): its status has nowhere to go. */
   readonly note: (taskId: string, exit: number) => Promise<boolean>;
 }
 
@@ -84,8 +87,8 @@ export async function harvestExits(deps: HarvestDeps): Promise<void> {
     panes
       .filter((pane) => harvestable(pane) && !registering.has(pane.windowId))
       .map(async (pane) => {
-        if (pane.taskId !== null && pane.deadStatus !== null && !(await deps.note(pane.taskId, pane.deadStatus)))
-          return;
+        // Closed either way: reap skips a pane holding a status (`owesExit`), so one left here would linger for good.
+        if (pane.taskId !== null && pane.deadStatus !== null) await deps.note(pane.taskId, pane.deadStatus);
         await deps.close(pane);
       }),
   );

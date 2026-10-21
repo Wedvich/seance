@@ -148,6 +148,7 @@ interface InfoLine {
   readonly dead?: string;
   readonly deadTime?: string;
   readonly deadStatus?: string;
+  readonly deadSignal?: string;
   readonly titled?: string;
   readonly name?: string;
   readonly task?: string;
@@ -164,6 +165,7 @@ function infoLine(fields: InfoLine): string {
     fields.dead ?? "0",
     fields.deadTime ?? "",
     fields.deadStatus ?? "",
+    fields.deadSignal ?? "",
     fields.titled ?? "1",
     fields.name ?? "task",
     fields.task ?? "",
@@ -212,8 +214,13 @@ describe("parsePaneInfo", () => {
       parsePaneInfo(infoLine({ pane: "%1", ...fields }))[0]?.deadStatus;
     expect(status({ dead: "1", deadStatus: "3" })).toBe(3);
     expect(status({ dead: "1", deadStatus: "0" })).toBe(0);
-    // A signal death: tmux leaves the field empty.
     expect(status({ dead: "1", deadStatus: "" })).toBeNull();
+    // A signal death reads as the shell reports it, 128 + signal.
+    expect(status({ dead: "1", deadSignal: "9" })).toBe(137);
+    expect(status({ dead: "1", deadSignal: "11" })).toBe(139);
+    expect(status({ dead: "1", deadSignal: "0" })).toBeNull();
+    expect(status({ dead: "1", deadSignal: "200" })).toBeNull();
+    expect(status({ dead: "0", deadSignal: "9" })).toBeNull();
     expect(status({ dead: "1", deadStatus: "256" })).toBeNull();
     expect(status({ dead: "1", deadStatus: "-1" })).toBeNull();
     expect(status({ dead: "0", deadStatus: "1" })).toBeNull();

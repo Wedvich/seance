@@ -58,7 +58,7 @@ describe("harvestExits", () => {
     expect(touched).toBe(false);
   });
 
-  test("a pane whose task is not in this ledger is left for reap; one a spawn still awaits is left to it", async () => {
+  test("a pane whose task is not in this ledger is closed, its status having nowhere to go; one a spawn still awaits is left to it", async () => {
     const closed: string[] = [];
     const deps = {
       list: () => Promise.resolve([pane("%1"), pane("%2", { windowId: "@awaited" })]),
@@ -66,10 +66,10 @@ describe("harvestExits", () => {
       close: (p: { paneId: string }) => Promise.resolve(closed.push(p.paneId)),
     };
     await whileRegistering("@awaited", () => harvestExits(deps));
-    expect(closed).toEqual([]);
+    expect(closed).toEqual(["%1"]);
     // Once the spawn is past registration its pane is harvestable again.
     await harvestExits(deps);
-    expect(closed).toEqual(["%2"]);
+    expect(closed.toSorted()).toEqual(["%1", "%1", "%2"]);
   });
 });
 

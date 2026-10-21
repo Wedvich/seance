@@ -493,6 +493,32 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
+  test("a task session killed by a signal reads as 128 + the signal, as a shell reports it", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+    try {
+      await ledger.record("task-kill");
+      const killed = await spawnSession(
+        { repo: "myrepo", mode: "here", title: "Task Kill", taskId: "task-kill" },
+        repos,
+        WAIT,
+      );
+      const pane = (await waitForSession(killed.window))?.id ?? "";
+      await tmux(["send-keys", "-t", pane, "-l", "/kill 9"]);
+      await tmux(["send-keys", "-t", pane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
+      expect((await paneInfo(pane))?.deadStatus).toBe(137);
+
+      await tasks.harvestExits();
+      expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-kill", exit: 137 })]);
+      expect(await paneInfo(pane)).toBeNull();
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await killWindow("Task Kill");
+    }
+  });
+
   test("two concurrent spawns for one task start exactly one session", async () => {
     const results = await Promise.allSettled(
       ["Race A", "Race B"].map((title) =>
