@@ -12,7 +12,7 @@ import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./aler
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
-import { branchChange } from "./done.ts";
+import { branchChange, ended as settledEnd } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
@@ -29,7 +29,17 @@ import {
 import { codeUnitOrder } from "./order.ts";
 import { prunable } from "./prune.ts";
 import { accountResetAt, route, type Decision } from "./route.ts";
-import { answerable, asSeen, deviceOf, holds, sessionChange, settle, verdict, type SessionSource } from "./settle.ts";
+import {
+  answerable,
+  asSeen,
+  deviceOf,
+  holds,
+  sessionChange,
+  settle,
+  verdict,
+  waitsForExit,
+  type SessionSource,
+} from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";
@@ -152,7 +162,8 @@ export class Scheduler {
    * settles them, since a check landing before the pane died still lists the
    * session. Memory only — a takeover checks every placed task anyway.
    */
-  readonly #ending = new Set<string>();
+  /** Task id → when its PR-less `ended` was deferred to its machine's next answer. */
+  readonly #ending = new Map<string, number>();
   /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
@@ -433,11 +444,15 @@ export class Scheduler {
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
     const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);
-    await this.#update(taskId, (task) => sessionChange(task, state, from, prUrl, awaitsExit));
-    if (state !== "ended" || !awaitsExit) return;
+    let defers = false;
+    await this.#update(taskId, (task) => {
+      defers = waitsForExit(task, state, from, prUrl, awaitsExit);
+      return sessionChange(task, state, from, prUrl, awaitsExit);
+    });
+    if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
-    this.#ending.add(taskId);
+    if (!this.#ending.has(taskId)) this.#ending.set(taskId, this.#now());
     // Asked now, not at the next timed pass: the answer is what settles it, and frees its slot.
     this.tick().catch(this.#onError);
   }
@@ -602,6 +617,7 @@ export class Scheduler {
   }
 
   async #pass(): Promise<void> {
+    await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());
     await this.#expire();
@@ -780,11 +796,30 @@ export class Scheduler {
         const deviceId = task.assignment?.deviceId ?? "";
         const since = this.#absentSince.get(deviceId);
         if (task.state === "lost" || since === undefined || now - since < this.#config.lostAfterMs) return;
-        await this.#update(task.id, (current) =>
-          current.state !== "lost" && PLACED.includes(current.state) && current.assignment?.deviceId === deviceId
-            ? advance(current, "lost", { absentSince: since })
-            : null,
-        );
+        // Its session ended, and only its exit was awaited: `lost` would fail dependents at `lost_expired` for a session that is over.
+        const settling = this.#ending.has(task.id);
+        await this.#update(task.id, (current) => {
+          if (current.state === "lost" || !PLACED.includes(current.state)) return null;
+          if (current.assignment?.deviceId !== deviceId) return null;
+          return settling ? settledEnd(current, undefined) : advance(current, "lost", { absentSince: since });
+        });
+        if (settling) this.#ending.delete(task.id);
+      }),
+    );
+  }
+
+  /**
+   * A task whose `ended` waited on its exit past `endingTimeoutMs` settles as
+   * the event would have without one (`ended`): a claude still alive after its
+   * SessionEnd hook is no failure to read, and must not hold its slot for good.
+   */
+  async #settleEndings(): Promise<void> {
+    const now = this.#now();
+    const due = [...this.#ending].filter(([, at]) => now - at >= this.#config.endingTimeoutMs);
+    await Promise.all(
+      due.map(async ([id]) => {
+        this.#ending.delete(id);
+        await this.#update(id, (current) => (PLACED.includes(current.state) ? settledEnd(current, undefined) : null));
       }),
     );
   }
@@ -814,7 +849,7 @@ export class Scheduler {
     const skipped = (deviceId: string): boolean => this.#checks.has(deviceId) || this.#quiet.has(deviceId);
     const returned = this.#returned;
     this.#returned = new Set([...returned].filter(skipped));
-    for (const id of this.#ending) {
+    for (const id of this.#ending.keys()) {
       const task = this.#held.get(id)?.task;
       if (task === undefined || !PLACED.includes(task.state)) this.#ending.delete(id);
     }

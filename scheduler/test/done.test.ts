@@ -162,6 +162,60 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")?.state).toBe("awaiting-merge");
   });
 
+  test("a claude that stays listed past the deadline settles as the event would have, and is asked no more", async () => {
+    const { fleet, clock, scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({ ok: true, sessions: [dying] });
+    await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
+    clock.now += DEFAULT_CONFIG.endingTimeoutMs - 1;
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("running");
+    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+
+    clock.now += 1;
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
+    await pass(scheduler);
+    expect(fleet.sessionCalls).toEqual(["a", "a"]);
+  });
+
+  test("a machine that disconnects while its task awaits its exit settles it, never `lost`", async () => {
+    const config = { ...DEFAULT_CONFIG, lostAfterMs: 1_000 };
+    const { fleet, clock, scheduler, put } = setup(reporting(), config);
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({ ok: true, sessions: [dying] });
+    await scheduler.onSession("t", "ended", FROM_A);
+    await scheduler.drain();
+    fleet.fleet = [{ ...fleet.fleet[0]!, connected: false }];
+    await pass(scheduler);
+    clock.now += config.lostAfterMs;
+    await pass(scheduler);
+    expect(clock.now - NOW).toBeLessThan(config.endingTimeoutMs);
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("an end from a machine the task is not on defers nothing: it is not asked about, nor settled", async () => {
+    const fleet = new FakeFleet([
+      machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus] }),
+      machine("b", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus] }),
+    ]);
+    // The first pass sweeps whatever the interval; what is checked is the asking after it.
+    const { clock, scheduler, put } = setup(fleet, { ...DEFAULT_CONFIG, sweepIntervalMs: 24 * 60 * 60_000 });
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    await scheduler.onSession("t", "ended", { deviceId: "b", pane: "%9" });
+    await scheduler.drain();
+    fleet.sessionCalls.length = 0;
+    clock.now += DEFAULT_CONFIG.endingTimeoutMs;
+    await scheduler.tick();
+    await scheduler.drain();
+    expect(scheduler.task("t")?.state).toBe("running");
+    expect(fleet.sessionCalls).toEqual([]);
+  });
+
   test("an end that resolves a reservation places it on the reporting pane, and the answer settles it", async () => {
     const { fleet, scheduler, put } = setup(reporting());
     await put("t", {

@@ -85,6 +85,14 @@ export interface SchedulerConfig {
    */
   readonly sweepIntervalMs: number;
   /**
+   * How long a PR-less `ended` from a machine reporting exit statuses waits for
+   * that machine's answer to stop listing the session (`#ending`). Past it the
+   * task settles as the event would have without an exit: a claude that stays
+   * alive after its SessionEnd hook must not hold its slot, and be asked about,
+   * for good.
+   */
+  readonly endingTimeoutMs: number;
+  /**
    * Finished tasks kept for `queue` to show; older ones are pruned, so creates
    * stay under the store's `MAX_TASKS`.
    */
@@ -126,6 +134,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
   sweepIntervalMs: 120_000,
+  endingTimeoutMs: 120_000,
   keepFinished: 50,
   pruneAt: 96,
 };

@@ -3610,7 +3610,13 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
   reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine
   at once, then every pass (`#ending`) until a reply no longer lists the session, since a check
-  landing while claude is still shutting down does. That makes the event path and the sweep one path. An end
+  landing while claude is still shutting down does. That makes the event path and the sweep one path.
+  Only the machine the task is on defers (`waitsForExit`): a foreign sender's `ended` changes
+  and waits for nothing. The wait is bounded by `endingTimeoutMs` (2 min): past it the task
+  settles as the event would have without an exit, so a claude that stays alive after its
+  SessionEnd hook does not hold its slot and get asked about for good; likewise a machine
+  that disconnects past `lostAfterMs` settles it that way instead of marking it `lost`, which
+  would fail dependents at `lost_expired` for a session that is over. An end
   with a PR known settles on the event as before; the status counts only when neither a PR nor a
   believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). No status — 0, which
   under `failed` closes the window and is never seen, a signal death (tmux prints no status), a

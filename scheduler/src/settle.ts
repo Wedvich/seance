@@ -104,6 +104,25 @@ function liveState(state: Exclude<SessionState, "ended" | "done">): TaskState {
 }
 
 /**
+ * Whether `from`, the machine `task` is on, reports an `ended` that waits for
+ * its exit (`sessionChange`'s `awaitsExit`): no PR known, and the task is that
+ * machine's — a foreign sender defers nothing, so nothing waits on it.
+ */
+export function waitsForExit(
+  task: Task,
+  state: SessionState,
+  from: SessionSource | undefined,
+  prUrl: string | undefined,
+  awaitsExit: boolean,
+): boolean {
+  if (state !== "ended" || !awaitsExit || from === undefined || prUrl !== undefined || task.prUrl !== undefined) {
+    return false;
+  }
+  const at = task.state === "reserved" ? task.reservation : PLACED.includes(task.state) ? task.assignment : undefined;
+  return at?.deviceId === from.deviceId;
+}
+
+/**
  * A session event, with the PR URL it carried. A session that ended settles as
  * `ended` does (`awaiting-merge` with a PR, else `done`); one still live moves
  * between `running` and `needs-input`, and records a new PR URL even when its
@@ -126,7 +145,7 @@ export function sessionChange(
   // and a leader that meets one anyway leaves the task alone rather than read it as running.
   if (state === "done") return null;
   const pr = prUrl === undefined ? {} : { prUrl };
-  const deferred = state === "ended" && awaitsExit && prUrl === undefined && task.prUrl === undefined;
+  const deferred = waitsForExit(task, state, from, prUrl, awaitsExit);
   if (task.state === "reserved") {
     const at = task.reservation;
     if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return null;
