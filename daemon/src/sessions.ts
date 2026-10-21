@@ -142,8 +142,9 @@ export interface PaneInfo {
   /**
    * Its process's exit status once dead, 0–255; null while alive, or when tmux
    * gives neither a status nor a signal. A signal death reads as the shell
-   * convention, `128 + signal` (`pane_dead_signal`, tmux ≥ 3.3; older tmux
-   * leaves it empty and the death has no status).
+   * convention, `128 + signal` (`pane_dead_signal`, tmux ≥ 3.3: a number on
+   * glibc, a name such as `kill` where libc has `sys_signame`, as on macOS;
+   * older tmux leaves it empty and the death has no status).
    */
   readonly deadStatus: number | null;
   readonly titled: boolean;

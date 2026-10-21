@@ -3630,7 +3630,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   with a PR known settles on the event as before; the status counts only when neither a PR nor a
   believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). A signal death (an OOM
   SIGKILL, a segfault) leaves `pane_dead_status` empty and `pane_dead_signal` set (tmux 3.3 and
-  later), read as `128 + signal`, the shell's convention and inside 0–255, so it fails like any
+  later; a number on Linux, a name on macOS, resolved through `os.constants.signals`), read as `128 + signal`, the shell's convention and inside 0–255, so it fails like any
   nonzero exit. No status — 0, which
   under `failed` closes the window and is never seen, a signal death on a tmux without
   `pane_dead_signal` (the field reads empty), a tmux older than 3.2 (which refuses `failed`, so the window gets `off`), a pane someone closed by
