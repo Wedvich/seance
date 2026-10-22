@@ -3,10 +3,10 @@ import type { EngineInterface, Register } from "claude-code";
 /**
  * Tells the local seanced what this session is doing, for séance's scheduler
  * (DESIGN.md, "Session events"): busy, idle, waiting on a person, ended, and
- * the PR it opened. Each report is one `seanced session-event` with the event as JSON on
- * stdin. The daemon trusts none of it about *which* session this is — it binds
- * the report to a tmux pane by this process tree — so nothing here names a
- * session or a task.
+ * the PR it opened. Each report is one `session-event` run of this checkout's
+ * daemon CLI (`daemonMain`) with the event as JSON on stdin. The daemon trusts
+ * none of it about *which* session this is — it binds the report to a tmux pane
+ * by this process tree — so nothing here names a session or a task.
  *
  * Engine events only, never `classic.*`: on Team/Enterprise orgs a built-in
  * plugin sits above every installed one on the classic chain and passes each
@@ -34,7 +34,7 @@ import type { EngineInterface, Register } from "claude-code";
  * Not covered: an MCP server's elicitation, which has no engine event.
  *
  * Fire-and-forget throughout: no hook waits on the daemon, and a missing
- * `seanced`, a stopped daemon or a slow one costs the session nothing.
+ * `bun`, a stopped daemon or a slow one costs the session nothing.
  */
 
 type State = "busy" | "idle" | "needs-input" | "ended";
@@ -49,6 +49,18 @@ const SEND_TIMEOUT_MS = 3_000;
 
 /** session.end reasons after which the same process, in the same pane, carries on. */
 const CONTINUES: ReadonlySet<string> = new Set(["clear", "resume"]);
+
+/**
+ * The daemon's entry point, by path from this mod's own folder rather than the
+ * CLI's name on PATH: a directory marketplace is read in place, so the mod and
+ * the daemon are always the same checkout, while the PATH link is opt-in and
+ * nothing re-points it on a pull. Exported for tests.
+ */
+export function daemonMain(pluginRoot: string): string {
+  const parts = pluginRoot.replace(/\/+$/u, "").split("/");
+  // The plugin folder is <checkout>/claude-mods/<mod>.
+  return [...parts.slice(0, -2), "daemon", "src", "main.ts"].join("/");
+}
 
 const PR_URL = /https:\/\/[^\s"'<>]+\/pull\/\d+/u;
 
@@ -68,7 +80,11 @@ async function report($: EngineInterface, body: Report): Promise<void> {
   // per event. The daemon still decides the binding for every report that goes out.
   const pane = await $.env.get("TMUX_PANE");
   if (pane === undefined || pane === "") return;
-  await $.process.run(["seanced", "session-event"], { stdin: JSON.stringify(body), timeoutMs: SEND_TIMEOUT_MS });
+  // Bun by bare name, as `update.ts` does: resolved at use, never recorded.
+  await $.process.run(["bun", daemonMain($.plugin.root), "session-event"], {
+    stdin: JSON.stringify(body),
+    timeoutMs: SEND_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -123,7 +139,7 @@ async function drain($: EngineInterface, t: Tracker): Promise<void> {
       t.pending = null;
       // oxlint-disable-next-line no-await-in-loop -- one report at a time, in order
       await report($, body).catch(() => {
-        // seanced not on PATH, or it timed out: nothing for the session to do about it.
+        // bun not on PATH, or the run timed out: nothing for the session to do about it.
       });
     }
   } finally {
@@ -132,7 +148,7 @@ async function drain($: EngineInterface, t: Tracker): Promise<void> {
 }
 
 function send($: EngineInterface, t: Tracker, body: Report): void {
-  // Never awaited by a hook: the run resolves when seanced exits.
+  // Never awaited by a hook: the run resolves when the CLI exits.
   if (body.state === "ended") {
     // Terminal, so it skips the queue: it must not wait out a wedged daemon's
     // timeouts, and whatever was pending is stale. A pending prUrl rides along.

@@ -1,12 +1,12 @@
 import { describe, expect, mock, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On, SessionEndReason, ToolCheckDecision } from "claude-code";
-import { prUrlFrom } from "./register.ts";
+import { daemonMain, prUrlFrom } from "./register.ts";
 
 type Sent = { readonly argv: readonly string[]; readonly report: unknown }[];
 
 /**
- * Records every `seanced session-event` the mod runs, answering as seanced does: silently.
+ * Records every `session-event` run the mod makes, answering as the CLI does: silently.
  * `env` is the session's: in a tmux pane unless a test says otherwise.
  */
 function record(
@@ -32,7 +32,7 @@ function record(
   on("process.run", async (_$, e) => {
     sent.push({ argv: [...e.argv], report: JSON.parse(e.init?.stdin ?? "null") });
     await gate;
-    if (fail) throw new Error("spawn seanced ENOENT");
+    if (fail) throw new Error("spawn bun ENOENT");
     return { value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
   });
   return sent;
@@ -121,15 +121,24 @@ describe("prUrlFrom", () => {
   });
 });
 
+describe("daemonMain", () => {
+  test("tolerates a trailing slash on the plugin folder", () => {
+    expect(daemonMain("/r/seance/claude-mods/session-events/")).toBe("/r/seance/daemon/src/main.ts");
+  });
+});
+
 describe("reports", () => {
-  test("a session's life sends its states through seanced, never naming a session", async ($, on) => {
+  test("a session's life sends its states through this checkout's daemon CLI, never naming a session", async ($, on) => {
     const sent = record(on);
     await $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
     await $.turn.start({ ...turn, text: "hi" });
     await $.turn.complete(answered);
     await end($, "prompt_input_exit");
     await settled(sent, 4);
-    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 4 }, () => ["seanced", "session-event"]));
+    // The checkout the mod is read from, never a name on PATH.
+    const main = sent[0]?.argv[1] ?? "";
+    expect(main.endsWith("/daemon/src/main.ts")).toBe(true);
+    expect(sent.map((s) => s.argv)).toEqual(Array.from({ length: 4 }, () => ["bun", main, "session-event"]));
     expect(sent.map((s) => s.report)).toEqual([
       { state: "idle" },
       { state: "busy" },
@@ -522,7 +531,7 @@ describe("reports", () => {
     expect(sent).toEqual([]);
   });
 
-  test("seanced missing costs the session nothing, and later reports still go", async ($, on) => {
+  test("bun missing costs the session nothing, and later reports still go", async ($, on) => {
     const sent = record(on, { fail: true });
     await $.turn.start({ ...turn, text: "hi" });
     await $.turn.complete(answered);
