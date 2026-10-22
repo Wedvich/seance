@@ -514,6 +514,15 @@ precede. Wave 2 waits on the wave-1 item named.
   settles on the deadline alone, never `lost` at the defaults), so the event path and the sweep are one path; a nonzero exit (a signal death as `128 + signal`) fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
   status", records the rest and what was rejected.
 
+  _Open gaps (follow-up, not yet planned):_
+  - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
+    in the ledger (`progress.prUrl`) but the leader never recorded settles `done` by `session`,
+    not `awaiting-merge`, and releases `after: "merged"` dependents early. Same blindness the
+    event path had before; narrower now. Fix direction: settle from the machine's last
+    `progress` entry where one was read.
+  - A spawn that times out before claude registers and then dies untitled gets no status
+    (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
+
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.

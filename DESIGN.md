@@ -4304,8 +4304,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
   refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
-  each candidate was judged on; the queued task's record shows it, its age read as the account
-  cards read it, observer named and "asleep" when it is. **Queue on auto** is an enqueue
+  each candidate was judged on (the task record keeps it). **Queue on auto** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
   and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
@@ -4314,8 +4313,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
   stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
   decision card is not on the verdict at all — the owner's call: the form's preview says where
-  it would go, the Queue screen's row says why there, and the verdict says only that it is
-  running; `verdict-view.ts` derives the rest): a `queue-changed` nudge that names the task (or
+  it would go and the verdict says only that it is running; `verdict-view.ts` derives the rest.
+  The Queue screen's rows once carried it too, behind a "Why there" disclosure, removed
+  2026-10-22 as unread — the task record still holds the decision): a `queue-changed` nudge that names the task (or
   none) re-reads
   `queue {tasks: [id]}` at once, a reconnect or a new leader re-reads it, and a poll every 2s, at
   most 30 times, is the fallback while the task has not settled (`isSettled`,

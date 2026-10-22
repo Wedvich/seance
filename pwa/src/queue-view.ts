@@ -1,4 +1,4 @@
-import { QUEUE_MAX_TASKS, TASK_PHASES, type Decision, type PauseHold, type Task } from "@seance/shared";
+import { QUEUE_MAX_TASKS, TASK_PHASES, type PauseHold, type Task } from "@seance/shared";
 import { taskHeadline } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
@@ -18,8 +18,6 @@ export interface QueueRow {
   readonly body: string | null;
   readonly dot: QueueDot | null;
   readonly age: string;
-  /** Keyed on the task's `assignment`, not its state: a waiting task marked done never reads as placed. */
-  readonly decision: { readonly record: Decision; readonly tense: "would" | "did" } | null;
   readonly canCancel: boolean;
   readonly canMarkDone: boolean;
   /** Cancelling despawns a session: the button asks twice. */
@@ -41,8 +39,8 @@ export interface HoldRow {
 }
 
 export interface QueueScreenView {
-  /** The header's meta line: who leads, or why nobody answers. */
-  readonly status: string;
+  /** The header's meta line, "2 running · 1 waiting"; null until a list has been read. */
+  readonly summary: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
   /** The reply held `QUEUE_MAX_TASKS` tasks, so older ones may be left out. */
@@ -135,10 +133,6 @@ function rowOf(task: Task, state: AppState, now: number): QueueRow {
     body: bodyOf(task, now),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
-    decision:
-      task.decision === undefined
-        ? null
-        : { record: task.decision, tense: task.assignment === undefined ? "would" : "did" },
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
@@ -190,8 +184,10 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     else empty = "Nothing in the queue.";
   }
 
+  const count = (title: string): number => sections.find((s) => s.title === title)?.rows.length ?? 0;
+
   return {
-    status: text,
+    summary: ok === null ? null : `${count("Running")} running · ${count("Waiting")} waiting`,
     available,
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,
