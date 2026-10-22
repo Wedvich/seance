@@ -39,7 +39,7 @@ const recorded = async (file: string): Promise<readonly string[]> => {
   return text.split("\n").filter((line) => line !== "");
 };
 
-describe("seanced raycast install/uninstall through the CLI", () => {
+describe("seance raycast install/uninstall through the CLI", () => {
   let base: string;
   let stubs: string;
   let root: string;
@@ -174,7 +174,7 @@ exit 0
   test("a missing or unknown subcommand is a usage error, and runs nothing", async () => {
     const bare = await run();
     expect(bare.code).toBe(1);
-    expect(bare.err).toContain("usage: seanced raycast install");
+    expect(bare.err).toContain("usage: seance raycast install");
     const wrong = await run("reinstall");
     expect(wrong.code).toBe(1);
     expect(wrong.err).toContain('unknown raycast subcommand "reinstall"');

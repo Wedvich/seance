@@ -104,7 +104,7 @@ export async function importTpmPskValue(psk: string, path: string = tpmPskPath()
   const dec = await exec(decryptArgv(CRED_NAME), { stdin: blob, timeoutMs: CREDS_TIMEOUT_MS });
   if (dec.exitCode !== 0 || dec.stdout.trim() !== psk) {
     throw new Error(
-      `sealed blob does not decrypt back (${execFailure(dec)}) — existing blob left untouched, check \`seanced doctor\``,
+      `sealed blob does not decrypt back (${execFailure(dec)}) — existing blob left untouched, check \`seance doctor\``,
     );
   }
   await mkdir(dirname(path), { recursive: true });

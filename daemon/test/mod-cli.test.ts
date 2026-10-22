@@ -13,7 +13,7 @@ const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 // the one failure uninstall must read as "nothing to do" rather than an error.
 // Plugins live per config dir, so the stub keys its state on CLAUDE_CONFIG_DIR
 // and prefixes each record with it ("-" when unset — the default exclave).
-describe("seanced mod install/uninstall through the CLI", () => {
+describe("seance mod install/uninstall through the CLI", () => {
   let root: string;
   let recorded: string;
   let checkout: string;
@@ -131,7 +131,7 @@ exit 0
   test("an unknown subcommand fails with the usage line and touches nothing", async () => {
     const { err, code, argv } = await run("reinstall");
     expect(code).not.toBe(0);
-    expect(err).toContain("usage: seanced mod install");
+    expect(err).toContain("usage: seance mod install");
     expect(argv).toEqual([]);
   });
 });

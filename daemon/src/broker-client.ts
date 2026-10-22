@@ -12,7 +12,7 @@ import { exchange, LocalConnectionLost, LocalTimedOut, LocalUnavailable } from "
 import { socketPath } from "./paths.ts";
 
 /**
- * The peer side of the fleet broker — what a keyless `seanced mcp` uses to reach
+ * The peer side of the fleet broker — what a keyless `seance mcp` uses to reach
  * other machines through the daemon on its own box. Nothing here logs: this runs
  * inside the MCP server, whose stdout is JSON-RPC.
  */
@@ -107,7 +107,7 @@ export async function brokerMachines(opts: BrokerCallOpts = {}): Promise<readonl
     if (err instanceof BrokerError && err.code === "daemon_closed") {
       throw new BrokerError(
         "daemon_closed",
-        `${err.message} — a seanced older than the fleet broker answers this way; update it and \`seanced restart\``,
+        `${err.message} — a seanced older than the fleet broker answers this way; update it and \`seance restart\``,
       );
     }
     throw err;

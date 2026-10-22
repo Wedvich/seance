@@ -11,9 +11,9 @@ import {
 import { CONNECT_TIMEOUT_MS } from "./app-relay.ts";
 
 /**
- * The fleet broker's frames on the local op socket: what a keyless `seanced mcp`
+ * The fleet broker's frames on the local op socket: what a keyless `seance mcp`
  * sends the daemon to reach *other* machines, and what comes back. Shared by
- * both ends, so nothing here logs — the client end runs inside `seanced mcp`,
+ * both ends, so nothing here logs — the client end runs inside `seance mcp`,
  * whose stdout is JSON-RPC.
  *
  * Deliberately not a `Plain` and not an `OpName`. A broker frame names an

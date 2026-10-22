@@ -20,7 +20,7 @@ export interface RelayHandle {
 }
 
 /**
- * A third app-role client, exactly as `seanced mcp` is: same `/app?t=<token>`
+ * A third app-role client, exactly as `seance mcp` is: same `/app?t=<token>`
  * upgrade, same envelope crypto, same correlation. No relay or daemon change.
  *
  * No `createSocket` override: `RelayClient`'s default `new WebSocket(url)` is

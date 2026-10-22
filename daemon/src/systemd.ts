@@ -13,7 +13,7 @@ import {
   missingBinariesMessage,
   missingUnitBinaries,
   requireRoot,
-  SUDO_SEANCED,
+  SUDO_SEANCE,
   targetUserName,
   whichIn,
 } from "./target-user.ts";
@@ -53,7 +53,7 @@ function scopeArgv(scope: UnitScope): readonly string[] {
 /**
  * The unit path only where systemd could load it, and in the scope that is
  * actually installed. A box without a running instance has no service to point
- * at, and naming the file there would read as "installed" in `seanced status`.
+ * at, and naming the file there would read as "installed" in `seance status`.
  */
 export function servicePath(): string {
   if (!systemdRunning()) return NO_SERVICE_MANAGER;
@@ -314,14 +314,14 @@ export function userInstanceMissingMessage(wsl: boolean, username: string): stri
   const why = wsl ? "WSL sessions don't register with logind" : "a headless box has no logind session";
   return (
     `systemd is running but the user instance is not — ${why}, so only linger starts it: ` +
-    `run \`sudo loginctl enable-linger ${username}\`, then re-run \`seanced install\``
+    `run \`sudo loginctl enable-linger ${username}\`, then re-run \`seance install\``
   );
 }
 
 export function noSystemdMessage(wsl: boolean): string {
   return wsl
     ? "systemd is not running in this distro — add [boot] systemd=true to /etc/wsl.conf, " +
-        "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seanced install`"
+        "run `wsl.exe --shutdown` from Windows (kills every session on the box), then re-run `seance install`"
     : "this system is not running systemd — run seanced under your own supervisor";
 }
 
@@ -349,9 +349,9 @@ async function assertSystemdRunning(): Promise<void> {
 export function conflictingScopeMessage(installing: UnitScope, existing: string): string {
   return installing === "system"
     ? `a user unit already exists at ${existing} — it would run a second daemon against the same state dir, ` +
-        "log and relay identity, and it is the one `selfRestart` rewrites; run `seanced uninstall` as that user first"
+        "log and relay identity, and it is the one `selfRestart` rewrites; run `seance uninstall` as that user first"
     : `a system unit already exists at ${existing} — installing a user unit too would run a second daemon ` +
-        `against the same state dir, log and relay identity; \`${SUDO_SEANCED} uninstall --system\` removes it`;
+        `against the same state dir, log and relay identity; \`${SUDO_SEANCE} uninstall --system\` removes it`;
 }
 
 export async function installService(): Promise<InstallResult> {
@@ -485,7 +485,7 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   await mkdirAsTarget(targetStateDir, user);
   // systemd opens `append:` as root before dropping to User=, so a log file it
   // has to create lands root-owned and the daemon's own CLI can't append to it —
-  // silently unauditing every `seanced spawn`. Root can put an existing one back
+  // silently unauditing every `seance spawn`. Root can put an existing one back
   // too, which is the fix for a log rotated or deleted since the last install;
   // the daemon repairs the mode on start, but never another user's ownership.
   // O_NOFOLLOW and the f* variants, because root is operating inside the target
@@ -541,7 +541,7 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
 
   notes.push(
     `the daemon runs as ${user.name}; \`systemctl status ${UNIT_NAME}\` and ${logFile} are how you see its health — ` +
-      "`seanced status` and `seanced doctor` work as that user too",
+      "`seance status` and `seance doctor` work as that user too",
   );
   return { target, notes };
 }
@@ -556,7 +556,7 @@ async function credentialBlobFor(blob: string, configFile: string, notes: string
   if (!existsSync(blob)) {
     notes.push(
       `no sealed PSK blob at ${blob}, so the unit delivers no credential — seal it (docs/psk.md, "Sealing the ` +
-        `blob as root") and re-run \`${SUDO_SEANCED} install --system\` to add the LoadCredentialEncrypted= line`,
+        `blob as root") and re-run \`${SUDO_SEANCE} install --system\` to add the LoadCredentialEncrypted= line`,
     );
     return undefined;
   }
@@ -584,7 +584,7 @@ export async function uninstallSystemService(): Promise<readonly string[]> {
   await exec(scopeArgv("system").concat("daemon-reload"));
   return [
     "the sealed PSK blob and state dir are left in place — a TPM-sealed blob can't be recreated from a backup",
-    "the `seanced` name on PATH is left too: it belongs to the user, whose PATH root can't see — `seanced unlink` as that user",
+    "the `seance` name on PATH is left too: it belongs to the user, whose PATH root can't see — `seance unlink` as that user",
   ];
 }
 
@@ -597,7 +597,7 @@ async function scopeActive(scope: UnitScope): Promise<boolean> {
  * Which scope's unit holds this box's daemon, as far as an unprivileged caller can
  * tell. The files answer unless both exist — there only `is-active` separates the
  * live daemon from a leftover unit file, and answering "system" for a daemon the
- * user manager is running sends `seanced restart` at the wrong one.
+ * user manager is running sends `seance restart` at the wrong one.
  */
 async function ownerScope(units: InstalledUnits = installedUnits()): Promise<UnitScope> {
   if (units.system && units.user && !(await scopeActive("system"))) return "user";
@@ -616,7 +616,7 @@ export async function serviceLoaded(scope?: UnitScope): Promise<boolean> {
 
 /** The privileged restart, for what the unprivileged one can't reach: a stopped unit, or a daemon running as someone else. */
 export function restartCommandFor(scope: UnitScope): string {
-  return scope === "system" ? `sudo systemctl restart ${UNIT_NAME}` : `seanced restart`;
+  return scope === "system" ? `sudo systemctl restart ${UNIT_NAME}` : `seance restart`;
 }
 
 /** `systemctl show -p MainPID --value` output, or null when no process is running (systemd reports 0). */
@@ -666,7 +666,7 @@ async function signalRestart(): Promise<void> {
   }
   throw new Error(
     `the daemon exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
-      `check \`systemctl status ${UNIT_NAME}\` and \`seanced doctor\``,
+      `check \`systemctl status ${UNIT_NAME}\` and \`seance doctor\``,
   );
 }
 
@@ -706,7 +706,7 @@ export async function selfRestart(): Promise<void> {
   if (scope === "system") {
     console.log(
       "updated — exiting for Restart=always to relaunch on the new code; the unit definition is not rewritten " +
-        `here, so run \`${SUDO_SEANCED} install --system\` if \`seanced doctor\` reports it drifted`,
+        `here, so run \`${SUDO_SEANCE} install --system\` if \`seance doctor\` reports it drifted`,
     );
     process.exit(0);
   }
@@ -748,7 +748,7 @@ export async function scopeChecks(
       level: "warn",
       message:
         `both a system unit (${systemUnitPath()}) and a user unit (${unitPath()}) exist — two daemons against ` +
-        "one state dir, log and relay identity; `seanced uninstall` drops the user one",
+        "one state dir, log and relay identity; `seance uninstall` drops the user one",
     });
   }
   if (active) {
@@ -762,7 +762,7 @@ export async function scopeChecks(
       message:
         scope === "system"
           ? `systemd system unit not active — \`systemctl status ${UNIT_NAME}\` says why`
-          : "systemd unit not active — run `seanced install` (its preflight names what's missing)",
+          : "systemd unit not active — run `seance install` (its preflight names what's missing)",
     });
   }
   if (ctx.unitText !== null) {
@@ -773,7 +773,7 @@ export async function scopeChecks(
     const drift = await recordedBunCheck(
       unitBunPath(ctx.unitText),
       "service",
-      scope === "system" ? `${SUDO_SEANCED} install --system` : "seanced install",
+      scope === "system" ? `${SUDO_SEANCE} install --system` : "seance install",
       current,
     );
     if (drift !== null) checks.push(drift);
@@ -783,7 +783,7 @@ export async function scopeChecks(
       level: "warn",
       message:
         "the installed system unit differs from what this checkout would write — nothing rewrites a system unit " +
-        `on its own; \`${SUDO_SEANCED} install --system\` reinstalls it`,
+        `on its own; \`${SUDO_SEANCE} install --system\` reinstalls it`,
     });
   }
   if (scope === "system" && ctx.blobPath !== null && ctx.unitText !== null && !unitDeliversPsk(ctx.unitText)) {
@@ -792,7 +792,7 @@ export async function scopeChecks(
       message:
         `a sealed blob exists at ${ctx.blobPath} but the system unit has no ` +
         `LoadCredentialEncrypted=${CRED_NAME}: line, so the daemon is never handed the key — ` +
-        `\`${SUDO_SEANCED} install --system\` adds it once the blob decrypts`,
+        `\`${SUDO_SEANCE} install --system\` adds it once the blob decrypts`,
     });
   }
   return checks;

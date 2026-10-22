@@ -131,7 +131,7 @@ describe("selectFleet", () => {
     expect(message).toContain("no PSK");
     expect(message).toContain("no daemon listening");
     expect(message).toContain("is seanced running?");
-    expect(message).toContain("seanced psk-import");
+    expect(message).toContain("seance psk-import");
     // Local ops ride the same socket, so the advice must not promise them.
     expect(message).not.toContain("needs neither");
   });
@@ -175,7 +175,7 @@ describe("selectFleet", () => {
       expect(err).toBeInstanceOf(FleetUnreachable);
       const message = String(err);
       expect(message).toContain(expected);
-      expect(message).toContain("seanced status");
+      expect(message).toContain("seance status");
       // Local ops ride the same daemon, which just failed to answer on that socket.
       expect(message).not.toContain("needs neither");
     }
@@ -189,7 +189,7 @@ describe("selectFleet", () => {
     });
     const message = String(await fleet.open().catch((caught: unknown) => caught));
     expect(message).toContain("not service-delivered");
-    expect(message).toContain("seanced doctor");
+    expect(message).toContain("seance doctor");
     expect(message).not.toContain("update");
     expect(message).not.toContain("is seanced running?");
   });

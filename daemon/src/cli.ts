@@ -23,7 +23,7 @@ import {
   type Config,
 } from "./config.ts";
 import type { Check } from "./check.ts";
-import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
+import { CLI_NAME, cliOnPath, createLink, LEGACY_CLI_NAME, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
@@ -70,7 +70,7 @@ export async function cmdInit(): Promise<void> {
   console.log("       openssl rand -base64 32");
   console.log("  2. fill in relayUrl, repoRoots, and a bearerToken shared with the relay:");
   console.log("       openssl rand -base64 32 | tr '+/' '-_' | tr -d '='");
-  console.log("  3. run `seanced doctor`, then `seanced install`");
+  console.log("  3. run `seance doctor`, then `seance install`");
 }
 
 /**
@@ -92,7 +92,7 @@ export async function cmdScan(): Promise<void> {
   console.log(`\n${repos.length} repos`);
   if (daemonPid !== null) {
     console.log(
-      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seanced restart\` if you edited repoRoots.`,
+      `cache untouched — daemon pid ${daemonPid} owns it. Refresh from the app to rescan, or \`seance restart\` if you edited repoRoots.`,
     );
   }
 }
@@ -104,7 +104,7 @@ export interface SpawnCliArgs {
   readonly prompt?: string;
 }
 
-const SPAWN_USAGE = "usage: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]";
+const SPAWN_USAGE = "usage: seance spawn <repo> [--here] [-t <title>] [[-p] <task>]";
 
 /** Mirrors /spawn: -p is optional, bare words join into the prompt. Exported for tests. */
 export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
@@ -186,7 +186,7 @@ export interface DespawnCliArgs {
   readonly force: boolean;
 }
 
-const DESPAWN_USAGE = "usage: seanced despawn <session id, e.g. %12> [--force]";
+const DESPAWN_USAGE = "usage: seance despawn <session id, e.g. %12> [--force]";
 
 /** Exported for tests. */
 export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
@@ -232,7 +232,7 @@ export interface ReapCliArgs {
   readonly minAgeDays?: number;
 }
 
-const REAP_USAGE = "usage: seanced reap [--dry-run] [--min-age-days <n>]";
+const REAP_USAGE = "usage: seance reap [--dry-run] [--min-age-days <n>]";
 
 /** Exported for tests. */
 export function parseReapArgs(argv: readonly string[]): ReapCliArgs {
@@ -370,7 +370,7 @@ export async function cmdDoctor(): Promise<void> {
 
   console.log("config");
   let config;
-  // Whether this shell holds a key decides how `seanced mcp` reaches the fleet,
+  // Whether this shell holds a key decides how `seance mcp` reaches the fleet,
   // reported under "service" once the socket is known. Null when config failed.
   let keyReadable: boolean | null = null;
   try {
@@ -406,7 +406,7 @@ export async function cmdDoctor(): Promise<void> {
         const store = resolved.source === "config" ? await availablePskStore() : null;
         if (store !== null) {
           warn(
-            `psk sits in config.json, readable by anything running as you — \`seanced psk-import\` moves it to ${store.nag}`,
+            `psk sits in config.json, readable by anything running as you — \`seance psk-import\` moves it to ${store.nag}`,
           );
         }
       }
@@ -477,7 +477,7 @@ export async function cmdDoctor(): Promise<void> {
 }
 
 export const INSTALL_USAGE =
-  'usage: seanced install [--system [--user <name>] [--state-dir <path>] [--path "$PATH"]]\n' +
+  'usage: seance install [--system [--user <name>] [--state-dir <path>] [--path "$PATH"]]\n' +
   "  --system  install the root-owned system unit that systemd delivers the TPM-sealed PSK to\n" +
   "            (systemd >= 256; needs sudo — see docs/psk.md)";
 
@@ -538,7 +538,7 @@ export async function cmdInstall(argv: readonly string[] = []): Promise<void> {
   for (const note of result.notes) console.log(`note: ${note}`);
   // The service embeds the absolute main.ts path, so it never needs the name —
   // but every follow-up this CLI prints does, so say so now rather than let
-  // `seanced restart` be the first discovery.
+  // `seance restart` be the first discovery.
   const onPath = await cliOnPath();
   if (onPath.level !== "ok") console.log(`note: ${onPath.message}`);
   console.log(`logs: ${logPath()}`);
@@ -616,7 +616,9 @@ export async function cmdLink(argv: readonly string[]): Promise<void> {
   if (result.status === "already") console.log(`already linked: ${result.file} → ${main}`);
   else if (result.status === "repointed") console.log(`repointed ${result.file}: was ${result.previous}, now ${main}`);
   else console.log(`linked ${result.file} → ${main}`);
-  if (Bun.which("seanced") === null) {
+  const legacy = await removeLinks(process.env.PATH ?? "", main, [LEGACY_CLI_NAME]);
+  for (const file of legacy.removed) console.log(`removed ${file}, the old name`);
+  if (Bun.which(CLI_NAME) === null) {
     console.log(`note: ${result.file} still doesn't resolve — is its dir actually on PATH in this shell?`);
   }
 }
@@ -637,7 +639,7 @@ export async function cmdSessions(): Promise<void> {
   const backend = createBackend(await loadConfig(), { home: homedir() });
   const state = await loadOrInitState();
   const sessions = await backend.sessions(state.repos);
-  // The id first: it is what `seanced despawn` takes.
+  // The id first: it is what `seance despawn` takes.
   for (const s of sessions) {
     console.log(`${(s.id ?? "-").padEnd(6)} ${s.window.padEnd(30)} ${(s.repo ?? "-").padEnd(20)} ${s.path}`);
   }
@@ -717,7 +719,7 @@ async function runPskImport(store: PskStore): Promise<void> {
     process.exit(1);
   }
   console.log(`\nstored — fingerprint ${await pskFingerprint(stored)}`);
-  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seanced restart\``);
+  console.log(`now clear "psk" in ${configPath()} so the daemon reads ${store.clearHint}, then \`seance restart\``);
 }
 
 export async function cmdPskImport(): Promise<void> {
@@ -733,14 +735,14 @@ export async function cmdPskImport(): Promise<void> {
  * The registration is delegated to `claude mcp add/remove` rather than editing
  * ~/.claude.json — Claude Code owns that schema. Registered as PATH-resolved bun
  * plus this checkout's main.ts (the same target `link` points at), so it tracks a
- * git pull and a bun upgrade alike, and works whether or not `seanced` is on PATH.
+ * git pull and a bun upgrade alike, and works whether or not `seance` is on PATH.
  * Once per exclave (`userScopeTargets`): a user-scope entry reaches one config dir.
  */
 export async function cmdMcp(rest: readonly string[]): Promise<void> {
   const [sub] = rest;
   if (sub === undefined) return runMcpServer();
   if (sub !== "install" && sub !== "uninstall") {
-    throw new Error(`unknown mcp subcommand "${sub}" — expected \`seanced mcp\`, \`mcp install\` or \`mcp uninstall\``);
+    throw new Error(`unknown mcp subcommand "${sub}" — expected \`seance mcp\`, \`mcp install\` or \`mcp uninstall\``);
   }
   const claude = Bun.which("claude");
   if (claude === null) throw new Error("claude not on PATH — install Claude Code first");
@@ -781,12 +783,12 @@ export async function cmdMcp(rest: readonly string[]): Promise<void> {
   );
 }
 
-export const MOD_USAGE = "usage: seanced mod install | seanced mod uninstall";
+export const MOD_USAGE = "usage: seance mod install | seance mod uninstall";
 
 /** Same shape as `parseRaycastArgs`. Exported for tests. */
 export function parseModArgs(argv: readonly string[]): "install" | "uninstall" {
   const [sub, ...extra] = argv;
-  if (sub === undefined) throw new Error(`seanced mod needs a subcommand\n${MOD_USAGE}`);
+  if (sub === undefined) throw new Error(`seance mod needs a subcommand\n${MOD_USAGE}`);
   if (sub !== "install" && sub !== "uninstall") throw new Error(`unknown mod subcommand "${sub}"\n${MOD_USAGE}`);
   if (extra.length > 0) throw new Error(`mod ${sub} takes no arguments\n${MOD_USAGE}`);
   return sub;
@@ -802,7 +804,7 @@ export async function cmdMod(argv: readonly string[]): Promise<void> {
   await uninstallMods((line) => console.log(line));
 }
 
-export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast uninstall";
+export const RAYCAST_USAGE = "usage: seance raycast install | seance raycast uninstall";
 
 /**
  * Allow-listed like `mcp`'s, but with no bare-invocation mode: `mcp` alone
@@ -811,7 +813,7 @@ export const RAYCAST_USAGE = "usage: seanced raycast install | seanced raycast u
  */
 export function parseRaycastArgs(argv: readonly string[]): "install" | "uninstall" {
   const [sub, ...extra] = argv;
-  if (sub === undefined) throw new Error(`seanced raycast needs a subcommand\n${RAYCAST_USAGE}`);
+  if (sub === undefined) throw new Error(`seance raycast needs a subcommand\n${RAYCAST_USAGE}`);
   if (sub !== "install" && sub !== "uninstall") {
     throw new Error(`unknown raycast subcommand "${sub}"\n${RAYCAST_USAGE}`);
   }

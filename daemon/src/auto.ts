@@ -106,7 +106,7 @@ const ENQUEUE_RETRY_MS = 1_000;
  * with none (or an unverified one) the task waits in the relay's queue until one
  * leads. A lost reply (timeout, dropped socket) or no socket is tried again with
  * the same task, since a repeat create reads `landedEarlier`; every try lost says
- * so and names the id. Never logs: `seanced mcp`'s stdout is its JSON-RPC
+ * so and names the id. Never logs: `seance mcp`'s stdout is its JSON-RPC
  * channel. The text names MCP's tools (`get_queue`, `cancel_task`).
  */
 export async function enqueueAuto(

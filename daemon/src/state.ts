@@ -104,7 +104,7 @@ async function parseState(path: string): Promise<{ readonly state: State } | { r
  * which `loadOrInitState` does: it never mints a `deviceId`, so asking the
  * question on a box that has never run the daemon does not answer it by
  * inventing an identity; and it never logs, because `log.ts` writes to stdout
- * and `seanced mcp` — the caller this exists for — carries JSON-RPC frames
+ * and `seance mcp` — the caller this exists for — carries JSON-RPC frames
  * there.
  */
 export async function readState(path: string = statePath()): Promise<State | null> {
@@ -176,7 +176,7 @@ export async function saveState(state: State, path: string = statePath()): Promi
   await writeAtomic(path, state);
 }
 
-/** Written by the running daemon; read by `seanced status`. */
+/** Written by the running daemon; read by `seance status`. */
 export interface Runtime {
   readonly pid: number;
   readonly startedAt: number;

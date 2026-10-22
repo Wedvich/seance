@@ -21,7 +21,7 @@ describe("modChecksFrom", () => {
       const [check] = modChecksFrom(MARKET, ROOT, output, LABEL);
       expect(check?.level).toBe("warn");
       expect(check?.message).toContain("not installed in pengefix2");
-      expect(check?.message).toContain("seanced mod install");
+      expect(check?.message).toContain("seance mod install");
     }
   });
 

@@ -101,7 +101,7 @@ export interface ReapReport {
   readonly minAgeDays: number;
   readonly repos: readonly RepoReport[];
   readonly closedPanes: readonly (PaneNote & { readonly why: "dead" | "exit-prompt" })[];
-  /** Séance windows left open, each with the id `seanced despawn` takes. */
+  /** Séance windows left open, each with the id `seance despawn` takes. */
   readonly openPanes: readonly (PaneNote & { readonly state: PaneState })[];
 }
 
@@ -541,7 +541,7 @@ export function formatReport(report: ReapReport): readonly string[] {
       row(closed, `${pane.paneId} "${pane.window}"   ${pane.why === "dead" ? "dead" : "answered Keep worktree"}`),
     ),
     ...report.openPanes.map((pane) =>
-      row(PANE_LABELS[pane.state], `${pane.paneId} "${pane.window}"   — seanced despawn ${pane.paneId}`),
+      row(PANE_LABELS[pane.state], `${pane.paneId} "${pane.window}"   — seance despawn ${pane.paneId}`),
     ),
   ];
   if (paneRows.length > 0) lines.push("sessions", ...paneRows);

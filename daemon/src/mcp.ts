@@ -70,7 +70,7 @@ export interface LocalMachine {
   readonly platform: string;
   /**
    * Re-read per call, not snapshotted: the daemon rewrites state.json on every
-   * rescan and `seanced mcp` outlives many of them. A snapshot rejects a repo
+   * rescan and `seance mcp` outlives many of them. A snapshot rejects a repo
    * cloned since startup, and rejects every repo if the first scan hadn't landed.
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
@@ -193,14 +193,14 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   return reachable
     ? `${why} — only this machine is listed, and only local spawns will work`
     : `${why} — only this machine is listed, and its daemon is not listening either, so nothing will spawn until ` +
-        "seanced is running (`seanced status`)";
+        "seanced is running (`seance status`)";
 }
 
 /** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
 function localFailureText(op: string, err: unknown): string {
   const detail = err instanceof Error ? err.message : String(err);
   if (err instanceof LocalUnavailable) {
-    return `${op} failed: ${detail} — is seanced running? try \`seanced status\``;
+    return `${op} failed: ${detail} — is seanced running? try \`seance status\``;
   }
   return `${op} failed: ${detail}`;
 }
@@ -424,7 +424,7 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  *
  * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): an `auto`
  * enqueue reaches no daemon, so this process records it in the audit log itself,
- * as `seanced spawn` does — never on stdout, the JSON-RPC channel.
+ * as `seance spawn` does — never on stdout, the JSON-RPC channel.
  */
 export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, audit: AuditSink = cliSink): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
@@ -767,7 +767,7 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
 }
 
 /**
- * The fleet as `seanced mcp` reaches it. The PSK is resolved on first remote
+ * The fleet as `seance mcp` reaches it. The PSK is resolved on first remote
  * use, not at startup, because local ops need no key at all; when this process
  * can read none — the key exists only as a credential systemd delivers to the
  * daemon's unit — remote ops go through the daemon's broker instead, and the
@@ -789,7 +789,7 @@ function mcpFleet(config: Config): Fleet {
   });
 }
 
-/** `seanced mcp` — serve MCP over stdio until the client hangs up. */
+/** `seance mcp` — serve MCP over stdio until the client hangs up. */
 export async function runMcpServer(): Promise<void> {
   const config = await loadConfig();
   const local = await localMachine(config);
@@ -835,15 +835,15 @@ export async function mcpScriptCheck(recorded: string | null, label: string, cur
   if (real === expected) return null;
   return {
     level: "warn",
-    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seanced mcp install\` repoints it`,
+    message: `MCP entry (${label}) runs ${recorded}, not this checkout's ${expected} — \`seance mcp install\` repoints it`,
   };
 }
 
-/** Whether each exclave's Claude Code knows about `seanced mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
+/** Whether each exclave's Claude Code knows about `seance mcp`, and whether its recorded bun and script are current; renders under doctor's binaries section. */
 export async function mcpChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null) {
-    return [{ level: "warn", message: "claude not on PATH — `seanced mcp install` needs Claude Code" }];
+    return [{ level: "warn", message: "claude not on PATH — `seance mcp install` needs Claude Code" }];
   }
   const { present } = await userScopeTargets();
   const perTarget = await Promise.all(
@@ -853,7 +853,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
         return [
           {
             level: "warn",
-            message: `MCP server not registered with Claude Code in ${target.label} — run \`seanced mcp install\``,
+            message: `MCP server not registered with Claude Code in ${target.label} — run \`seance mcp install\``,
           },
         ];
       }
@@ -862,7 +862,7 @@ export async function mcpChecks(): Promise<readonly Check[]> {
       // this checkout's main.ts in Claude's config, and nothing rewrites that entry
       // on its own.
       const findings = await Promise.all([
-        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seanced mcp install"),
+        recordedBunCheck(mcpBunPath(result.stdout), `MCP entry (${target.label})`, "seance mcp install"),
         mcpScriptCheck(mcpScriptPath(result.stdout), target.label),
       ]);
       return [registered].concat(findings.filter((check) => check !== null));

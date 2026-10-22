@@ -8,7 +8,7 @@ monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durabl
 envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pure library: routing,
 task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
-`seanced mod install` (DESIGN.md, "Claude Code mods").
+`seance mod install` (DESIGN.md, "Claude Code mods").
 
 Read the docs before changing behavior — this file deliberately doesn't repeat them:
 
@@ -124,10 +124,10 @@ green:
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
-  requests the daemon forwards to other machines for a keyless `seanced mcp`, `schedule` for
+  requests the daemon forwards to other machines for a keyless `seance mcp`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, and `mcp` for `seanced mcp`'s own `auto` enqueue line — a new
+  process and admitting a task, and `mcp` for `seance mcp`'s own `auto` enqueue line — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
@@ -196,14 +196,14 @@ green:
   fixed argv and an env built from the scan — no frame field reaches either.
   Giving it any other act, or taking a session or task id from the frame, is the same kind of
   change too.
-  Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
+  Nothing reachable from `seance mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
   outside the Raycast host, so such a module could not run under `bun test` and would take every
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
   `src/lib/`; platform APIs (`LocalStorage`, preferences) reach the logic as injected seams. The rule
   is enforced by `raycast/src/lib/layering.test.ts`, not just remembered.
-- The Raycast extension is a third app-role relay client, exactly as `seanced mcp` is — no relay or
+- The Raycast extension is a third app-role relay client, exactly as `seance mcp` is — no relay or
   daemon change. Its credentials come only from the local daemon's config plus the macOS keychain;
   Raycast preferences hold defaults, never secrets. `raycast/src/lib/credentials.ts` reimplements
   what `daemon/src/config.ts` and `keychain.ts` do in Bun, so its test imports _both_ and asserts

@@ -5,9 +5,9 @@
 // those runs — 47 ms against 11. Every other command imports what it needs once picked.
 import { cmdSessionEvent } from "./session-event-cli.ts";
 
-const USAGE = `seanced — séance daemon
+const USAGE = `seance — séance CLI; with no command it runs the daemon, seanced
 
-usage: seanced [command]
+usage: seance [command]
 
   (none)      run the daemon in the foreground (launchd/systemd supervises)
   init        write config skeleton + generate deviceId (never the PSK)
@@ -15,15 +15,15 @@ usage: seanced [command]
   install     install and start the service (macOS launchd plist; Linux/WSL systemd user unit + linger, plus a logon pin task on WSL)
               --system: the root-owned systemd unit that gets the TPM-sealed PSK delivered to it, needs sudo (docs/psk.md)
   uninstall   stop the service and remove it, plus any symlink from link (--system for the system unit)
-  link        put seanced on PATH — a symlink to this file, so it tracks git pull: seanced link [dir]
+  link        put seance on PATH — a symlink to this file, so it tracks git pull: seance link [dir]
   unlink      remove the PATH symlink (only ones pointing at this checkout)
   restart     restart the service (after git pull)
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
   scan        discover repos now; caches for the next start unless a daemon is running
   sessions    list running claude tmux windows, each with the id despawn takes
-  spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
-  despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
+  spawn       spawn locally: seance spawn <repo> [--here] [-t <title>] [[-p] <task>]
+  despawn     end a session: seance despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
   mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude

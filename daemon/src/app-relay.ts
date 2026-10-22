@@ -17,7 +17,7 @@ import type { Config } from "./config.ts";
 
 /**
  * The app-role relay connection, lazily dialled and shared — neutral ground
- * between `seanced mcp`, which dials with a key it resolved itself, and the
+ * between `seance mcp`, which dials with a key it resolved itself, and the
  * daemon's broker, which dials with the key it already imported at start.
  *
  * Nothing here logs on its own: the MCP server's stdout is its JSON-RPC
@@ -59,7 +59,7 @@ const SETTLE_MARGIN_MS = 1_000;
 
 export interface LazyRelayOpts {
   /**
-   * Async because `seanced mcp` resolves the PSK here rather than at startup:
+   * Async because `seance mcp` resolves the PSK here rather than at startup:
    * local ops need no key, so only a remote op pays for resolving it. The
    * daemon's broker passes a client built over the key it already holds.
    */
@@ -216,7 +216,7 @@ export class LazyRelay {
 /**
  * The shared app-role client, configured the way every daemon-side consumer
  * needs it. `log` is required rather than defaulted: the default is stdout,
- * which in `seanced mcp` is the protocol channel. `scheduler` makes it the
+ * which in `seance mcp` is the protocol channel. `scheduler` makes it the
  * leader's leg for one term (`leader.ts`), under a replay guard that outlives it.
  */
 export function appRelayClient(

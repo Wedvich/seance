@@ -82,7 +82,7 @@ export interface SessionBackend {
    * session can still start them, and the frontend answers for it.
    */
   readonly despawn?: (id: string, opts: { readonly force: boolean }) => Promise<DespawnResult>;
-  /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
+  /** Backend-specific preflight for `seance doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**
    * Whatever a started session is showing right now, for the one case the

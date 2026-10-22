@@ -125,7 +125,7 @@ export class RequestFailure extends Error {
 }
 
 /**
- * The one line per failure reason every surface shows, shared so `seanced mcp`,
+ * The one line per failure reason every surface shows, shared so `seance mcp`,
  * the Raycast extension and any later app-role client explain a reason the same
  * way. Callers add their own op/title framing around it.
  */

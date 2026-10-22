@@ -323,7 +323,7 @@ describe("PR URLs", () => {
 });
 
 describe("activity", () => {
-  test("a report through `seanced session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
+  test("a report through `seance session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
     const input = join(base, "legacy.json");
     // What a session started before the mod dropped its rate-limit tap still sends.
     await writeFile(input, JSON.stringify({ rateLimits: [{ kind: "five_hour", percentUsed: 42.4 }] }));

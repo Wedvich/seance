@@ -40,9 +40,9 @@ describe("bunDriftCheck", () => {
   });
 
   test("what/remedy name the record being checked — the MCP entry's fix is mcp install, not install", () => {
-    const check = bunDriftCheck(keg, shim, false, "MCP entry", "seanced mcp install");
+    const check = bunDriftCheck(keg, shim, false, "MCP entry", "seance mcp install");
     expect(check.message).toContain("MCP entry records bun");
-    expect(check.message).toContain("`seanced mcp install`");
+    expect(check.message).toContain("`seance mcp install`");
   });
 });
 
@@ -53,21 +53,28 @@ describe("cliOnPathCheck", () => {
     const check = cliOnPathCheck(null, null, main);
     expect(check.level).toBe("warn");
     expect(check.message).toContain(`bun ${main} link`);
-    expect(check.message).toContain(`alias seanced='bun ${main}'`);
+    expect(check.message).toContain(`alias seance='bun ${main}'`);
   });
 
   test("resolving to this checkout is ok", () => {
-    expect(cliOnPathCheck("/home/u/.local/bin/seanced", main, main)).toEqual({
+    expect(cliOnPathCheck("/home/u/.local/bin/seance", main, main)).toEqual({
       level: "ok",
-      message: "seanced on PATH at /home/u/.local/bin/seanced",
+      message: "seance on PATH at /home/u/.local/bin/seance",
     });
   });
 
   test("resolving to another checkout warns with both paths and the repoint remedy", () => {
-    const check = cliOnPathCheck("/home/u/.local/bin/seanced", "/old-clone/daemon/src/main.ts", main);
+    const check = cliOnPathCheck("/home/u/.local/bin/seance", "/old-clone/daemon/src/main.ts", main);
     expect(check.level).toBe("warn");
     expect(check.message).toContain("/old-clone/daemon/src/main.ts");
     expect(check.message).toContain(`bun ${main} link`);
+  });
+
+  test("only the pre-rename name on PATH names the one command that moves it over", () => {
+    const check = cliOnPathCheck(null, null, main, "/home/u/.local/bin/seanced");
+    expect(check.level).toBe("warn");
+    expect(check.message).toContain("/home/u/.local/bin/seanced");
+    expect(check.message).toContain("`seanced link`");
   });
 });
 
@@ -119,51 +126,51 @@ describe("createLink / removeLinks", () => {
   });
 
   test("creates in the preferred writable dir and is idempotent", async () => {
-    expect(await createLink(pathEnv, root, main)).toEqual({ status: "created", file: join(binDir, "seanced") });
-    expect(await readlink(join(binDir, "seanced"))).toBe(main);
-    expect(await createLink(pathEnv, root, main)).toEqual({ status: "already", file: join(binDir, "seanced") });
+    expect(await createLink(pathEnv, root, main)).toEqual({ status: "created", file: join(binDir, "seance") });
+    expect(await readlink(join(binDir, "seance"))).toBe(main);
+    expect(await createLink(pathEnv, root, main)).toEqual({ status: "already", file: join(binDir, "seance") });
   });
 
   test("repoints a link into another checkout, in place", async () => {
     const stale = join(root, "old-clone", "daemon", "src", "main.ts");
-    await symlink(stale, join(otherDir, "seanced"));
+    await symlink(stale, join(otherDir, "seance"));
     expect(await createLink(pathEnv, root, main)).toEqual({
       status: "repointed",
-      file: join(otherDir, "seanced"),
+      file: join(otherDir, "seance"),
       previous: stale,
     });
-    expect(await readlink(join(otherDir, "seanced"))).toBe(main);
+    expect(await readlink(join(otherDir, "seance"))).toBe(main);
   });
 
   test("refuses to touch a real file squatting on the name", async () => {
-    await writeFile(join(otherDir, "seanced"), "#!/bin/sh\n");
+    await writeFile(join(otherDir, "seance"), "#!/bin/sh\n");
     expect(createLink(pathEnv, root, main)).rejects.toThrow("not touching it");
   });
 
   test("explicit dir overrides the ranking", async () => {
     expect(await createLink(pathEnv, root, main, otherDir)).toEqual({
       status: "created",
-      file: join(otherDir, "seanced"),
+      file: join(otherDir, "seance"),
     });
   });
 
   test("removeLinks takes this checkout's links — broken ones included — and keeps a stranger's", async () => {
-    await symlink(main, join(binDir, "seanced"));
+    await symlink(main, join(binDir, "seance"));
     const foreign = join(root, "old-clone", "daemon", "src", "main.ts");
-    await symlink(foreign, join(otherDir, "seanced"));
+    await symlink(foreign, join(otherDir, "seance"));
     const first = await removeLinks(pathEnv, main);
-    expect(first.removed).toEqual([join(binDir, "seanced")]);
-    expect(first.kept).toEqual([{ file: join(otherDir, "seanced"), target: foreign }]);
+    expect(first.removed).toEqual([join(binDir, "seance")]);
+    expect(first.kept).toEqual([{ file: join(otherDir, "seance"), target: foreign }]);
 
     // Broken: same raw target, but the checkout file is gone — realpath fails.
     await rm(main);
-    await symlink(main, join(binDir, "seanced"));
+    await symlink(main, join(binDir, "seance"));
     const second = await removeLinks(pathEnv, main);
-    expect(second.removed).toEqual([join(binDir, "seanced")]);
+    expect(second.removed).toEqual([join(binDir, "seance")]);
   });
 
   test("findExisting lstats, so a broken link is still visible", async () => {
-    await symlink(join(root, "nowhere"), join(binDir, "seanced"));
-    expect(await findExisting(pathEnv)).toEqual([{ file: join(binDir, "seanced"), target: join(root, "nowhere") }]);
+    await symlink(join(root, "nowhere"), join(binDir, "seance"));
+    expect(await findExisting(pathEnv)).toEqual([{ file: join(binDir, "seance"), target: join(root, "nowhere") }]);
   });
 });

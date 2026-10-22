@@ -766,20 +766,20 @@ precede. Wave 2 waits on the wave-1 item named.
 - **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
   exists already (DESIGN.md "MCP server"). Its `enqueueAuto` is module-private in
   `daemon/src/mcp.ts`, so it is split out before a second caller. What remains:
-  - `seanced spawn --auto` (spelling open), enqueueing through the store as the PWA does:
+  - `seance spawn --auto` (spelling open), enqueueing through the store as the PWA does:
     seal the task, `store-put` it at `expect: 0`, so it queues with no leader up; the
     verdict is "queued" plus the task id, and `get_sessions` finds the session by
-    `taskId` once it runs. `seanced spawn` is relay-free today: it drives local tmux and
+    `taskId` once it runs. `seance spawn` is relay-free today: it drives local tmux and
     audits `origin=cli`. `--auto` is the one form that needs the relay and the PSK (an
-    app-role leg, as `seanced mcp` has), and a direct spawn stays relay-free.
-  - Keyless `seanced mcp`. It reaches the relay only through the fleet broker, whose
+    app-role leg, as `seance mcp` has), and a direct spawn stays relay-free.
+  - Keyless `seance mcp`. It reaches the relay only through the fleet broker, whose
     actions are fixed; today its `auto` is refused ("needs this machine's own key"). An
     enqueue there is a new broker action, which is a threat-model change (DESIGN.md
     "Fleet broker"); without it, keyless MCP gets no `auto`.
   - _Decided (#16):_ ship CLI `--auto` on boxes with the key; defer the broker action.
 
   Raycast attaches the same way. Exit: a CLI `auto` spawn lands as a task with no leader
-  up and runs once one leads (e2e); `seanced spawn` without `--auto` still works with the
+  up and runs once one leads (e2e); `seance spawn` without `--auto` still works with the
   relay unreachable (daemon).
 
 ## Settled defaults (interview, 2026-10-15)

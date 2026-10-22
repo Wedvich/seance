@@ -32,7 +32,7 @@ export function plistBunPath(plist: string): string | null {
 
 /**
  * Runs the daemon from the git checkout via PATH's bun (never the realpath'd
- * keg, which a runtime upgrade deletes) — update = `git pull` + `seanced
+ * keg, which a runtime upgrade deletes) — update = `git pull` + `seance
  * restart`. PATH is captured at install time because launchd agents otherwise
  * get /usr/bin:/bin, which has no tmux/claude.
  */
@@ -98,7 +98,7 @@ async function bootstrapFresh(target: string): Promise<void> {
 
 /** `notes` is empty unless the log could not be prepared: launchd needs no step the user has to finish by hand. */
 export async function installService(): Promise<InstallResult> {
-  assertMacos("seanced install");
+  assertMacos("seance install");
   const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url));
   const target = servicePath();
   await mkdir(dirname(target), { recursive: true });
@@ -117,7 +117,7 @@ export async function installService(): Promise<InstallResult> {
 
 /** Nothing is left behind, so there is never a note — unlike systemd's linger. */
 export async function uninstallService(): Promise<readonly string[]> {
-  assertMacos("seanced uninstall");
+  assertMacos("seance uninstall");
   await exec(["launchctl", "bootout", `${gui()}/${LAUNCHD_LABEL}`]);
   await exec(["rm", "-f", servicePath()]);
   return [];
@@ -130,7 +130,7 @@ export async function serviceLoaded(): Promise<boolean> {
 }
 
 export async function restartService(): Promise<void> {
-  assertMacos("seanced restart");
+  assertMacos("seance restart");
   const result = await exec(["launchctl", "kickstart", "-k", `${gui()}/${LAUNCHD_LABEL}`]);
   if (result.exitCode !== 0) {
     throw new Error(`launchctl kickstart failed: ${result.stderr.trim()}`);
@@ -151,7 +151,7 @@ export function selfRestart(): Promise<void> {
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   const loaded: Check = (await serviceLoaded())
     ? { level: "ok", message: "launchd agent loaded" }
-    : { level: "warn", message: "launchd agent not loaded — run `seanced install`" };
+    : { level: "warn", message: "launchd agent not loaded — run `seance install`" };
   const plist = await Bun.file(servicePath())
     .text()
     .catch(() => null);

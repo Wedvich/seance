@@ -152,7 +152,7 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
     if (entry === undefined) {
       return {
         level: "warn",
-        message: `Claude mod ${plugin.name} not installed in ${label} — run \`seanced mod install\``,
+        message: `Claude mod ${plugin.name} not installed in ${label} — run \`seance mod install\``,
       };
     }
     const expected = join(root, plugin.source);
@@ -160,7 +160,7 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
     if (folder !== expected) {
       return {
         level: "warn",
-        message: `Claude mod ${plugin.name} in ${label} is read from ${String(folder)}, not this checkout's ${expected} — \`seanced mod install\` repoints it`,
+        message: `Claude mod ${plugin.name} in ${label} is read from ${String(folder)}, not this checkout's ${expected} — \`seance mod install\` repoints it`,
       };
     }
     if (entry["enabled"] === false) {
@@ -174,7 +174,7 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
 export async function modChecks(): Promise<readonly Check[]> {
   const claude = Bun.which("claude");
   if (claude === null)
-    return [{ level: "warn", message: "claude not on PATH — `seanced mod install` needs Claude Code" }];
+    return [{ level: "warn", message: "claude not on PATH — `seance mod install` needs Claude Code" }];
   const root = await realCheckoutRoot();
   let market: Marketplace;
   try {

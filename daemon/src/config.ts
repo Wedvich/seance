@@ -22,7 +22,7 @@ export interface Config {
    * from `name`, which is a display string and makes an ugly tag.
    */
   readonly machineTag?: string;
-  /** `seanced reap`'s settings; absent means the defaults, with the schedule off. */
+  /** `seance reap`'s settings; absent means the defaults, with the schedule off. */
   readonly reap?: ReapConfig;
   /** The `/usage` refresh's settings; absent means the defaults. */
   readonly quota?: QuotaConfig;
@@ -107,7 +107,7 @@ function requireString(raw: Record<string, unknown>, key: string, path: string):
 export async function loadConfig(path: string = configPath()): Promise<Config> {
   const file = Bun.file(path);
   if (!(await file.exists())) {
-    throw new Error(`no config at ${path} — run \`seanced init\` first`);
+    throw new Error(`no config at ${path} — run \`seance init\` first`);
   }
   let raw: unknown;
   try {
@@ -205,9 +205,7 @@ export function runnableProblems(config: Config, psk: string | null, opts: Runna
   }
   if (psk === null) {
     if (!opts.pskDelivered) {
-      problems.push(
-        "no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seanced psk-import`",
-      );
+      problems.push("no psk — paste 32 random bytes into config (openssl rand -base64 32), or run `seance psk-import`");
     }
   } else {
     try {

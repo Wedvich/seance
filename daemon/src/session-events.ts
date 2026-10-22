@@ -22,7 +22,7 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 /**
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
  * events"): what the `claude-mods/session-events` mod reports about the session
- * it runs in, through `seanced session-event`. Ingest-only — the handler stores
+ * it runs in, through `seance session-event`. Ingest-only — the handler stores
  * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
  * refresh's trigger, which decides alone whether anything runs); nothing here
  * spawns, despawns or runs a command shaped by the frame. Its own only

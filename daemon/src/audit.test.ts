@@ -172,7 +172,7 @@ describe("auditLogChecks — what doctor renders", () => {
 
     expect(first?.level).toBe("warn");
     expect(first?.message).toContain("0644");
-    expect(first?.message).toContain("seanced restart");
+    expect(first?.message).toContain("seance restart");
   });
 
   test("a writable 0600 log reports only its size", async () => {

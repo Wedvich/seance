@@ -19,7 +19,7 @@ describe("parseReapArgs", () => {
 
   test("a missing or nonsense age, or an unknown flag, is a usage error rather than a default", () => {
     for (const argv of [["--min-age-days"], ["--min-age-days", "soon"], ["--min-age-days", "-1"], ["--force"]]) {
-      expect(() => parseReapArgs(argv)).toThrow("usage: seanced reap");
+      expect(() => parseReapArgs(argv)).toThrow("usage: seance reap");
     }
   });
 });
@@ -33,7 +33,7 @@ describe("parseDespawnArgs", () => {
 
   test("no id, two ids, or an unknown flag is a usage error, not a guess", () => {
     for (const argv of [[], ["%1", "%2"], ["%1", "-f"], ["--force"]]) {
-      expect(() => parseDespawnArgs(argv)).toThrow("usage: seanced despawn");
+      expect(() => parseDespawnArgs(argv)).toThrow("usage: seance despawn");
     }
   });
 });
@@ -125,7 +125,7 @@ describe("install --system as a normal user", () => {
       // The refusal has to land before anything is written, and it has to say what
       // to run — the whole point of folding the runbook into the CLI.
       await expect(cmdInstall(["--system"])).rejects.toThrow(
-        /sudo --preserve-env=PATH "\$\(command -v seanced\)" install --system/u,
+        /sudo --preserve-env=PATH "\$\(command -v seance\)" install --system/u,
       );
     },
   );
