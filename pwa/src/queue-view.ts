@@ -1,4 +1,4 @@
-import { QUEUE_MAX_TASKS, TASK_PHASES, type Decision, type PauseHold, type Task } from "@seance/shared";
+import { QUEUE_MAX_TASKS, TASK_PHASES, type PauseHold, type Task } from "@seance/shared";
 import { taskHeadline } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
@@ -18,8 +18,6 @@ export interface QueueRow {
   readonly body: string | null;
   readonly dot: QueueDot | null;
   readonly age: string;
-  /** Keyed on the task's `assignment`, not its state: a waiting task marked done never reads as placed. */
-  readonly decision: { readonly record: Decision; readonly tense: "would" | "did" } | null;
   readonly canCancel: boolean;
   readonly canMarkDone: boolean;
   /** Cancelling despawns a session: the button asks twice. */
@@ -135,10 +133,6 @@ function rowOf(task: Task, state: AppState, now: number): QueueRow {
     body: bodyOf(task, now),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
-    decision:
-      task.decision === undefined
-        ? null
-        : { record: task.decision, tense: task.assignment === undefined ? "would" : "did" },
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",

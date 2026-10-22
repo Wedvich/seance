@@ -1,11 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import type { Machine } from "@seance/shared";
-import { describeDecision } from "../decision-view.ts";
 import type { QueueRow, QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
-import { DecisionCard } from "./decision.tsx";
-import { Disclosure } from "./disclosure.tsx";
 import { RelayDot, RelaySettings } from "./relay-dot.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
@@ -19,8 +15,6 @@ const ARM_MS = 4_000;
 export function QueueScreen(props: {
   view: QueueScreenView;
   relayState: ConnectionState;
-  machines: readonly Machine[];
-  now: number;
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
   pausing: boolean;
@@ -36,16 +30,8 @@ export function QueueScreen(props: {
   /** Desktop layout only: the queue is the rightmost column, so the settings pill moves to its header. */
   onOpenSettings?: () => void;
 }): JSX.Element {
-  const { view, relayState, machines, now, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
+  const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
-  const [why, setWhy] = useState<ReadonlySet<string>>(new Set());
-
-  const toggleWhy = (id: string): void =>
-    setWhy((open) => {
-      const next = new Set(open);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
 
   useEffect(() => {
     if (armed === null) return;
@@ -156,22 +142,8 @@ export function QueueScreen(props: {
                       {row.headline} · {row.age}
                     </p>
                   </div>
-                  {row.decision !== null && (
-                    <Disclosure
-                      open={why.has(row.id)}
-                      label={row.decision.tense === "did" ? "Why there" : "Where it would go"}
-                      onToggle={() => toggleWhy(row.id)}
-                    />
-                  )}
                 </div>
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {row.decision !== null && why.has(row.id) && (
-                  <DecisionCard
-                    summary={describeDecision(row.decision.record, machines, now, row.decision.tense)}
-                    title={row.decision.tense === "did" ? "WHY THERE" : "WHERE IT WOULD GO"}
-                    quota
-                  />
-                )}
                 {(row.canMarkDone || row.canCancel) && (
                   <div className="queue-actions">
                     {row.canMarkDone && (

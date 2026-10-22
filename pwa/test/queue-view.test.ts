@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   QUEUE_MAX_TASKS,
-  type Decision,
   type ExclaveInfo,
   type Machine,
   type PauseHold,
@@ -76,7 +75,6 @@ function task(id: string, fields: Partial<Task> = {}): Task {
 }
 
 const placedAt = { deviceId: "dev-a", exclave: "default", clone: "app", window: "w" };
-const decision: Decision = { at: NOW, chosen: null, candidates: [] };
 
 function ok(tasks: readonly Task[], holds: readonly PauseHold[] = []): QueueState {
   return { kind: "ok", tasks, holds, unreadable: [], at: NOW };
@@ -196,20 +194,6 @@ describe("deriveQueue", () => {
     expect(rowOf({ state: "ready" }).cancelEndsSession).toBe(false);
     expect(rowOf({ state: "needs-input" }).markDoneEndsSession).toBe(true);
     expect(rowOf({ state: "lost" }).markDoneEndsSession).toBe(true);
-  });
-
-  test("a row's decision is placed ('did') by its assignment, so a waiting task marked done never reads as placed", () => {
-    const waitingDone = task("a", { state: "done", doneBy: "manual", decision });
-    const running = task("b", { state: "running", assignment: placedAt, decision });
-    const view = deriveQueue(state(ok([waitingDone, running])), NOW);
-    const [finished, runningSection] = [
-      view.sections.find((s) => s.title === "Finished"),
-      view.sections.find((s) => s.title === "Running"),
-    ];
-    expect(finished?.rows[0]?.decision?.tense).toBe("would");
-    expect(finished?.rows[0]?.headline).toBe("Marked done.");
-    expect(runningSection?.rows[0]?.decision?.tense).toBe("did");
-    expect(deriveQueue(state(ok([task("n")])), NOW).sections[0]?.rows[0]?.decision).toBeNull();
   });
 
   test("a row is busy while its action is in flight", () => {
