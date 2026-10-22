@@ -1,5 +1,5 @@
 {
   "name": "session-events",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reports a session's state and PR URL to the local seanced for séance's scheduler"
 }
