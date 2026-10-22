@@ -164,6 +164,9 @@ export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]
 export const HISTORY_RANGES = ["6h", "24h", "30d"] as const;
 export type HistoryRange = (typeof HISTORY_RANGES)[number];
 
+/** Opens on a day: long enough to show a working pattern, on the tier that fits it. */
+export const DEFAULT_HISTORY_RANGE: HistoryRange = "24h";
+
 /** Each range on the coarsest-needed store tier, so none crosses `METRICS_MAX_POINTS`. */
 export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: MetricsStep }> = {
   "6h": { span: 6 * 3600, step: 30 },

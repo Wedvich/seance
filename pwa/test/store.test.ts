@@ -280,6 +280,19 @@ describe("layers and history", () => {
     expect(seen[1]?.labels).toBeUndefined();
   });
 
+  test("a chart opened without a range keeps the last one picked, across targets and a close", async () => {
+    fake = fakeHistory();
+    const store = new Store(idleClient());
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-1" });
+    expect(store.getState().history?.range).toBe("24h");
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-1" }, "6h");
+    store.hideHistory();
+    await store.showHistory({ kind: "machine", deviceId: "dev-2" });
+    expect(store.getState().history?.range).toBe("6h");
+  });
+
   test("a sheet already open is replaced without a second entry", () => {
     fake = fakeHistory();
     const store = new Store(idleClient());
