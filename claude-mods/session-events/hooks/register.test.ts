@@ -53,6 +53,7 @@ function tools(
     stdout = "",
     hold,
     fail = () => false,
+    denied = false,
   }: {
     readonly verdict?: ToolCheckDecision;
     readonly approver?: "person" | "host" | undefined;
@@ -61,6 +62,8 @@ function tools(
     readonly hold?: (id: string | undefined) => Promise<void> | undefined;
     /** Whether the call crashes, asked as it runs. */
     readonly fail?: () => boolean;
+    /** The person answers the dialog with no: the call comes back denied. */
+    readonly denied?: boolean;
   } = {},
 ): void {
   on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : verdict }));
@@ -69,10 +72,12 @@ function tools(
       tool: e.tool,
       input: {},
       ...(e.tool_use_id === undefined ? {} : { tool_use_id: e.tool_use_id }),
+      ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
       ...(approver === undefined ? {} : { approver }),
     });
     await hold?.(e.tool_use_id);
     if (fail()) throw new Error("tool crashed");
+    if (denied) return { deny: "The user denied this call" };
     return { result: { stdout, stderr: "", interrupted: false } };
   });
 }
@@ -297,27 +302,127 @@ describe("reports", () => {
     tools($, on, { verdict: "ask", fail: () => crashing });
     // The kit skips a throwing bottom hook, so `next` rejects with its own "no implementation": that rejection is what is under test.
     await expect($.tool.call({ tool: "Bash", command: "x" })).rejects.toThrow();
-    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    // The rejection resumes the session.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
     // A leaked entry would swallow this call's busy.
     crashing = false;
     await $.tool.call({ tool: "Bash", command: "y" });
-    await settled(sent, 3);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "needs-input" }, { state: "busy" }]);
+    await settled(sent, 4);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input" },
+      { state: "busy" },
+      { state: "needs-input" },
+      { state: "busy" },
+    ]);
+  });
+
+  test("a rejection that empties the set resumes, to idle once the turn ended", async ($, on) => {
+    const sent = record(on);
+    const dialog = latch();
+    tools($, on, { verdict: "ask", hold: () => dialog.held, fail: () => true });
+    const call = $.tool.call({ tool: "Bash", command: "x", agentId: "a1" });
+    await settled(sent, 1);
+    await $.turn.complete(answered);
+    dialog.release();
+    await expect(call).rejects.toThrow();
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle" }]);
+  });
+
+  test("a person denying the call resumes", async ($, on) => {
+    const sent = record(on);
+    tools($, on, { verdict: "ask", denied: true });
+    await $.tool.call({ tool: "Bash", command: "rm -r build" });
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
   });
 
   test("a new prompt drops dialogs that never settled", async ($, on) => {
     const sent = record(on);
     const stuck = latch();
-    tools($, on, { verdict: "ask", hold: () => stuck.held });
+    let started = 0;
+    tools($, on, { verdict: "ask", hold: () => (started++ === 0 ? stuck.held : undefined) });
     const call = $.tool.call({ tool: "Bash", command: "x" });
     await settled(sent, 1);
     await $.turn.start({ ...turn, text: "carry on" });
     await settled(sent, 2);
     expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    // A leaked entry would still be outstanding here and swallow this call's busy.
+    await $.tool.call({ tool: "Bash", command: "y" });
+    await settled(sent, 4);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input" },
+      { state: "busy" },
+      { state: "needs-input" },
+      { state: "busy" },
+    ]);
     stuck.release();
     await call;
+  });
+
+  test("a continuation turn with no typed prompt leaves a subagent's dialog standing", async ($, on) => {
+    const sent = record(on);
+    const dialog = latch();
+    tools($, on, { verdict: "ask", hold: () => dialog.held });
+    const call = $.tool.call({ tool: "Bash", command: "x", agentId: "a1" });
+    await settled(sent, 1);
+    await $.turn.start({ ...turn, text: "" });
+    // A non-event cannot be polled for: wait as long as a send takes to land above.
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    dialog.release();
+    await call;
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+  });
+
+  test("the main loop's turn ending drops its own dialog that never settled", async ($, on) => {
+    const sent = record(on);
+    const stuck = latch();
+    tools($, on, { verdict: "ask", hold: () => stuck.held });
+    const call = $.tool.call({ tool: "Bash", command: "x" });
+    await settled(sent, 1);
+    await $.turn.complete(answered);
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle" }]);
+    stuck.release();
+    await call;
+  });
+
+  test("a subagent's activity after the main turn ended resumes to idle", async ($, on) => {
+    const sent = record(on);
+    tools($, on, { stdout: "https://github.com/acme/app/pull/12\n" });
+    await $.turn.start({ ...turn, text: "hi" });
+    await $.turn.complete(answered);
+    await $.tool.call({ tool: "Bash", command: "gh pr create", agentId: "a1" });
+    await settled(sent, 3);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "busy" },
+      { state: "idle" },
+      { state: "idle", prUrl: "https://github.com/acme/app/pull/12" },
+    ]);
+  });
+
+  test("a PR found while a dialog is open goes out with needs-input, which the daemon needs", async ($, on) => {
+    const sent = record(on);
+    const dialog = latch();
+    let started = 0;
+    tools($, on, {
+      verdict: "ask",
+      stdout: "https://github.com/acme/app/pull/12\n",
+      hold: () => (started++ === 0 ? dialog.held : undefined),
+    });
+    const first = $.tool.call({ tool: "Bash", command: "x", agentId: "a1" });
+    await settled(sent, 1);
+    await $.tool.call({ tool: "Bash", command: "gh pr create" });
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input" },
+      { state: "needs-input", prUrl: "https://github.com/acme/app/pull/12" },
+    ]);
+    dialog.release();
+    await first;
   });
 
   test("a result of an unknown shape still reports busy", async ($, on) => {
@@ -325,7 +430,8 @@ describe("reports", () => {
     on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : "ask" }));
     on("tool.call", async (_$, e) => {
       await $.tool.check({ tool: e.tool, input: {}, tool_use_id: e.tool_use_id ?? "", approver: "person" });
-      return { result: "not a record" };
+      // `.stdout` on this throws, so only the guard keeps the busy.
+      return { result: null };
     });
     await $.tool.call({ tool: "Bash", command: "gh pr create" });
     await settled(sent, 2);
@@ -350,6 +456,37 @@ describe("reports", () => {
       { state: "busy" },
       { state: "idle", prUrl: "https://github.com/acme/app/pull/12" },
     ]);
+  });
+
+  test("ended carries the PR URL, in flight or pending", async ($, on) => {
+    const url = "https://github.com/acme/app/pull/12";
+    const daemon = latch();
+    const sent = record(on, { gate: daemon.held });
+    tools($, on, { stdout: `${url}\n` });
+    // The busy report holds the daemon, so the PR report stays pending behind it.
+    await $.turn.start({ ...turn, text: "hi" });
+    await settled(sent, 1);
+    await $.tool.call({ tool: "Bash", command: "gh pr create" });
+    await end($, "prompt_input_exit");
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "ended", prUrl: url }]);
+    daemon.release();
+  });
+
+  test("ended carries a PR URL whose report is already in flight", async ($, on) => {
+    const url = "https://github.com/acme/app/pull/12";
+    const daemon = latch();
+    const sent = record(on, { gate: daemon.held });
+    tools($, on, { stdout: `${url}\n` });
+    await $.tool.call({ tool: "Bash", command: "gh pr create" });
+    await settled(sent, 1);
+    await end($, "prompt_input_exit");
+    await settled(sent, 2);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "busy", prUrl: url },
+      { state: "ended", prUrl: url },
+    ]);
+    daemon.release();
   });
 
   test("ended does not wait behind a wedged daemon, and replaces what was queued", async ($, on) => {

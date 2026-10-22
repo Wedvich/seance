@@ -13,12 +13,21 @@ import type { EngineInterface, Register } from "claude-code";
  * event on past them, so classic hooks here never ran.
  *
  * Waiting on a person is a `tool.check` whose verdict beneath this hook is
- * `ask` with a person to answer, or an AskUserQuestion call; that call's
- * `tool.call` settling means the turn goes on, and busy goes out once nothing
- * else is outstanding. Auto mode also settles on `ask` (its classifier decides
- * without a person), so there each such call reports needs-input then busy
- * within the classifier's seconds: accepted, since no engine event says a
- * dialog was shown and the leader escalates only a needs-input that lasts.
+ * `ask` with a person to answer, or an AskUserQuestion call. Each such dialog is
+ * kept with the loop it holds (`agentId`, unset for the main loop) until its
+ * `tool.call` settles or rejects. The state reported is always the current one:
+ * needs-input while any dialog is outstanding, else idle while the main loop is
+ * at its prompt (`atPrompt`: set by its turn.complete, cleared by its
+ * turn.start), else busy. So a subagent's dialog closing after the main turn
+ * ended resumes to idle, and the main loop's own turn events drop its dialogs (one
+ * cannot be open across them; any left is a leak) but never a subagent's.
+ * Every `prUrl` goes with a state, since the daemon refuses a frame without one,
+ * and the last one seen rides on `ended`.
+ *
+ * Auto mode also settles on `ask` (its classifier decides without a person), so
+ * there each such call reports needs-input then busy within the classifier's
+ * seconds: accepted, since no engine event says a dialog was shown and the leader
+ * escalates only a needs-input that lasts.
  * A plugin above this one may override the verdict this hook read: one that
  * asks over an allow is a missed needs-input; one that turns an ask into an
  * allow or deny is a brief needs-input with no dialog. No hook can see either.
@@ -68,73 +77,97 @@ async function report($: EngineInterface, body: Report): Promise<void> {
  * only the latest state is true by the time one is sent.
  */
 function merge(older: Report | null, newer: Report): Report {
+  const state = newer.state ?? older?.state;
   const prUrl = newer.prUrl ?? older?.prUrl;
-  return { ...(newer.state === undefined ? {} : { state: newer.state }), ...(prUrl === undefined ? {} : { prUrl }) };
+  return { ...(state === undefined ? {} : { state }), ...(prUrl === undefined ? {} : { prUrl }) };
 }
 
-// One report in flight and one pending slot: separate Bun starts race, and an
-// Esc on a permission prompt raises busy then idle within a millisecond, so
-// the second goes out only after the first has landed.
-let running = false;
-let pending: Report | null = null;
+/**
+ * Everything a registration tracks. Created inside `register`, so each
+ * registration (and each test) starts fresh. It is a value passed to top-level
+ * functions rather than closure state because the hooks compiler only follows `$`
+ * into functions declared at the top of the file.
+ */
+interface Tracker {
+  /** One report in flight and one pending slot: separate Bun starts race, and an
+   * Esc on a permission prompt raises busy then idle within a millisecond, so the
+   * second goes out only after the first has landed. */
+  running: boolean;
+  pending: Report | null;
+  /** What holds a loop on a person, by tool_use_id; the value is the loop's `agentId` (unset: main). */
+  readonly outstanding: Map<string, string | undefined>;
+  /** The main loop is at its prompt: its turn.complete came and no turn.start since. */
+  atPrompt: boolean;
+  lastState: State | undefined;
+  lastPrUrl: string | undefined;
+  anonymous: number;
+}
 
-async function drain($: EngineInterface): Promise<void> {
-  running = true;
+function newTracker(): Tracker {
+  return {
+    running: false,
+    pending: null,
+    outstanding: new Map(),
+    atPrompt: false,
+    lastState: undefined,
+    lastPrUrl: undefined,
+    anonymous: 0,
+  };
+}
+
+async function drain($: EngineInterface, t: Tracker): Promise<void> {
+  t.running = true;
   try {
-    while (pending !== null) {
-      const body: Report = pending;
-      pending = null;
+    while (t.pending !== null) {
+      const body: Report = t.pending;
+      t.pending = null;
       // oxlint-disable-next-line no-await-in-loop -- one report at a time, in order
       await report($, body).catch(() => {
         // seanced not on PATH, or it timed out: nothing for the session to do about it.
       });
     }
   } finally {
-    running = false;
+    t.running = false;
   }
 }
 
-function send($: EngineInterface, body: Report): void {
+function send($: EngineInterface, t: Tracker, body: Report): void {
   // Never awaited by a hook: the run resolves when seanced exits.
   if (body.state === "ended") {
     // Terminal, so it skips the queue: it must not wait out a wedged daemon's
     // timeouts, and whatever was pending is stale. A pending prUrl rides along.
-    const last = merge(pending, body);
-    pending = null;
+    const last = merge(t.pending, body);
+    t.pending = null;
     report($, last).catch(() => {
       // As above: nothing for the session to do about it.
     });
     return;
   }
-  pending = merge(pending, body);
-  if (!running) {
-    drain($).catch(() => {
+  t.pending = merge(t.pending, body);
+  if (!t.running) {
+    drain($, t).catch(() => {
       // report() already swallows; this only keeps a bug here from going unhandled.
     });
   }
 }
 
-/**
- * What holds the main loop on a person, by tool_use_id: calls put to a person
- * (`tool.check` ask) and open AskUserQuestion calls, until their `tool.call`
- * settles or rejects. Busy goes out only when this is empty.
- */
-const outstanding = new Set<string>();
-/** A main-loop turn.complete came while a dialog was open: idle is owed once it closes. */
-let idleOwed = false;
-let anonymous = 0;
-
-/** True when `id` is the first dialog to hold the loop: later ones leave needs-input as it stands. */
-function open(id: string): boolean {
-  if (outstanding.has(id)) return false;
-  outstanding.add(id);
-  return outstanding.size === 1;
+function current(t: Tracker): State {
+  if (t.outstanding.size > 0) return "needs-input";
+  return t.atPrompt ? "idle" : "busy";
 }
 
-/** Reports the state the session returns to once the last dialog closes. */
-function resume($: EngineInterface, extra: Report = {}): void {
-  send($, { ...extra, state: idleOwed ? "idle" : "busy" });
-  idleOwed = false;
+/** Reports the current state; an unchanged one goes out only to carry a `prUrl`. */
+function sendCurrent($: EngineInterface, t: Tracker, prUrl?: string): void {
+  const state = current(t);
+  if (state === t.lastState && prUrl === undefined) return;
+  t.lastState = state;
+  send($, t, { state, ...(prUrl === undefined ? {} : { prUrl }) });
+}
+
+function dropMain(t: Tracker): void {
+  for (const [id, loop] of t.outstanding) {
+    if (loop === undefined) t.outstanding.delete(id);
+  }
 }
 
 // Every hook fails open: a report that throws must never cost the event itself.
@@ -142,30 +175,33 @@ function resume($: EngineInterface, extra: Report = {}): void {
 // settlement, so a tool never runs twice and its own rejection passes up unchanged.
 // oxlint-disable promise/no-callback-in-promise -- each `.catch` is a hook registration's, not a Promise's
 export const register: Register = (on) => {
+  const t = newTracker();
   // Also raised on an enable, a hooks-worker respawn or a reload, not only a fresh
   // process, so a restart mid-turn reads idle until the next turn event. Gating on
   // a first start would take a `$.state` contract and a value this plugin owns:
   // too much machinery for a report the next turn event corrects.
   on("session.start", ($, e, next) => {
-    send($, { state: "idle" });
-    return next(e);
-  }).catch(($, e, next) => next(e));
-  on("turn.start", ($, e, next) => {
-    if (e.agentId === undefined) {
-      // A person typed a prompt, so no dialog tracked here can still hold the main
-      // loop: this is what keeps an entry that never settled from silencing busy.
-      outstanding.clear();
-      idleOwed = false;
-      send($, { state: "busy" });
-    }
+    t.atPrompt = true;
+    sendCurrent($, t);
     return next(e);
   }).catch(($, e, next) => next(e));
   // A subagent's turns say nothing about whether the main loop is at its prompt.
+  on("turn.start", ($, e, next) => {
+    if (e.agentId === undefined) {
+      // Not only a typed prompt: a continuation turn starts with `text: ""` while a
+      // background subagent's dialog may be open, which therefore stays.
+      dropMain(t);
+      t.atPrompt = false;
+      sendCurrent($, t);
+    }
+    return next(e);
+  }).catch(($, e, next) => next(e));
   on("turn.complete", ($, e, next) => {
-    if (e.agentId !== undefined) return next(e);
-    // A dialog is still open (a subagent's): its needs-input stands.
-    if (outstanding.size > 0) idleOwed = true;
-    else send($, { state: "idle" });
+    if (e.agentId === undefined) {
+      dropMain(t);
+      t.atPrompt = true;
+      sendCurrent($, t);
+    }
     return next(e);
   }).catch(($, e, next) => next(e));
   // Any loop's: a subagent's prompt holds the session as the main loop's does.
@@ -174,45 +210,48 @@ export const register: Register = (on) => {
     // The verdict beneath this hook: a plugin above may still change it.
     const verdict = await next(e);
     if (verdict.decision === "ask" && e.approver === "person" && e.tool_use_id !== undefined) {
-      if (open(e.tool_use_id)) send($, { state: "needs-input" });
+      t.outstanding.set(e.tool_use_id, e.agentId);
+      sendCurrent($, t);
     }
     return verdict;
   }).catch(($, e, next) => next(e));
   on("tool.call", async ($, e, next) => {
     const isQuestion = e.tool === "AskUserQuestion";
     // Core's own check for AskUserQuestion settles ask/person under this id too.
-    const id = e.tool_use_id ?? (isQuestion ? `question-${++anonymous}` : undefined);
-    if (isQuestion && id !== undefined && open(id)) send($, { state: "needs-input" });
-    /** Closes `id`; true when it was outstanding. */
-    const close = (): boolean => id !== undefined && outstanding.delete(id);
-    // A rejected call reports nothing: the turn is ending, and turn.complete says so.
+    const id = e.tool_use_id ?? (isQuestion ? `question-${++t.anonymous}` : undefined);
+    if (isQuestion && id !== undefined) {
+      t.outstanding.set(id, e.agentId);
+      sendCurrent($, t);
+    }
+    /** Closes `id`; a dialog closing or a PR found reports the state the session is in now. */
+    const finish = (prUrl?: string): void => {
+      const wasOpen = id !== undefined && t.outstanding.delete(id);
+      if (prUrl !== undefined) t.lastPrUrl = prUrl;
+      if (prUrl !== undefined || (wasOpen && t.outstanding.size === 0)) sendCurrent($, t, prUrl);
+    };
+    // A rejection closes too, so the session resumes whatever the turn does next.
     const settled = async <R>(run: Promise<R>): Promise<R> =>
       run.catch((err: unknown) => {
-        close();
+        finish();
         throw err;
       });
     // Narrowed before `next`, so it resolves to Bash's own record.
     if (e.tool === "Bash") {
       const ran = await settled(next(e));
-      // Bookkeeping first: nothing read from the result below may cost the busy.
-      const wasOpen = close();
-      let prUrl: string | null = null;
+      let prUrl: string | undefined;
       try {
         const stdout: unknown = ran.result.stdout;
         if (ran.deny === undefined && ran.isError !== true && typeof stdout === "string") {
-          prUrl = prUrlFrom(e.command, stdout);
+          prUrl = prUrlFrom(e.command, stdout) ?? undefined;
         }
       } catch {
         // A result of a shape this mod does not know: no PR to report.
       }
-      if (outstanding.size > 0) {
-        if (prUrl !== null) send($, { prUrl });
-      } else if (prUrl !== null) resume($, { prUrl });
-      else if (wasOpen) resume($);
+      finish(prUrl);
       return ran;
     }
     const ran = await settled(next(e));
-    if (close() && outstanding.size === 0) resume($);
+    finish();
     return ran;
   }).catch(($, e, next) => next(e));
   // Unawaited like the rest, so it may not outlive a fast exit; the daemon's
@@ -220,7 +259,9 @@ export const register: Register = (on) => {
   // `/clear` and `/resume` end a conversation, not the process: the pane runs
   // on, so `ended` — terminal for the task — would be a lie.
   on("session.end", ($, e, next) => {
-    if (!CONTINUES.has(e.reason)) send($, { state: "ended" });
+    if (!CONTINUES.has(e.reason)) {
+      send($, t, { state: "ended", ...(t.lastPrUrl === undefined ? {} : { prUrl: t.lastPrUrl }) });
+    }
     return next(e);
   }).catch(($, e, next) => next(e));
 };

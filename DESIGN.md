@@ -4859,29 +4859,33 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
   on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
   the next turn event; gating on a first start would take a `$.state` contract for a
-  report the next turn event corrects); `turn.start` busy and `turn.complete` idle, main
-  loop only (`agentId` unset — a subagent's turns say nothing about whether the main loop
-  is at its prompt); a `tool.check` whose verdict beneath the mod is `ask`
-  with `approver: "person"` on a real call (a `$.tool.check` query has no `tool_use_id`)
-  is needs-input, from any loop, as the old permission notification was; an
-  `AskUserQuestion` call is needs-input too. Both enter one set of outstanding
-  `tool_use_id`s (core's check for `AskUserQuestion` settles `ask`/person under the same id,
-  so the id enters once), and busy goes out only when a settling call leaves it empty: two
-  overlapping prompts report busy after the second. An entry leaves when its `tool.call`
-  settles or rejects, and the set is cleared on a main-loop `turn.start` (a person typed a
-  prompt, so no tracked dialog can still hold the loop), so a leaked entry cannot silence
-  busy past the next turn. A main-loop `turn.complete` while the set is non-empty sends no
-  idle (a subagent's dialog stands); the idle is sent in place of busy when the set empties.
-  A Bash `gh pr create` that printed an `https:` `/pull/<n>` URL adds `prUrl` (with busy,
-  or alone while a dialog is open); the set is updated before the result is read, so an
-  odd result shape cannot drop the busy. `session.end` is ended unless its reason is `clear`
-  or `resume`. A `tool.call` that rejects reports nothing: the turn is ending and
-  `turn.complete` says so. Reports go out one in flight and one pending slot, in the order
-  raised, never awaited by a hook: the latest state overwrites the pending slot (a
-  `prUrl` is kept), since an Esc on a prompt raises busy then idle within a millisecond and
-  two Bun starts race, and a wedged daemon (3 s a run) must not grow a queue. `ended` skips
-  the queue and replaces the pending slot (carrying its `prUrl`): it is terminal, so
-  nothing queued is still true, and it must not wait out a wedged daemon.
+  report the next turn event corrects); the main loop's `turn.start` and `turn.complete`
+  (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
+  its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
+  `ask` with `approver: "person"` on a real call (a `$.tool.check` query has no
+  `tool_use_id`) is a dialog, from any loop, as the old permission notification was; an
+  `AskUserQuestion` call is one too. Each dialog is kept in one map, `tool_use_id` to the
+  loop it holds (`agentId`; core's check for `AskUserQuestion` settles `ask`/person under
+  the same id, so it enters once), until its `tool.call` settles or rejects. **One function
+  names the state every report carries**: needs-input while any dialog is outstanding, else
+  idle while `atPrompt`, else busy. A report goes out whenever that changes (and only then,
+  bar a PR below), so two overlapping prompts report busy after the second, and a subagent's
+  dialog closing after the main turn ended resumes to idle, not busy. A rejection resumes
+  the same way when it empties the map. The main loop's own turn events drop its own entries
+  (a main-loop dialog cannot be open across them: any left is a leak that would silence
+  busy) and never a subagent's: a continuation turn starts with no typed prompt
+  (`text: ""`) while a background subagent's dialog may be open.
+  A Bash `gh pr create` that printed an `https:` `/pull/<n>` URL adds `prUrl` to the current
+  state, needs-input included: the daemon refuses a frame without a `state` (its note of the
+  PR is behind that check), so a bare `prUrl` would be lost. The map is updated before the
+  result is read, so an odd result shape cannot drop the resume. `session.end` is ended
+  unless its reason is `clear` or `resume`, carrying the last `prUrl` seen. Reports go out
+  one in flight and one pending slot, in the order raised, never awaited by a hook: the
+  latest state overwrites the pending slot (a `prUrl` is kept), since an Esc on a prompt
+  raises busy then idle within a millisecond and two Bun starts race, and a wedged daemon
+  (3 s a run) must not grow a queue. `ended` skips the queue and replaces the pending slot:
+  it is terminal, so nothing queued is still true, and it must not wait out a wedged daemon.
+  All of it is per registration (a tracker value created in `register`), not module state.
   **The verdict is the one beneath the mod**: `await next(e)` at `tool.check` returns what
   the hooks below it settled, and a plugin above may still override it. One that asks over
   an allow is a missed needs-input; one that turns an ask into an allow or deny is a brief
