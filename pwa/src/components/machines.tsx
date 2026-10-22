@@ -10,9 +10,6 @@ import { Seg } from "./seg.tsx";
 
 const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Load and disk", account: "Quota" };
 
-/** Opens on a day: long enough to show a working pattern, on the tier that fits it. */
-const DEFAULT_RANGE: HistoryRange = "24h";
-
 const CHART_WIDTH = 320;
 const CHART_HEIGHT = 120;
 /** Series beyond the palette wrap around; a quota panel past five is already hard to read. */
@@ -33,7 +30,7 @@ export function MachinesScreen(props: {
   history: HistoryView | null;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
-  onShowHistory: (target: HistoryTarget, range: HistoryRange) => void;
+  onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
   const { view, relayLine, relayState, settled, history, onDismiss, onShowHistory, onHideHistory } = props;
@@ -93,7 +90,7 @@ export function MachinesScreen(props: {
 function MachineCardView(props: {
   card: MachineCard;
   history: HistoryView | null;
-  onShowHistory: (target: HistoryTarget, range: HistoryRange) => void;
+  onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
   const { card, history, onShowHistory, onHideHistory } = props;
@@ -118,7 +115,7 @@ function MachineCardView(props: {
         <HistoryToggle
           available={card.charts}
           history={history}
-          onShow={() => onShowHistory(target, DEFAULT_RANGE)}
+          onShow={() => onShowHistory(target)}
           onHide={onHideHistory}
         />
       </div>
@@ -158,7 +155,7 @@ function MachineCardView(props: {
 function AccountCardView(props: {
   account: AccountCard;
   history: HistoryView | null;
-  onShowHistory: (target: HistoryTarget, range: HistoryRange) => void;
+  onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
   const { account, history, onShowHistory, onHideHistory } = props;
@@ -179,7 +176,7 @@ function AccountCardView(props: {
         <HistoryToggle
           available={target !== null}
           history={history}
-          onShow={() => target !== null && onShowHistory(target, DEFAULT_RANGE)}
+          onShow={() => target !== null && onShowHistory(target)}
           onHide={onHideHistory}
         />
       </div>
