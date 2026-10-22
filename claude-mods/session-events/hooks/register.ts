@@ -8,6 +8,18 @@ import type { EngineInterface, Register } from "claude-code";
  * the report to a tmux pane by this process tree — so nothing here names a
  * session or a task.
  *
+ * Engine events only, never `classic.*`: on Team/Enterprise orgs a built-in
+ * plugin sits above every installed one on the classic chain and passes each
+ * event on past them, so classic hooks here never ran.
+ *
+ * Waiting on a person is a `tool.check` that settles on `ask` with a person to
+ * answer, or an AskUserQuestion call; that call's `tool.call` resolving means
+ * the turn goes on. Auto mode also settles on `ask` (its classifier decides
+ * without a person), so there each such call reports needs-input then busy
+ * within the classifier's seconds: accepted, since no engine event says a
+ * dialog was shown and the leader escalates only a needs-input that lasts.
+ * Not covered: an MCP server's elicitation, which has no engine event.
+ *
  * Fire-and-forget throughout: no hook waits on the daemon, and a missing
  * `seanced`, a stopped daemon or a slow one costs the session nothing.
  */
@@ -22,34 +34,19 @@ interface Report {
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
 const SEND_TIMEOUT_MS = 3_000;
 
-/** Waiting on a person, as opposed to idle: a permission prompt or a question the session asked. */
-const NEEDS_INPUT = new Set(["permission_prompt", "elicitation_dialog"]);
-
-/** SessionEnd reasons after which the same process, in the same pane, carries on. */
+/** session.end reasons after which the same process, in the same pane, carries on. */
 const CONTINUES: ReadonlySet<string> = new Set(["clear", "resume"]);
-
-export function notificationState(type: string): State | null {
-  if (NEEDS_INPUT.has(type)) return "needs-input";
-  return type === "idle_prompt" ? "idle" : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const PR_URL = /https:\/\/[^\s"'<>]+\/pull\/\d+/u;
 
 /**
- * The PR a `gh pr create` printed. Only Bash, only that command, only an
- * `https:` URL ending in `/pull/<n>` — the daemon re-checks the scheme anyway,
- * and nothing else a tool printed is worth reporting.
+ * The PR a `gh pr create` printed. Only that command, only an `https:` URL
+ * ending in `/pull/<n>` — the daemon re-checks the scheme anyway, and nothing
+ * else a command printed is worth reporting.
  */
-export function prUrlFrom(toolName: string, input: unknown, response: unknown): string | null {
-  if (toolName !== "Bash" || !isRecord(input) || typeof input["command"] !== "string") return null;
-  if (!/\bgh\s+pr\s+create\b/u.test(input["command"])) return null;
-  const out = isRecord(response) ? response["stdout"] : response;
-  if (typeof out !== "string") return null;
-  return PR_URL.exec(out)?.[0] ?? null;
+export function prUrlFrom(command: string, stdout: string): string | null {
+  if (!/\bgh\s+pr\s+create\b/u.test(command)) return null;
+  return PR_URL.exec(stdout)?.[0] ?? null;
 }
 
 async function report($: EngineInterface, body: Report): Promise<void> {
@@ -61,44 +58,82 @@ async function report($: EngineInterface, body: Report): Promise<void> {
   await $.process.run(["seanced", "session-event"], { stdin: JSON.stringify(body), timeoutMs: SEND_TIMEOUT_MS });
 }
 
+// One report at a time, in the order raised: separate Bun starts race, and an
+// Esc on a permission prompt raises busy (the call settled) then idle (the turn
+// ended) within a millisecond.
+let sending: Promise<void> = Promise.resolve();
+
 function send($: EngineInterface, body: Report): void {
-  // Unawaited: the run resolves when seanced exits, and no hook should wait for that.
-  void report($, body).catch(() => {
-    // seanced not on PATH, or it timed out: nothing for the session to do about it.
-  });
+  // Never awaited by a hook: the run resolves when seanced exits.
+  sending = sending
+    .then(() => report($, body))
+    .catch(() => {
+      // seanced not on PATH, or it timed out: nothing for the session to do about it.
+    });
 }
 
+/** Calls a person was asked to approve, by tool_use_id, until their `tool.call` settles. */
+const asked = new Set<string>();
+
 // Every hook fails open: a report that throws must never cost the event itself.
+// Where the hook already called `next`, the handler's `next(e)` replays that
+// settlement, so a tool never runs twice and its own rejection passes up unchanged.
 // oxlint-disable promise/no-callback-in-promise -- each `.catch` is a hook registration's, not a Promise's
 export const register: Register = (on) => {
-  on("classic.SessionStart", ($, e, next) => {
-    // A compaction can land mid-turn: the session is not idle because of it.
-    if (e.source !== "compact") send($, { state: "idle" });
-    return next(e);
-  }).catch(($, e, next) => next(e));
-  on("classic.UserPromptSubmit", ($, e, next) => {
-    send($, { state: "busy" });
-    return next(e);
-  }).catch(($, e, next) => next(e));
-  on("classic.Stop", ($, e, next) => {
+  // Not raised for a /clear or a compaction, so idle here is a fresh process.
+  on("session.start", ($, e, next) => {
     send($, { state: "idle" });
     return next(e);
   }).catch(($, e, next) => next(e));
-  on("classic.Notification", ($, e, next) => {
-    const state = notificationState(e.notification_type);
-    if (state !== null) send($, { state });
+  // A subagent's turns run inside the main loop's: only the main loop's say anything.
+  on("turn.start", ($, e, next) => {
+    if (e.agentId === undefined) send($, { state: "busy" });
     return next(e);
   }).catch(($, e, next) => next(e));
-  on("classic.PostToolUse", ($, e, next) => {
-    const prUrl = prUrlFrom(e.tool_name, e.tool_input, e.tool_response);
-    if (prUrl !== null) send($, { state: "busy", prUrl });
+  on("turn.complete", ($, e, next) => {
+    if (e.agentId === undefined) send($, { state: "idle" });
     return next(e);
+  }).catch(($, e, next) => next(e));
+  // Any loop's: a subagent's prompt holds the session as the main loop's does.
+  // A `$.tool.check` query carries no tool_use_id and shows no dialog.
+  on("tool.check", async ($, e, next) => {
+    const verdict = await next(e);
+    if (verdict.decision === "ask" && e.approver === "person" && e.tool_use_id !== undefined) {
+      asked.add(e.tool_use_id);
+      send($, { state: "needs-input" });
+    }
+    return verdict;
+  }).catch(($, e, next) => next(e));
+  on("tool.call", async ($, e, next) => {
+    const isQuestion = e.tool === "AskUserQuestion";
+    if (isQuestion) send($, { state: "needs-input" });
+    const id = e.tool_use_id;
+    const forget = (): boolean => id !== undefined && asked.delete(id);
+    // A rejected call reports nothing: the turn is ending, and turn.complete says so.
+    const settled = async <R>(run: Promise<R>): Promise<R> =>
+      run.catch((err: unknown) => {
+        forget();
+        throw err;
+      });
+    // Narrowed before `next`, so it resolves to Bash's own record.
+    if (e.tool === "Bash") {
+      const ran = await settled(next(e));
+      const wasAsked = forget();
+      const isAnswered = ran.deny === undefined && ran.isError !== true;
+      const prUrl = isAnswered ? prUrlFrom(e.command, ran.result.stdout) : null;
+      if (prUrl !== null) send($, { state: "busy", prUrl });
+      else if (wasAsked) send($, { state: "busy" });
+      return ran;
+    }
+    const ran = await settled(next(e));
+    if (forget() || isQuestion) send($, { state: "busy" });
+    return ran;
   }).catch(($, e, next) => next(e));
   // Unawaited like the rest, so it may not outlive a fast exit; the daemon's
   // `ended` backstop counts a launched task whose pane is gone either way.
   // `/clear` and `/resume` end a conversation, not the process: the pane runs
   // on, so `ended` — terminal for the task — would be a lie.
-  on("classic.SessionEnd", ($, e, next) => {
+  on("session.end", ($, e, next) => {
     if (!CONTINUES.has(e.reason)) send($, { state: "ended" });
     return next(e);
   }).catch(($, e, next) => next(e));
