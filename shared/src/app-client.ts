@@ -38,6 +38,7 @@ import {
   type SchedulerLeader,
   type SchedulerOp,
   type SourceInfo,
+  type StoreChangedFrame,
   type StoreReplyFrame,
   type Task,
   type TaskRecord,
@@ -62,6 +63,7 @@ import {
   parseQueueReply,
   parseRescanResponse,
   parseRoutePreviewReply,
+  parseStoreChanged,
   parseStoreReply,
   parseTaskReply,
 } from "./parse.ts";
@@ -390,6 +392,7 @@ type ParsedFrame =
   | { readonly t: "undeliverable"; readonly to: string; readonly iv: string; readonly code: string }
   | { readonly t: "forget-refused"; readonly deviceId: string; readonly code: string }
   | StoreReplyFrame
+  | StoreChangedFrame
   /** A store reply this build cannot read: it still names its request, so that settles now rather than at its timeout. */
   | { readonly t: "store-unreadable"; readonly re: string };
 
@@ -452,6 +455,8 @@ function parseFrame(text: string): ParsedFrame | null {
     if (typeof value["deviceId"] !== "string" || typeof value["code"] !== "string") return null;
     return { t: "forget-refused", deviceId: value["deviceId"], code: value["code"] };
   }
+  // Before the reply branch: a nudge carries no `re`, so that branch would drop it.
+  if (value["t"] === "store-changed") return parseStoreChanged(value);
   if (typeof value["t"] === "string" && value["t"].startsWith("store-")) {
     const reply = parseStoreReply(value);
     if (reply !== null) return reply;
@@ -514,6 +519,7 @@ export class RelayClient {
   readonly #key: CryptoKey;
   readonly #listeners = new Set<() => void>();
   readonly #queueListeners = new Set<(change: QueueChanged) => void>();
+  readonly #storeListeners = new Set<(key: string, version: number) => void>();
   readonly #pending = new Map<string, Pending>();
   /** Store frames are Layer 1 plaintext the relay answers, correlated on the frame's own `id`, not a sealed one. */
   readonly #storePending = new Map<string, StorePending>();
@@ -1018,6 +1024,11 @@ export class RelayClient {
       this.#wireLog("forget-refused", `to=${quote(frame.deviceId)} code=${quote(frame.code)}`);
       return;
     }
+    if (frame.t === "store-changed") {
+      // Apps' records only; the term's leader acts on `task:` nudges via its daemon socket.
+      if (this.#term === null) for (const listener of this.#storeListeners) listener(frame.key, frame.version);
+      return;
+    }
     if (frame.t === "store-unreadable") {
       this.#wireLog("dropped", `re=${quote(frame.re)} reason=store-shape`);
       this.#settleStore(socket, frame.re, null);
@@ -1447,6 +1458,17 @@ export class RelayClient {
   onQueueChanged(listener: (change: QueueChanged) => void): () => void {
     this.#queueListeners.add(listener);
     return () => this.#queueListeners.delete(listener);
+  }
+
+  /**
+   * Called when the relay says another client wrote an app-writable record
+   * (today `account:`). Only an app's client hears it, as with `onQueueChanged`.
+   * Relay plaintext, prefix unchecked: a hint to re-read through the store's own
+   * open path, never data — trust neither `key` nor `version` past that.
+   */
+  onStoreChanged(listener: (key: string, version: number) => void): () => void {
+    this.#storeListeners.add(listener);
+    return () => this.#storeListeners.delete(listener);
   }
 
   /**

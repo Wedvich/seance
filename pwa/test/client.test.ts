@@ -1755,6 +1755,46 @@ describe("malformed frames", () => {
     }
   });
 
+  test("hands a store-changed nudge to its listeners and drops a malformed one", async () => {
+    const peer = startHostilePeer();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ url: peer.url, log: (line) => lines.push(line) });
+    // Its own peer: a hostile peer holds one socket.
+    const legPeer = startHostilePeer();
+    const leg = startClient({ url: legPeer.url, scheduler: { term: 1 } });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      await leg.waitFor((s) => s.status === "open", "the term leg open");
+      const heard: [string, number][] = [];
+      const legHeard: string[] = [];
+      const stop = client.onStoreChanged((changed, version) => heard.push([changed, version]));
+      leg.client.onStoreChanged((changed) => legHeard.push(changed));
+      peer.send({ t: "store-changed", key: "account:a-1", version: 3 });
+      legPeer.send({ t: "store-changed", key: "account:a-1", version: 3 });
+      await pollUntil(() => heard.length > 0, "the nudge to reach the listener");
+      expect(heard).toEqual([["account:a-1", 3]]);
+      expect(lines.some((line) => line.startsWith("wire dropped"))).toBe(false);
+
+      peer.send({ t: "store-changed", key: "account:a-1", version: -1 });
+      peer.send({ t: "store-changed", key: "no prefix", version: 5 });
+      await pollUntil(
+        () => lines.filter((line) => line === "wire dropped reason=frame").length === 2,
+        "both malformed nudges to be dropped",
+      );
+      stop();
+      peer.send({ t: "store-changed", key: "account:a-1", version: 4 });
+      // A non-event has nothing to poll for.
+      await Bun.sleep(50);
+      expect(heard).toEqual([["account:a-1", 3]]);
+      expect(legHeard).toEqual([]);
+    } finally {
+      client.stop();
+      leg.client.stop();
+      await peer.stop();
+      await legPeer.stop();
+    }
+  });
+
   // Every push carries the full stored registry, so dropping a push over one
   // bad entry would drop every push for as long as that entry stays stored —
   // an authoritative "no machines" out of one machine a version ahead.
