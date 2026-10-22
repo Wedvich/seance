@@ -237,20 +237,31 @@ describe("deriveQueue", () => {
     expect(accountOnly.paused).toBe(false);
   });
 
-  test("status names the leader or why nobody answers, and the list stays up while it is away", () => {
+  test("the list stays up while the leader is away, and the empty line says why", () => {
     const list = ok([task("a")]);
-    expect(deriveQueue(state(list), NOW)).toMatchObject({ status: "Scheduler on Mac", available: true, empty: null });
+    expect(deriveQueue(state(list), NOW)).toMatchObject({ available: true, empty: null });
     const none = deriveQueue(state(list, {}, { scheduler: { kind: "none" } }), NOW);
-    expect(none).toMatchObject({ status: "No scheduler is leading right now", available: false, empty: null });
+    expect(none).toMatchObject({ available: false, empty: null });
     expect(none.sections).toHaveLength(1);
     const unverified = deriveQueue(
       state(null, {}, { scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } }),
       NOW,
     );
-    expect(unverified.status).toContain("Leader unverified");
     expect(unverified.empty).toContain("Leader unverified");
     const down = deriveQueue(state(null, {}, { status: "retrying" }), NOW);
-    expect(down).toMatchObject({ status: "Not connected to the relay", available: false });
+    expect(down).toMatchObject({ summary: null, available: false });
+  });
+
+  test("summary counts running and waiting tasks, null until a list is read", () => {
+    const list = ok([
+      task("a", { state: "running" }),
+      task("b", { state: "reserved" }),
+      task("c", { state: "queued" }),
+      task("d", { state: "needs-input" }),
+    ]);
+    expect(deriveQueue(state(list), NOW).summary).toBe("2 running · 1 waiting");
+    expect(deriveQueue(state(ok([])), NOW).summary).toBe("0 running · 0 waiting");
+    expect(deriveQueue(state(null), NOW).summary).toBeNull();
   });
 
   test("an empty screen says why: loading, failed, or nothing", () => {
