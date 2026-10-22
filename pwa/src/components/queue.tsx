@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { QueueRow, QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
-import { RelayDot, RelaySettings } from "./relay-dot.tsx";
+import { RelaySettings } from "./relay-dot.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
@@ -73,10 +73,7 @@ export function QueueScreen(props: {
           )}
           <div>
             <h1 className="header-title">Queue</h1>
-            <p className="header-meta header-status">
-              <RelayDot state={relayState} />
-              {view.status}
-            </p>
+            {view.summary !== null && <p className="header-meta">{view.summary}</p>}
           </div>
         </div>
         <div className="header-actions">

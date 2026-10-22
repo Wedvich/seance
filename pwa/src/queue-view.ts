@@ -39,8 +39,8 @@ export interface HoldRow {
 }
 
 export interface QueueScreenView {
-  /** The header's meta line: who leads, or why nobody answers. */
-  readonly status: string;
+  /** The header's meta line, "2 running · 1 waiting"; null until a list has been read. */
+  readonly summary: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
   /** The reply held `QUEUE_MAX_TASKS` tasks, so older ones may be left out. */
@@ -184,8 +184,10 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     else empty = "Nothing in the queue.";
   }
 
+  const count = (title: string): number => sections.find((s) => s.title === title)?.rows.length ?? 0;
+
   return {
-    status: text,
+    summary: ok === null ? null : `${count("Running")} running · ${count("Waiting")} waiting`,
     available,
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,
