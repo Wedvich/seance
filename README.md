@@ -298,9 +298,9 @@ The same command installs **session-events**. It tells this machine's daemon wha
 each session is doing (busy, idle, waiting on you, ended) and the PR it opened, which
 is what the scheduler reads. Quota no longer comes from it: the daemon refreshes each
 signed-in account's own cached reading with a `claude -p /usage` run once it is ten
-minutes old, checking every minute and whenever a session there reports. It runs `seanced session-event`, so it needs `seanced` on PATH
-(`seanced link`). Without that it does nothing, silently. A session started outside
-tmux reports nothing.
+minutes old, checking every minute and whenever a session there reports. It runs this
+checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
+`seanced link`. A session started outside tmux reports nothing.
 
 ## Usage
 

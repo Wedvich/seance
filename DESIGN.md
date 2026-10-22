@@ -1049,7 +1049,7 @@ places on: sealed `from: "scheduler"` with its `term` on its app-role leg (`term
 "leader")`, which never touches this wire (Scheduler, "The leader").
 
 `session-event` starts on that socket too, as a third frame kind the session-events
-mod sends through `seanced session-event` (see "Session events"). What crosses the
+mod sends through the CLI's `session-event` (see "Session events"). What crosses the
 relay is the daemon's own event, built from its pane map, never the mod's frame.
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope>,
@@ -4841,9 +4841,13 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
-  reaches the socket through `seanced session-event` (JSON on stdin). A hooks module
+  reaches the socket through the CLI's `session-event` (JSON on stdin). A hooks module
   runs with no Node and no sockets of its own, so it runs that command through
-  `$.process.run`. The command is silent, always exits 0, and waits for the daemon's
+  `$.process.run`, as `bun <checkout>/daemon/src/main.ts session-event` from its own
+  `$.plugin.root`, never the `seanced` name on PATH (changed 2026-10-22): the mod is
+  read in place from the checkout (Claude Code mods), so the path always names the same
+  checkout's CLI, while the PATH link is opt-in and nothing re-points it on a pull — a
+  machine without it, or with a link into another clone, reported nothing, silently. The command is silent, always exits 0, and waits for the daemon's
   one-line answer before exiting: the binding below needs the sender alive. It runs
   two or three times a turn in every session on the machine, so `main.ts` dispatches it
   before loading anything else of the CLI (`cli.ts` pulls in the MCP SDK and zod), and the
