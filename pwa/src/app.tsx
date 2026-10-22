@@ -72,8 +72,6 @@ export function App(props: { store: Store }): JSX.Element {
     <QueueScreen
       view={deriveQueue(state, now)}
       relayState={view.relayState}
-      machines={state.relay.machines}
-      now={now}
       notice={state.queueNotice}
       pausing={state.pausing}
       discarding={state.discarding}
