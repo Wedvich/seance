@@ -708,6 +708,17 @@ precede. Wave 2 waits on the wave-1 item named.
     - It depends on store rules v2, not on account records.
   - _Estimate:_ about 288 get-and-put pairs per daemon a day, roughly 2,900 rows written at 10
     daemons (3% of the free limit).
+  - _Constraint for the writer (after store rules v2):_ the relay answers a `/daemon` socket's
+    store frames only once its register is accepted (`forbidden` before, on a superseded socket or
+    after a failed verify), and `RelayClient.store()` does not check that — today only the leader
+    calls it, after `lead`.
+    - Send only after the register is accepted: gate on the first `lead`/`follow` (or a register
+      ack). A `forbidden` after a reconnect means register first, then retry — not a lost write.
+    - Stay under the per-socket write floor (`MAX_STORE_CREATES_PER_WINDOW`, 60 writes per 60 s,
+      creates and overwrites alike since `quota:` is not term-fenced). Create with `expect: 0` only
+      when `store-get` shows no record; otherwise overwrite by the version read.
+    - The key is `QUOTA_KEY` (`quota:fleet`), never a per-account key — the singleton prefix
+      refuses any other, and per-account keys are what the one-record decision rules out.
 - **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
   filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
