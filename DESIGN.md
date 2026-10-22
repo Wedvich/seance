@@ -3611,7 +3611,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   leader's sweep makes of every machine holding placed tasks. The CLI's
   reap, in a process that does not own the ledger, leaves them. The tmux calls are injected where
   `EndedTasks` is built (`tmuxHarvestPanes`), so only the daemon's wiring touches tmux. The live `ended` event cannot carry the status: the mod's
-  SessionEnd hook runs before the process exits. So a leader settles a PR-less `ended` from a
+  `session.end` hook runs before the process exits. So a leader settles a PR-less `ended` from a
   machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
   reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine
   at once, then every pass (`#ending`) until a reply no longer lists the session, since a check
@@ -3619,7 +3619,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   Only the machine the task is on defers (`waitsForExit`): a foreign sender's `ended` changes
   and waits for nothing. The wait is bounded by `endingTimeoutMs` (5 min, well past
   `sweepIntervalMs` plus the `sessions` op's 10s): past it the task settles as the event would
-  have without an exit, so a claude that stays alive after its SessionEnd hook does not hold its
+  have without an exit, so a claude that stays alive after its `session.end` hook does not hold its
   slot and get asked about for good. The deadline spares a machine whose check is out, and waits
   for a read begun after it that still lists the session (`#awaited`), or a late answer would
   be dropped for a task already `done` and its dependents would run on a failed predecessor. A
@@ -4852,6 +4852,27 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   is unset: such a session is in no pane the daemon could bind it to, so every report
   would be `unbound` (below) at the cost of a Bun start and the daemon's tmux and
   parent-walk reads. The daemon still binds every report that does arrive.
+- **Where the states come from: engine events, never `classic.*`** (changed 2026-10-22,
+  mod 0.2.0). On Team/Enterprise orgs Claude Code 2.1.308's built-in
+  `cc-plugin-sec-default` sits first on the classic chain and passes every classic event
+  past the plugins a person installs, so the first mod's `classic.*` hooks never ran there.
+  Now: `session.start` is idle (not raised for `/clear` or a compaction, so no `source`
+  check); `turn.start` busy and `turn.complete` idle, main loop only (`agentId` unset —
+  a subagent's turns run inside the main loop's); a `tool.check` that settles on `ask`
+  with `approver: "person"` on a real call (a `$.tool.check` query has no `tool_use_id`)
+  is needs-input, from any loop, as the old permission notification was, and that call's
+  `tool.call` settling is busy again; an `AskUserQuestion` call is needs-input until it
+  settles; a Bash `gh pr create` that printed an `https:` `/pull/<n>` URL is busy plus
+  `prUrl`; `session.end` is ended unless its reason is `clear` or `resume`. A `tool.call`
+  that rejects reports nothing: the turn is ending and `turn.complete` says so. Reports
+  go out one at a time in the order raised (one promise chain, still never awaited by a
+  hook), since an Esc on a prompt raises busy then idle within a millisecond and two
+  Bun starts race. **Auto mode reports needs-input then busy for each call its
+  classifier settles**: core answers `ask` there too, and no engine event says a dialog
+  was shown, nor does `$` read the permission mode. Accepted: the leader escalates only
+  a needs-input that lasts (`escalation`), so the flicker alerts nobody; it costs two
+  task-record writes per such call in a task's session. **Not covered**: an MCP server's elicitation, which
+  has no engine event (only the skipped `classic.Elicitation`).
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
@@ -5266,7 +5287,12 @@ are tmux-rename's, except where they say mods.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
   the repo root lists the mods; `seanced mod install` runs `claude plugin
   marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
-  A directory marketplace is read in place, never copied, so unlike the Raycast
+  A directory marketplace's plugins are read in place: Claude also records a copy
+  under `plugins/cache/<marketplace>/<mod>/<version>` and names it `installPath`, but
+  loads the folder (`readFromFolder` in `claude plugin list --json`; checked on
+  2.1.308, where `claude plugin update` on one says "read from its folder: nothing to
+  update"), so the copy goes stale harmlessly. A mod's version still moves with its
+  behaviour, so `list`'s `folderVersion` says which one a machine runs. So unlike the Raycast
   import a `git pull` (or a self-update) reaches the next session with nothing
   re-run. `marketplace add` is idempotent and repoints in place when the name is
   registered from another folder, carrying installed plugins along — so no
