@@ -1025,7 +1025,7 @@ export class RelayClient {
       return;
     }
     if (frame.t === "store-changed") {
-      // A leader's term leg hears its writes on the daemon socket (`#nudgeLeader`) instead.
+      // Apps' records only; the term's leader acts on `task:` nudges via its daemon socket.
       if (this.#term === null) for (const listener of this.#storeListeners) listener(frame.key, frame.version);
       return;
     }
@@ -1463,6 +1463,8 @@ export class RelayClient {
   /**
    * Called when the relay says another client wrote an app-writable record
    * (today `account:`). Only an app's client hears it, as with `onQueueChanged`.
+   * Relay plaintext, prefix unchecked: a hint to re-read through the store's own
+   * open path, never data — trust neither `key` nor `version` past that.
    */
   onStoreChanged(listener: (key: string, version: number) => void): () => void {
     this.#storeListeners.add(listener);
