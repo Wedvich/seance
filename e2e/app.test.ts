@@ -353,7 +353,7 @@ describe("daemon ↔ relay ↔ app", () => {
     try {
       await app.waitForApp((s) => typeof s.sessions[stack.deviceId] === "object", "sessions answered");
 
-      // Straight down the transport, bypassing the Store: what a `seanced spawn`
+      // Straight down the transport, bypassing the Store: what a `seance spawn`
       // at the machine, or another device's session, looks like from here.
       const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
         repo: "myrepo",

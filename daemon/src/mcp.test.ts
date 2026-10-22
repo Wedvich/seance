@@ -154,7 +154,7 @@ describe("mcpScriptCheck", () => {
     expect(check?.message).toContain("(pengefix2)");
     expect(check?.message).toContain(other);
     expect(check?.message).toContain(main);
-    expect(check?.message).toContain("`seanced mcp install` repoints it");
+    expect(check?.message).toContain("`seance mcp install` repoints it");
   });
 
   test("no parsable script is no finding", async () => {
@@ -445,7 +445,7 @@ describe("the local short circuit", () => {
     // The remediation is attached here, not baked into the thrown message, so it
     // reads the same for a socket that closed mid-request as for one never there.
     expect(toolText(result)).toContain("no daemon listening at /run/seanced.sock (ENOENT)");
-    expect(toolText(result)).toContain("is seanced running? try `seanced status`");
+    expect(toolText(result)).toContain("is seanced running? try `seance status`");
     expect(fake.requests).toHaveLength(0);
     lazy.stop();
   });
@@ -466,7 +466,7 @@ describe("the local short circuit", () => {
   });
 
   test("a repo cloned after the MCP server started is spawnable without a restart", async () => {
-    // `seanced mcp` outlives many rescans, so the repo set is read per call. A
+    // `seance mcp` outlives many rescans, so the repo set is read per call. A
     // snapshot taken at startup rejects this spawn with no way to recover short
     // of restarting the process — `rescan` is deliberately not a local op.
     let repos: RepoEntry[] = [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }];
@@ -643,7 +643,7 @@ describe("the local short circuit", () => {
     expect(listed.note).toContain("fail too");
     expect(listed.note).not.toContain("only local spawns will work");
     // The advice already names the fix; the note must not say it twice.
-    expect(listed.note.split("seanced status").length).toBe(2);
+    expect(listed.note.split("seance status").length).toBe(2);
   });
 
   test("list_machines takes the broker's word on the local daemon rather than probing it again", async () => {
@@ -895,7 +895,7 @@ describe("spawn_session on auto", () => {
       ]);
       expect(text).toContain("get_queue shows where it lands and why");
       expect(text).not.toContain("No scheduler is leading");
-      // Nothing reachable from `seanced mcp` writes to stdout: it is the JSON-RPC channel.
+      // Nothing reachable from `seance mcp` writes to stdout: it is the JSON-RPC channel.
       expect(stdout).not.toHaveBeenCalled();
     } finally {
       stdout.mockRestore();

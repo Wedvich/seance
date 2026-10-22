@@ -12,7 +12,7 @@ import {
   targetUserName,
   whichIn,
   type TargetUser,
-  SUDO_SEANCED,
+  SUDO_SEANCE,
 } from "./target-user.ts";
 
 const dirs: string[] = [];
@@ -30,7 +30,7 @@ afterAll(async () => {
 describe("requireRoot", () => {
   test("names the sudo form it wants, PATH preservation included", () => {
     expect(() => requireRoot(1000, "install --system")).toThrow(
-      /sudo --preserve-env=PATH "\$\(command -v seanced\)" install --system/u,
+      /sudo --preserve-env=PATH "\$\(command -v seance\)" install --system/u,
     );
   });
 
@@ -97,8 +97,8 @@ describe("missing binaries", () => {
     expect(missing).toEqual(["bun", "git", "tmux", "claude"]);
     const message = missingBinariesMessage(missing, "/usr/sbin:/usr/bin");
     expect(message).toContain("secure_path");
-    expect(message).toContain(SUDO_SEANCED);
-    expect(message).toContain('sudo env PATH="$PATH" seanced install --system');
+    expect(message).toContain(SUDO_SEANCE);
+    expect(message).toContain('sudo env PATH="$PATH" seance install --system');
   });
 });
 

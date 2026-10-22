@@ -44,11 +44,11 @@ including what this deliberately does not defend against.
 
 ## How it fits together
 
-| Component | Where it runs                                                            | What it does                                                                                                                                                                                            |
-| --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists the machine registry (presence = discovery) and the scheduler's sealed queue                                                                       |
-| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session, reports load and quota every 30s and keeps its history; `seanced mcp` serves the same reach to a local Claude Code |
-| `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions; a Machines screen with load, quota and history                                                            |
+| Component | Where it runs                                                            | What it does                                                                                                                                                                                           |
+| --------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `relay/`  | Cloudflare Worker + Durable Object                                       | Routes opaque encrypted blobs phone↔daemon, persists the machine registry (presence = discovery) and the scheduler's sealed queue                                                                      |
+| `daemon/` | Each dev machine (Bun; launchd on macOS, systemd user unit on Linux/WSL) | Holds WebSocket to relay, scans repo roots, spawns `claude` in a named tmux session, reports load and quota every 30s and keeps its history; `seance mcp` serves the same reach to a local Claude Code |
+| `pwa/`    | Cloudflare Worker (static assets)                                        | Spawn form, machine and repo pickers, spawn verdicts, per-machine counts of running sessions; a Machines screen with load, quota and history                                                           |
 
 See [DESIGN.md](DESIGN.md) for the full architecture and every decision with
 its rationale.
@@ -64,7 +64,7 @@ Prerequisites: [Bun](https://bun.sh), a Cloudflare account, and this repo cloned
 `bun install` run at the root. The relay is one Worker plus one SQLite-backed Durable
 Object, so it fits the free tier — no paid plan needed. Each daemon machine (macOS,
 Linux, or WSL) additionally needs `tmux`, `git`, and `claude` on PATH. Linux machines
-need systemd for `seanced install` — a standard Debian/Ubuntu box, VM, or LXC
+need systemd for `seance install` — a standard Debian/Ubuntu box, VM, or LXC
 container (unprivileged is fine) qualifies; without systemd, run `seanced` under your
 own supervisor. **On WSL, enable systemd before anything else**: `systemd=true` under
 `[boot]` in `/etc/wsl.conf`, which takes a `wsl.exe --shutdown` to apply and kills
@@ -139,13 +139,13 @@ bun daemon/src/main.ts init      # writes the ~/.config/seance/config.json skele
 The CLI runs the same way, and to spare the typing:
 
 ```sh
-bun daemon/src/main.ts link      # symlinks `seanced` into a dir on your PATH
+bun daemon/src/main.ts link      # symlinks `seance` into a dir on your PATH
 ```
 
 The link is a plain symlink to `main.ts` (executable, `bun` shebang), so it
 tracks `git pull` and source edits with nothing to re-run. It prefers
-`~/.local/bin`, or takes a dir explicitly (`link <dir>`); `seanced unlink`
-removes it, as does `uninstall`. A shell alias (`alias seanced='bun
+`~/.local/bin`, or takes a dir explicitly (`link <dir>`); `seance unlink`
+removes it, as does `uninstall`. A shell alias (`alias seance='bun
 <checkout>/daemon/src/main.ts'`) works too. `doctor` and `install` warn when
 the name doesn't resolve — or resolves into a different checkout, which
 `link` repoints — though they can't see an alias.
@@ -155,7 +155,7 @@ Edit `~/.config/seance/config.json`:
 - `relayUrl` — `wss://seance-relay.<subdomain>.workers.dev/daemon` (must end
   in `/daemon`)
 - `bearerToken` — from step 1
-- `psk` — from step 1, or leave it empty and run `seanced psk-import` to keep the key
+- `psk` — from step 1, or leave it empty and run `seance psk-import` to keep the key
   in the platform store instead (macOS login keychain / WSL DPAPI blob / Linux
   TPM-sealed blob), which is where it belongs — see [docs/psk.md](docs/psk.md). Linux
   without a usable TPM has no such store; there the PSK stays in `config.json`, which
@@ -168,7 +168,7 @@ Edit `~/.config/seance/config.json`:
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
-- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
+- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seance reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
@@ -186,7 +186,7 @@ A running daemon watches this file and reloads within a second of a save, so
 edits need no restart — including ones made by a Claude Code session on the
 box. A bad edit is refused with the reason in the log and the previous config
 keeps running, so the machine never drops offline over a typo. Only a code
-change still needs `seanced restart`. A repo added _inside_ an existing root
+change still needs `seance restart`. A repo added _inside_ an existing root
 needs nothing at all — the hourly rescan, or the app's refresh, picks it up.
 
 ```sh
@@ -197,7 +197,7 @@ bun daemon/src/main.ts install   # macOS: launchd agent (RunAtLoad + KeepAlive)
 
 On systemd ≥ 256 with the PSK in a TPM-sealed blob the daemon needs a root-owned unit
 instead, so PID 1 can unseal the key and hand it over —
-`sudo --preserve-env=PATH "$(command -v seanced)" install --system`, details in
+`sudo --preserve-env=PATH "$(command -v seance)" install --system`, details in
 [docs/psk.md](docs/psk.md) and [docs/platform-notes.md](docs/platform-notes.md).
 
 Both platforms have sharp edges worth knowing about — linger on a headless Linux
@@ -214,7 +214,7 @@ the app; there is no pairing step.
 that runs **Auto** — only from an allowlist: `SCHEDULER_LEADERS`, comma-separated
 device ids, a Worker secret like the bearer token. Without it anyone holding the
 bearer token could mint an id of their own and hold the role. Read the id off
-`seanced doctor` (the `deviceId` line under `state`), then from `relay/`:
+`seance doctor` (the `deviceId` line under `state`), then from `relay/`:
 
 ```sh
 bun run wrangler secret put SCHEDULER_LEADERS   # paste every leader's id, comma-separated
@@ -237,12 +237,12 @@ PSK. Machines appear as their daemons register.
 On any machine that runs `seanced`:
 
 ```sh
-seanced mcp install    # registers the MCP server with Claude Code (user scope)
+seance mcp install    # registers the MCP server with Claude Code (user scope)
 ```
 
 Claude Code sessions on that machine can then reach every other machine through the
 relay — see [From another Claude Code session](#from-another-claude-code-session).
-`seanced mcp uninstall` removes it; `seanced doctor` reports whether it is
+`seance mcp uninstall` removes it; `seance doctor` reports whether it is
 registered.
 
 The entry records bun by its PATH name, so upgrading bun doesn't break it. A
@@ -257,7 +257,7 @@ later and re-run it.
 On a Mac with [Raycast](https://raycast.com) installed:
 
 ```sh
-seanced raycast install    # builds this checkout's extension and imports it
+seance raycast install    # builds this checkout's extension and imports it
 ```
 
 Séance then appears in Raycast as **Spawn Session** — a form that reaches every
@@ -268,15 +268,15 @@ effort to preselect.
 
 The install is a local one — the extension is deliberately never published to the
 Raycast Store — so nothing updates it on its own: **re-run it after a `git
-pull`**, which `seanced doctor` reminds you of once the sources are newer than
-the imported copy. `seanced raycast uninstall` removes the import and the build
+pull`**, which `seance doctor` reminds you of once the sources are newer than
+the imported copy. `seance raycast uninstall` removes the import and the build
 artifacts; Raycast keeps listing the extension until you also remove it in
 **Manage Extensions** (⌘⇧E), which no command can do for you.
 
 ### 8. Optional: Claude Code mods — `/rename` and session reports
 
 ```sh
-seanced mod install    # installs this checkout's Claude Code mods (user scope, every exclave)
+seance mod install    # installs this checkout's Claude Code mods (user scope, every exclave)
 ```
 
 After a `/rename` in any Claude session in tmux — spawned or started by hand —
@@ -287,12 +287,12 @@ you leave it out) and the tmux window takes the name without it, so
 global environment when it starts, so a shell opened before that (or before a
 tag change) needs a new window. The mod is read in
 place from the checkout, so a `git pull` reaches new sessions with nothing re-run
-(running ones on `/reload-plugins`). `seanced mod uninstall` removes it;
-`seanced doctor` reports whether it is installed from this checkout. Like
+(running ones on `/reload-plugins`). `seance mod uninstall` removes it;
+`seance doctor` reports whether it is installed from this checkout. Like
 `mcp install`, it reaches every Claude config directory: plugins are per config
 directory, so install, uninstall and doctor run once per exclave (`~/.claude`
 plus each `~/.claude-<name>` listed in `~/.exclaves`), skipping any not set up yet.
-An exclave created later needs `seanced mod install` run again.
+An exclave created later needs `seance mod install` run again.
 
 The same command installs **session-events**. It tells this machine's daemon what
 each session is doing (busy, idle, waiting on you, ended) and the PR it opened, which
@@ -300,7 +300,7 @@ is what the scheduler reads. Quota no longer comes from it: the daemon refreshes
 signed-in account's own cached reading with a `claude -p /usage` run once it is ten
 minutes old, checking every minute and whenever a session there reports. It runs this
 checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
-`seanced link`. A session started outside tmux reports nothing.
+`seance link`. A session started outside tmux reports nothing.
 
 ## Usage
 
@@ -322,7 +322,7 @@ refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it
 disappears on every device you use the app from, and returns only if that machine's
-daemon connects again. `seanced uninstall` deletes it for you on the way out; under
+daemon connects again. `seance uninstall` deletes it for you on the way out; under
 `--system` it can't (as root it would read the wrong user's config) and says so.
 
 There is no title field: the daemon names the tmux window after the prompt.
@@ -344,7 +344,7 @@ no client sets one yet. Picking a machine directly always works, with or without
 scheduler.
 
 Upgrading into the queue: until the machine leading the scheduler runs a build with
-it, tasks an updated app or `seanced mcp` queues sit unrun, and an older app's
+it, tasks an updated app or `seance mcp` queues sit unrun, and an older app's
 `auto` is refused by an updated leader. Update the leader-capable machines first.
 
 **Machines** (a column on desktop, in the header menu on a phone) shows every machine
@@ -365,22 +365,22 @@ doesn't check out with your key.
 ### From the machine
 
 ```sh
-seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
+seance spawn seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 
-seanced spawn seance --here   # run in the checkout as it stands, no worktree
-seanced sessions              # running claude windows: id, window, repo, path
-seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
-seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
-seanced status                # this machine: service, relay, repo count, running vs on-disk sha
-seanced doctor                # preflight config, binaries, roots, relay, service
-seanced help                  # every command
+seance spawn seance --here   # run in the checkout as it stands, no worktree
+seance sessions              # running claude windows: id, window, repo, path
+seance despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
+seance reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
+seance status                # this machine: service, relay, repo count, running vs on-disk sha
+seance doctor                # preflight config, binaries, roots, relay, service
+seance help                  # every command
 ```
 
 `<repo>` is a _name_, matched exactly against the cached scan set and never joined as
-a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
+a path — so it is whatever `seance scan` calls the repo (a bare basename, or
 `parent/base` when two collide). Bare words after it become the prompt, which makes
-`-p` optional: `seanced spawn seance fix the flaky test` works.
+`-p` optional: `seance spawn seance fix the flaky test` works.
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
@@ -413,7 +413,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 ### From another Claude Code session
 
-With `seanced mcp install` done (step 6), a local Claude Code can list machines,
+With `seance mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
 `list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
@@ -431,7 +431,7 @@ it (below), `auto` is unavailable.
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool but
-`auto` and `get_queue` still works for every machine, with the same registration; `seanced doctor` says which
+`auto` and `get_queue` still works for every machine, with the same registration; `seance doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
 read the key itself, the daemon runs no broker, so nothing gains fleet reach without
 the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
@@ -440,7 +440,7 @@ Naming _this_ machine skips the relay entirely: the request goes straight to the
 local daemon over a unix socket in the state directory, so spawning where you are
 sitting costs no round trip and works with the relay down. It is the same daemon,
 backend and audit trail either way — the log says `origin=local` instead of
-`origin=relay`, and `seanced status` and `doctor` report whether the socket is up.
+`origin=relay`, and `seance status` and `doctor` report whether the socket is up.
 If a remote machine shares this one's name, local wins; reach the remote one by its
 `deviceId`.
 
@@ -458,11 +458,11 @@ announces it over the relay, and every other machine fetches, fast-forwards
 its default branch, runs `bun install --frozen-lockfile`, and restarts itself.
 A machine that was asleep or offline catches up on its next reconnect. One
 update is not transparent: the first daemon with a signed identity (October 2026) mints a key and a new `deviceId` for the machine, so the app lists the
-old id as an offline stranger — forget it there; `seanced status` shows the new
+old id as an offline stranger — forget it there; `seance status` shows the new
 one. A machine whose id changes — that update, a reinstall, a lost `state.json` —
 also drops off `SCHEDULER_LEADERS` until you put its new id there (step 4). A
 checkout that is dirty, on another branch, or has local commits is skipped —
-never forced — and reports why; `seanced status` on that machine shows its version
+never forced — and reports why; `seance status` on that machine shows its version
 and its last update outcome. The relay and the app deploy themselves from CI on a
 push to `main` that touches them (`Deploy` in Actions also runs on demand, per
 component), so deploying either by hand would race that.
@@ -472,13 +472,18 @@ until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that
 deploy lands; set after, **Auto** still queues in between but no leader runs the
 queue until the secret is set, and nothing else is affected.
 
+The CLI was `seanced` until October 2026; it is `seance` now, while the daemon (the
+service, its log) keeps `seanced`. A machine linked under the old name runs
+`seanced link` once: it links `seance` and removes the old link. `seance doctor`
+flags one that hasn't.
+
 The Raycast extension does not self-propagate: it is a built copy, so a machine
-that has it needs `seanced raycast install` re-run after the pull. `seanced
+that has it needs `seance raycast install` re-run after the pull. `seance
 doctor` flags one that is out of date.
 
 Service definitions already on disk lag behind the code that writes them, and
 machines installed before certain fixes need a one-time catch-up — both in
-[docs/platform-notes.md](docs/platform-notes.md). `seanced doctor` flags a machine
+[docs/platform-notes.md](docs/platform-notes.md). `seance doctor` flags a machine
 that still needs it.
 
 ## Docs

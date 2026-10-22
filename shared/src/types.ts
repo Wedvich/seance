@@ -1310,7 +1310,7 @@ export type SpawnResponse =
 /**
  * Ends one session: claude is asked to exit, and its pane is killed if it
  * hasn't within a few seconds. The window only — a worktree and its branch are
- * left for `seanced reap`.
+ * left for `seance reap`.
  */
 export interface DespawnRequest {
   /** `SessionEntry.id` from a session list — the daemon accepts nothing else as a target. */

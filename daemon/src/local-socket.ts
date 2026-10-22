@@ -13,7 +13,7 @@ import { isSessionEventFrameKind, type SessionEventReply } from "./session-event
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
- * with no relay, no envelope and no PSK. It exists so `seanced mcp` can spawn on
+ * with no relay, no envelope and no PSK. It exists so `seance mcp` can spawn on
  * the machine it runs on without a round trip to Cloudflare and back down the
  * daemon's own websocket.
  *
@@ -25,7 +25,7 @@ import { isSessionEventFrameKind, type SessionEventReply } from "./session-event
  * oracle, which same-uid peers make unpoliceable.
  *
  * It grants no authority a same-uid process did not already have: such a process
- * can read `config.json` and take the PSK outright, run `seanced spawn`, or talk
+ * can read `config.json` and take the PSK outright, run `seance spawn`, or talk
  * to the tmux server directly. What it adds is that going through here is the
  * *recorded* way to do it.
  *
@@ -380,7 +380,7 @@ export async function localSocketChecks(path: string = socketPath()): Promise<re
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
     checks.push({
       level: "warn",
-      message: `${dir} is ${mode}, and its mode is what keeps the op socket to this user — \`seanced restart\` tightens it to 0700`,
+      message: `${dir} is ${mode}, and its mode is what keeps the op socket to this user — \`seance restart\` tightens it to 0700`,
     });
   }
   checks.push(

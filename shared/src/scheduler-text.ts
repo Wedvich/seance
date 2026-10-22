@@ -13,7 +13,7 @@ import {
 
 /**
  * What a scheduler answer means to whoever asked, worded once for every app-role
- * surface — the PWA, `seanced mcp`, any later client — so they cannot drift
+ * surface — the PWA, `seance mcp`, any later client — so they cannot drift
  * apart. Each line is a lowercase clause; a surface that shows it alone makes
  * it a sentence (`sentence`), and adds its own next step around it.
  */
@@ -54,7 +54,7 @@ const STORE_ERROR_TEXT: Record<StoreErrorCode, string> = {
   store_full: "the queue is full; the scheduler prunes finished tasks as it runs — try again later",
 };
 
-/** A relay store refusal of an enqueue, worded once for the PWA and `seanced mcp`. */
+/** A relay store refusal of an enqueue, worded once for the PWA and `seance mcp`. */
 export function storeErrorText(code: string): string {
   const known = STORE_ERROR_CODES.find((c) => c === code);
   return known === undefined

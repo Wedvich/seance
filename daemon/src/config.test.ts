@@ -43,9 +43,9 @@ const VALID = {
 };
 
 describe("loadConfig", () => {
-  test("missing file points at seanced init", async () => {
+  test("missing file points at seance init", async () => {
     const dir = await tempDir();
-    expect(loadConfig(join(dir, "config.json"))).rejects.toThrow("seanced init");
+    expect(loadConfig(join(dir, "config.json"))).rejects.toThrow("seance init");
   });
 
   test("invalid JSON is a clear error", async () => {

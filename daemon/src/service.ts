@@ -35,13 +35,13 @@ export function servicePath(): string {
 
 export async function installService(): Promise<InstallResult> {
   const service = manager();
-  if (service === null) throw unsupported("seanced install");
+  if (service === null) throw unsupported("seance install");
   return service.installService();
 }
 
 export async function uninstallService(): Promise<readonly string[]> {
   const service = manager();
-  if (service === null) throw unsupported("seanced uninstall");
+  if (service === null) throw unsupported("seance uninstall");
   return service.uninstallService();
 }
 
@@ -67,7 +67,7 @@ export async function serviceLoaded(): Promise<boolean> {
 
 export async function restartService(): Promise<void> {
   const service = manager();
-  if (service === null) throw unsupported("seanced restart");
+  if (service === null) throw unsupported("seance restart");
   return service.restartService();
 }
 

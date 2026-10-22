@@ -4,7 +4,7 @@
 
 Put `BEARER_TOKEN=...` in a gitignored `relay/.dev.vars` (see `.dev.vars.example`),
 then `bun run dev` in `relay/` and in `pwa/`. Add `SCHEDULER_LEADERS=<deviceId>` there
-too — your daemon's id, off `seanced doctor` — or no daemon is nominated and `auto`
+too — your daemon's id, off `seance doctor` — or no daemon is nominated and `auto`
 stays unavailable. Outside production builds the app
 defaults to `ws://127.0.0.1:8787/app`, so no `VITE_RELAY_URL` is needed for local
 work.
@@ -56,7 +56,7 @@ secrecy: the device ids the relay may nominate as scheduler leader, comma-separa
 A var in `wrangler.jsonc` would sit in git and be rewritten by every CI deploy; a
 secret is neither. Unset or empty, nobody is nominated (fail closed — DESIGN.md,
 "Leadership"); an entry outside the deviceId bounds is logged and ignored. A machine's
-id is the `deviceId` line `seanced doctor` prints under `state`. `bun run wrangler
+id is the `deviceId` line `seance doctor` prints under `state`. `bun run wrangler
 secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a new
 version, so every socket drops and re-registers. Set it before deploying a relay that
 first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues. Nothing gates Durable Object migrations: a change to
@@ -214,10 +214,10 @@ the linked one.
 | `bun run dev` (in `raycast/`)       | imports into Raycast and watches             |
 | `bun run typecheck` (in `raycast/`) | `src` on node types, then tests on bun types |
 
-`seanced raycast install` runs both of the first two in order — `ray build` for
+`seance raycast install` runs both of the first two in order — `ray build` for
 the typecheck, then `ray develop` long enough to import — and is the command to
-use rather than driving `ray` by hand; `seanced raycast uninstall` reverses what
-it can, and `seanced doctor` reports whether the imported copy has gone stale.
+use rather than driving `ray` by hand; `seance raycast uninstall` reverses what
+it can, and `seance doctor` reports whether the imported copy has gone stale.
 `ray develop` by hand is still the right tool while iterating on the extension
 itself: it watches, and `install` deliberately stops the watcher once the import
 lands. Both go through `raycast/node_modules/.bin/ray`, so the "never `npx ray`"

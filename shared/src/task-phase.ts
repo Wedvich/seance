@@ -2,7 +2,7 @@ import { TASK_STATES, type TaskState } from "./types.ts";
 
 /**
  * Where a task stands, coarser than its state: what the scheduler, the PWA and
- * `seanced mcp` each ask of one ("is it placed?", "can a follower stop?") as one
+ * `seance mcp` each ask of one ("is it placed?", "can a follower stop?") as one
  * table, so they cannot drift apart as M3's states start moving. The
  * scheduler's own rules — the edges, which states hold a slot — stay in
  * `scheduler/src/task.ts`.

@@ -2,10 +2,10 @@
   "name": "@seance/daemon",
   "version": "0.0.0",
   "private": true,
-  "description": "seanced — per-machine daemon that holds the relay socket and spawns claude in tmux",
+  "description": "seance — the CLI for seanced, the per-machine daemon that holds the relay socket and spawns claude in tmux",
   "license": "MIT",
   "bin": {
-    "seanced": "./src/main.ts"
+    "seance": "./src/main.ts"
   },
   "type": "module",
   "scripts": {

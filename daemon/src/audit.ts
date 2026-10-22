@@ -42,7 +42,7 @@ export const AUDIT_LOG_MODE = 0o600;
 export const daemonSink: AuditSink = (line) => log.info(line);
 
 /**
- * `seanced spawn` is a separate process with no launchd redirect, so it appends
+ * `seance spawn` is a separate process with no launchd redirect, so it appends
  * to the log itself. Never throws: an unwritable log must not fail a spawn the
  * human asked for. Two independent writers is safe while nothing rotates the
  * file — a rename-and-recreate would leave the daemon on the old inode.
@@ -59,7 +59,7 @@ export const cliSink: AuditSink = async (line) => {
 
 /**
  * Names the state observed in production: a log the daemon's own user cannot
- * append to, so `seanced spawn` records nothing and the both-paths-audit
+ * append to, so `seance spawn` records nothing and the both-paths-audit
  * invariant holds only for `origin=relay`.
  */
 export function unwritableLogMessage(path: string, user: string): string {
@@ -118,12 +118,12 @@ export async function auditLogChecks(path: string = logPath()): Promise<readonly
   if ((info.mode & 0o777) !== AUDIT_LOG_MODE) {
     const mode = (info.mode & 0o777).toString(8).padStart(4, "0");
     const exposure = `log is ${mode}, and it records repo paths and window titles`;
-    // `seanced restart` repairs the mode only on a file the daemon owns
+    // `seance restart` repairs the mode only on a file the daemon owns
     // (ensureAuditLog); on someone else's file the honest fix is the chown pair.
     checks.push({
       level: "warn",
       message: ownedByUs(info.uid)
-        ? `${exposure} — \`seanced restart\` tightens it to 0600`
+        ? `${exposure} — \`seance restart\` tightens it to 0600`
         : `${exposure} — owned by another user, so restart can't tighten it: ` +
           `sudo chown ${userInfo().username} ${path} && sudo chmod 600 ${path}`,
     });
@@ -304,7 +304,7 @@ export type EnqueueOutcome =
   | { readonly kind: "unanswered" };
 
 /**
- * `seanced mcp` enqueuing on `auto` with the key itself (`relayFleet`): a store
+ * `seance mcp` enqueuing on `auto` with the key itself (`relayFleet`): a store
  * write that reaches no daemon, so this line, under its own origin, is the
  * enqueuing box's only record of it; the leader's `op=admit` is the other end.
  * Never the prompt.
@@ -326,7 +326,7 @@ export function enqueueAudit(
 
 /**
  * Something on this box asked the daemon to reach *another* machine for it over
- * the op socket — a keyless `seanced mcp`. Its own origin, never `local`: a
+ * the op socket — a keyless `seance mcp`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches
  * someone else's. The target daemon audits the spawn itself as `origin=relay`.
  */

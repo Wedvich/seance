@@ -174,7 +174,7 @@ describe("loadKey", () => {
     ).rejects.toThrow(/bearerToken is empty/u);
   });
 
-  // Drift-guarded against the daemon's actual skeleton: `seanced init` writes
+  // Drift-guarded against the daemon's actual skeleton: `seance init` writes
   // the placeholder this must catch, or `new URL` inside appRelayUrl surfaces
   // a bare "Invalid URL" naming neither the field nor the file.
   test("names the field and file for a config still holding the init placeholder", async () => {

@@ -141,7 +141,7 @@ describe("raycastChecks", () => {
   test.if(darwin)("warns when nothing is imported", async () => {
     const checks = await raycastChecks(home);
     expect(checks.map((check) => check.level)).toEqual(["ok", "warn"]);
-    expect(checks[1]?.message).toContain("seanced raycast install");
+    expect(checks[1]?.message).toContain("seance raycast install");
   });
 
   test.if(darwin)("an imported copy newer than the sources is clean", async () => {

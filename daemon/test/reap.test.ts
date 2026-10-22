@@ -513,7 +513,7 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
       expect(report.closedPanes).toContainEqual(expect.objectContaining({ paneId: dead, why: "dead" }));
       expect(await paneExists(dead)).toBe(false);
       expect(report.openPanes).toContainEqual(expect.objectContaining({ paneId: live, state: "live" }));
-      expect(formatReport(report).join("\n")).toContain(`seanced despawn ${live}`);
+      expect(formatReport(report).join("\n")).toContain(`seance despawn ${live}`);
       await tmuxOk(["kill-pane", "-t", live]);
     },
     DEATH_STAMP_TEST_TIMEOUT_MS,

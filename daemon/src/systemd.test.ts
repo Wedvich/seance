@@ -27,7 +27,7 @@ import {
   userInstanceMissingMessage,
   type UnitOptions,
 } from "./systemd.ts";
-import { SUDO_SEANCED } from "./target-user.ts";
+import { SUDO_SEANCE } from "./target-user.ts";
 
 function userUnit(bunPath = "/opt/bun", mainPath = "/repo/daemon/src/main.ts", pathEnv = "/usr/bin"): string {
   return unitContent({ scope: "user", bunPath, mainPath, pathEnv, logFile: logPath() });
@@ -209,7 +209,7 @@ describe("preflight messages", () => {
     const linux = userInstanceMissingMessage(false, "ada");
     for (const msg of [wsl, linux]) {
       expect(msg).toContain("sudo loginctl enable-linger ada");
-      expect(msg).toContain("re-run `seanced install`");
+      expect(msg).toContain("re-run `seance install`");
     }
     expect(wsl).toContain("don't register with logind");
     expect(linux).toContain("headless box");
@@ -286,9 +286,9 @@ const messages = (checks: readonly { readonly message: string }[]): string => ch
 describe("scopeChecks", () => {
   const clean = { unitText: null, expectedUnit: null, blobPath: null } as const;
 
-  test("no unit at all keeps pointing at `seanced install`", async () => {
+  test("no unit at all keeps pointing at `seance install`", async () => {
     const checks = await scopeChecks({ user: false, system: false }, false, clean);
-    expect(messages(checks)).toContain("run `seanced install`");
+    expect(messages(checks)).toContain("run `seance install`");
   });
 
   test("an active user unit reads as it always did", async () => {
@@ -302,13 +302,13 @@ describe("scopeChecks", () => {
     );
     const down = messages(await scopeChecks({ user: false, system: true }, false, clean));
     expect(down).toContain("systemctl status seanced.service");
-    expect(down).not.toContain("run `seanced install`");
+    expect(down).not.toContain("run `seance install`");
   });
 
   test("both units installed names the two-daemons hazard", async () => {
     const checks = await scopeChecks({ user: true, system: true }, true, clean);
     expect(messages(checks)).toContain("two daemons against one state dir");
-    expect(messages(checks)).toContain("`seanced uninstall`");
+    expect(messages(checks)).toContain("`seance uninstall`");
   });
 
   test("a system unit whose definition drifted is reported — nothing rewrites it on its own", async () => {
@@ -325,7 +325,7 @@ describe("scopeChecks", () => {
       unitText: installed,
       expectedUnit: installed.replace("Restart=always", "Restart=on-failure"),
     });
-    expect(messages(drifted)).toContain(`${SUDO_SEANCED} install --system`);
+    expect(messages(drifted)).toContain(`${SUDO_SEANCE} install --system`);
   });
 
   test("a sealed blob the unit doesn't deliver is the one silent misconfiguration left", async () => {
@@ -350,10 +350,10 @@ describe("scopeChecks", () => {
 describe("conflictingScopeMessage", () => {
   test("each direction names the unit in the way it is removed", () => {
     expect(conflictingScopeMessage("system", "/home/ada/.config/systemd/user/seanced.service")).toContain(
-      "`seanced uninstall` as that user",
+      "`seance uninstall` as that user",
     );
     expect(conflictingScopeMessage("user", "/etc/systemd/system/seanced.service")).toContain(
-      `${SUDO_SEANCED} uninstall --system`,
+      `${SUDO_SEANCE} uninstall --system`,
     );
   });
 });

@@ -5,7 +5,7 @@ import { resolveCommonDir } from "./gitdir.ts";
 
 /**
  * Git for code that runs in every scanned repo, or fetches before a spawn —
- * `seanced reap` and `base-fetch.ts`. Repo-local config executes, and a session can
+ * `seance reap` and `base-fetch.ts`. Repo-local config executes, and a session can
  * write it (`git config` in a worktree writes the clone's shared `.git/config`):
  * `core.fsmonitor` would start a hook (or a daemon) per worktree and hooks run on
  * ref updates, so both are off for every call, as is the `ext::` transport, which

@@ -63,7 +63,7 @@ export interface Started {
 export type DaemonCapability = (ctx: WiringCtx) => Started;
 
 /**
- * Only where the key is service-delivered: there `seanced mcp` cannot read it,
+ * Only where the key is service-delivered: there `seance mcp` cannot read it,
  * and the broker is its only way to other machines. Anywhere else it reads the
  * key itself, so a broker would only widen what a same-uid process can do
  * without touching the key store — and keep an app-role surface in the daemon.

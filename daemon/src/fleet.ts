@@ -14,7 +14,7 @@ import type { BrokerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 
 /**
- * How `seanced mcp` reaches machines other than its own. Two transports behind
+ * How `seance mcp` reaches machines other than its own. Two transports behind
  * one shape, so the four tools — name resolution, repo pre-check, rendering,
  * `client: "mcp"` — exist once:
  *
@@ -109,13 +109,13 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
  * broker — the fix is on this side, never "update seanced".
  */
 const NOT_BROKERING =
-  "this daemon's key is not service-delivered, so it does not broker — `seanced mcp` has to read the PSK itself";
+  "this daemon's key is not service-delivered, so it does not broker — `seance mcp` has to read the PSK itself";
 const WHY_KEYLESS =
-  "run `seanced doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field — fill the field or run `seanced psk-import`)";
+  "run `seance doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field — fill the field or run `seance psk-import`)";
 
 /** What a broker failure needs added for the reader to act on it. */
 export function brokerFailureText(err: BrokerError): string {
-  if (err.code === "daemon_unreachable") return `${err.message} — is seanced running? try \`seanced status\``;
+  if (err.code === "daemon_unreachable") return `${err.message} — is seanced running? try \`seance status\``;
   if (err.code === "relay_unavailable") return `the daemon could not reach the relay: ${err.message}`;
   if (err.code === "broker_disabled") return `${NOT_BROKERING}; ${WHY_KEYLESS}`;
   return err.message;
@@ -148,8 +148,8 @@ function unreachableAdvice(cause: unknown): string {
     case "daemon_unreachable":
       return (
         `${NO_KEY}, and none is reachable: it is not running, or too old to have the socket (${message}). ` +
-        "Check it with `seanced status` — is seanced running? Where only the seanced service can read the key it must be " +
-        "running; elsewhere fill the psk field in config.json or run `seanced psk-import`. " +
+        "Check it with `seance status` — is seanced running? Where only the seanced service can read the key it must be " +
+        "running; elsewhere fill the psk field in config.json or run `seance psk-import`. " +
         LOCAL_NEEDS_IT_TOO
       );
     case "relay_unavailable":
@@ -164,13 +164,13 @@ function unreachableAdvice(cause: unknown): string {
       return (
         `${NO_KEY}. The daemon accepted the connection but never answered (${message}), and it answers even a ` +
         "relay failure well inside that time, so the daemon itself is stuck. Ops on this machine go through it too " +
-        "and will likely hang the same way — check `seanced status`, and `seanced restart` if it stays stuck."
+        "and will likely hang the same way — check `seance status`, and `seance restart` if it stays stuck."
       );
     case "daemon_closed":
       // A stopping daemon and a pre-broker one both close; `brokerMachines` names the second in `message`.
       return (
         `${NO_KEY}. The daemon dropped the connection without answering (${message}). If it was stopping or ` +
-        "restarting, ops on this machine fail too until it is back — check `seanced status`."
+        "restarting, ops on this machine fail too until it is back — check `seance status`."
       );
     case "bad_reply":
       return `${NO_KEY}. The daemon's answer was not readable (${message}) — a mismatched seanced version? ${LOCAL_STILL_WORKS}`;
@@ -195,7 +195,7 @@ export class FleetUnreachable extends Error {
 }
 
 /**
- * Doctor's line on how `seanced mcp` would reach other machines from this
+ * Doctor's line on how `seance mcp` would reach other machines from this
  * shell. Never resolves a key of its own — the caller says whether its own
  * `loadPsk` found one — and probes the broker only where it would be used,
  * with `machines`, which cannot change anything.

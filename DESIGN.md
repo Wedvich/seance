@@ -212,7 +212,7 @@ Séance's noise is cover for a real intruder.
    its own store behind the same `loadPsk()` — a DPAPI blob
    (`ProtectedData`, CurrentUser scope) at `~/.local/state/seance/psk.dpapi`,
    encrypted and decrypted through `powershell.exe` interop, written by the
-   same `seanced psk-import`. What it buys: a Linux-context sweep of
+   same `seance psk-import`. What it buys: a Linux-context sweep of
    `~/.config` gets ciphertext, and the key never rests in plaintext inside
    the ext4.vhdx, so at-rest theft (the vhdx itself, backups of it) is
    covered. What it honestly does not: DPAPI has no ACL — any process in the
@@ -239,7 +239,7 @@ Séance's noise is cover for a real intruder.
    boxes that do have a TPM: where `/dev/tpmrm0` exists — bare metal, or a
    Proxmox LXC with the device passed through — `systemd-creds encrypt
    --with-key=tpm2` seals the PSK at `~/.local/state/seance/psk.cred`,
-   behind the same `loadPsk()` and the same `seanced psk-import`. Sealed to
+   behind the same `loadPsk()` and the same `seance psk-import`. Sealed to
    the TPM alone, deliberately no PCR binding: a PCR-bound blob dies on the
    next firmware update, and the threat here is at-rest exfiltration
    (container backups, ZFS snapshots, stolen disks), not a tampered boot
@@ -647,7 +647,7 @@ nothing checked it. The last is the gap they leave.
   rejected alternatives under Daemon.
 - **Every spawn path audits, through one formatter**, tagged `origin=relay`,
   `origin=cli` or `origin=local`. A trail that covered only the relay would make
-  `seanced spawn` the quieter way in — precisely the path someone with local
+  `seance spawn` the quieter way in — precisely the path someone with local
   shell access would choose — and the tag is what separates "me at my desk at
   2pm" from "my phone was in a drawer at 3am". `local` is the third: the op
   socket below, driven by something on this box that is not the human at the
@@ -666,7 +666,7 @@ nothing checked it. The last is the gap they leave.
   daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
   "The leader") — distinct from `local`, which says a peer on the op socket asked,
   and from the `client=scheduler` other machines log under `relay`; the leader's
-  `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
+  `op=admit` line is under it too. `mcp` is `seance mcp` enqueuing on `auto` with the
   key itself: a store write the relay answers, which no daemon sees, so that process
   appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
   M3 review S5). The daemon writes
@@ -677,7 +677,7 @@ nothing checked it. The last is the gap they leave.
   the `cli` half**, so the daemon repairs it on every start. Both service
   managers open the log _before_ dropping to the daemon's user — under a systemd
   system unit that is root, so a log the manager has to create lands root-owned
-  and every `seanced spawn` then fails its append, warns to stderr and proceeds
+  and every `seance spawn` then fails its append, warns to stderr and proceeds
   unaudited. That was the production state on a `--system` box: `install`
   chowned the log once, and nothing re-established it after the file was
   replaced. `ensureAuditLog` now creates it 0600 outright and tightens the mode
@@ -747,10 +747,10 @@ that is already compromised (it holds the PSK, so it _is_ the boundary);
 zero-downtime key rotation.
 
 **Key rotation runbook.** Rotation and revocation are one operation: generate
-32 bytes in 1Password, paste into all four configs and the PWA, `seanced
+32 bytes in 1Password, paste into all four configs and the PWA, `seance
 restart` on each. Spawns fail closed in between. No `keyId` in the envelope —
 considered and rejected, because a rollover window buys nothing for four
-devices owned by one person and costs a wire-format change. `seanced doctor`
+devices owned by one person and costs a wire-format change. `seance doctor`
 prints a PSK fingerprint (SHA-256 prefix of the raw key) so agreement across
 devices is checkable without comparing secrets.
 
@@ -780,7 +780,7 @@ The Durable Object persists a machine registry:
   `detail`, and the parser caps it), reversing an earlier "not
   rendered — converged is the steady state" decision: a dev check found a
   scheduler leader still on an older build, and nothing an app could see said
-  so. `seanced doctor`/`status` print both too. No wire change was needed.
+  so. `seance doctor`/`status` print both too. No wire change was needed.
 - `connected` is **not persisted** — it's derived from `state.getWebSockets()`
   when the registry is read, so an eviction or crash can never leave a stale
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
@@ -1040,7 +1040,7 @@ only in the audit origin they are tagged with — see "Local op socket".
 
 The same three ops have a third sender on a credential-delivered box, and only
 there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
-`seanced mcp` that reached it over the local op socket with a broker frame — not a
+`seance mcp` that reached it over the local op socket with a broker frame — not a
 `Plain`, and not on this wire. To the relay and the target it is one more app.
 
 A fourth is the scheduler leader, which dispatches the same three ops to the machines it
@@ -1129,7 +1129,7 @@ requesting socket only.
   to `account:` and `quota:` records, which it can overwrite but nobody can
   delete (Threat model, item 3).
 - **Uninstalling deregisters the machine, and does it as an app-role client.**
-  `seanced uninstall` sends the same `forget` on `/app` that the PWA's bin does
+  `seance uninstall` sends the same `forget` on `/app` that the PWA's bin does
   (`daemon/src/deregister.ts`), after the service is stopped and before the links
   are removed — that order matters, because the relay refuses while it still
   holds the socket, so the refusal is retried three times a second apart. It
@@ -1523,7 +1523,7 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   the queue" — since M3 an enqueue needs no leader, so `auto` never reads unavailable. The
   lead proof (above) is the tripwire for a listed seed stolen without the PSK (Threat model,
   item 3). Cost: a new leader-capable machine is a `wrangler secret put` with its id read off
-  `seanced doctor`, which rolls the relay and drops every socket once. No relay op exposes the
+  `seance doctor`, which rolls the relay and drops every socket once. No relay op exposes the
   list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var
   (CI would overwrite it), and the reader check alone (it changes what readers believe, not who
   holds the term).
@@ -2793,7 +2793,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   deletes it, leaving every definition that recorded it pointing at nothing.
   macOS cannot recover from that on its own: `launchd.selfRestart()` exits rather
   than rewriting, because launchd caches job definitions and a rewrite wouldn't
-  land until the next bootstrap, so only `seanced install` ever repoints the
+  land until the next bootstrap, so only `seance install` ever repoints the
   plist. The systemd unit does get rewritten on self-restart, but from the
   pre-update process still serving old code, so a definition change lands one
   update later. `doctor` reports drift (recorded path gone → fail; alive but no
@@ -2807,10 +2807,10 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   bootout → poll until the job is gone (5s cap) → bootstrap, and a failed pass
   gets exactly one retry. Rejected: reporting the error and letting the user
   re-run (observed behavior was a half-installed machine with no daemon at all).
-- **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
+- **CLI**: `seance` (with no command, the daemon in the foreground; launchd/systemd supervises), `init`
   (write config skeleton + mint the identity that is the deviceId), `install`/`uninstall` (launchd plist on
   macOS; systemd unit + linger on Linux, plus a Windows logon task on WSL),
-  `link`/`unlink` (opt-in `seanced` name on PATH — a plain symlink to
+  `link`/`unlink` (opt-in `seance` name on PATH — a plain symlink to
   `main.ts`, which is executable with a bun shebang, so it tracks the checkout
   with nothing to re-run; `uninstall` also unlinks, so a torn-down machine
   never keeps a name into a deleted checkout. Rejected: `bun link` — its
@@ -2818,9 +2818,22 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   wrapper script — its realpath doesn't lead back to `main.ts`, blinding
   doctor's stale-clone detection),
   `doctor` (preflight: tmux/claude/git/roots/relay/config, plus whether the
-  `seanced` name resolves to this checkout), `status`,
+  `seance` name resolves to this checkout), `status`,
   `scan`, and `spawn <repo>` — the last runs the spawn path locally with no
   relay, the SSH-debuggability hook.
+- **The CLI is `seance`, the daemon `seanced`** (changed 2026-10-22; the CLI was
+  `seanced` too). What a person types is the product's name; the daemon's name
+  stays where it names the service — the systemd unit, the launchd label, the
+  log file, and prose about the running process — so no installed service is
+  redefined (platform notes, the service-definition lag). Only the PATH link
+  carried the old name, and nothing outside a shell typed it once the
+  session-events mod stopped running the CLI by name ("Session events"): the
+  service, the MCP entry and the mod all run `bun <checkout>/daemon/src/main.ts`.
+  `link` and `unlink` still sweep this checkout's links under `seanced`, so a
+  machine linked before moves over with one `seanced link`, and doctor names that
+  command when only the old name resolves. Rejected: keeping `seanced` as a
+  second link for good — a name nothing documents that `doctor` would have to
+  keep checking.
 - **Config split**: `~/.config/seance/config.json` (hand-edited, 0600,
   never rewritten by the daemon: relayUrl — which must include the `/daemon`
   path, so `doctor` warns when it doesn't; the failure mode is a rejected
@@ -2840,7 +2853,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   reloads on change — still never writes it, so the invariant above is intact.
   Two cases motivated it: editing config on a machine you are only reachable on
   through the app, and letting a Claude Code session on the box adjust it; both
-  otherwise need a shell to run `seanced restart`. Reload rebuilds the whole
+  otherwise need a shell to run `seance restart`. Reload rebuilds the whole
   `startDaemon` handle (key import, backend, relay client) rather than diffing
   fields into the live objects — every field is read exactly once, at start, and
   a full swap keeps it that way; the cost is one reconnect, which a changed
@@ -2879,7 +2892,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   amount of waiting recovers it. Measured at ~20% when the write follows
   arming immediately on a saturated machine, 0% otherwise. Untouched because
   the daemon arms its watch at startup and real edits arrive minutes or hours
-  later; the exposure is an edit within milliseconds of `seanced restart`, and
+  later; the exposure is an edit within milliseconds of `seance restart`, and
   the next save is picked up normally. Tests do write that fast: the two that
   are about the watcher itself wait for the stream (`awaitWatcherLive` in
   `daemon/test/fixtures.ts`), and the rest substitute `SuperviseOpts.watch`
@@ -2921,7 +2934,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   may serve other units). Logged out of Windows or sitting at the login
   screen, WSL cannot run and the machine shows offline — same class as a
   LaunchAgent, which is also per-login. Update = `git pull` +
-  `seanced restart` (`launchctl kickstart -k` / `systemctl --user
+  `seance restart` (`launchctl kickstart -k` / `systemctl --user
   restart`; under a system unit, non-root: SIGTERM to the unit's `MainPID` and
   let `Restart=always` relaunch it — no sudoers or polkit rule to provision).
   Rejected: daemon-inside-tmux (reboot silently takes
@@ -3186,7 +3199,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   (`manual`), and a remote loosening the machine's own setting is the thing the
   bullet above refuses. Plan only ever constrains. Not exposed in the PWA or
   Raycast — a human at a picker can say "plan this" in the prompt — and
-  `seanced spawn` does not take it either; the field is on the wire, so adding
+  `seance spawn` does not take it either; the field is on the wire, so adding
   either later is a client change with no protocol change. Old daemons ignore
   it, exactly as they ignore `client`.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
@@ -3223,7 +3236,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   of one tmux exec. And any same-uid process can rewrite the option, which is
   why the read revalidates it against the pattern; a session relabelling itself
   is the same residual the threat model accepts for the session-event path.
-  `seanced spawn` takes no task id: only the scheduler mints them.
+  `seance spawn` takes no task id: only the scheduler mints them.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
   the exclave the repo sits in — `~/.claude.json` for `default`,
@@ -3301,7 +3314,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   scheme, userinfo and `.git` stripped, scp-style `host:path` folded to
   `host/path`, and the whole lowercased (GitHub and Azure DevOps compare
   case-insensitively; a key that differed by case would split one repo in two).
-  A typed origin is keyed the same way: `auto`'s `repo` in `seanced mcp` goes
+  A typed origin is keyed the same way: `auto`'s `repo` in `seance mcp` goes
   through `originQuery` (`scan.ts`), so the remote URL as `git remote -v`
   prints it, a repo's root page URL, or the key in another case finds the key
   — a deeper page (`/tree/main`) does not, and a key with a port is tried as
@@ -3575,7 +3588,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   drops "It's running on X" for "it started, but it's stuck", muted rather than
   green and offering the form back instead of "Start another" (a retry meets the
   same dialog and leaves two stuck windows); Raycast switches the toast to the
-  attention style; `seanced mcp` appends "(started, not registered yet)".
+  attention style; `seance mcp` appends "(started, not registered yet)".
   Optional on the wire, so a daemon a version behind omits it and its acks read
   exactly as they did before. The window id reaches the frontend as `SpawnOutcome.handle`, a
   backend-scoped token the response is assembled field by field to exclude.
@@ -3679,8 +3692,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   is `caffeinate`, with claude as its child — whatever kills a pane has to
   account for that.
 - **Despawn** (designed 2026-08-21, built 2026-10-09; `despawn.ts`): ends one
-  session — the window only; its worktree and branch are `seanced reap`'s. The
-  wire op `despawn { id, force?, client? }`, `seanced despawn <id> [--force]`
+  session — the window only; its worktree and branch are `seance reap`'s. The
+  wire op `despawn { id, force?, client? }`, `seance despawn <id> [--force]`
   and the MCP tool `despawn_session` all reach `SessionBackend.despawn`. No PWA
   or Raycast surface. The target is `SessionEntry.id`, the tmux pane id, which
   the session list now carries (optional on the wire, so an older daemon simply
@@ -3751,11 +3764,11 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
 - Config file: relay URL, bearer token, PSK, machine name, repo roots; the
   deviceId's seed lives in state.json.
 
-## Reap (`seanced reap`) — designed 2026-10-09
+## Reap (`seance reap`) — designed 2026-10-09
 
 Remote sessions leave residue: linked worktrees, the branches they were on,
 and séance windows that never closed (see the exit prompt under "Pane
-classifier"). `seanced reap` cleans up all three, by default acting and with
+classifier"). `seance reap` cleans up all three, by default acting and with
 `--dry-run` previewing — a dry run writes nothing, a fetch's refs included, so
 it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 `reap-git.ts` (every git call).
@@ -3776,7 +3789,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   worktree it kept goes through the rules below on a later run, once it is
   old enough. The background-work prompt, a live claude (idle or working,
   archived from the app or not) and a stuck one are reported with the pane id
-  `seanced despawn` takes, never acted on.
+  `seance despawn` takes, never acted on.
 - **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
   inside it (any pane, hand-started included); its branch — or detached HEAD —
   merged by the rules below; untouched for `reap.minAgeDays` (default 7); and
@@ -3901,7 +3914,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   between, which a contender would take for a dead holder. A holder that is
   gone is a crashed run and is taken over. The CLI exits
   on a live one; the schedule skips and tries again at its next check.
-- **Surfaces**: `seanced reap [--dry-run] [--min-age-days <n>]`, audited
+- **Surfaces**: `seance reap [--dry-run] [--min-age-days <n>]`, audited
   `origin=cli`, and a timer inside the daemon, audited `origin=schedule`, which
   logs its report one `reap:` line at a time. The schedule is off unless
   `reap.intervalHours` is set; it checks every 10 minutes against `lastReapAt`
@@ -3990,7 +4003,7 @@ relay state unnecessary).
   failure (seeded from state.json at startup), reported once so a fixed
   problem stops being shown; not for an install or restart failure this
   process recorded, since HEAD is already at target while old code serves. The Machines screen and `list_machines` render both (since
-  2026-10-18; Presence & identity says why), beside `seanced doctor`/`status`.
+  2026-10-18; Presence & identity says why), beside `seance doctor`/`status`.
 - **Rollback is deferred** (the bootstrap paradox: rollback logic would ship
   inside the very version that is broken; a stable shim is v2 if ever). A
   machine bricked by an update shows offline in the app with its last-known
@@ -4304,7 +4317,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   most 10 times, rather than shown as a failure. The card shows the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
-  refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
+  refusal's, is `shared/src/scheduler-text.ts`, which `seance mcp` words from too). The preview leaves out the quota reading
   each candidate was judged on (the task record keeps it). **Queue on auto** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
@@ -4412,7 +4425,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   textarea can't style its own text, so a mirror behind it with the same metrics draws the
   glyphs and follows its scroll, and the field keeps only caret, selection and input.
 
-## MCP server (`seanced mcp`) — designed 2026-08-03
+## MCP server (`seance mcp`) — designed 2026-08-03
 
 A local Claude Code session gets Séance's reach: an MCP stdio server that acts
 as a **third app-role client** — to the relay it is a PWA tab. It dials
@@ -4420,9 +4433,9 @@ as a **third app-role client** — to the relay it is a PWA tab. It dials
 and receives registry pushes. Zero relay/DO changes; every channel property
 (AAD binding, replay window, IV dedup, app-socket fan-out) applies unchanged.
 
-- **Ships inside the daemon** as `seanced mcp`, not a separate package: it
+- **Ships inside the daemon** as `seance mcp`, not a separate package: it
   rides the existing self-update path and its Claude config entry is just the
-  `seanced` binary. Rejected: a new workspace package (a second thing to
+  CLI's `main.ts`. Rejected: a new workspace package (a second thing to
   install and update per machine), a standalone bin over a shared library
   (same, plus packaging).
 - **Credentials come from the daemon's own config** via `loadConfig()` +
@@ -4431,7 +4444,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   is that the MCP server requires a machine that carries a daemon config,
   accepted because it is colocated by design. The key is imported
   non-extractable, same as the PWA. Where the key exists only as a credential
-  systemd delivers to the daemon's unit, `seanced mcp` — launched by Claude
+  systemd delivers to the daemon's unit, `seance mcp` — launched by Claude
   Code, outside that unit — resolves nothing; it then reaches other machines
   through the daemon instead ("Fleet broker", below, 2026-10-14). Before that it
   reached only its own box there.
@@ -4508,7 +4521,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   otherwise take the queue for a backlog: a task waiting for capacity is held by the relay
   and survives a leader change (every relay deploy, every daemon self-update), the next leader
   taking it over; a placed session is ordinary; no deps or ordering. **Not
-  through the broker**: a keyless `seanced mcp` gets "auto needs this machine's own
+  through the broker**: a keyless `seance mcp` gets "auto needs this machine's own
   key; unavailable through the broker", and nothing falls back. A scheduler action
   would be a new broker action, which is a threat-model change ("Fleet broker"), so
   `brokerFleet` leases carry `scheduler: null`. The enqueue is a `store-put` through the
@@ -4526,7 +4539,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   daemon's stdout logging convention would corrupt frames. The shared client
   takes a `log` sink option (default stdout) for exactly this consumer;
   redirecting `console.log` process-wide would silence stdout for everything.
-- **CLI pair for Claude config**: `seanced mcp install` / `seanced mcp uninstall`
+- **CLI pair for Claude config**: `seance mcp install` / `seance mcp uninstall`
   shell out to `claude mcp add` / `claude mcp remove` (argv-array, per the exec
   invariant) rather than editing `~/.claude.json` — Claude Code owns that
   schema. What gets registered is PATH-resolved bun plus this checkout's
@@ -4546,7 +4559,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   left the exclaves without it.
   Nothing re-registers on its own — no self-update path touches Claude config —
   so a machine that predates a change to the recorded argv needs
-  `seanced mcp install` run again by hand. Which is why `install` clears the name
+  `seance mcp install` run again by hand. Which is why `install` clears the name
   before adding it: `claude mcp add` fails with "already exists" otherwise, and
   the machines needing a repoint are exactly the registered ones. Same
   bootout-before-bootstrap shape as the launchd install. Rejected: telling the
@@ -4620,7 +4633,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 
 - **A socket into the daemon, not a second spawner.** The alternative was ~50
   lines: the MCP process calling `createBackend(config).spawn()` itself, exactly
-  as `seanced spawn` does. Rejected, because it makes a **second executor**. The
+  as `seance spawn` does. Rejected, because it makes a **second executor**. The
   daemon cold-boots the tmux server when none is running, so whichever process
   spawns first decides that server's environment — and a pane's environment is
   the server's. Routing through the daemon keeps one executor, one repo set (its
@@ -4655,7 +4668,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   since it was loosened would not have tightened it yet.
 - **It grants no authority a same-uid process did not already have.** Such a
   process can read `config.json` (0600, same uid) and take the PSK outright, run
-  `seanced spawn`, or drive the tmux server directly. The socket is strictly
+  `seance spawn`, or drive the tmux server directly. The socket is strictly
   less: three named ops, no way to address another machine, no way to reach the
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
@@ -4728,14 +4741,14 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   reload is `stop()` then start, sequentially, and `stop(true)` unlinks the path,
   so a config swap rebinds cleanly with no race.
 
-Non-goals: routing `seanced spawn` through the socket (it would collapse the
+Non-goals: routing `seance spawn` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
 a `rescan` op; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
-On a credential-delivered box `seanced mcp` can read no PSK, so on its own it
+On a credential-delivered box `seance mcp` can read no PSK, so on its own it
 reaches only the machine it runs on. The broker gives it the rest of the fleet: a
 second frame kind on the same socket, through which the server asks the daemon for
 the registry or for one of three ops on one other machine, and the daemon makes that
@@ -4743,7 +4756,7 @@ request itself as an app-role relay client with the key it imported at start.
 
 - **Only on a daemon whose key is service-delivered.** `run-capabilities.ts` builds the broker
   when the daemon's `loadPsk` answered `source: "credential"`, and nowhere else: on
-  macOS, WSL and Linux with a config-field or user-unsealed `tpm` key, `seanced mcp`
+  macOS, WSL and Linux with a config-field or user-unsealed `tpm` key, `seance mcp`
   reads the key itself and goes direct, so a broker there would add no reach — only
   same-uid authority that skips the key store, and an app-role relay surface in the
   daemon. Those daemons construct no broker and no app-role client at all; a broker
@@ -4768,9 +4781,9 @@ request itself as an app-role relay client with the key it imported at start.
   leg is daemon-role: it registers and answers, the relay never pushes it the
   registry, and it cannot address another daemon. Being an app is the only way to
   reach one, so the broker is a fourth app-role client (beside the PWA, Raycast and
-  `seanced mcp`) over the shared `RelayClient`, built with the daemon's
+  `seance mcp`) over the shared `RelayClient`, built with the daemon's
   already-imported `CryptoKey` — never a second store lookup or TPM touch. Lazy and
-  idle-closing like `seanced mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
+  idle-closing like `seance mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
   every MCP process on the box, stopped with the daemon handle so a reload builds a
   fresh one and leaks none.
 - **Semantic, allowlisted, fail-closed.** Two actions: `machines` (the decrypted
@@ -4810,7 +4823,7 @@ request itself as an app-role relay client with the key it imported at start.
   budget plus the op's own timeout plus margin, so a slow first connect never cuts
   off a spawn still on its way. In flight is capped at 16; past it a request is
   refused as `busy`, not queued.
-- **Transport choice in `seanced mcp` (`daemon/src/fleet.ts`).** Direct when this
+- **Transport choice in `seance mcp` (`daemon/src/fleet.ts`).** Direct when this
   process resolves a key, which keeps macOS, WSL and readable-Linux exactly as
   before; the broker only when the lookup returns none — a typed null, never an error
   string. The choice is made before anything is sent. A direct failure (bad token,
@@ -4821,7 +4834,7 @@ request itself as an app-role relay client with the key it imported at start.
   daemon drops the frame and closes; the server's `machines` probe — side-effect free
   — is where that is read as "update seanced". `doctor` reports which path MCP takes
   from the shell, probing the broker only when it is the one. A self-update restarts
-  the daemon, not a running `seanced mcp`: an MCP older than `broker_disabled` parses
+  the daemon, not a running `seance mcp`: an MCP older than `broker_disabled` parses
   the unknown code as an unreadable reply ("a mismatched seanced version?"), which a
   new Claude session resolves; on a credential-delivered box nothing changes.
 
@@ -4844,7 +4857,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   reaches the socket through the CLI's `session-event` (JSON on stdin). A hooks module
   runs with no Node and no sockets of its own, so it runs that command through
   `$.process.run`, as `bun <checkout>/daemon/src/main.ts session-event` from its own
-  `$.plugin.root`, never the `seanced` name on PATH (changed 2026-10-22): the mod is
+  `$.plugin.root`, never the CLI's name on PATH (changed 2026-10-22): the mod is
   read in place from the checkout (Claude Code mods), so the path always names the same
   checkout's CLI, while the PATH link is opt-in and nothing re-points it on a pull — a
   machine without it, or with a link into another clone, reported nothing, silently. The command is silent, always exits 0, and waits for the daemon's
@@ -5079,7 +5092,7 @@ the binding with real panes.
 ## Raycast extension (`raycast/`) — designed 2026-08-14
 
 A **fourth** relay participant and a **third app-role client**, structurally
-identical to `seanced mcp`: it dials `/app?t=<token>`, seals with the PSK as
+identical to `seance mcp`: it dials `/app?t=<token>`, seals with the PSK as
 `from="app"`, correlates on `re`, and takes registry pushes. Zero relay and zero
 daemon changes; every channel property applies unchanged. What it adds is a
 latency budget — one hotkey to a running session.
@@ -5092,7 +5105,7 @@ latency budget — one hotkey to a running session.
 - **Reach is every paired machine, through the relay.** Rejected: local-only
   (talking to the daemon on this box directly). It would need no PSK and no
   socket, but "spawn on the machine I am sitting at" is the one case where a
-  terminal is already open and `seanced spawn` already works; the value is
+  terminal is already open and `seance spawn` already works; the value is
   reaching the _other_ machines.
 - **Local install only, never the Raycast Store.** Publishing would push the
   source into the `raycast/extensions` monorepo and — because the Store's
@@ -5158,7 +5171,7 @@ latency budget — one hotkey to a running session.
   the config-dir resolution, the PSK precedence, and the offered model/effort
   lists. Those four are duplicated by necessity (different runtimes, plus a
   static manifest that cannot import), so they are guarded instead.
-- **`seanced raycast install` drives Raycast's own CLI, exactly as `mcp
+- **`seance raycast install` drives Raycast's own CLI, exactly as `mcp
   install` drives Claude's.** Two steps, in order. `ray build` first, because
   it is the only typecheck in the loop: `ray develop` skips it entirely — its
   output stops at "compiled entry points", where `ray build` also prints
@@ -5313,7 +5326,7 @@ are tmux-rename's, except where they say mods.
   is passed through untouched; outside tmux the name is still tagged, only the
   window step is skipped.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
-  the repo root lists the mods; `seanced mod install` runs `claude plugin
+  the repo root lists the mods; `seance mod install` runs `claude plugin
   marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
   A directory marketplace's plugins are read in place: Claude also records a copy
   under `plugins/cache/<marketplace>/<mod>/<version>` and names it `installPath`, but
@@ -5356,7 +5369,7 @@ are tmux-rename's, except where they say mods.
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
-  its way out: `seanced spawn` now audits like the relay path, so the slash
+  its way out: `seance spawn` now audits like the relay path, so the slash
   command can become a thin wrapper over it and the duplication disappears.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.
@@ -5426,7 +5439,7 @@ reconciliation.
 
 The threat model is fully built out as of 2026-07-27: spawn audit logging on
 both paths with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
-`seanced psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
+`seance psk-import`; PSK fingerprint in `doctor`; tests pinning the two spawn
 invariants; registry entry cap, wire-level id and ciphertext bounds, and
 per-socket register rate limiting in the DO. The PWA's non-extractable-key and
 CSP items landed with the app (see the PWA section).

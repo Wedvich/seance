@@ -21,19 +21,19 @@ which `init` creates 0600, and `psk-import` says so and stores nothing.
 
 ## Importing it
 
-Run `seanced psk-import` bare and it prompts on the terminal with no echo, or pipe it
+Run `seance psk-import` bare and it prompts on the terminal with no echo, or pipe it
 straight from a password manager — either way the key never lands in argv or shell
 history:
 
 ```sh
-op item get Séance --fields password --reveal --account my | seanced psk-import
+op item get Séance --fields password --reveal --account my | seance psk-import
 ```
 
 On systemd ≥ 256 this command cannot seal — the sealing is a one-time root step
 instead, below. Everywhere else it is the whole story.
 
 Then clear `psk` in `config.json`. The daemon reloads and logs the fingerprint it came
-up with, so you can see which store answered. `seanced doctor` prints that fingerprint
+up with, so you can see which store answered. `seance doctor` prints that fingerprint
 too — compare it across machines to confirm they all hold the same key. The one box
 where it can't is the credential-delivered one: the key is mounted inside the unit and
 nothing outside it can read the key, so `doctor` says where the key comes from and the
@@ -62,7 +62,7 @@ Who performs the unseal depends on the systemd version:
   express TPM-only keys, and its default key degrades to a host key file inside the
   rootfs — which travels with backups, exactly the exposure sealing exists to prevent.
   Here the key is _delivered_ instead of unsealed: run `seanced` as a systemd
-  **system** unit (`sudo --preserve-env=PATH "$(command -v seanced)" install --system` writes it) with
+  **system** unit (`sudo --preserve-env=PATH "$(command -v seance)" install --system` writes it) with
   `User=<you>` and
 
   ```ini
@@ -86,12 +86,12 @@ Who performs the unseal depends on the systemd version:
   so that no session needs that path.
 
   A consequence worth expecting: **nothing outside the unit can resolve the key**, so
-  `seanced doctor`, `seanced run` and `seanced mcp` in a shell all see no PSK. Doctor
+  `seance doctor`, `seanced run` and `seance mcp` in a shell all see no PSK. Doctor
   reads the system unit to tell that arrangement from a genuinely keyless box, and
   reports the key as delivered rather than missing; `seanced run` is simply not
-  runnable by hand there, and `seanced mcp` asks the running daemon instead (below).
+  runnable by hand there, and `seance mcp` asks the running daemon instead (below).
   The daemon's log carries the fingerprint, which is the only place it can come from
-  here; `seanced status` reports the unit's health.
+  here; `seance status` reports the unit's health.
 
 ### Sealing the blob as root
 
@@ -117,7 +117,7 @@ a future `psk-import --system` folds this runbook into the CLI too.
 Order doesn't matter. `install --system` only writes the
 `LoadCredentialEncrypted=` line for a blob that already decrypts as root — a credential
 systemd can't load fails the unit at start — so seal first and install, or install first
-and re-run `sudo --preserve-env=PATH "$(command -v seanced)" install --system` after sealing. `seanced doctor` warns while a
+and re-run `sudo --preserve-env=PATH "$(command -v seance)" install --system` after sealing. `seance doctor` warns while a
 blob is sitting there undelivered.
 
 ### Proxmox LXC
@@ -149,7 +149,7 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 ### MCP on a credential-delivered box
 
-Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is
+Claude Code launches `seance mcp` outside the daemon's unit, where no credential is
 delivered and (on systemd ≥ 256) direct unseal is refused — so it cannot hold the key.
 It does not need to. Every tool works, for every machine — except `auto`: `spawn_session`
 with `machine: "auto"` and `get_queue` talk to the scheduler, not to one machine, and the
@@ -164,17 +164,17 @@ machine's own key". The rest work like this:
   and is never sent over the socket; what crosses it is "list the machines" or "this
   op on this deviceId", for `sessions`, `spawn` and `despawn` only.
 
-Nothing to configure: the existing `seanced mcp install` registration is unchanged. The
+Nothing to configure: the existing `seance mcp install` registration is unchanged. The
 server tries its own PSK lookup first, on first remote use — on macOS, WSL, or Linux
 with a key this user can read, it dials the relay itself exactly as before — and uses
 the daemon only when that lookup finds nothing. A "nothing" is re-checked after a
 minute, so a keychain unlocked mid-session is picked up.
 
-Prerequisites: the daemon running (`seanced status`), as the same user Claude Code
+Prerequisites: the daemon running (`seance status`), as the same user Claude Code
 runs as — the op socket lives in a 0700 directory under that user's state dir, so
 `User=` in the system unit must be you, which `install --system` already writes — and
 a daemon new enough to broker whose own key is service-delivered (any other daemon
-refuses with `broker_disabled`). `seanced doctor` says which path MCP will take from your
+refuses with `broker_disabled`). `seance doctor` says which path MCP will take from your
 shell, and probes the broker when that is the one:
 
 | doctor says                                | meaning                                                              |
@@ -182,7 +182,7 @@ shell, and probes the broker when that is the one:
 | reaches other machines directly            | this shell can read the PSK; the daemon is not involved              |
 | through the daemon's broker — N machine(s) | keyless here, and the broker answered with the registry              |
 | no daemon is listening                     | start it (`sudo systemctl start seanced`); local ops need it too     |
-| older than the fleet broker                | update the checkout and `seanced restart`                            |
+| older than the fleet broker                | update the checkout and `seance restart`                             |
 | this daemon's key is not service-delivered | only a credential box brokers; read the key here (see the psk check) |
 | the daemon could not reach the relay       | the daemon's own relay URL/token — same fix as for the daemon        |
 
@@ -193,7 +193,7 @@ the fleet — and it is behind Claude Code's per-tool approval, so do not allowl
 `spawn_session` or `despawn_session`. It is confined to this kind of box: a daemon
 whose key came from anywhere but the systemd credential (keychain, DPAPI, a
 user-unsealed TPM blob, the config field) runs no broker at all, since there
-`seanced mcp` reads the key itself and a broker would only hand the same reach to
+`seance mcp` reads the key itself and a broker would only hand the same reach to
 anything that skips the key store. It is still less than the key: no way to read
 it, seal or open anything, address the `"machines"` group, or send any op but those
 three, and every brokered request is audited as `origin=local-broker` (the target
@@ -204,6 +204,6 @@ A same-user process in an MCP session holding fleet authority is a decision reco
 in DESIGN.md ("Local op socket", "Fleet broker"). Before it, such a box could drive
 only itself.
 
-Rolling back is the previous checkout plus `seanced restart`: an older daemon drops
-broker frames, and `seanced mcp` then reports the daemon as predating the broker
+Rolling back is the previous checkout plus `seance restart`: an older daemon drops
+broker frames, and `seance mcp` then reports the daemon as predating the broker
 while local ops keep working.
