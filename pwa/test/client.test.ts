@@ -1755,6 +1755,32 @@ describe("malformed frames", () => {
     }
   });
 
+  test("hands a store-changed nudge to its listeners and drops a malformed one", async () => {
+    const peer = startHostilePeer();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ url: peer.url, log: (line) => lines.push(line) });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const heard: [string, number][] = [];
+      const stop = client.onStoreChanged((changed, version) => heard.push([changed, version]));
+      peer.send({ t: "store-changed", key: "account:a-1", version: 3 });
+      await pollUntil(() => heard.length > 0, "the nudge to reach the listener");
+      expect(heard).toEqual([["account:a-1", 3]]);
+      expect(lines.some((line) => line.startsWith("wire dropped"))).toBe(false);
+
+      peer.send({ t: "store-changed", key: "account:a-1", version: -1 });
+      await pollUntil(() => lines.includes("wire dropped reason=frame"), "the malformed nudge to be dropped");
+      stop();
+      peer.send({ t: "store-changed", key: "account:a-1", version: 4 });
+      // A non-event has nothing to poll for.
+      await Bun.sleep(50);
+      expect(heard).toEqual([["account:a-1", 3]]);
+    } finally {
+      client.stop();
+      await peer.stop();
+    }
+  });
+
   // Every push carries the full stored registry, so dropping a push over one
   // bad entry would drop every push for as long as that entry stays stored —
   // an authoritative "no machines" out of one machine a version ahead.
