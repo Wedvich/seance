@@ -4707,6 +4707,25 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
+- **`pin` on auto** (2026-10-23). `spawn_session` with machine `auto` and each `queue_batch` member
+  take `pin { machine?, exclave? }`, stored as `TaskSpec.pin` — the restriction the leader has
+  routed on since M2 (`pinFilter`: a candidate off the pin is `pin_mismatch`), so a pinned task
+  waits for a slot where it is pinned and never goes elsewhere. No capability gate: `parsePin` has
+  been in the task-record parser since the store's records themselves (M3 schema), so every leader
+  that can read the record keeps the pin. `machine` is a name or deviceId, resolved by
+  `resolveMachine` at submit time and stored as the deviceId only: an unknown name is refused
+  listing the machines, a shared one listing their deviceIds. `exclave` is checked against the
+  pinned machine's reported exclave ids, or with no machine against every machine's. A machine
+  reporting none is refused as a pin target (the leader never places on it, `exclaves_unknown`,
+  and its clones carry no exclave), naming `seanced update`; an exclave alone is refused likewise
+  while no machine reports any. A pin with neither field, an empty one, or a machine or exclave
+  past `TASK_SPEC_LIMITS.placement` is refused before the relay is dialled; a named machine refuses `pin`
+  with the other auto-only fields. **`repo` under a pin** is resolved by `resolveOrigin` against the
+  pin's scope only — the pinned machine (or every machine), its clones cut to the pinned exclave by
+  `RepoEntry.exclave`, as the leader's clone match is — so a name ambiguous or absent across the
+  fleet works as the pinned machine lists it, and an origin with no clone where the task is pinned
+  is refused rather than queued to wait forever. Unpinned resolution is unchanged. `list_machines`
+  does not list exclave ids; the refusal names them.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is

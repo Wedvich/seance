@@ -135,6 +135,8 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
               title: "authoring-m1",
               prompt: "first member",
               after: [{ task: p.id, when: "opened" }],
+              // The stack's one machine, by deviceId: it still runs, so the pin is stored and honoured.
+              pin: { machine: stack.deviceId },
             },
             {
               ref: "m2",
@@ -171,6 +173,8 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
       expect(m1.spec.batch?.id).toBe(m2.spec.batch?.id);
       expect([m1.spec.batch?.index, m2.spec.batch?.index]).toEqual([1, 2]);
       expect(m2.spec.linear).toEqual({ issue: "ENG-9" });
+      expect(m1.spec.pin).toEqual({ deviceId: stack.deviceId });
+      expect(m2.spec.pin).toBeUndefined();
 
       expect(await app.client.markDone(p.id)).toMatchObject({ task: { id: p.id, state: "done" } });
       await pollUntil(async () => (await stateOf(m1.id)) === "running", "the first member to run", 30_000);
