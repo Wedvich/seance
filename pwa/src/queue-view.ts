@@ -25,6 +25,8 @@ export interface QueueRow {
   /** Mark done may despawn a session (live, or `lost` with its machine back; the PWA can't tell which): asks twice. */
   readonly markDoneEndsSession: boolean;
   readonly busy: boolean;
+  /** The PR its session reported, for the card's chip: `#123` where the URL names a number. */
+  readonly pr: { readonly url: string; readonly label: string } | null;
 }
 
 export interface QueueSection {
@@ -123,6 +125,16 @@ function bodyOf(task: Task, now: number): string | null {
   return null;
 }
 
+/** GitHub's `/pull/<n>`, GitLab's `/-/merge_requests/<n>`. */
+const PR_NUMBER = /\/(?:pull|merge_requests)\/(\d+)(?:\/|$)/u;
+
+/** `prUrl` is `https:`-checked at parse (`httpsUrl`), so it is safe as an href. */
+function prOf(task: Task): QueueRow["pr"] {
+  if (task.prUrl === undefined) return null;
+  const number = PR_NUMBER.exec(new URL(task.prUrl).pathname)?.[1];
+  return { url: task.prUrl, label: number === undefined ? "PR" : `#${number}` };
+}
+
 function rowOf(task: Task, state: AppState, now: number): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
@@ -138,6 +150,7 @@ function rowOf(task: Task, state: AppState, now: number): QueueRow {
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     busy: state.taskAction?.taskId === task.id,
+    pr: prOf(task),
   };
 }
 

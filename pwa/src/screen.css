@@ -2079,6 +2079,30 @@
   opacity: 0.5;
 }
 
+/* The PR chip is a link, so the accent rather than `auto`'s colour, and a rounded rectangle
+   rather than the badge's pill: at this size it reads as a control. Sized near the buttons
+   beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
+   the pill. Leads the actions row; the auto margin keeps the buttons right, and a finished
+   task's row holds the chip alone. */
+.queue-pr {
+  position: relative;
+  align-self: center;
+  margin-right: auto;
+  padding: 7px 10px 8px;
+  border-color: var(--acc);
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--acc);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-pr::before {
+  content: "";
+  position: absolute;
+  inset: -5px -4px;
+}
+
 .queue-refresh {
   width: 44px;
   height: 44px;

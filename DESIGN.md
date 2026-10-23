@@ -4355,7 +4355,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
-  credits", not "would spend"). **Cancel** and **Mark done** are offered where the leader allows
+  credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
+  the record keeps no other) carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
+  number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
+  because the parser admits only `https:`. **Cancel** and **Mark done** are offered where the leader allows
   them. Mark done sets the task `done` by hand, ending its session first when it is running,
   `needs-input` or `lost`. Either one that ends a live session takes a second tap within four
   seconds. A `done` or `cancelled` task with `leftRunning` says its session may still be running
