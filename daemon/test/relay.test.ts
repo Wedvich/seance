@@ -888,8 +888,13 @@ describe("daemon ↔ relay integration", () => {
     console.log = (...args: unknown[]): void => {
       lines.push(args.map(String).join(" "));
     };
-    // Port 1 on loopback: nothing listens, so the dial is refused outright.
-    const daemon = await startTestDaemon("ws://127.0.0.1:1", { maxBackoffMs: 50 });
+    // A port just released, so the dial is refused outright. Not a fixed low
+    // port: WSL's mirrored networking drops SYNs to unlistened privileged
+    // loopback ports, and the dial hangs instead of failing.
+    const released = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const { port } = released;
+    await released.stop(true);
+    const daemon = await startTestDaemon(`ws://127.0.0.1:${port}`, { maxBackoffMs: 50 });
     try {
       await pollUntil(() => lines.some((line) => line.includes("relay socket errored")), "an errored drop");
       const line = lines.find((l) => l.includes("relay socket errored"));
