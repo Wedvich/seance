@@ -31,6 +31,7 @@ import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { MetricsStore } from "./metrics-store.ts";
+import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
@@ -100,6 +101,8 @@ export interface RunOpts {
     readonly store?: QueueStore;
     readonly tickIntervalMs?: number;
     readonly takeoverRetryMs?: number;
+    /** Tests point the PR poller at a `gh` stub; production runs its defaults. */
+    readonly prStatus?: PrPollerOpts;
   };
   /** Tests only: the branch-state emitter's intervals, which are constants in production. */
   readonly branchState?: Pick<BranchStateDeps, "intervalMs" | "fetchStaleMs">;
@@ -385,6 +388,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
     now,
     httpFetch,
+    prStatus: opts.leader?.prStatus ?? {},
   });
 
   const client = new RelayClient({
