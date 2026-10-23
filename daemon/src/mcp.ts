@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
+  DEP_AFTER,
   failureReasonText,
   importPsk,
   isTransportError,
@@ -11,10 +12,15 @@ import {
   QUEUE_MAX_TASKS,
   REPORT_DONE_TOOL,
   schedulerErrorText,
+  schedulerRefusal,
   schedulerRole,
   taskFailureText,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
+  TASK_UNTIL,
+  withReportInstruction,
+  type BatchStrategy,
   type Candidate,
   type Decision,
   type DespawnRequest,
@@ -30,11 +36,12 @@ import {
   type SpawnRequest,
   type SpawnResponse,
   type Task,
-  type TaskRequest,
+  type TaskDep,
+  type TaskUntil,
 } from "@seance/shared";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
-import { enqueueAuto, resolveOrigin, taskRequestError } from "./auto.ts";
+import { enqueueAuto, leaderTakesReported, resolveOrigin, specError, usesReported, type AutoSpec } from "./auto.ts";
 import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
@@ -249,15 +256,14 @@ function isAutoRef(ref: string): boolean {
 /**
  * Said wherever `auto` is described, because an agent will otherwise take the
  * queue for something it is not. The queue is the relay's store, so a waiting
- * task survives a leader change (docs/scheduler.md, M3); dependencies and
- * ordering aren't offered here.
+ * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies and ordering can't be set from here.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches and Linear links are set with spawn_session's after, until and linear fields and with queue_batch.";
 
 /** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "auto" | SchedulerCall;
+type SchedulerTool = "auto" | "queue_batch" | SchedulerCall;
 
 /** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
 function keylessText(op: SchedulerTool): string {
@@ -357,6 +363,123 @@ function describeHold(hold: PauseHold): Record<string, unknown> {
   };
 }
 
+const AFTER_WHEN = z
+  .enum(DEP_AFTER)
+  .default("opened")
+  .describe(
+    '"opened": the task has a PR and its branch is pushed (stacked work, the default). "merged": its branch merged. "done": the task is settled done — for a task authored with until "reported", only its session\'s own report',
+  );
+
+const LINEAR_FIELD = z
+  .object({
+    issue: z
+      .string()
+      .describe(`The Linear issue identifier, e.g. "ENG-123" (at most ${TASK_SPEC_LIMITS.linearIssue} characters)`),
+    url: z.string().optional().describe("The issue's https: URL"),
+  })
+  .optional()
+  .describe(
+    "The Linear issue this task is for. Informational: the scheduler stores and shows it, and reads nothing from Linear",
+  );
+
+const UNTIL_FIELD = z
+  .enum(TASK_UNTIL)
+  .optional()
+  .describe(
+    `What settles the task. "merged" (default): its PR merging, or its session ending. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
+  );
+
+const REPORTED_GATE =
+  "auto refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
+const REPORTED_UNKNOWN =
+  "auto refused: no verified scheduler is leading, so it cannot be confirmed to take until: reported / after: done — try again once one leads (list_machines shows it)";
+
+/** Why an `until: "reported"` / `after: "done"` spec is not written to this lease's scheduler. */
+function reportedGateError(lease: Parameters<typeof leaderTakesReported>[0]): string {
+  return lease.scheduler.availability().kind === "ready" ? REPORTED_GATE : REPORTED_UNKNOWN;
+}
+
+/** Empty model/effort mean "default", which a task spells as absent. */
+function requestFields(input: {
+  readonly prompt?: string | undefined;
+  readonly title?: string | undefined;
+  readonly mode: "worktree" | "here";
+  readonly model?: string | undefined;
+  readonly effort?: string | undefined;
+  readonly plan?: boolean | undefined;
+}): Omit<AutoSpec, "repo"> {
+  const { prompt, title, mode, model, effort, plan } = input;
+  return {
+    mode,
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(title === undefined ? {} : { title }),
+    ...(model === undefined || model === "" ? {} : { model }),
+    ...(effort === undefined || effort === "" ? {} : { effort }),
+    ...(plan === undefined ? {} : { plan }),
+  };
+}
+
+/**
+ * The authoring fields as a spec holds them: `until` only when it is not the default, `linear.url` only
+ * when given, and `linear.issue` trimmed as the PWA's form trims it (a blank one is then refused by `specError`).
+ */
+function authoredFields(
+  deps: readonly TaskDep[],
+  until: TaskUntil | undefined,
+  linear: { readonly issue: string; readonly url?: string | undefined } | undefined,
+): Pick<AutoSpec, "deps" | "until" | "linear"> {
+  return {
+    ...(deps.length === 0 ? {} : { deps }),
+    ...(until === "reported" ? { until } : {}),
+    ...(linear === undefined
+      ? {}
+      : {
+          linear: {
+            issue: linear.issue.trim(),
+            ...(linear.url === undefined || linear.url === "" ? {} : { url: linear.url }),
+          },
+        }),
+  };
+}
+
+/**
+ * `until: "reported"` carries its own instruction to report: appended here so the author sees the length
+ * bound, and the leader never rewrites a prompt. A session told nothing would never report.
+ */
+function withReportedPrompt(
+  until: TaskUntil | undefined,
+  prompt: string | undefined,
+): { readonly prompt: string | undefined } | { readonly error: string } {
+  if (until !== "reported") return { prompt };
+  if (prompt === undefined || prompt.trim() === "") {
+    return { error: 'until "reported" needs a prompt — the session is told in it to report itself done' };
+  }
+  return { prompt: withReportInstruction(prompt) };
+}
+
+/** A batch is at most this many members: one tool call, and `queue_batch` creates them one by one. */
+const BATCH_TASKS_MAX = 16;
+
+function batchStrategy(
+  strategy: "sequential" | "parallel" | "auto",
+  max: number | undefined,
+): { readonly strategy: BatchStrategy } | { readonly error: string } {
+  if (strategy === "parallel") {
+    return max === undefined ? { error: 'strategy "parallel" needs max' } : { strategy: { mode: "parallel", max } };
+  }
+  return max === undefined ? { strategy: { mode: strategy } } : { error: `max applies to strategy "parallel" only` };
+}
+
+function describeStrategy(strategy: BatchStrategy): string {
+  return strategy.mode === "parallel" ? `parallel, at most ${strategy.max} at once` : strategy.mode;
+}
+
+/** Under `until: "reported"` the prompt the author wrote is not the one that is bounded. */
+function lengthNote(invalid: string, until: TaskUntil | undefined): string {
+  if (until !== "reported" || !invalid.startsWith("the prompt is")) return "";
+  return " (the instruction to report is appended to the prompt and counts)";
+}
+
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const { spec } = task;
@@ -375,6 +498,12 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
+    ...(spec.until === "reported" ? { until: spec.until } : {}),
+    // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
+    ...(task.merged === true ? { merged: true } : {}),
+    ...(spec.batch === undefined ? {} : { batch: spec.batch }),
+    ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
+    ...(spec.linear === undefined ? {} : { linear: spec.linear }),
   };
 }
 
@@ -610,37 +739,62 @@ export function buildMcpServer(
           .describe(
             "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise.",
           ),
+        after: z
+          .array(
+            z.object({
+              task: z.string().describe("A task id from get_queue or an earlier queue_batch"),
+              when: AFTER_WHEN,
+            }),
+          )
+          .max(TASK_SPEC_LIMITS.deps)
+          .optional()
+          .describe(
+            'Machine "auto" only: hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents',
+          ),
+        until: UNTIL_FIELD,
+        linear: LINEAR_FIELD,
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan }) => {
+    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear }) => {
       if (isAutoRef(machine)) {
+        const reported = withReportedPrompt(until, prompt);
+        if ("error" in reported) return errorResult(`auto refused: ${reported.error}`);
         // `client` is not a TaskRequest field: the leader stamps its own
         // dispatch `client=scheduler`, so the target audits the session as the
-        // scheduler's. Empty model/effort mean "default", which a task spells as absent.
-        const task = {
-          mode,
-          ...(prompt === undefined ? {} : { prompt }),
-          ...(title === undefined ? {} : { title }),
-          ...(model === undefined || model === "" ? {} : { model }),
-          ...(effort === undefined || effort === "" ? {} : { effort }),
-          ...(plan === undefined ? {} : { plan }),
+        // scheduler's.
+        const spec: AutoSpec = {
+          repo,
+          ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan }),
+          ...authoredFields(
+            (after ?? []).map(({ task, when }) => ({ task, after: when })),
+            until,
+            linear,
+          ),
         };
         // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
-        const tooLong = taskRequestError({ repo, ...task });
-        if (tooLong !== null) return errorResult(`auto refused: ${tooLong}`);
+        const invalid = specError(spec);
+        if (invalid !== null) return errorResult(`auto refused: ${invalid}${lengthNote(invalid, until)}`);
         return withFleet(async (lease) => {
           // Never a fallback: through the broker there is no scheduler leg at all.
           if (lease.scheduler === null) return errorResult(keylessText("auto"));
+          const leg = { machines: lease.machines, scheduler: lease.scheduler };
+          if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
           const resolved = resolveOrigin(lease.machines, repo);
           if ("error" in resolved) return errorResult(resolved.error);
           // The origin a clone name resolved to is what the leader bounds, not the name.
-          const resolvedRequest: TaskRequest = { repo: resolved.origin, ...task };
-          const longOrigin = taskRequestError(resolvedRequest);
-          if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}`);
-          const enqueued = await enqueueAuto(lease.scheduler, resolvedRequest, audit);
+          const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin };
+          const longOrigin = specError(resolvedSpec);
+          if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
+          const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit);
           return enqueued.ok ? textResult(enqueued.text) : errorResult(enqueued.text);
         });
+      }
+      // `until: "merged"` and an empty `after` are the defaults, which a named machine honours trivially.
+      if ((after !== undefined && after.length > 0) || until === "reported" || linear !== undefined) {
+        return errorResult(
+          'after, until and linear apply to machine "auto" only — a named machine starts the session now, with nothing to wait for',
+        );
       }
       const request: SpawnRequest = {
         repo,
@@ -698,6 +852,151 @@ export function buildMcpServer(
         } catch (err) {
           return errorResult(failureText("spawn_session", err));
         }
+      });
+    },
+  );
+
+  server.registerTool(
+    "queue_batch",
+    {
+      title: "Queue a batch of tasks",
+      description: `Queue several tasks for the scheduler at once, as one batch with a shared strategy: "sequential" runs them one at a time in the order given, "parallel" runs at most max at once, "auto" leaves it to the dependencies and the fleet's capacity. Always machine "auto". Name a task's own dependencies with after: another member by its ref (an earlier one only), or an existing task by its id. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
+      inputSchema: z.object({
+        strategy: z.enum(["sequential", "parallel", "auto"]),
+        max: z
+          .number()
+          .int()
+          .min(1)
+          .max(TASK_SPEC_LIMITS.parallel)
+          .optional()
+          .describe('At most this many members run at once. Required with strategy "parallel", refused otherwise'),
+        tasks: z
+          .array(
+            z.object({
+              ref: z
+                .string()
+                .optional()
+                .describe("A name for this task within the batch, for later members' after to point at"),
+              repo: z.string().describe('As spawn_session\'s repo with machine "auto"'),
+              prompt: z.string().optional().describe("The task for the spawned session"),
+              title: z.string().optional().describe("Name for the spawned session, its window and its worktree branch"),
+              mode: z.enum(["worktree", "here"]).default("worktree"),
+              model: z.string().optional(),
+              effort: z.string().optional(),
+              plan: z.boolean().optional().describe("Start in plan mode, as spawn_session's plan"),
+              after: z
+                .array(
+                  z.object({
+                    task: z.string().optional().describe("An existing task's id from get_queue"),
+                    ref: z.string().optional().describe("An earlier member's ref"),
+                    when: AFTER_WHEN,
+                  }),
+                )
+                .max(TASK_SPEC_LIMITS.deps)
+                .optional()
+                .describe("Each entry names exactly one of task and ref"),
+              until: UNTIL_FIELD,
+              linear: LINEAR_FIELD,
+            }),
+          )
+          .min(1)
+          .max(BATCH_TASKS_MAX),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ strategy, max, tasks }) => {
+      const shared = batchStrategy(strategy, max);
+      if ("error" in shared) return errorResult(`queue_batch: ${shared.error}`);
+      const batchId = crypto.randomUUID();
+      const planned: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
+      const refs = new Map<string, string>();
+      for (const [i, member] of tasks.entries()) {
+        const n = i + 1;
+        const id = crypto.randomUUID();
+        const deps: TaskDep[] = [];
+        for (const edge of member.after ?? []) {
+          if ((edge.task === undefined) === (edge.ref === undefined)) {
+            return errorResult(`queue_batch refused: task ${n}: each after entry names exactly one of task and ref`);
+          }
+          if (edge.task !== undefined) {
+            deps.push({ task: edge.task, after: edge.when });
+            continue;
+          }
+          const target = refs.get(edge.ref ?? "");
+          if (target === undefined) {
+            return errorResult(
+              `queue_batch refused: task ${n}: after ref "${edge.ref}" is not the ref of an earlier task in this batch`,
+            );
+          }
+          deps.push({ task: target, after: edge.when });
+        }
+        // Registered after the member's own edges, so a task cannot wait on itself.
+        if (member.ref !== undefined) {
+          if (member.ref === "" || refs.has(member.ref)) {
+            return errorResult(
+              `queue_batch refused: task ${n}: ref ${JSON.stringify(member.ref)} is empty or already used`,
+            );
+          }
+          refs.set(member.ref, id);
+        }
+        const reported = withReportedPrompt(member.until, member.prompt);
+        if ("error" in reported) return errorResult(`queue_batch refused: task ${n}: ${reported.error}`);
+        const spec: AutoSpec = {
+          repo: member.repo,
+          ...requestFields({ ...member, prompt: reported.prompt }),
+          ...authoredFields(deps, member.until, member.linear),
+          batch: { id: batchId, index: n, strategy: shared.strategy },
+        };
+        const invalid = specError(spec);
+        if (invalid !== null) {
+          return errorResult(`queue_batch refused: task ${n}: ${invalid}${lengthNote(invalid, member.until)}`);
+        }
+        planned.push({ id, ref: member.ref, spec });
+      }
+      return withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(keylessText("queue_batch"));
+        const leg = { machines: lease.machines, scheduler: lease.scheduler };
+        if (planned.some(({ spec }) => usesReported(spec)) && !leaderTakesReported(leg)) {
+          return errorResult(reportedGateError(leg));
+        }
+        // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name.
+        const resolvedPlan: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
+        for (const [i, member] of planned.entries()) {
+          const resolved = resolveOrigin(lease.machines, member.spec.repo);
+          if ("error" in resolved) return errorResult(`queue_batch refused: task ${i + 1}: ${resolved.error}`);
+          const spec: AutoSpec = { ...member.spec, repo: resolved.origin };
+          const invalid = specError(spec);
+          if (invalid !== null) {
+            return errorResult(
+              `queue_batch refused: task ${i + 1}: ${invalid}${lengthNote(invalid, member.spec.until)}`,
+            );
+          }
+          resolvedPlan.push({ ...member, spec });
+        }
+        // One at a time, in order: a dependent's record lands after its predecessor's, and a failure stops the rest.
+        const landed: string[] = [];
+        for (const [i, member] of resolvedPlan.entries()) {
+          // oxlint-disable-next-line no-await-in-loop -- each create follows the one before
+          const enqueued = await enqueueAuto(lease.scheduler, member.spec, audit, member.id);
+          if (!enqueued.ok) {
+            const queued = landed.length === 0 ? "none had queued" : `already queued: ${landed.join(", ")}`;
+            return errorResult(
+              `queue_batch failed at task ${i + 1} of ${resolvedPlan.length} (${queued}; cancel_task takes them out if the batch is unwanted) — ${enqueued.text}`,
+            );
+          }
+          landed.push(member.id);
+        }
+        const lines = [
+          `batch ${batchId}: ${resolvedPlan.length} tasks queued (${describeStrategy(shared.strategy)})`,
+          ...resolvedPlan.map(({ id, ref }, i) => `task ${i + 1}${ref === undefined ? "" : ` (${ref})`}: ${id}`),
+          "The scheduler places them as capacity and their dependencies allow; get_queue shows where each lands and why, and cancel_task takes one out.",
+        ];
+        if (schedulerRefusal(lease.scheduler.availability()) !== null) {
+          lines.push(
+            "No scheduler is leading right now (or its leader is unverified); the tasks wait in the relay's queue until one does.",
+          );
+        }
+        return textResult(lines.join("\n"));
       });
     },
   );
