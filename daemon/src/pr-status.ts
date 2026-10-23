@@ -82,7 +82,7 @@ const REMEDY: Record<Failure, string> = {
 interface Target {
   readonly pr: GithubPr;
   /** Every task read on this PR, each with the URL it holds: `prChange` compares them verbatim. */
-  readonly tasks: { readonly id: string; readonly prUrl: string }[];
+  readonly tasks: { readonly id: string; readonly prUrl: string; readonly finished: boolean }[];
 }
 
 /**
@@ -242,18 +242,22 @@ async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<
   return { kind: "ok", reads };
 }
 
-/** `unreadable` skips a finished task's PR the forge would not answer: its one reading is not worth a read a minute. */
-function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>): Target[] {
+/**
+ * A finished task is read once a term: `read` holds those already read, `unreadable` the PRs the
+ * forge would not answer. Its chip is not worth a read a minute, and an abandoned open PR would
+ * otherwise be read for as long as the store keeps the task.
+ */
+function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>, read: ReadonlySet<string>): Target[] {
   const byKey = new Map<string, Target>();
   for (const task of tasks) {
     if (!wantsPrReading(task) || task.prUrl === undefined) continue;
-    if (!isPrReadable(task.state) && unreadable.has(task.prUrl)) continue;
+    if (!isPrReadable(task.state) && (unreadable.has(task.prUrl) || read.has(task.id))) continue;
     const pr = parseGithubPr(task.prUrl);
     if (pr === null) continue;
     // GitHub names are case-insensitive: two spellings are one PR.
     const key = `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
     const known = byKey.get(key);
-    const entry = { id: task.id, prUrl: task.prUrl };
+    const entry = { id: task.id, prUrl: task.prUrl, finished: !isPrReadable(task.state) };
     if (known === undefined) byKey.set(key, { pr, tasks: [entry] });
     else known.tasks.push(entry);
   }
@@ -275,6 +279,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   let state: "ok" | Failure = "ok";
   let failures = 0;
   const unreadable = new Set<string>();
+  const readThisTerm = new Set<string>();
 
   const enter = (next: "ok" | Failure): void => {
     if (next === state) return;
@@ -285,7 +290,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
 
   /** The class the poll ended in, or null when there was nothing to poll. */
   async function poll(): Promise<"ok" | Failure | null> {
-    const wanted = targets(deps.tasks(), unreadable);
+    const wanted = targets(deps.tasks(), unreadable, readThisTerm);
     if (wanted.length === 0) return null;
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
@@ -301,6 +306,9 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       chunk.forEach((target, i) => {
         const read = answer.reads[i];
         if (read === undefined) return;
+        // Any answer spends a finished task's read, an unusable one too: else it is asked every poll.
+        // Only a task finished when targeted: one read while placed still owes its finished read.
+        for (const task of target.tasks) if (task.finished) readThisTerm.add(task.id);
         if (read.kind === "none") {
           const url = target.tasks[0]?.prUrl;
           if (read.error !== null && url !== undefined && !unreadable.has(url)) {

@@ -89,8 +89,8 @@ export function isUnconfirmed(task: Task): boolean {
  * leaving `lost` drops when its machine went absent; `reservedAt` survives only
  * from `reserved` into `lost`. Finishing drops the PR reading (`pr`) unless it
  * is merged: any other reading can go stale (open, or closed and reopened) and
- * with none `wantsPrReading` reads the finished task once more, but a merge
- * can't un-merge.
+ * the poller reads the finished task once more (`wantsPrReading`), but a
+ * merge can't un-merge.
  */
 export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
