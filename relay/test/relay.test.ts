@@ -9,7 +9,7 @@ import {
   type RelayToAppFrame,
   type RelayToDaemonFrame,
 } from "@seance/shared";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import {
   connectApp,
   connectDaemon,
@@ -1101,6 +1101,19 @@ describe("scheduler leadership", () => {
     return id;
   }
 
+  // One hub for the suite: a test that throws before its `leave` would keep its
+  // leader nominated and fail every test after it. A no-op when tests pass.
+  afterEach(async () => {
+    if (beats.size === 0) return;
+    for (const daemon of [...beats.keys()]) {
+      quiet(daemon);
+      daemon.close();
+    }
+    const app = await connectApp(hub);
+    await nextRegistry(app, (frame) => frame.scheduler === null);
+    app.close();
+  });
+
   afterAll(async () => {
     for (const beat of beats.values()) clearInterval(beat);
     await hub.dispose();
@@ -1328,21 +1341,34 @@ describe("scheduler leadership", () => {
     const leaderId = listedId();
     const leader = await join(watcher, leaderId, { roles: SCHEDULER });
     await leader.daemon.waitFor<LeadFrame>("lead");
+    const probeId = await newDeviceId();
+    const probe = await join(watcher, probeId);
 
     asker.send({ t: "msg", env: envelope(SCHEDULER_ID, APP_ID) });
     await leader.daemon.waitFor<DaemonMsg>("msg");
-    // No app is left to hear it. A socket the relay still lists fails its send,
-    // which also logs `apps=0`, so the close race does not matter.
+    // No app is left to hear it. Not the client's close event: workerd can take
+    // a send to a socket whose close it has not dispatched yet without throwing,
+    // and a credited reply the relay counts as reached is rightly quiet. A roleless
+    // daemon's reply holds no credit and always logs, so its `apps=` is the relay's own count.
     asker.close();
     watcher.close();
+    const linesFor = (iv: string): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${iv}"`));
+    for (;;) {
+      const env = envelope(APP_ID, probeId);
+      probe.daemon.send({ t: "msg", env });
+      // oxlint-disable-next-line no-await-in-loop -- each probe reads the count the last one left
+      await pollUntil(() => linesFor(env.iv).length > 0, "a probe's fanout line");
+      if (linesFor(env.iv).some((line) => line.includes("apps=0"))) break;
+    }
     const answer = envelope(APP_ID, leaderId);
-    const lines = (): readonly string[] => hub.logs().filter((line) => line.includes(`iv="${answer.iv}"`));
     leader.daemon.send({ t: "msg", env: answer });
-    await pollUntil(() => lines().length > 0, "the lost answer's fanout line");
-    expect(lines()).toEqual([expect.stringContaining("apps=0")]);
+    await pollUntil(() => linesFor(answer.iv).length > 0, "the lost answer's fanout line");
+    expect(linesFor(answer.iv)).toEqual([expect.stringContaining("apps=0")]);
 
-    quiet(leader.daemon);
-    leader.daemon.close();
+    for (const daemon of [leader.daemon, probe.daemon]) {
+      quiet(daemon);
+      daemon.close();
+    }
   });
 
   test("past the credit cap the surplus answers log: 17 requests, 17 answers, one line — the last", async () => {
