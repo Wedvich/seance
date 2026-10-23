@@ -177,8 +177,8 @@ green:
   admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
   lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an
-  event — a session event or a branch state — moves only a task placed on the machine that
-  sealed it. Don't let changes drift from them.
+  event — a session event or a branch state — moves only a task placed (or, for a session event,
+  reserved) on the machine that sealed it. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
@@ -191,9 +191,14 @@ green:
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
-  one connection whose pid came back null. Its one effect past ingest is poking the bound
+  one connection whose pid came back null. Its two acts past ingest are poking the bound
   exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
-  fixed argv and an env built from the scan — no frame field reaches either.
+  fixed argv and an env built from the scan — no frame field reaches either — and a `done`
+  report, which only `report_task_done` sends (`seanced session-event` drops a `done` unsent):
+  the daemon notes it in the launch ledger and forwards it once, both for the pane's own task
+  only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
+  no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
+  only from the machine it was placed or reserved on.
   Giving it any other act, or taking a session or task id from the frame, is the same kind of
   change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP

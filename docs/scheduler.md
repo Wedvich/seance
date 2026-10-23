@@ -377,8 +377,8 @@ the code, so M4 runs in waves:
 
 - Auth health needs the `/usage` refresh, since a refresh that fails on auth is the signal.
 - Web Push and Linear need `settings`.
-- Stacking and Linear need an authoring surface. No client writes `deps`, `batch` or `linear`
-  today.
+- Stacking and Linear need an authoring surface. Built (wave 1, 2026-10-23): MCP and the PWA
+  write `deps`, `batch` and `linear` (below).
 - The disk and auth alerts need Web Push.
 
 Each item still lands as its own PR with its own DESIGN.md subsection. Budget one follow-up PR per
@@ -399,7 +399,7 @@ precede. Wave 2 waits on the wave-1 item named.
 | 0    | One schema PR for every M4 shape — **Done**                        | the owner's calls below                                                | —                        |
 | 0    | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
 | 0    | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
-| 1    | Authoring surface (new)                                            | —                                                                      | M                        |
+| 1    | Authoring surface (new) — **Done**                                 | —                                                                      | M                        |
 | 1    | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
 | 1    | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1    | Skills filter                                                      | —                                                                      | S; M with project skills |
@@ -475,25 +475,33 @@ precede. Wave 2 waits on the wave-1 item named.
 
 **Items.**
 
-- **Authoring surface (new, M3 review R3).** MCP and PWA fields for `deps`, `batch` and a Linear
-  link. The library, the record and the leader support all three, and the app client already
-  bounds a batch index at `createTask`, but no client writes them. Without this item, stacking
-  and Linear ship unusable. Exit: a task enqueued from MCP and from the PWA with an
-  `after: opened` dep and a batch is admitted with both (e2e).
+- **Authoring surface (new, M3 review R3) — Done (2026-10-23).** MCP and PWA fields for `deps`,
+  `batch` and a Linear link. The library, the record and the leader supported all three, and the
+  app client bounds a batch index at `createTask`; this item is the clients that write them. MCP:
+  `spawn_session`'s `after`, `until` and `linear`, and `queue_batch`. PWA: the auto form's AFTER and
+  BATCH tiles, the settle-on-report switch and the Linear field, and Follow up on queue rows. DESIGN.md
+  records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
+  and from the PWA with an `after: opened` dep and a batch is stored with both and held `blocked`
+  until its predecessor is done.
+  Linear's own relations are not read yet: that is the Linear item below.
   - _Decided (#21), done by self-report:_ a task can stay open past its merge until its own
     session says it is done — "after X is in prod" is X's session merging, watching the deploy
     and then reporting. Three shapes, all in the schema PR:
     - a `done` session-event state, bound to the sender's pane by peer pid like every session
       event, so a session can finish only its own task;
     - a per-task `until: "merged" | "reported"` (default `merged`). Under `reported` a merge is
-      recorded but does not settle the task; only the report, `mark-done` or Linear Done does;
+      recorded but does not settle the task; its session's `done` report, `mark-done`, Linear Done, or a session ending clean with no PR does;
     - `after: "done"` beside `opened` and `merged`, released by the predecessor's `done`
       whatever settled it.
 
-    The authoring surface writes all three. It is the first act session events gain beyond
-    ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_, "Session
-    events", and _Threat model_), as decided and not built. The shapes are in the schema;
-    until this item, ingest refuses `done` and `released` frees `after: "done"` only at `done`. A session that lies about being done can do no more than one
+    The authoring surface writes all three, and a client writes `until` or a `done` edge only
+    to a leader advertising `CAPABILITIES.reportedDone`. It is the first act session events
+    gain beyond ingest, so it is a threat-model change: DESIGN.md records it (_Local op socket_,
+    "Session events", and _Threat model_). The daemon notes the report in its launch ledger and
+    forwards it whatever the task's `until`; the leader settles only a `reported` task, from the
+    machine it was placed on, and ignores it otherwise. The slot is freed at the report while the
+    session may still run, and a session that cannot call the tool (a permission prompt, plan
+    mode) is settled by `mark-done`. A session that lies about being done can do no more than one
     that exits. `mark-done` stays the manual override.
 - **`failed` from exit status (new, M3 review R3).** Today a session that crashes with no PR
   settles `done` by `session`, and `done` releases every edge (`released` in
@@ -660,8 +668,8 @@ precede. Wave 2 waits on the wave-1 item named.
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal. Needs settings
   and the authoring surface. _Decided (#18):_
   - Only `blocks` / `blocked by` count; `related` and `duplicate` carry no order.
-  - A blocks B maps to B `after: "done"` on A (#21), so a block behind a deploy works when A is
-    `until: "reported"`, and is a merge otherwise. Not `opened` (every block would stack) nor
+  - A blocks B maps to B `after: "done"` on A (#21; the authoring surface now writes the edge and
+    `until`), so a block behind a deploy works when A is `until: "reported"`, and is a merge otherwise. Not `opened` (every block would stack) nor
     `merged` (a deploy could not be waited on).
   - Linear Done against an open PR settles the task as a manual mark-done would, with a new
     `doneBy: "linear"`: a person closed the issue, so its dependents release. A later merge

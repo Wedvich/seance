@@ -105,7 +105,7 @@ a production change.
   the user flows end to end — machine discovery, spawns and their failures,
   dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
   between the doubles and the real thing. One file per area (`app`, `mcp`, `leader`,
-  `auto`), each booting the same stack of its own through `startSuite` in `e2e/suite.ts`,
+  `auto`, `authoring`), each booting the same stack of its own through `startSuite` in `e2e/suite.ts`,
   so a new area is a new file and never an edit to another's setup. The files share one
   process, so `startSuite` settles 500 ms around the relay's boot and dispose, as the inline
   sleeps in `relay.test.ts` and `store.test.ts` do; keep that shard off `--parallel`, which would rebuild the worker bundle per

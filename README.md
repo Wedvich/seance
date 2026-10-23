@@ -250,7 +250,11 @@ user-scope entry lives in one Claude config directory, so `mcp install` register
 it in every exclave's (`~/.claude`, plus `~/.claude-<name>` for each name in
 `~/.exclaves`) and in the shell's own `CLAUDE_CONFIG_DIR` when no exclave owns it.
 An exclave whose config directory doesn't exist yet is skipped: add an exclave
-later and re-run it.
+later and re-run it. A task that settles on its session's own done report
+(`until: "reported"`) needs it in the exclave the session runs in, since the session
+reports through this server's `report_task_done` tool, which must be allowed there
+(`mcp__seance__report_task_done` in that exclave's permissions): a call stopped at a
+permission prompt reports nothing, and the task then waits for **Mark done**.
 
 ### 7. Optional: spawn from Raycast (macOS)
 
@@ -415,7 +419,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `queue_batch` (several tasks with a shared strategy and dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` with `machine: "auto"` queues the task in the relay, as the app's
