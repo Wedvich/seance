@@ -478,10 +478,10 @@ precede. Wave 2 waits on the wave-1 item named.
 - **Authoring surface (new, M3 review R3) — Done (2026-10-23).** MCP and PWA fields for `deps`,
   `batch` and a Linear link. The library, the record and the leader supported all three, and the
   app client bounds a batch index at `createTask`; this item is the clients that write them. MCP:
-  `spawn_session`'s `after`, `until`, `linear` and `pin` (a machine, an exclave or both — the
-  M2 placement restriction; added 2026-10-23, DESIGN.md "`pin` on auto"), and `queue_batch`. PWA: the auto form's AFTER and
-  BATCH tiles, the settle-on-report switch and the Linear field, and Follow up on queue rows. DESIGN.md
-  records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
+  `spawn_session`'s `after`, `until`, `linear` and `pin` (a machine, an exclave or both — the M2
+  placement restriction; added 2026-10-23, DESIGN.md "`pin` on auto"), and `queue_batch`. PWA: the
+  auto form's AFTER and BATCH tiles, the settle-on-report switch and the Linear field, and Follow
+  up on queue rows. DESIGN.md records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
   and from the PWA with an `after: opened` dep and a batch is stored with both and held `blocked`
   until its predecessor is done.
   Linear's own relations are not read yet: that is the Linear item below.

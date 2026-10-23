@@ -1283,14 +1283,17 @@ describe("resolvePin", () => {
     expect(resolved.error).toContain("WSL (device-wsl), wsl (device-wsl2)");
   });
 
-  test("an exclave the pinned machine does not report is refused with its exclaves; one reporting none takes any", () => {
+  test("an exclave the pinned machine does not report is refused with its exclaves; a machine reporting none is refused", () => {
     expect(resolvePin(pinMachines(), { machine: "WSL", exclave: "work" })).toEqual({
       error: 'pin.exclave "work" is not an exclave of WSL (device-wsl) — its exclaves: default',
     });
     const old = [machine({ deviceId: "device-old", name: "Old" })];
-    expect(resolvePin(old, { machine: "Old", exclave: "work" })).toMatchObject({
-      pin: { deviceId: "device-old", exclave: "work" },
-    });
+    for (const input of [{ machine: "Old" }, { machine: "Old", exclave: "work" }]) {
+      expect(resolvePin(old, input)).toEqual({
+        error:
+          "pin.machine: Old (device-old) reports no exclaves, so auto cannot place there — its daemon needs `seanced update`",
+      });
+    }
   });
 
   test("an exclave alone must be on some machine that reports exclaves, and scopes every machine to it", () => {
@@ -1301,8 +1304,10 @@ describe("resolvePin", () => {
     expect(resolvePin(pinMachines(), { exclave: "home" })).toEqual({
       error: 'pin.exclave "home" is on no machine — the fleet\'s exclaves: default, work',
     });
-    // Nothing reports exclaves: nothing to judge the name by, as nothing can run auto either.
-    expect(resolvePin(autoMachines(), { exclave: "home" })).toMatchObject({ pin: { exclave: "home" } });
+    // Nothing reports exclaves: no clone carries one, so nothing could be placed.
+    expect(resolvePin(autoMachines(), { exclave: "home" })).toMatchObject({
+      error: expect.stringContaining("no machine reports exclaves"),
+    });
   });
 });
 
@@ -1375,6 +1380,7 @@ describe("spawn_session on auto, pinned", () => {
     const cases: [Record<string, unknown>, string][] = [
       [{}, "pin names neither a machine nor an exclave"],
       [{ machine: "" }, "pin.machine is empty"],
+      [{ machine: "m".repeat(65) }, "pin.machine is 65 characters; at most 64"],
       [{ exclave: "" }, "pin.exclave is empty"],
       [{ exclave: "x".repeat(65) }, "pin.exclave is 65 characters; at most 64"],
     ];

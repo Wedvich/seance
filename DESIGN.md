@@ -4715,11 +4715,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   that can read the record keeps the pin. `machine` is a name or deviceId, resolved by
   `resolveMachine` at submit time and stored as the deviceId only: an unknown name is refused
   listing the machines, a shared one listing their deviceIds. `exclave` is checked against the
-  pinned machine's reported exclave ids, or with no machine against every machine's; a machine
-  reporting none cannot vouch for or against a name (the leader never places on it,
-  `exclaves_unknown`), so only reporting machines are asked, and with none reporting the name is
-  taken as given. A pin with neither field, an empty one, or an exclave past
-  `TASK_SPEC_LIMITS.placement` is refused before the relay is dialled; a named machine refuses `pin`
+  pinned machine's reported exclave ids, or with no machine against every machine's. A machine
+  reporting none is refused as a pin target (the leader never places on it, `exclaves_unknown`,
+  and its clones carry no exclave), naming `seanced update`; an exclave alone is refused likewise
+  while no machine reports any. A pin with neither field, an empty one, or a machine or exclave
+  past `TASK_SPEC_LIMITS.placement` is refused before the relay is dialled; a named machine refuses `pin`
   with the other auto-only fields. **`repo` under a pin** is resolved by `resolveOrigin` against the
   pin's scope only — the pinned machine (or every machine), its clones cut to the pinned exclave by
   `RepoEntry.exclave`, as the leader's clone match is — so a name ambiguous or absent across the

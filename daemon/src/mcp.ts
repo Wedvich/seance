@@ -144,6 +144,9 @@ function pinInputError(pin: PinInput | undefined): string | null {
   if (pin === undefined) return null;
   if (pin.machine === undefined && pin.exclave === undefined) return "pin names neither a machine nor an exclave";
   if (pin.machine === "") return "pin.machine is empty";
+  if (pin.machine !== undefined && pin.machine.length > TASK_SPEC_LIMITS.placement) {
+    return `pin.machine is ${pin.machine.length} characters; at most ${TASK_SPEC_LIMITS.placement}`;
+  }
   return pin.exclave === undefined ? null : pinExclaveError(pin.exclave);
 }
 
@@ -154,9 +157,10 @@ function pinInputError(pin: PinInput | undefined): string | null {
  * repo name is read against, since a name can be ambiguous across the fleet yet
  * mean one clone where the task may run.
  *
- * An exclave is checked only against machines that report exclaves: one that
- * reports none is never a candidate for `auto` (`exclaves_unknown`), so it
- * cannot vouch for a name, and with none reported at all nothing can be judged.
+ * A machine that reports no exclaves is never a candidate for `auto`
+ * (`exclaves_unknown`), and its clones carry no exclave either, so a pin that
+ * names it — or an exclave while no machine reports any — could never place and
+ * is refused.
  */
 export function resolvePin(
   machines: readonly Machine[],
@@ -178,7 +182,12 @@ export function resolvePin(
     if ("error" in resolved) return { error: `pin.machine: ${resolved.error}` };
     const target = resolved.machine;
     const ids = (target.exclaves ?? []).map((info) => info.id);
-    if (exclave !== undefined && ids.length > 0 && !ids.includes(exclave)) {
+    if (ids.length === 0) {
+      return {
+        error: `pin.machine: ${target.name} (${target.deviceId}) reports no exclaves, so auto cannot place there — its daemon needs \`seanced update\``,
+      };
+    }
+    if (exclave !== undefined && !ids.includes(exclave)) {
       return {
         error: `pin.exclave "${exclave}" is not an exclave of ${target.name} (${target.deviceId}) — its exclaves: ${ids.join(", ")}`,
       };
@@ -191,7 +200,13 @@ export function resolvePin(
   }
   if (exclave === undefined) return { error: "pin names neither a machine nor an exclave" };
   const reported = [...new Set(machines.flatMap((machine) => (machine.exclaves ?? []).map((info) => info.id)))];
-  if (reported.length > 0 && !reported.includes(exclave)) {
+  if (reported.length === 0) {
+    return {
+      error:
+        "pin.exclave: no machine reports exclaves, so auto cannot place anywhere yet — daemons need `seanced update`",
+    };
+  }
+  if (!reported.includes(exclave)) {
     return {
       error: `pin.exclave "${exclave}" is on no machine — the fleet's exclaves: ${reported.toSorted().join(", ")}`,
     };
@@ -485,7 +500,9 @@ const PIN_FIELD = z
     machine: z
       .string()
       .optional()
-      .describe("Machine name (or deviceId) from list_machines. A name two machines share is refused: use a deviceId"),
+      .describe(
+        `Machine name (or deviceId) from list_machines. A name two machines share is refused: use a deviceId. At most ${TASK_SPEC_LIMITS.placement} characters`,
+      ),
     exclave: z
       .string()
       .optional()
@@ -822,7 +839,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (or only the exclave, or neither, under a pin), and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (under a pin, only what the pin leaves open), and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()

@@ -437,7 +437,8 @@ the scheduler's recent tasks with where each landed and why, and any pauses in f
 `repo` is a repo name from `list_machines` (or its origin, when the name means different
 repos on different machines). `pin: { machine?, exclave? }` restricts where it may run — the
 task waits for a slot there rather than going elsewhere — and `repo` is then the name as the
-pinned machine lists it; an unknown or ambiguous machine, or an unknown exclave, is refused. The queue is the relay's, so a task waiting for capacity
+pinned machine lists it; an unknown or ambiguous machine, an unknown exclave, or a machine whose
+daemon reports no exclaves is refused. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
 It needs the key in the MCP process itself: on a box where only the daemon can read
