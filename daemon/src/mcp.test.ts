@@ -218,6 +218,21 @@ describe("mcp tools", () => {
     lazy.stop();
   });
 
+  test("list_machines lists each machine's exclave ids, and none for a machine that reports none", async () => {
+    const machines = [
+      machine({ exclaves: [exclave("default"), exclave("work")] }),
+      machine({ deviceId: "device-2", name: "Old Box" }),
+    ];
+    const lazy = new LazyRelay({ create: () => fakeRelay(machines) });
+    const client = await connectedClient(lazy);
+    const [updated, old] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    ) as Record<string, unknown>[];
+    expect(updated?.exclaves).toEqual(["default", "work"]);
+    expect(old).not.toHaveProperty("exclaves");
+    lazy.stop();
+  });
+
   // A leader on an older build is what made the queue look wrong; this is how it shows.
   test("list_machines names each machine's build and marks the scheduler leader only once its proof verified", async () => {
     const source = { sha: "0123456789abcdef".repeat(2) + "01234567", commitTs: 1_700_000_000_000, branch: "main" };
@@ -1608,6 +1623,32 @@ describe("get_queue", () => {
       ],
     });
     expect(fake.requests.map((r) => `${r.op}@${r.deviceId}`)).toEqual([`queue@${SCHEDULER_ID}`]);
+    lazy.stop();
+  });
+
+  test("shows a task's pin, naming its machine where the fleet knows it", async () => {
+    const pinned = (id: string, pin: NonNullable<Task["spec"]["pin"]>) =>
+      task({ id, state: "ready", spec: { repo: ORIGIN, mode: "worktree", pin } });
+    const fake = leaderRelay([
+      {
+        tasks: [
+          pinned("t-1", { deviceId: "device-2", exclave: "work" }),
+          pinned("t-2", { deviceId: "device-gone" }),
+          pinned("t-3", { exclave: "default" }),
+          task({ id: "t-4", state: "ready" }),
+        ],
+        at: 6_000,
+      },
+    ]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks.map((t: { pin?: unknown }) => t.pin)).toEqual([
+      { machine: "Linux Box", deviceId: "device-2", exclave: "work" },
+      { deviceId: "device-gone" },
+      { exclave: "default" },
+      undefined,
+    ]);
     lazy.stop();
   });
 

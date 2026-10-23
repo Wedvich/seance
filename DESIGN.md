@@ -4725,7 +4725,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   `RepoEntry.exclave`, as the leader's clone match is — so a name ambiguous or absent across the
   fleet works as the pinned machine lists it, and an origin with no clone where the task is pinned
   is refused rather than queued to wait forever. Unpinned resolution is unchanged. `list_machines`
-  does not list exclave ids; the refusal names them.
+  lists each machine's exclave ids (`exclaves`, absent on a machine reporting none; the
+  relay-unreachable local fallback entry omits it, since `auto` needs the relay anyway), and
+  `get_queue` shows a task's `pin`, its deviceId named by the registry (or the decision's
+  candidates) where known, so an agent learns pin targets without a refusal.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
