@@ -180,6 +180,15 @@ describe("deriveMachines", () => {
     expect(labels({ h: 100, at: Date.UTC(2027, 0, 1) / 1000 - 1 })).toEqual(["5h 100%", "7d 40%"]);
   });
 
+  test("the credits bar is never green: yellow below the red threshold", () => {
+    const level = (c: number): string | undefined => {
+      const quota = [{ x: 0, s: "cache" as const, at: S - 60, h: 100, c }];
+      const [account] = deriveMachines([machine({ status: { at: S, scan: 1, quota } })], NOW, NO_LEADER).accounts;
+      return account?.bars.find((bar) => bar.label === "Credits")?.level;
+    };
+    expect([level(0), level(74), level(75), level(89), level(90)]).toEqual(["warn", "warn", "warn", "warn", "err"]);
+  });
+
   // The newest observer is asleep, or predates `metrics`: any online host still
   // has some history, and with none the card offers no chart at all.
   test("an account's history comes from another online host when the newest can't serve it", () => {
