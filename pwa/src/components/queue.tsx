@@ -141,8 +141,19 @@ export function QueueScreen(props: {
                   </div>
                 </div>
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {(row.canMarkDone || row.canCancel) && (
+                {(row.pr !== null || row.canMarkDone || row.canCancel) && (
                   <div className="queue-actions">
+                    {row.pr !== null && (
+                      <a
+                        className="fleet-badge queue-pr"
+                        href={row.pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Open pull request ${row.pr.label}`}
+                      >
+                        {row.pr.label}
+                      </a>
+                    )}
                     {row.canMarkDone && (
                       <button
                         type="button"

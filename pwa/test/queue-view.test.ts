@@ -196,6 +196,20 @@ describe("deriveQueue", () => {
     expect(rowOf({ state: "lost" }).markDoneEndsSession).toBe(true);
   });
 
+  test("a reported PR is the row's chip, numbered where its URL names one", () => {
+    const prOf = (prUrl?: string) =>
+      deriveQueue(state(ok([task("a", { state: "awaiting-merge", ...(prUrl === undefined ? {} : { prUrl }) })])), NOW)
+        .sections[0]?.rows[0]?.pr;
+    expect(prOf("https://github.com/acme/app/pull/123")).toEqual({
+      url: "https://github.com/acme/app/pull/123",
+      label: "#123",
+    });
+    expect(prOf("https://gitlab.com/acme/app/-/merge_requests/7/")?.label).toBe("#7");
+    expect(prOf("https://github.com/acme/app/pull/123/files")?.label).toBe("#123");
+    expect(prOf("https://example.com/review?id=5")?.label).toBe("PR");
+    expect(prOf()).toBeNull();
+  });
+
   test("a row is busy while its action is in flight", () => {
     const view = deriveQueue(state(ok([task("a"), task("b")]), { taskAction: { taskId: "b", op: "cancel" } }), NOW);
     expect(view.sections[0]?.rows.map((r) => r.busy)).toEqual([false, true]);
