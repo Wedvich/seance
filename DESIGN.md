@@ -740,6 +740,17 @@ nothing checked it. The last is the gap they leave.
   broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
   for an `until: "reported"` task.
+- **A PR status is read by the leader's own `gh`, never carried by a frame** (2026-10-23, Scheduler,
+  "PR status"). `Scheduler.onPrStatus` is reachable from the leader's poller alone, never
+  from `onEvent` or a request handler, and nothing on the wire carries a reading. It is bound
+  to the `prUrl` the record held when read, which only the machine the task was placed on, or
+  the app that created the queued record carrying it (a PSK holder, trusted as for the rest of
+  the record: `bindTaskRecord` checks only the state on a create), can have set
+  (`sessionChange`), and `prBound` drops it whenever a write moves that URL. Owner,
+  repo and number reach `gh` as GraphQL variables under argv-array exec, the URL first held to
+  `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
+  in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
+  case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -2339,7 +2350,28 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   settles `done` by `session` and a nonzero one `failed`, `session_failed` — a lying report can do
   no more than exiting can. The report counts only from the machine the task was placed or
   reserved on, and under `until: "merged"` it is ignored. A reported task past the merge
-  expiry fails `merge_expired` as "never reported done". A live session's newer PR URL is
+  expiry fails `merge_expired` as "never reported done". **The forge's word** (2026-10-23, "PR status"):
+  the leader's own `gh` reads each unfinished task's GitHub PR, and a PR it finds `merged` settles
+  a `running`, `needs-input`, `lost` or `awaiting-merge` task `done`, `doneBy: "merged"`, with none
+  of `branch-state`'s gates: no `pushed` (the forge answers for the exact PR the session
+  reported), `here` tasks included. Only a merge into the repo's default branch counts: GitHub's
+  `MERGED` is merged into the PR's base, so a stacked PR merged into its parent's branch is
+  recorded (`pr.stacked`, still drawn as merged) and settles nothing, or `after: "merged"`
+  dependents would be released with nothing on main (a base or default branch the answer does
+  not name counts as not the default). A settle off a placed task (`running`, `needs-input`,
+  `lost`) marks it `leftRunning`, as `mark-done` does a `lost` one, and leaves its session alone,
+  as a `branch-state` settle does: the slot is freed while the session may still run, so the
+  exclave can be over-committed until it exits, and the card says the session may still be running.
+  Under `until: "reported"` it only records `merged: true`, as above. `closed` is recorded in
+  `Task.pr` and moves nothing, and a finished task is never written. The local-git merge above stays as the
+  fallback where `gh` is absent. No ordering of one reading against the last by `at`: it would
+  compare two leaders' clocks. Known gaps: only a task's newest PR is read, so a session that
+  opens several is settled by the last; a task marked done by hand is not polled; the forge's
+  "open" does not release `after: "opened"`, which still reads the recorded `prUrl`; and
+  `absorb` keeps `prUrl` across a branch switch, so a session that opens PR 1, switches
+  branch for more work and has PR 1 merge before a new `gh pr create` settles the task on PR 1
+  with the new branch's work unpushed. Accepted: /ship creates its branches by hand, so a
+  recorded branch cannot be required to match the PR's head. A live session's newer PR URL is
   recorded even when its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
   the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
   within one branch, so the first pushed report with a PR releases `opened` for good — and
@@ -2800,6 +2832,64 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   it is load for a state the ledger and `progress` already carry, and a leader that missed one reads it
   back anyway. Reading an upstream (`%(upstream:track)`, `branch.<b>.merge`): `--no-track` branches
   have none, so it would say nothing for the branches this exists for.
+
+### PR status (`daemon/src/pr-status.ts`) — added 2026-10-23
+
+Branch state sees a merge only through the clone that launched the task, so a PR opened from a
+branch the daemon does not track (a /ship session creates its branches by hand, a hub opens PRs
+in sub-repos) never settled, and the PWA could say nothing of a PR beyond its number. The
+forge knows. The scheduler leader reads it: every minute from the start of its term (after
+takeover's load) it takes the `prUrl` of every unfinished task that matches
+`https://github.com/<owner>/<repo>/pull/<n>` and asks GitHub for the lot with its own `gh`.
+
+- **One batched GraphQL call per chunk of 50.** Each PR is an alias (`p0`, `p1`, …) of
+  `repository(owner:, name:){ defaultBranchRef{ name } pullRequest(number:){ state isDraft
+  baseRefName commits(last: 1){ … statusCheckRollup { state } } } }`, so a poll of fifty PRs
+  costs about one rate-limit point. The result becomes `Task.pr = { state, checks?, stacked?, at }`:
+  `open`, `draft`, `merged` or `closed`; the head commit's rollup as `pending`, `passing` or
+  `failing`; `stacked` on a merge whose base is not the default branch; `at` the leader's
+  clock at the read. Two tasks on one PR share an alias.
+- **Variables, never text.** Owner, repo and number reach `gh` only as GraphQL variables: strings
+  with `-f` (`-F` would read `@file` and coerce types), the number, which the URL regex has
+  already limited to a positive GraphQL `Int`, with `-F`. The query text is built from the alias
+  indices alone, and `gh` runs by argv array, so a `prUrl` a session chose can steer what is
+  read to another PR but never what is run. `--hostname github.com` pins it against `GH_HOST`;
+  `GH_PROMPT_DISABLED` keeps it from asking anything.
+- **Outcome classes.** `gh` missing from the PATH the service captured at install
+  (`missing`), exit 4, its "not logged in", or a revoked or expired token (exit 1, a body with
+  no `data` and a `Bad credentials` message or a 401 `status`: `unauthenticated`), a timeout or
+  stdout that is no GraphQL answer (`failed`), and otherwise ok — including a non-zero exit: one alias GitHub
+  cannot resolve (deleted repo, no access) makes `gh` exit 1 with the whole answer on stdout
+  and `null` at that alias, so the others still land and the bad one warns once per URL per
+  term with its GraphQL error `type` (`NOT_FOUND`, `FORBIDDEN`). A failing class writes
+  nothing, warns once on entering it with the remedy (never `gh`'s stderr, which can carry a
+  token fragment or a URL), backs the next poll off from a minute toward 15 minutes, and says
+  so once when it recovers. Nothing to poll means `gh` never runs.
+- **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
+  so the write has the per-task serial chain, the term fence and the version floor of every other,
+  and apps are nudged. A reading for a URL other than the task's current `prUrl` writes nothing,
+  nor does one on a task that is finished, waiting or reserved: the poller and `prChange` ask
+  one predicate for which tasks a reading can change (`isPrReadable`, `shared/src/task-phase.ts`),
+  so nothing is polled that cannot be applied. An unchanged reading writes
+  nothing either — until its `at` is `PR_STATUS_REFRESH_MS` (5 minutes) old, when it is
+  written again: the PWA greys a chip whose reading is past `PR_STATUS_STALE_MS` (10 minutes)
+  so that grey means the leader stopped reading, and that needs a fresh `at` on a PR that did
+  not change. A merged chip never greys, so an unchanged merged reading is never refreshed (an
+  `until: "reported"` task can wait a week). The PWA ages a reading against the leader's
+  clock, as the phone estimates it from the `queue` reply's `at` (`QueueState.skew`, local,
+  not on the wire), since `at` is the leader's. That costs about twelve writes and nudges an hour per polled task. There is no
+  ordering check against the stored `at`: within a term the poller never overlaps and `#update`
+  is serial per task, and a past term's write is refused by the term fence, so a check could
+  only compare two leaders' clocks, which drift after a host sleeps, and block a merge for
+  good. A reading behind the stored `at` counts as not fresh, so a slower leader's refresh lands.
+- **`prBound`.** A reading speaks only for the URL it was taken for, and `prUrl` changes on
+  several paths (`absorb` on a session event, a resumed `progress` entry), so `#update` drops
+  `pr` from any write that moved `prUrl` rather than each path remembering to.
+- **Rejected.** A poller in each daemon: the machine a session ran on may hold no GitHub token,
+  cannot see a hub's sub-repo PRs, and would send one `branch-state`-like frame per daemon for a
+  fact only one reader needs. Webhooks: the relay is blind and holds no secrets worth a
+  GitHub-facing endpoint; later, if polling's latency ever matters. REST per PR: one call each,
+  three for checks, against one per fifty.
 
 ## Daemon (`seanced`, Bun)
 

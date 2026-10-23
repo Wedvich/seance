@@ -35,7 +35,7 @@ stay as they are; the table says which word each one means.
 | Quota telemetry   | One source, the config dir's `cachedUsageUtilization` (M1's), which the daemon refreshes through `claude --safe-mode -p /usage` once it is stale (M4) → last value + `resets_at` floor. M4 retires M2's session-reported `rate_limits` and replaces the planned OAuth poll                                                                                                                  |
 | Task              | Free-form (repo + prompt + spawn opts), optional Linear link                                                                                                                                                                                                                                                                                                                                |
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
-| Done signal       | Layered: PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                                                               |
+| Done signal       | Layered: PR merged (leader, forge: GitHub via `gh`) / PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                  |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
 | Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                                                                                                                                     |
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
@@ -189,7 +189,7 @@ same `onAlert` fires a Web Push ("Spending credits on <account> for <task>"), on
 per window, not per task; the de-dupe outliving a leader change is M4's (Settings and Web Push,
 below).
 
-**Done detection, ahead.** Linear Done (M4, if linked, polled). A session that ends with no PR
+**Done detection, ahead.** The forge is built: the leader reads each GitHub PR with its own `gh` and settles a merge (DESIGN.md, "PR status"). Linear Done (M4, if linked, polled). A session that ends with no PR
 and a nonzero exit is `failed` since M4's _`failed` from exit status_, which fails its
 dependents; a PR-less end with a clean or unknown exit is still `done` by `session`.
 
@@ -198,8 +198,8 @@ token. Under a moving leader there is no Proxmox token at all (M4 #17: the LXC d
 only their own container); the VAPID keypair and Linear key live in the store (`settings`),
 opened by whichever daemon leads — the PSK is already the only trust boundary, so sealing them
 under it adds no second one. The leader alone writes `settings`, and every PSK holder can read
-it (Settings and Web Push, below, #9). Linear polling is optional from day one, since daemon-local merge detection is the
-primary done signal.
+it (Settings and Web Push, below, #9). Linear polling is optional from day one, since the leader's forge read and daemon-local merge detection are the
+primary done signals.
 
 ## Milestones
 

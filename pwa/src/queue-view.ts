@@ -1,9 +1,12 @@
 import {
+  PR_STATUS_STALE_MS,
   QUEUE_MAX_TASKS,
   TASK_PHASES,
   TASK_SPEC_LIMITS,
   type DepAfter,
   type PauseHold,
+  type PrChecks,
+  type PrState,
   type Task,
 } from "@seance/shared";
 import { taskHeadline } from "./decision-view.ts";
@@ -45,8 +48,23 @@ export interface QueueRow {
   /** Its place in a batch, one line; null outside one. */
   readonly batch: string | null;
   readonly busy: boolean;
-  /** The PR its session reported, for the card's chip: `#123` where the URL names a number. */
-  readonly pr: { readonly url: string; readonly label: string } | null;
+  /**
+   * The PR its session reported, for the card's chip: `#123` where the URL names a number.
+   * `state` and `checks` are the leader's forge reading, null without one (or without checks, or
+   * once merged: a settled PR's CI says nothing more); `stale` is a reading old enough that the
+   * leader has probably stopped reading, so the chip greys.
+   */
+  readonly pr: {
+    readonly url: string;
+    readonly label: string;
+    readonly state: PrState | null;
+    readonly checks: PrChecks | null;
+    readonly stale: boolean;
+    /** The chip's `title`: the PR, what the leader read of it, and how long ago. */
+    readonly description: string;
+    /** The chip's accessible name: what following it does, then the same reading. */
+    readonly accessibleName: string;
+  } | null;
 }
 
 export interface QueueSection {
@@ -148,11 +166,34 @@ function bodyOf(task: Task, now: number): string | null {
 /** GitHub's `/pull/<n>`, GitLab's `/-/merge_requests/<n>`. */
 const PR_NUMBER = /\/(?:pull|merge_requests)\/(\d+)(?:\/|$)/u;
 
-/** `prUrl` is `https:`-checked at parse (`httpsUrl`), so it is safe as an href. */
-function prOf(task: Task): QueueRow["pr"] {
+/**
+ * `prUrl` is `https:`-checked at parse (`httpsUrl`), so it is safe as an href. `skew` is the
+ * leader's clock minus this device's (`QueueState.skew`): `pr.at` is the leader's, so ageing it
+ * against this device's clock alone would grey a chip, or keep one live, by the clocks' difference.
+ */
+function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
   if (task.prUrl === undefined) return null;
   const number = PR_NUMBER.exec(new URL(task.prUrl).pathname)?.[1];
-  return { url: task.prUrl, label: number === undefined ? "PR" : `#${number}` };
+  const label = number === undefined ? "PR" : `#${number}`;
+  const noun = number === undefined ? "pull request" : `pull request #${number}`;
+  const name = `${noun.slice(0, 1).toUpperCase()}${noun.slice(1)}`;
+  const { pr } = task;
+  const base = { url: task.prUrl, label };
+  if (pr === undefined) {
+    return { ...base, state: null, checks: null, stale: false, description: name, accessibleName: `Open ${noun}` };
+  }
+  const leaderNow = now + skew;
+  const checks = pr.state === "merged" ? null : (pr.checks ?? null);
+  const reading = [pr.state, ...(checks === null ? [] : [`checks ${checks}`]), `read ${formatSeen(pr.at, leaderNow)}`];
+  return {
+    ...base,
+    state: pr.state,
+    checks,
+    // A merge does not un-merge, so it keeps its colour however old the reading.
+    stale: pr.state !== "merged" && leaderNow - pr.at > PR_STATUS_STALE_MS,
+    description: [name, ...reading].join(" · "),
+    accessibleName: `Open ${noun} (${reading.join(", ")})`,
+  };
 }
 
 function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
@@ -170,7 +211,7 @@ function batchLine(task: Task): string | null {
   return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
 }
 
-function rowOf(task: Task, state: AppState, now: number, titles: ReadonlyMap<string, string>): QueueRow {
+function rowOf(task: Task, state: AppState, now: number, skew: number, titles: ReadonlyMap<string, string>): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
   return {
@@ -188,7 +229,7 @@ function rowOf(task: Task, state: AppState, now: number, titles: ReadonlyMap<str
     deps: depsLine(task, titles),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
-    pr: prOf(task),
+    pr: prOf(task, now, skew),
   };
 }
 
@@ -215,6 +256,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const ok = view?.kind === "ok" ? view : null;
   const tasks = ok?.tasks ?? [];
   const titles = new Map(tasks.map((task) => [task.id, titleOf(task)]));
+  const skew = ok?.skew ?? 0;
 
   const sections = SECTIONS.map(({ title, pick }) => {
     const members = tasks
@@ -222,7 +264,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, titles)) };
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles)) };
   }).filter((section) => section.rows.length > 0);
 
   const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, now));

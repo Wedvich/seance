@@ -388,6 +388,7 @@ export class SchedulerStore {
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
           at: reply.at,
+          skew: reply.at - Date.now(),
         };
       } else {
         // An older leader ignores the filter and answers its newest: only the named ids are taken.
@@ -412,6 +413,7 @@ export class SchedulerStore {
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
           at: reply.at,
+          skew: reply.at - Date.now(),
         };
       }
     } catch (err) {

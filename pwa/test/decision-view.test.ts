@@ -179,6 +179,21 @@ describe("taskHeadline on a manual done", () => {
       "It finished on Mac · default.",
     );
   });
+
+  test("a merge the leader read says so, and a lost session it never stopped is not marked done by hand", () => {
+    const machines = [machine("mac", "Mac")];
+    const at = { deviceId: "mac", exclave: "default", clone: "app", window: "w" };
+    expect(taskHeadline(task({ doneBy: "merged", assignment: at }), machines, NOW)).toBe(
+      "Its PR merged on Mac · default.",
+    );
+    const left = taskHeadline(task({ doneBy: "merged", assignment: at, leftRunning: true }), machines, NOW);
+    expect(left).toBe("Its PR merged — its session may still be running on Mac · default.");
+    expect(left).not.toContain("Marked done");
+    // Neighbours: a hand mark keeps its words, with and without a session left running.
+    expect(taskHeadline(task({ doneBy: "manual", assignment: at, leftRunning: true }), machines, NOW)).toBe(
+      "Marked done — its session may still be running on Mac · default.",
+    );
+  });
 });
 
 test("every reason has its own words", () => {
@@ -278,6 +293,16 @@ describe("the queued verdict's body", () => {
   test("a task marked done by hand makes no claim about a session; one that finished says it ended", () => {
     expect(queuedBody({ ...base, doneBy: "manual" })).toBe("Marked done by hand.");
     expect(queuedBody({ ...base, doneBy: "session" })).toBe("The session ended.");
+  });
+
+  test("a merged PR settles it in its own words, and with a session left running never says by hand", () => {
+    expect(queuedBody({ ...base, doneBy: "merged" })).toBe("Its pull request merged, so the scheduler marked it done.");
+    const left = queuedBody({ ...base, doneBy: "merged", leftRunning: true });
+    expect(left).toContain("Its pull request merged");
+    expect(left).toContain("End the session on that machine if it is still running.");
+    expect(left).not.toContain("by hand");
+    expect(left).not.toContain("machine was away");
+    expect(queuedBody({ ...base, doneBy: "manual", leftRunning: true })).toContain("Marked done by hand.");
   });
 
   test("a mark done or cancel that could not reach its machine says its session may still be running", () => {

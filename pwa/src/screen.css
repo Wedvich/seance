@@ -2086,6 +2086,9 @@
    task's row holds the chip alone. */
 .queue-pr {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   align-self: center;
   margin-right: auto;
   padding: 7px 10px 8px;
@@ -2101,6 +2104,59 @@
   content: "";
   position: absolute;
   inset: -5px -4px;
+}
+
+/* The leader's forge reading (`Task.pr`) colours the chip: merged is the one filled state, since
+   it is the one that settles the task; open and draft are outlines, draft the quiet one. A
+   reading older than the stale threshold greys, as a leader that stopped reading must not look
+   like a PR that did not change; a merge is exempt (`prOf`). The CI icon says only pending,
+   passing or failing, and the `title` carries the words; a merged chip has none (`prOf`
+   gives it no checks), its CI no longer saying anything. */
+.queue-pr-open {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.queue-pr-draft {
+  border-color: var(--fg2);
+  color: var(--fg2);
+}
+
+.queue-pr-merged {
+  background: var(--acc);
+  color: var(--acc-fg);
+}
+
+.queue-pr-closed {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.queue-pr-icon,
+.queue-pr-ci {
+  flex: none;
+}
+
+.queue-pr-ci-passing {
+  color: var(--ok);
+}
+
+.queue-pr-ci-failing {
+  color: var(--err);
+}
+
+.queue-pr-ci-pending {
+  color: var(--warn);
+}
+
+.queue-pr-stale {
+  border-color: var(--line);
+  background: none;
+  color: var(--fg2);
+}
+
+.queue-pr-stale .queue-pr-ci {
+  opacity: 0.5;
 }
 
 .queue-refresh {
