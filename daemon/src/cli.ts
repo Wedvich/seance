@@ -29,6 +29,7 @@ import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { scanExclaves, tagExclaves, userScopeTargets } from "./exclaves.ts";
 import { mcpFleetChecks } from "./fleet.ts";
+import { platformFsmonitor } from "./fsmonitor.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
 import { configDir, configPath, logPath, pruneLogPath, socketPath, statePath } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
@@ -273,6 +274,7 @@ export async function cmdReap(argv: readonly string[]): Promise<void> {
         minAgeMs: minAgeDays * DAY_MS,
         audit: reapAudit("cli", cliSink),
         pruneLogPath: pruneLogPath(),
+        fsmonitor: platformFsmonitor(),
       }),
     );
     for (const line of formatReport(report)) console.log(line);

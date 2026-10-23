@@ -5,6 +5,7 @@ import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { ExclaveScan } from "./exclaves.ts";
+import { platformFsmonitor } from "./fsmonitor.ts";
 import type { Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -178,6 +179,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
           harvest: () => ctx.endedTasks.harvestExits(),
           signal: abort.signal,
           pruneLogPath: pruneLogPath(),
+          fsmonitor: platformFsmonitor(),
         }),
       );
       for (const line of formatReport(report)) log.info(`reap: ${line}`);

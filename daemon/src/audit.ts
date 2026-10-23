@@ -374,10 +374,13 @@ export interface ReapAudit {
   /** The full tip sha is the recovery: `git branch <name> <sha>` brings the branch back. */
   readonly deletedBranch: (repo: string, name: string, sha: string, reason: string) => Promise<void>;
   readonly closedPane: (paneId: string, window: string, reason: string) => Promise<void>;
+  /** A `git fsmonitor--daemon` asked to stop (`stop`) or signalled (`signal`); pid null when unmapped. */
+  readonly stoppedMonitor: (path: string, pid: number | null, how: string) => Promise<void>;
   readonly done: (counts: {
     readonly worktrees: number;
     readonly branches: number;
     readonly panes: number;
+    readonly monitors: number;
   }) => Promise<void>;
 }
 
@@ -400,7 +403,12 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
     deletedBranch: (repo, name, sha, reason) =>
       emit(`deleted-branch repo=${quote(repo)} branch=${quote(name)} sha=${sha} reason=${reason}`),
     closedPane: (paneId, window, reason) => emit(`closed-pane pane=${paneId} window=${quote(window)} reason=${reason}`),
-    done: (counts) => emit(`done worktrees=${counts.worktrees} branches=${counts.branches} panes=${counts.panes}`),
+    stoppedMonitor: (path, pid, how) =>
+      emit(`stopped-fsmonitor path=${quote(path)} pid=${pid ?? "(unknown)"} how=${how}`),
+    done: (counts) =>
+      emit(
+        `done worktrees=${counts.worktrees} branches=${counts.branches} panes=${counts.panes} monitors=${counts.monitors}`,
+      ),
   };
 }
 
