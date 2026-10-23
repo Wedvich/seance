@@ -100,6 +100,11 @@ function fleetKey(machines: readonly Machine[]): string {
     .join(";");
 }
 
+/** A hold decides a preview's answer as much as the fleet does. */
+function holdsKey(holds: readonly PauseHold[]): string {
+  return holds.map((h) => `${h.account ?? ""}:${h.until}:${h.resumeAt ?? ""}`).join(";");
+}
+
 /** A presence or repo change asks the preview again after this quiet, so a registry burst asks once. */
 export const PREVIEW_DEBOUNCE_MS = 500;
 
@@ -420,7 +425,13 @@ export class SchedulerStore {
       next = { notice: readFailureText(err, "the queue could not be read") };
     }
     if (next !== null && !("notice" in next)) {
+      const before = this.#state.queueView;
       this.#patch({ queueView: next, ...(nudged && !this.#noticeFromRead ? {} : { queueNotice: null }) });
+      // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
+      // compare: the preview was asked under whatever holds stood.
+      if (this.#state.form.auto && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
+        this.#askPreviewSoon();
+      }
       return;
     }
     const view = this.#state.queueView;
@@ -524,6 +535,7 @@ export class SchedulerStore {
         const view = this.#state.queueView;
         if (view?.kind === "ok") this.#patch({ queueView: { ...view, holds: reply.holds } });
         else void this.refreshQueue();
+        if (this.#state.form.auto) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);

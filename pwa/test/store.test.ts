@@ -1278,6 +1278,36 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toContain("taking over");
   });
 
+  test("a hold changing asks the preview again: at once for our own, after the quiet for a read's", async () => {
+    const client = new ScriptedClient();
+    client.onPreview = async () => ({ decision: DECISION });
+    const store = await loaded(client);
+    store.selectAuto();
+    await until(() => store.getState().preview?.kind === "ok", "the first preview");
+    client.previews.length = 0;
+
+    client.onPause = async () => ({ holds: [{ until: "resume", at: 5 }] });
+    await store.pauseQueue();
+    expect(client.previews).toHaveLength(1);
+    client.onResume = async () => ({ holds: [] });
+    await store.resumeQueue();
+    expect(client.previews).toHaveLength(2);
+
+    // The same holds read back ask nothing; another device's pause does.
+    await store.refreshQueue();
+    expect(timers.armed(PREVIEW_DEBOUNCE_MS)).toBe(0);
+    client.onQueue = async () => ({ tasks: [waiting, running], holds: [{ until: "resume", at: 9 }], at: 2 });
+    await store.refreshQueue();
+    expect(timers.armed(PREVIEW_DEBOUNCE_MS)).toBe(1);
+    timers.fire(PREVIEW_DEBOUNCE_MS);
+    await until(() => client.previews.length === 3, "the preview under the new hold");
+
+    // A failed pause changed nothing to ask about.
+    client.onPause = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    await store.pauseQueue();
+    expect(client.previews).toHaveLength(3);
+  });
+
   test("a re-dialed socket reads the whole queue again, and a followed task once", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
