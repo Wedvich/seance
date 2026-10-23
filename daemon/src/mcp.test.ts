@@ -1635,7 +1635,20 @@ describe("get_queue", () => {
           pinned("t-3", { exclave: "default" }),
           task({ id: "t-4", state: "ready" }),
           // Off the registry, but the decision's candidates still name it.
-          { ...pinned("t-5", { deviceId: "device-lost" }), decision: { ...decision, candidates: [{ deviceId: "device-lost", machine: "Lost Box", exclave: "default", rejected: [{ code: "auth_missing" }] }] } },
+          {
+            ...pinned("t-5", { deviceId: "device-lost" }),
+            decision: {
+              ...decision,
+              candidates: [
+                {
+                  deviceId: "device-lost",
+                  machine: "Lost Box",
+                  exclave: "default",
+                  rejected: [{ code: "auth_missing" }],
+                },
+              ],
+            },
+          },
         ],
         at: 6_000,
       },
