@@ -276,7 +276,9 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
  * The daemon sends cents.
  */
 function creditsBar({ c, cu, cl }: QuotaObservation): QuotaBar {
-  const bar = gauge("Credits", c ?? 0);
+  const base = gauge("Credits", c ?? 0);
+  // Credits are only on screen while a window is full, so spending them is never "fine": no green band.
+  const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
   if (cu === undefined || cl === undefined) return { ...bar, note: null };
   return { ...bar, note: `${money.format(cu / 100)} of ${money.format(cl / 100)}` };
 }

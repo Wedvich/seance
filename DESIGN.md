@@ -4326,7 +4326,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`sameCreditMonth`): they fill only from a reading in the same UTC month, and routing
   and the card read last month's as unknown, never as spent.
   A Credits bar (percent of the cap like every row, "$42 of $50" in whole units where
-  a reset goes) shows only while one of the card's windows, per-model weeklies included, reads
+  a reset goes; yellow below the red threshold, never green: it is only on screen while a window is full) shows only while one of the card's windows, per-model weeklies included, reads
   100% after the reset floor — that is when use spills into credits, and until then the
   monthly figure is noise on a card about windows. Not charted: the series (`quota_credits_pct`) is kept
   daemon-side for when a chart wants it. Every machine counts, an asleep
