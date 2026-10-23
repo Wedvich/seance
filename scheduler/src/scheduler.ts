@@ -3,6 +3,7 @@ import {
   DECISION_MAX_CANDIDATES,
   quote,
   type BranchState,
+  type PrStatus,
   type PauseHold,
   type PauseRequest,
   type ResumeRequest,
@@ -12,7 +13,7 @@ import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./aler
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
-import { branchChange, ended as settledEnd } from "./done.ts";
+import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
 import {
@@ -479,6 +480,15 @@ export class Scheduler {
    */
   async onBranchState(state: BranchState, from: string): Promise<void> {
     await this.#update(state.taskId, (task) => branchChange(task, state, from));
+  }
+
+  /**
+   * The leader's own forge reading of a task's PR (`prChange`): never a frame,
+   * so it carries no `from`. Bound to `prUrl`, the URL it was read for. A
+   * dependent it releases moves on the next pass, as with `onBranchState`.
+   */
+  async onPrStatus(taskId: string, prUrl: string, status: PrStatus): Promise<void> {
+    await this.#update(taskId, (task) => prChange(task, prUrl, status));
   }
 
   /**
@@ -984,6 +994,7 @@ export class Scheduler {
    * winner, never the task cut. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
    * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
+   * A forge reading (`pr`) is dropped when the write moves `prUrl` (`prBound`).
    * A finished task is kept lean on the same write (`lean`), so none reaches
    * the store with a prompt or the losers of its decision. Null when `change` declines (it returns null
    * for a task no longer in the state it acts on), the task is gone or
@@ -999,7 +1010,7 @@ export class Scheduler {
         const proposed = change(held.task);
         if (proposed === null) return null;
         const now = this.#now();
-        const changed = lean(endClock(held.task, inputClock(proposed, now), now));
+        const changed = lean(endClock(held.task, inputClock(prBound(held.task, proposed), now), now));
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);

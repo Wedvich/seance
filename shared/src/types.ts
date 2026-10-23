@@ -1856,6 +1856,36 @@ export interface Decision {
   readonly trimmed?: number;
 }
 
+export const PR_STATES = ["open", "draft", "merged", "closed"] as const;
+export type PrState = (typeof PR_STATES)[number];
+
+export const PR_CHECKS = ["pending", "passing", "failing"] as const;
+export type PrChecks = (typeof PR_CHECKS)[number];
+
+/** The leader's forge reading of a task's PR. */
+export interface PrStatus {
+  readonly state: PrState;
+  readonly checks?: PrChecks;
+  /**
+   * With `merged`: it landed in a branch other than the repo's default (a
+   * stacked PR merged into its parent's branch), so nothing is on the default
+   * branch yet. Shown as merged, settles nothing.
+   */
+  readonly stacked?: true;
+  /** When the leader read it, ms, the leader's clock. */
+  readonly at: number;
+}
+
+/**
+ * An unchanged reading is rewritten once its `at` is this old, so a reader can
+ * tell a leader that stopped reading from a PR that did not change. Here with
+ * `PR_STATUS_STALE_MS` so the leader and the PWA cannot drift.
+ */
+export const PR_STATUS_REFRESH_MS = 5 * 60_000;
+
+/** A reading older than this is shown as stale (the PWA); twice the refresh, so one missed poll does not grey it. */
+export const PR_STATUS_STALE_MS = 10 * 60_000;
+
 export interface Task {
   readonly id: string;
   /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
@@ -1888,6 +1918,12 @@ export interface Task {
   readonly leftRunning?: true;
   /** The newest `https:` PR URL its session reported — what `after: "opened"` and `awaiting-merge` read. */
   readonly prUrl?: string;
+  /**
+   * The leader's forge reading of `prUrl`. Dropped whenever `prUrl` changes
+   * (`prBound`); display-only, except that `merged` settles the task
+   * (`scheduler/src/done.ts`).
+   */
+  readonly pr?: PrStatus;
   /** Its branch, from its machine's `branch-state`. */
   readonly branch?: string;
   /**

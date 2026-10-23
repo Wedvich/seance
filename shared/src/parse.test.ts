@@ -33,6 +33,7 @@ import {
   parseResumeRequest,
   parseStoreChanged,
   parseStoreReply,
+  parsePrStatus,
   parseTask,
   parseTaskRecord,
   parseTaskProgressList,
@@ -520,6 +521,55 @@ describe("tasks and their records", () => {
     expect(parseTask(reported)).toEqual(reported);
     expect(parseTask({ ...task, merged: false })).toBeNull();
     expect(parseTask({ ...task, merged: "yes" })).toBeNull();
+  });
+
+  test("a forge reading round-trips, with or without checks", () => {
+    const at = 1_700_000_300_000;
+    expect(parseTask({ ...task, pr: { state: "open", checks: "passing", at } })?.pr).toEqual({
+      state: "open",
+      checks: "passing",
+      at,
+    });
+    const bare = parseTask({ ...task, pr: { state: "merged", at } });
+    expect(bare?.pr).toEqual({ state: "merged", at });
+    expect(bare?.pr).not.toHaveProperty("checks");
+    expect(bare?.pr).not.toHaveProperty("stacked");
+  });
+
+  test("a merge into a non-default branch round-trips as `stacked`", () => {
+    const at = 1_700_000_300_000;
+    expect(parseTask({ ...task, pr: { state: "merged", stacked: true, at } })?.pr).toEqual({
+      state: "merged",
+      stacked: true,
+      at,
+    });
+  });
+
+  test("a malformed forge reading drops `pr` and never the task", () => {
+    for (const pr of [
+      { state: "stacked", at: 1 },
+      { state: "open", checks: "flaky", at: 1 },
+      { state: "merged", stacked: false, at: 1 },
+      { state: "merged", stacked: "yes", at: 1 },
+      { state: "open", at: Number.POSITIVE_INFINITY },
+      { state: "open", at: "now" },
+      { state: "open" },
+      "open",
+      null,
+    ]) {
+      const parsed = parseTask({ ...task, pr });
+      expect(parsed).toEqual(task);
+      expect(parsed).not.toHaveProperty("pr");
+    }
+  });
+
+  test("parsePrStatus returns a fresh object holding only its fields", () => {
+    const input = { state: "draft", checks: "pending", at: 5, extra: "x" };
+    const parsed = parsePrStatus(input);
+    expect(parsed).toEqual({ state: "draft", checks: "pending", at: 5 });
+    expect(parsed).not.toBe(input);
+    expect(parsePrStatus({ state: "open", checks: undefined, at: 5 })).toEqual({ state: "open", at: 5 });
+    expect(parsePrStatus({ state: "merged", stacked: true, at: 5 })).toEqual({ state: "merged", stacked: true, at: 5 });
   });
 
   test("a progress field that is not exactly its shape nulls the task", () => {
