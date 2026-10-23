@@ -1,9 +1,14 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  CAPABILITIES,
+  type BatchStrategy,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
+  TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
+  withReportInstruction,
   type Decision,
   type DiscardReply,
   type DiscardRequest,
@@ -1558,5 +1563,215 @@ describe("the queue screen", () => {
     await drain();
     expect(client.queueRequests).toEqual([]);
     detach();
+  });
+});
+
+describe("authoring a task from the auto form", () => {
+  let timers: ReturnType<typeof captureTimers>;
+  let fake: ReturnType<typeof fakeHistory>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+    fake = fakeHistory();
+  });
+
+  afterEach(() => {
+    timers.restore();
+    fake.restore();
+  });
+
+  /** A leader that advertises the done report, as a seanced of this version does. */
+  const reporting = (): ScriptedClient =>
+    new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
+    });
+  const BATCH = { id: "b-1", strategy: { mode: "sequential" }, next: 1 } as const;
+  const form = { ...DEFAULT_FORM, auto: true, prompt: "fix it" };
+
+  test("deps, batch and Linear go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, {
+      ...form,
+      after: [{ task: "base", after: "merged" }],
+      batch: BATCH,
+      linearIssue: " ENG-7 ",
+    });
+    await store.spawn();
+
+    expect(firstCreate(client).spec).toMatchObject({
+      client: "pwa",
+      prompt: "fix it",
+      deps: [{ task: "base", after: "merged" }],
+      batch: { id: "b-1", index: 1, strategy: { mode: "sequential" } },
+      linear: { issue: "ENG-7" },
+    });
+    expect(firstCreate(client).spec).not.toHaveProperty("until");
+    // What belongs to the task just stored is cleared; the batch stays open, one further on.
+    expect(store.getState().form).toMatchObject({
+      after: [],
+      until: "merged",
+      linearIssue: "",
+      batch: { ...BATCH, next: 2 },
+    });
+  });
+
+  test("a plain form writes none of the authoring fields", async () => {
+    const client = new ScriptedClient();
+    await new Store(client, form).spawn();
+    for (const field of ["deps", "batch", "until", "linear"])
+      expect(firstCreate(client).spec).not.toHaveProperty(field);
+  });
+
+  test("a retry after an unreadable answer re-puts the same member and moves the counter once", async () => {
+    const client = new ScriptedClient();
+    client.onCreate = async () => null;
+    const store = new Store(client, { ...form, batch: { ...BATCH, next: 3 } });
+    await store.spawn();
+    const verdict = store.getState().verdict;
+    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
+    expect(store.getState().form.batch?.next).toBe(3);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    await store.retryEnqueue(verdict);
+    expect(client.creates).toHaveLength(2);
+    expect(client.creates[1]?.spec.batch?.index).toBe(3);
+    expect(store.getState().form.batch?.next).toBe(4);
+  });
+
+  test("settling on the done report appends the instruction, writes `until`, and resets to merged", async () => {
+    const client = reporting();
+    const store = new Store(client, { ...form, until: "reported" });
+    await store.spawn();
+    expect(firstCreate(client).spec).toMatchObject({ until: "reported", prompt: withReportInstruction("fix it") });
+    expect(store.getState().form.until).toBe("merged");
+    expect(store.getState().form.prompt).toBe("");
+  });
+
+  test("a leader that does not advertise the report is refused client-side, for `until` and for a done edge", async () => {
+    for (const change of [{ until: "reported" }, { after: [{ task: "base", after: "done" }] }] as const) {
+      const client = new ScriptedClient();
+      const store = new Store(client, { ...form, ...change });
+      await store.spawn();
+      expect(client.creates).toHaveLength(0);
+      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+      expect(store.getState().form.prompt).toBe("fix it");
+    }
+    // The same edge at "opened" is understood by any leader.
+    const client = new ScriptedClient();
+    await new Store(client, { ...form, after: [{ task: "base", after: "opened" }] }).spawn();
+    expect(client.creates).toHaveLength(1);
+  });
+
+  test("settling on the report needs a prompt to carry the instruction, and room for it", async () => {
+    const empty = reporting();
+    const bare = new Store(empty, { ...form, prompt: "  ", until: "reported" });
+    await bare.spawn();
+    expect(empty.creates).toHaveLength(0);
+    expect(bare.getState().verdict).toMatchObject({ kind: "unqueued" });
+
+    const full = reporting();
+    // Fits on its own; the appended instruction is what pushes it over.
+    const prompt = "x".repeat(TASK_REQUEST_LIMITS.prompt - 1);
+    const long = new Store(full, { ...form, prompt, until: "reported" });
+    await long.spawn();
+    expect(full.creates).toHaveLength(0);
+    expect(long.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(long.getState().form.prompt).toBe(prompt);
+  });
+
+  test("a batch with no index left is refused", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...form, batch: { ...BATCH, next: TASK_SPEC_LIMITS.batchIndex + 1 } });
+    await store.spawn();
+    expect(client.creates).toHaveLength(0);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", message: expect.stringContaining("full") });
+  });
+
+  test("an edge on a task replaces the one held, and sixteen is the most", () => {
+    const store = new Store(new ScriptedClient(), form);
+    store.addAfter("a", "opened");
+    store.addAfter("a", "merged");
+    expect(store.getState().form.after).toEqual([{ task: "a", after: "merged" }]);
+    for (let i = 0; i < 20; i += 1) store.addAfter(`t-${i}`, "opened");
+    expect(store.getState().form.after).toHaveLength(TASK_SPEC_LIMITS.deps);
+    // Full, a held edge can still change.
+    store.addAfter("a", "opened");
+    expect(store.getState().form.after.find((dep) => dep.task === "a")?.after).toBe("opened");
+    store.removeAfter("a");
+    expect(store.getState().form.after.some((dep) => dep.task === "a")).toBe(false);
+  });
+
+  test("re-picking the open batch's strategy keeps its id and counter; another strategy starts a new batch", () => {
+    const store = new Store(new ScriptedClient(), form);
+    const pick = (strategy: BatchStrategy): void => {
+      store.openSheet("batch");
+      store.startBatch(strategy);
+      fake.settle(store);
+    };
+    pick({ mode: "sequential" });
+    const first = store.getState().form.batch;
+    expect(first).toMatchObject({ strategy: { mode: "sequential" }, next: 1 });
+    expect(store.getState().sheet).toBeNull();
+
+    pick({ mode: "sequential" });
+    expect(store.getState().form.batch).toBe(first);
+
+    pick({ mode: "parallel", max: 2 });
+    const second = store.getState().form.batch;
+    expect(second?.id).not.toBe(first?.id);
+    expect(second).toMatchObject({ strategy: { mode: "parallel", max: 2 }, next: 1 });
+
+    store.openSheet("batch");
+    store.endBatch();
+    fake.settle(store);
+    expect(store.getState().form.batch).toBeNull();
+    expect(store.getState().sheet).toBeNull();
+  });
+
+  test("the Linear issue is clamped to what a spec takes", () => {
+    const store = new Store(new ScriptedClient(), form);
+    store.setLinearIssue("E".repeat(200));
+    expect(store.getState().form.linearIssue).toHaveLength(TASK_SPEC_LIMITS.linearIssue);
+  });
+
+  test("opening the After sheet reads the queue; other sheets do not", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, form);
+    store.openSheet("batch");
+    await drain();
+    expect(client.queueRequests).toHaveLength(0);
+    store.openSheet("after");
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(client.queueRequests).toHaveLength(1);
+  });
+
+  test("following up from the queue closes it and its verdict, and lands on the auto form waiting on that task", async () => {
+    const client = new ScriptedClient();
+    const { store, created } = await followedAndListed(client);
+    expect(store.getState().queue).toBe(true);
+    expect(fake.index()).toBe(2);
+
+    store.followUp("base");
+    fake.settle(store);
+    expect(fake.index()).toBe(0);
+    expect(store.getState()).toMatchObject({ queue: false, verdict: null, queueNotice: null });
+    expect(store.getState().form).toMatchObject({ auto: true, after: [{ task: "base", after: "opened" }] });
+    expect(created.id).not.toBe("base");
+  });
+
+  test("following up where the queue is a column pops nothing, and where the relay is not connected does nothing", () => {
+    const wide = new Store(new ScriptedClient(), { ...DEFAULT_FORM, prompt: "keep" });
+    wide.setWide(true);
+    wide.followUp("base");
+    expect(fake.index()).toBe(0);
+    expect(wide.getState().form).toMatchObject({
+      auto: true,
+      prompt: "keep",
+      after: [{ task: "base", after: "opened" }],
+    });
+
+    const away = new Store(new ScriptedClient({ status: "retrying" }), DEFAULT_FORM);
+    away.followUp("base");
+    expect(away.getState().form).toEqual(DEFAULT_FORM);
   });
 });

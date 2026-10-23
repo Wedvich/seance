@@ -1,4 +1,6 @@
 import type {
+  BatchStrategy,
+  DepAfter,
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
@@ -9,6 +11,8 @@ import type {
   SpawnRequest,
   SpawnResponse,
   Task,
+  TaskSpec,
+  TaskUntil,
 } from "@seance/shared";
 import {
   failureReasonText,
@@ -18,6 +22,8 @@ import {
   storeErrorText,
   storeFullUnreadableText,
   TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
+  withReportInstruction,
   type RelayClient,
 } from "@seance/shared";
 import {
@@ -39,7 +45,14 @@ import {
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
-import { autoRepos, deriveAutoAvailability, resolveAutoRepo, resolveMachine, resolveRepo } from "./view.ts";
+import {
+  autoRepos,
+  deriveAutoAvailability,
+  deriveReportedAvailability,
+  resolveAutoRepo,
+  resolveMachine,
+  resolveRepo,
+} from "./view.ts";
 
 /**
  * Owns the screen's state and the orchestration the transport deliberately
@@ -416,6 +429,66 @@ export class Store {
   openSheet(sheet: SheetKind): void {
     if (this.#state.sheet === null) this.#pushLayer();
     this.#patch({ sheet });
+    // The picker lists what the leader holds now, not what the Queue screen last read.
+    if (sheet === "after") void this.refreshQueue();
+  }
+
+  /** Waits on `taskId` at `after`; an edge already held on it is replaced, never doubled. */
+  addAfter(taskId: string, after: DepAfter): void {
+    const { form } = this.#state;
+    const others = form.after.filter((dep) => dep.task !== taskId);
+    if (others.length >= TASK_SPEC_LIMITS.deps) return;
+    this.#patch({ form: { ...form, after: [...others, { task: taskId, after }] } });
+  }
+
+  removeAfter(taskId: string): void {
+    const { form } = this.#state;
+    this.#patch({ form: { ...form, after: form.after.filter((dep) => dep.task !== taskId) } });
+  }
+
+  setUntil(until: TaskUntil): void {
+    this.#patch({ form: { ...this.#state.form, until } });
+  }
+
+  setLinearIssue(linearIssue: string): void {
+    this.#patch({ form: { ...this.#state.form, linearIssue: linearIssue.slice(0, TASK_SPEC_LIMITS.linearIssue) } });
+  }
+
+  /**
+   * The next enqueues join a new batch of `strategy`, numbered from 1. The same
+   * strategy again keeps the batch open: re-picking it must not renumber a
+   * batch already in flight.
+   */
+  startBatch(strategy: BatchStrategy): void {
+    const { form } = this.#state;
+    const same = form.batch !== null && JSON.stringify(form.batch.strategy) === JSON.stringify(strategy);
+    if (!same) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), strategy, next: 1 } } });
+    this.dismissLayer();
+  }
+
+  endBatch(): void {
+    this.#patch({ form: { ...this.#state.form, batch: null } });
+    this.dismissLayer();
+  }
+
+  /**
+   * "Follow up" on a queue row: the form goes to `auto` with that task as its one
+   * dependency. The queue (and a verdict under it) closes like a machine pick's
+   * sheet does, so the form is what shows; in the desktop layout the queue is a
+   * column and stays.
+   */
+  followUp(taskId: string): void {
+    const { form, relay, queue, verdict } = this.#state;
+    if (!deriveAutoAvailability(relay).available) return;
+    const open = (queue ? 1 : 0) + (verdict === null ? 0 : 1);
+    this.#patch({
+      form: { ...form, auto: true, after: [{ task: taskId, after: "opened" }] },
+      queue: false,
+      queueNotice: null,
+      verdict: null,
+    });
+    if (open > 0) history.go(-open);
+    void this.refreshPreview();
   }
 
   /** The settings screen is a layer like the sheets: one entry, popped by back. */
@@ -651,13 +724,46 @@ export class Store {
     const repo = resolveAutoRepo(autoRepos(relay.machines), form);
     if (repo === null || !deriveAutoAvailability(relay).available || this.#state.spawning) return;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
-    const length = form.prompt.trim().length;
-    if (length > TASK_REQUEST_LIMITS.prompt) {
-      const message = `The prompt is ${length} characters; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine.`;
-      this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
+    const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
+    const reported = form.until === "reported";
+    // An older leader would drop `until` and hold a `done` edge unreadable, so neither is written to one.
+    if ((reported || form.after.some((dep) => dep.after === "done")) && !deriveReportedAvailability(relay)) {
+      refusal(
+        "The scheduler's leader doesn't take tasks that settle on a done report yet. Update seanced on its machine, or pick another setting.",
+      );
       return;
     }
-    const spec = { ...taskRequest(form, repo.origin, true), client: "pwa" satisfies SpawnClient };
+    if (reported && form.prompt.trim() === "") {
+      refusal("A task that settles on its done report needs a prompt: the session is told in it to report.");
+      return;
+    }
+    if (form.batch !== null && form.batch.next > TASK_SPEC_LIMITS.batchIndex) {
+      refusal("This batch is full. End it and start another.");
+      return;
+    }
+    const request = taskRequest(form, repo.origin, true);
+    // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
+    const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
+    const length = prompt?.length ?? 0;
+    if (length > TASK_REQUEST_LIMITS.prompt) {
+      const instruction = reported ? " (with the instruction to report, which is added)" : "";
+      refusal(
+        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine.`,
+      );
+      return;
+    }
+    const issue = form.linearIssue.trim();
+    const spec: TaskSpec = {
+      ...request,
+      ...(prompt === undefined ? {} : { prompt }),
+      client: "pwa" satisfies SpawnClient,
+      ...(form.after.length === 0 ? {} : { deps: form.after }),
+      ...(form.batch === null
+        ? {}
+        : { batch: { id: form.batch.id, index: form.batch.next, strategy: form.batch.strategy } }),
+      ...(reported ? { until: form.until } : {}),
+      ...(issue === "" ? {} : { linear: { issue } }),
+    };
     await this.#enqueue(queuedTask(spec, Date.now()));
   }
 
@@ -688,7 +794,22 @@ export class Store {
         });
       } else {
         this.#disarmUndo();
-        this.#patch({ form: { ...this.#state.form, prompt: "" }, promptUndo: null });
+        const { form } = this.#state;
+        // Deps, Linear and `until` belong to the task just stored; a batch spans enqueues, and its
+        // counter moves only for the member it numbered, so a retry that lands twice moves it once.
+        const { batch } = form;
+        const counted = batch !== null && task.spec.batch?.id === batch.id && task.spec.batch.index === batch.next;
+        this.#patch({
+          form: {
+            ...form,
+            prompt: "",
+            after: [],
+            until: "merged",
+            linearIssue: "",
+            batch: counted ? { ...batch, next: batch.next + 1 } : batch,
+          },
+          promptUndo: null,
+        });
         this.#showVerdict({ kind: "queued", task });
         this.#queue.startFollowing(task.id);
       }

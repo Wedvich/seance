@@ -7,8 +7,9 @@ import {
   type RelayState,
   type Task,
 } from "@seance/shared";
-import { deriveQueue } from "../src/queue-view.ts";
+import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
 import { DEFAULT_FORM, type QueueState } from "../src/state.ts";
+import { CAPABILITIES } from "@seance/shared";
 import { failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -306,5 +307,125 @@ describe("deriveQueue", () => {
     expect(deriveQueue(state(listing(0)), NOW).unreadable).toBeNull();
     // Nothing else on the screen claims the queue is empty of them.
     expect(deriveQueue(state(listing(4)), NOW).empty).toBe("Nothing in the queue.");
+  });
+});
+
+describe("authoring on a row", () => {
+  const batch = { id: "b-1", index: 2, strategy: { mode: "sequential" } } as const;
+  const rowOf = (tasks: readonly Task[], id: string) =>
+    deriveQueue(state(ok(tasks)), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === id);
+
+  test("what a task waits on reads as the task's title when it is listed, else as a count", () => {
+    const base = task("base", { spec: { repo: ORIGIN, mode: "worktree", title: "Add the schema" } });
+    const one = task("one", {
+      state: "blocked",
+      spec: { repo: ORIGIN, mode: "worktree", deps: [{ task: "base", after: "opened" }] },
+    });
+    const gone = task("gone", {
+      state: "blocked",
+      spec: { repo: ORIGIN, mode: "worktree", deps: [{ task: "x", after: "merged" }] },
+    });
+    const two = task("two", {
+      state: "blocked",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        deps: [
+          { task: "base", after: "opened" },
+          { task: "x", after: "opened" },
+        ],
+      },
+    });
+    const mixed = task("mixed", {
+      state: "blocked",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        deps: [
+          { task: "base", after: "opened" },
+          { task: "x", after: "done" },
+        ],
+      },
+    });
+    const tasks = [base, one, gone, two, mixed];
+    expect(rowOf(tasks, "one")?.deps).toBe("After Add the schema (opened)");
+    expect(rowOf(tasks, "gone")?.deps).toBe("After 1 task (merged)");
+    expect(rowOf(tasks, "two")?.deps).toBe("After 2 tasks (opened)");
+    // Edges that disagree get no single word.
+    expect(rowOf(tasks, "mixed")?.deps).toBe("After 2 tasks");
+    expect(rowOf(tasks, "base")?.deps).toBeNull();
+  });
+
+  test("a batch member shows its place and strategy", () => {
+    const member = task("m", { spec: { repo: ORIGIN, mode: "worktree", batch } });
+    expect(rowOf([member], "m")?.batch).toBe("Batch #2 · one at a time");
+    expect(
+      rowOf(
+        [
+          task("p", {
+            spec: { repo: ORIGIN, mode: "worktree", batch: { ...batch, strategy: { mode: "parallel", max: 3 } } },
+          }),
+        ],
+        "p",
+      )?.batch,
+    ).toBe("Batch #2 · up to 3 at once");
+    expect(rowOf([task("n")], "n")?.batch).toBeNull();
+  });
+
+  test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {
+    const can = (fields: Partial<Task>): boolean | undefined => rowOf([task("t", fields)], "t")?.canFollowUp;
+    expect(can({ state: "queued" })).toBe(true);
+    expect(can({ state: "running", assignment: placedAt })).toBe(true);
+    expect(can({ state: "awaiting-merge" })).toBe(true);
+    expect(can({ state: "done", doneBy: "session" })).toBe(true);
+    expect(can({ state: "failed", failure: { code: "repo_not_found", message: "x" } })).toBe(false);
+    expect(can({ state: "cancelled" })).toBe(false);
+  });
+});
+
+describe("deriveAfterSheet", () => {
+  const form = { ...DEFAULT_FORM, auto: true };
+
+  test("lists what the leader holds that has not failed or been cancelled, with the edge the form holds on each", () => {
+    const view = deriveAfterSheet(
+      state(
+        ok([
+          task("a"),
+          task("b", { state: "running", assignment: placedAt }),
+          task("c", { state: "failed", failure: { code: "x", message: "y" } }),
+          task("d", { state: "cancelled" }),
+        ]),
+        {
+          form: { ...form, after: [{ task: "b", after: "merged" }] },
+        },
+      ),
+      NOW,
+    );
+    // The chosen one first.
+    expect(view.options.map((o) => [o.id, o.when])).toEqual([
+      ["b", "merged"],
+      ["a", null],
+    ]);
+    expect(view.note).toBeNull();
+    expect(view.full).toBe(false);
+  });
+
+  test("an edge on a task the list no longer shows stays, by id, so it can be removed; sixteen edges is full", () => {
+    const edges = Array.from({ length: 16 }, (_unused, i) => ({ task: `gone-${i}`, after: "opened" as const }));
+    const view = deriveAfterSheet(state(ok([task("a")]), { form: { ...form, after: edges } }), NOW);
+    expect(view.full).toBe(true);
+    expect(view.options).toHaveLength(17);
+    expect(view.options[0]).toMatchObject({ id: "gone-0", when: "opened", headline: "No longer in the queue" });
+  });
+
+  test("says why the list is empty, and whether Done is offered", () => {
+    expect(deriveAfterSheet(state(null, { form }), NOW).note).toBe("Loading the queue…");
+    expect(deriveAfterSheet(state({ kind: "failed", message: "no leader" }, { form }), NOW).note).toBe("no leader");
+    expect(deriveAfterSheet(state(ok([]), { form }), NOW).note).toBe("No task in the queue to wait on.");
+    expect(deriveAfterSheet(state(ok([]), { form }), NOW).doneAvailable).toBe(false);
+    const capable = machine({ capabilities: [CAPABILITIES.reportedDone] });
+    expect(deriveAfterSheet(state(ok([]), { form }, { machines: [capable] }), NOW).doneAvailable).toBe(true);
   });
 });

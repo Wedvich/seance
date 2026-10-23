@@ -209,11 +209,14 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
         ? `Lost${place} — its machine stopped answering.`
         : `Lost${place} — its machine went away ${formatSeen(task.absentSince, now)}.`;
     case "awaiting-merge":
+      // Under `until: "reported"` the merge settles nothing: only the session's own report does.
+      if (task.merged === true) return `Merged${place} — waiting for its session to report it done.`;
       return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
       if (task.leftRunning === true) return `Marked done — its session may still be running${place}.`;
       // Marked by hand: nothing saw it finish, so "finished" would claim too much.
       if (task.doneBy === "linear") return `Its Linear issue was closed${place}.`;
+      if (task.doneBy === "reported") return `It reported done${place}.`;
       return task.doneBy === "manual" ? `Marked done${place}.` : `It finished${place}.`;
     case "failed":
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
@@ -255,10 +258,14 @@ export function queuedBody(task: Task): string {
     case "lost":
       return "Its machine stopped answering and the session may still be alive there, so the scheduler starts it nowhere else unless that machine proves it never began. It settles once that machine is back, or is given up on after a week.";
     case "awaiting-merge":
+      if (task.merged === true) {
+        return "Its PR merged, but it was set to settle on its session's done report, which has not come. Tasks that wait for it to be done stay blocked; mark it done if the work is finished. The scheduler gives up after a week, and they fail.";
+      }
       return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
     case "done":
       if (task.leftRunning === true) return `Marked done by hand. ${LEFT_RUNNING}`;
       if (task.doneBy === "linear") return "Its Linear issue was closed, so the scheduler marked it done.";
+      if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
       return failedBody(task.failure?.code);

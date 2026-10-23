@@ -1,5 +1,5 @@
-import { isSpawnErrorCode, sentence, taskFailureText } from "@seance/shared";
-import type { Machine, RelayState, RepoEntry } from "@seance/shared";
+import { CAPABILITIES, isSpawnErrorCode, sentence, taskFailureText } from "@seance/shared";
+import type { BatchStrategy, Machine, RelayState, RepoEntry } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -75,6 +75,11 @@ export interface ViewModel {
   readonly repoTile: Tile;
   readonly modelTile: Tile;
   readonly effortTile: Tile;
+  /** `auto`'s authoring tiles: the tasks this one waits on, and the batch it joins. */
+  readonly afterTile: Tile;
+  readonly batchTile: Tile;
+  /** The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities). */
+  readonly reportedAvailable: boolean;
   readonly worktreeHint: string;
   readonly footerStatus: string;
   readonly button: PrimaryButton;
@@ -319,6 +324,33 @@ export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
   return { available: true, reason: null, note: null };
 }
 
+/**
+ * `until: "reported"` and a `done` edge are written only to a leader that
+ * advertises `reportedDone`: an older one would strip the first and hold the
+ * second unreadable. Needs the verified leader's own entry, so no leader (or an
+ * unverified one) says no — unlike `auto`, which queues and waits.
+ */
+export function deriveReportedAvailability(relay: RelayState): boolean {
+  const { scheduler } = relay;
+  if (relay.status !== "open" || scheduler.kind !== "ready") return false;
+  const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
+  return leader?.capabilities?.includes(CAPABILITIES.reportedDone) === true;
+}
+
+export function describeStrategy(strategy: BatchStrategy): string {
+  return strategy.mode === "sequential"
+    ? "one at a time"
+    : strategy.mode === "parallel"
+      ? `up to ${strategy.max} at once`
+      : "no limit";
+}
+
+function afterValue(after: PersistedForm["after"]): string {
+  const [only] = after;
+  if (only === undefined) return "None";
+  return after.length === 1 ? `1 task · ${only.after}` : `${after.length} tasks`;
+}
+
 /** `host/path` → `path`: the host says nothing a person picks a repo by. A remote-less origin is its basename already. */
 export function originLabel(origin: string): string {
   const slash = origin.indexOf("/");
@@ -540,6 +572,17 @@ export function deriveView(state: AppState, now: number): ViewModel {
       mono: false,
       dot: null,
     },
+    afterTile: { label: "AFTER", value: afterValue(state.form.after), mono: false, dot: null },
+    batchTile: {
+      label: "BATCH",
+      value:
+        state.form.batch === null
+          ? "Off"
+          : `#${state.form.batch.next} · ${describeStrategy(state.form.batch.strategy)}`,
+      mono: false,
+      dot: null,
+    },
+    reportedAvailable: deriveReportedAvailability(state.relay),
     worktreeHint: state.form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, now),
     button: deriveButton(state, machine),

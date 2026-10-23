@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SPAWN_ERROR_CODES, type Machine, type RelayState } from "@seance/shared";
+import { CAPABILITIES, SPAWN_ERROR_CODES, type Machine, type RelayState } from "@seance/shared";
 import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
   abbreviatePath,
   abbreviatePaths,
+  deriveReportedAvailability,
   deriveView,
   failedBody,
   failureBody,
@@ -569,5 +570,51 @@ describe("failedBody", () => {
     // It ran and ended: its dependents are the news, and "Nothing is running." would say less.
     expect(failedBody("session_failed")).toContain("exited with an error");
     expect(failedBody("session_failed")).toContain("Tasks waiting on it failed with it.");
+  });
+});
+
+describe("deriveReportedAvailability", () => {
+  const capable = machine({ capabilities: [CAPABILITIES.reportedDone] });
+  const leading = { kind: "ready", deviceId: "dev-1", term: 1 } as const;
+
+  test("true only for a verified leader whose own entry advertises it", () => {
+    expect(deriveReportedAvailability(relay({ machines: [capable], scheduler: leading }))).toBe(true);
+    expect(deriveReportedAvailability(relay({ machines: [machine()], scheduler: leading }))).toBe(false);
+    expect(
+      deriveReportedAvailability(relay({ machines: [machine({ capabilities: ["taskId"] })], scheduler: leading })),
+    ).toBe(false);
+  });
+
+  test("another machine advertising it does not count, nor does no leader, an unverified one, or a retrying socket", () => {
+    const other = machine({ deviceId: "dev-2", capabilities: [CAPABILITIES.reportedDone] });
+    expect(deriveReportedAvailability(relay({ machines: [machine(), other], scheduler: leading }))).toBe(false);
+    expect(deriveReportedAvailability(relay({ machines: [capable] }))).toBe(false);
+    expect(
+      deriveReportedAvailability(
+        relay({ machines: [capable], scheduler: { kind: "unverified", deviceId: "dev-1", term: 1 } }),
+      ),
+    ).toBe(false);
+    expect(deriveReportedAvailability(relay({ machines: [capable], scheduler: leading, status: "retrying" }))).toBe(
+      false,
+    );
+  });
+
+  test("the auto form's tiles say what is set", () => {
+    const view = deriveView(
+      state(
+        {},
+        {
+          auto: true,
+          after: [{ task: "t-1", after: "merged" }],
+          batch: { id: "b", strategy: { mode: "parallel", max: 2 }, next: 3 },
+        },
+      ),
+      NOW,
+    );
+    expect(view.afterTile).toMatchObject({ label: "AFTER", value: "1 task · merged" });
+    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3 · up to 2 at once" });
+    const bare = deriveView(state({}, { auto: true }), NOW);
+    expect(bare.afterTile.value).toBe("None");
+    expect(bare.batchTile.value).toBe("Off");
   });
 });

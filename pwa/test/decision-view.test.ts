@@ -302,3 +302,33 @@ describe("the queued verdict's body", () => {
     ).toBe(true);
   });
 });
+
+describe("a task settled by its session's own report", () => {
+  const task = (fields: Partial<Task>): Task => ({
+    id: "t",
+    spec: { repo: "github.com/acme/app", mode: "worktree", until: "reported" },
+    state: "done",
+    createdAt: NOW,
+    ...fields,
+  });
+  const machines = [machine("mac", "Mac")];
+  const at = { deviceId: "mac", exclave: "default", clone: "app", window: "w" };
+
+  test("a report reads as one, short and long, and is not mistaken for a finish", () => {
+    const reported = task({ doneBy: "reported", assignment: at });
+    expect(taskHeadline(reported, machines, NOW)).toBe("It reported done on Mac · default.");
+    expect(queuedBody(reported)).toBe("Its session reported it done.");
+  });
+
+  test("a merge that settled nothing says it waits for the report", () => {
+    const merged = task({ state: "awaiting-merge", merged: true, assignment: at });
+    expect(taskHeadline(merged, machines, NOW)).toBe(
+      "Merged on Mac · default — waiting for its session to report it done.",
+    );
+    expect(queuedBody(merged)).toContain("mark it done if the work is finished");
+    // The ordinary awaiting-merge words are untouched.
+    expect(taskHeadline(task({ state: "awaiting-merge", assignment: at }), machines, NOW)).toContain(
+      "waiting for the PR to merge",
+    );
+  });
+});

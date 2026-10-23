@@ -1,7 +1,8 @@
 import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { Machine } from "@seance/shared";
+import { TASK_SPEC_LIMITS, type BatchStrategy, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
 import { describeDecision } from "../decision-view.ts";
+import type { AfterSheetView } from "../queue-view.ts";
 import {
   EFFORTS,
   EFFORT_LABELS,
@@ -15,9 +16,10 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { abbreviatePaths, formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { abbreviatePaths, describeStrategy, formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
+import { Seg } from "./seg.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
@@ -31,7 +33,11 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   repo: "Which repo?",
   model: "Which model?",
   effort: "How much effort?",
+  after: "Wait for which tasks?",
+  batch: "Batch these tasks",
 };
+
+const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
 
 /**
  * What this screen can ask the app to do. A callback set rather than the store
@@ -58,6 +64,12 @@ export interface SpawnActions {
   readonly rescan: () => void;
   readonly setModel: (model: Model) => void;
   readonly setEffort: (effort: Effort) => void;
+  readonly addAfter: (taskId: string, after: DepAfter) => void;
+  readonly removeAfter: (taskId: string) => void;
+  readonly setUntil: (until: TaskUntil) => void;
+  readonly setLinearIssue: (issue: string) => void;
+  readonly startBatch: (strategy: BatchStrategy) => void;
+  readonly endBatch: () => void;
 }
 
 /**
@@ -167,6 +179,9 @@ function ActiveSheet(props: {
   model: Model;
   effort: Effort;
   rescan: RescanState;
+  batch: PersistedForm["batch"];
+  /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
+  afterSheet: AfterSheetView | null;
   /** True while the exit animation plays; the sheet is already popped from state. */
   closing: boolean;
   onExited: () => void;
@@ -179,12 +194,22 @@ function ActiveSheet(props: {
     machines,
     model: selectedModel,
     effort: selectedEffort,
+    batch,
+    afterSheet,
     now,
     rescan,
     closing,
     onExited,
   } = props;
   const close = actions.dismissLayer;
+
+  if (kind === "after" && afterSheet !== null) {
+    return <AfterSheet actions={actions} sheet={afterSheet} closing={closing} onExited={onExited} />;
+  }
+
+  if (kind === "batch") {
+    return <BatchSheet actions={actions} batch={batch} closing={closing} onExited={onExited} />;
+  }
 
   if (kind === "machine") {
     const auto = view.autoAvailability;
@@ -271,6 +296,14 @@ function ActiveSheet(props: {
     );
   }
 
+  if (kind === "after") {
+    return (
+      <Sheet title={SHEET_TITLES.after} closing={closing} onExited={onExited} onClose={close}>
+        {null}
+      </Sheet>
+    );
+  }
+
   return (
     <Sheet title={SHEET_TITLES.effort} closing={closing} onExited={onExited} onClose={close}>
       {EFFORTS.map((effort) => (
@@ -281,6 +314,121 @@ function ActiveSheet(props: {
           onClick={() => actions.setEffort(effort)}
         />
       ))}
+    </Sheet>
+  );
+}
+
+/**
+ * Each unfinished task as a row to tick; a ticked one shows when its edge
+ * releases. `Done` is offered only to a leader that takes it, but a held one
+ * stays selectable so it can be changed back.
+ */
+function AfterSheet(props: {
+  actions: SpawnActions;
+  sheet: AfterSheetView;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, sheet, closing, onExited } = props;
+  return (
+    <Sheet title={SHEET_TITLES.after} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      {sheet.options.map((option) => {
+        const { when } = option;
+        const whens: readonly DepAfter[] =
+          sheet.doneAvailable || when === "done" ? ["opened", "merged", "done"] : ["opened", "merged"];
+        return (
+          <div key={option.id}>
+            <SheetItem
+              label={option.title}
+              sub={option.headline}
+              selected={when !== null}
+              disabled={when === null && sheet.full}
+              onClick={() => (when === null ? actions.addAfter(option.id, "opened") : actions.removeAfter(option.id))}
+            />
+            {when !== null && (
+              <div className="after-when">
+                <Seg
+                  label={`When ${option.title} releases it`}
+                  options={whens}
+                  value={when}
+                  render={(choice) => WHEN_LABELS[choice]}
+                  onChange={(choice) => actions.addAfter(option.id, choice)}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {sheet.note !== null && <p className="sheet-note">{sheet.note}</p>}
+      {sheet.full && <p className="sheet-note">A task waits on at most {TASK_SPEC_LIMITS.deps} others.</p>}
+      <p className="sheet-note">
+        Opened: it has a PR. Merged: its branch merged. Done: it is finished
+        {sheet.doneAvailable ? "" : " (the scheduler's leader doesn't take this yet)"}.
+      </p>
+    </Sheet>
+  );
+}
+
+const DEFAULT_PARALLEL = 3;
+
+function BatchSheet(props: {
+  actions: SpawnActions;
+  batch: PersistedForm["batch"];
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, batch, closing, onExited } = props;
+  const mode = batch?.strategy.mode ?? null;
+  const current = batch?.strategy.mode === "parallel" ? batch.strategy.max : DEFAULT_PARALLEL;
+  const [max, setMax] = useState(String(current));
+  const parsed = Number(max);
+  const valid = max.trim() !== "" && Number.isInteger(parsed) && parsed >= 1 && parsed <= TASK_SPEC_LIMITS.parallel;
+  return (
+    <Sheet title={SHEET_TITLES.batch} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
+      <SheetItem
+        label={batch === null ? "Off" : "End batch"}
+        sub={batch === null ? "each task is queued on its own" : `the next task starts a fresh numbering`}
+        selected={batch === null}
+        onClick={actions.endBatch}
+      />
+      <SheetItem
+        label="One at a time"
+        sub="in the order queued"
+        selected={mode === "sequential"}
+        onClick={() => actions.startBatch({ mode: "sequential" })}
+      />
+      <SheetItem
+        label="No limit"
+        sub="only dependencies and capacity hold them"
+        selected={mode === "auto"}
+        onClick={() => actions.startBatch({ mode: "auto" })}
+      />
+      <div className={mode === "parallel" ? "sheet-max sheet-item-selected" : "sheet-max"}>
+        <label htmlFor="batch-max">Up to</label>
+        <input
+          id="batch-max"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={TASK_SPEC_LIMITS.parallel}
+          value={max}
+          onInput={(event) => setMax(event.currentTarget.value)}
+        />
+        <span>at once</span>
+        <button
+          type="button"
+          className="quiet"
+          disabled={!valid}
+          onClick={() => actions.startBatch({ mode: "parallel", max: parsed })}
+        >
+          Use
+        </button>
+      </div>
+      {batch !== null && (
+        <p className="sheet-note">
+          Open: {describeStrategy(batch.strategy)}, next is #{batch.next}.
+        </p>
+      )}
     </Sheet>
   );
 }
@@ -342,13 +490,18 @@ export function SpawnScreen(props: {
   now: number;
   rescan: RescanState;
   preview: PreviewState | null;
+  /** The After sheet's list; non-null only while that sheet is open. */
+  afterSheet: AfterSheetView | null;
   /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
   columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview, columns } = props;
+  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview, afterSheet, columns } = props;
   const offline = view.auto === null && view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
+  // The list is derived only while its sheet is open; the exit animation still needs it.
+  const lastAfterSheet = useRef(afterSheet);
+  if (afterSheet !== null) lastAfterSheet.current = afterSheet;
 
   // Open from the prompt text and caret, never focus: a tap on a row blurs the
   // textarea before its click lands on some browsers, and a focus-driven picker
@@ -595,6 +748,12 @@ export function SpawnScreen(props: {
           <TileButton tile={view.repoTile} onClick={() => actions.openSheet("repo")} />
           <TileButton tile={view.modelTile} onClick={() => actions.openSheet("model")} />
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
+          {view.auto !== null && (
+            <>
+              <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
+              <TileButton tile={view.batchTile} onClick={() => actions.openSheet("batch")} />
+            </>
+          )}
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
@@ -618,6 +777,48 @@ export function SpawnScreen(props: {
             <span className="toggle-knob" />
           </span>
         </button>
+
+        {view.auto !== null && (
+          <>
+            <button
+              type="button"
+              className="worktree card"
+              onClick={() => actions.setUntil(form.until === "reported" ? "merged" : "reported")}
+              role="switch"
+              aria-checked={form.until === "reported"}
+              disabled={!view.reportedAvailable && form.until !== "reported"}
+            >
+              <span className="worktree-text">
+                <span className="worktree-title">Settle on its done report</span>
+                <span className="worktree-hint">
+                  {view.reportedAvailable || form.until === "reported"
+                    ? form.until === "reported"
+                      ? "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server"
+                      : "Settles when its PR merges or its session ends"
+                    : "The scheduler's leader doesn't take this yet — update seanced on its machine"}
+                </span>
+              </span>
+              <span className={form.until === "reported" ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+                <span className="toggle-knob" />
+              </span>
+            </button>
+
+            <label className="field linear card" htmlFor="linear-issue">
+              <span className="label">LINEAR ISSUE</span>
+              <input
+                id="linear-issue"
+                type="text"
+                value={form.linearIssue}
+                maxLength={TASK_SPEC_LIMITS.linearIssue}
+                placeholder="ENG-123"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellcheck={false}
+                onInput={(event) => actions.setLinearIssue(event.currentTarget.value)}
+              />
+            </label>
+          </>
+        )}
       </div>
 
       <footer className="footer">
@@ -640,6 +841,8 @@ export function SpawnScreen(props: {
           machines={machines}
           model={form.model}
           effort={form.effort}
+          batch={form.batch}
+          afterSheet={lastAfterSheet.current}
           now={now}
           rescan={rescan}
           closing={sheetClosing}
