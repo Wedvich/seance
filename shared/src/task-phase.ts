@@ -55,12 +55,13 @@ export function isPrReadable(state: TaskState): boolean {
 
 /**
  * The leader's poller reads this task's PR: one a reading can change, or a
- * finished one with no reading yet — marked done before the poller saw it, or
- * settled by a path that dropped its last non-merged one (`advance`) — read once so its
- * chip does not stay unknown or stale for good. The poller and `prChange`
- * both ask this, so what is polled is what can be applied.
+ * finished one without a merged reading — none yet, or one that can be stale
+ * (taken while it ran, before `advance` dropped such readings) — so its chip
+ * does not stay unknown or stale for good. A merge can't un-merge, so that
+ * reading is final. The poller bounds a finished task to one read per term;
+ * it and `prChange` both ask this, so what is polled is what can be applied.
  */
 export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr">): boolean {
   if (task.prUrl === undefined) return false;
-  return isPrReadable(task.state) || (TASK_PHASES[task.state] === "finished" && task.pr === undefined);
+  return isPrReadable(task.state) || (TASK_PHASES[task.state] === "finished" && task.pr?.state !== "merged");
 }

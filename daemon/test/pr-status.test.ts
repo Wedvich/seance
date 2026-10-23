@@ -268,13 +268,13 @@ describe("chunking", () => {
 });
 
 describe("what is never read", () => {
-  test("a URL that is not a GitHub PR, one too big for GraphQL's Int, a finished task already read and a task with no PR never reach gh", async () => {
+  test("a URL that is not a GitHub PR, one too big for GraphQL's Int, a finished task read as merged and a task with no PR never reach gh", async () => {
     await gh.setReply(reply({ state: "OPEN" }), 0);
     const { seen } = start([
       pr(1, { id: "gitlab", prUrl: "https://gitlab.com/octo-org/widgets/pull/1" }),
       pr(1, { id: "files", prUrl: `${prUrl(1)}/files` }),
       pr(1, { id: "big", prUrl: prUrl(99_999_999_999) }),
-      pr(1, { id: "done", state: "done", pr: { state: "open", at: 1 } }),
+      pr(1, { id: "done", state: "done", pr: { state: "merged", at: 1 } }),
       pr(1, { id: "bare", prUrl: undefined }),
       pr(6, { id: "good" }),
     ]);
@@ -302,10 +302,46 @@ describe("what is never read", () => {
     expect(refused.logs.warn).toHaveLength(1);
   });
 
+  test("a finished task holding a non-merged reading is read once per term: again by the next poller, not every poll", async () => {
+    await gh.setReply(reply({ state: "MERGED" }, { state: "OPEN" }), 0);
+    const tasks = [
+      pr(1, { id: "stale", state: "done", pr: { state: "open", checks: "pending", at: 1 } }),
+      pr(2, { id: "open", state: "failed", pr: { state: "open", at: 1 } }),
+    ];
+    const first = start(tasks);
+    await pollUntil(() => first.seen.length >= 2, "the term's one reading of each");
+    expect(first.seen.find((s) => s.id === "stale")?.status.state).toBe("merged");
+    // A non-event cannot be polled for: several intervals, and still the one run.
+    await Bun.sleep(200);
+    expect(await gh.calls()).toBe(1);
+    expect(first.seen).toHaveLength(2);
+    first.stop();
+
+    const next = start(tasks);
+    await pollUntil(() => next.seen.length >= 2, "the next term's reading");
+    expect(next.seen.map((s) => s.id).toSorted()).toEqual(["open", "stale"]);
+  });
+
+  test("a task read while running still takes its finished read once it finishes", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    const tasks = [pr(1, { id: "t" })];
+    const { seen } = start(tasks);
+    await pollUntil(() => seen.length > 0, "the running read");
+    tasks[0] = pr(1, { id: "t", state: "done" });
+    const before = seen.length;
+    await pollUntil(() => seen.length > before, "a read after it finished");
+    // That read may be one in flight at the switch, aimed at the running task; settling waits out the finished read after it.
+    const calls = await gh.settledCalls();
+    expect(seen.at(-1)?.id).toBe("t");
+    // A non-event cannot be polled for: several intervals, and no more reads.
+    await Bun.sleep(200);
+    expect(await gh.calls()).toBe(calls);
+  });
+
   test("with nothing to poll gh never runs", async () => {
     const { seen } = start([
       pr(1, { prUrl: "https://gitlab.com/octo-org/widgets/pull/1" }),
-      pr(2, { state: "cancelled", pr: { state: "closed", at: 1 } }),
+      pr(2, { state: "cancelled", pr: { state: "merged", at: 1 } }),
       pr(3, { state: "queued" }),
       pr(4, { state: "blocked" }),
       pr(5, { state: "reserved" }),
