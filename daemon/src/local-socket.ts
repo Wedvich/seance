@@ -9,7 +9,8 @@ import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
 import { runDir, socketPath } from "./paths.ts";
 import { peerPid, socketFd } from "./peer.ts";
-import { isSessionEventFrameKind, type SessionEventReply } from "./session-events.ts";
+import type { SessionEventReply } from "./session-event-frame.ts";
+import { isSessionEventFrameKind } from "./session-events.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,

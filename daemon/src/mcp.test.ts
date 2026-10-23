@@ -26,6 +26,7 @@ import { BrokerError } from "./broker-client.ts";
 import { resolveOrigin } from "./auto.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
+import type { reportDone } from "./report-done.ts";
 import {
   buildMcpServer,
   decisionText,
@@ -66,6 +67,7 @@ async function connectedClient(
   relay: LazyRelay | Fleet,
   local: LocalMachine | null = null,
   audit: AuditSink = () => {},
+  report?: typeof reportDone,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -77,7 +79,7 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, audit, report), { transport: serverTransport });
   await client.connect(clientTransport);
   return client;
 }
@@ -1189,6 +1191,45 @@ describe("get_queue", () => {
     }
     expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
     lazy.stop();
+  });
+});
+
+describe("report_task_done", () => {
+  async function call(result: Awaited<ReturnType<typeof reportDone>>): Promise<{ text: string; error: boolean }> {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(
+      lazy,
+      null,
+      () => {},
+      () => Promise.resolve(result),
+    );
+    const reply = await client.callTool({ name: "report_task_done", arguments: {} });
+    lazy.stop();
+    return { text: toolText(reply), error: reply.isError === true };
+  }
+
+  test("is always offered, takes no input, and is not read-only", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "report_task_done");
+    expect(tool?.annotations?.readOnlyHint).toBe(false);
+    expect(tool?.description).toContain("only when the task's prompt asks you to");
+    lazy.stop();
+  });
+
+  test("an accepted report is a plain answer; a refusal or a missing daemon is a tool error carrying the reason", async () => {
+    expect(await call({ ok: true, text: "reported to the scheduler" })).toEqual({
+      text: "reported to the scheduler",
+      error: false,
+    });
+    expect(
+      await call({ ok: false, text: "this session runs no scheduler task, so there is nothing to report" }),
+    ).toEqual({
+      text: "this session runs no scheduler task, so there is nothing to report",
+      error: true,
+    });
+    expect((await call({ ok: false, text: "the local daemon is not running" })).error).toBe(true);
   });
 });
 
