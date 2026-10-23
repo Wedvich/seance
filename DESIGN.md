@@ -589,9 +589,10 @@ Séance's noise is cover for a real intruder.
    also report its own state and PR. That too is a claim about itself, bound to
    its own pane (Local op socket, "Session events"); its only other effect is
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
-   (Daemon, "Usage refresh"). Decided for M4, not built (#21): it will also report its
-   own task `done`, which settles a `until: "reported"` task and releases `after: "done"`
-   dependents. A session that lies about being done can do no more than one that exits. The
+   (Daemon, "Usage refresh"). It can also report its
+   own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task and releases
+   `after: "done"` dependents. A session that lies about being done can do no more than one
+   that exits. The
    scheduler routes on the quota figures, so a session that lies about its
    account's usage steers where the next task lands. It cannot reach past what
    that one account's reading decides.
@@ -736,8 +737,9 @@ nothing checked it. The last is the gap they leave.
   one same-uid process mislabelling another session's state on its own machine, is
   recorded under "Session events" (Local op socket). This frame kind widens the
   socket. A new kind, or a new act for this one, is a threat-model change like the
-  broker's. One is decided, not built: a `done` report finishing the sender's own task
-  (#21, "Session events"). Until it lands, ingest refuses the state.
+  broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
+  task, noted in the launch ledger and forwarded, and settled only by a leader and only
+  for an `until: "reported"` task.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -1388,11 +1390,19 @@ an old peer's frames parse as before. Mixed versions:
   the default, or `"reported"`, #21): an older leader's `parseTaskSpec` rebuilds the spec
   without them, and every write it makes (reserve, place, settle) seals the stripped spec
   back, so both are lost from the record, not merely ignored while it leads: a `reported` task
-  under one settles at its merge, and routing ignores its skill. The authoring item must not
-  write `until` or `skill` until leaders are upgraded.
-- `after: "done"` (#21, released only by a `done` predecessor) and `doneBy: "linear"`: an
-  older leader reads a task carrying either as malformed, and holds it unreadable, never
-  running it, until a leader that knows them takes over (Scheduler, "The queue store").
+  under one settles at its merge, and routing ignores its skill. A client therefore writes
+  `until` only when the verified leader's own registry entry advertises `reportedDone`
+  (the capability the authoring surface added with it; the PWA's `deriveReportedAvailability`, MCP's
+  `leaderTakesReported`), and refuses locally otherwise. `skill` still waits on its item.
+- `after: "done"` (#21, released only by a `done` predecessor), `doneBy: "linear"` and, added
+  with the authoring surface, `doneBy: "reported"`: an older leader reads a task carrying
+  any of them as malformed, and holds it unreadable, never running it, until a leader that
+  knows them takes over (Scheduler, "The queue store"). `after: "done"` is gated like `until`.
+  `Task.merged` (a merge seen on an `until: "reported"` task, which settles nothing) is not:
+  an older leader's parser drops it, so the task reads and the field is gone at its next write.
+- `TaskProgress.reported` (the launch ledger's note of a session's `done` report, sticky): an
+  older leader drops it, and does not know `until: "reported"` either, which is why clients write
+  that only to a leader advertising `reportedDone`.
 - `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
   list costs the field, never the entry or the machine. `MachineStatus.ax` (the exclave
   indices whose login has expired) is strict and capped. An old app ignores both.
@@ -1404,8 +1414,11 @@ an old peer's frames parse as before. Mixed versions:
   bounded code); an older PWA words it as a spawn refusal.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
-- `session-event` `done` is refused at ingest and ignored by the leader (Local op socket,
-  "Session events"), as a daemon that predates it refuses any unknown state.
+- `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
+  that predates it refuses the frame `invalid`, which `report_task_done` words as "run `seanced
+  update`"; the daemon's own new reply codes are `untasked` (a pane with no scheduler task),
+  `unrecorded` (a task the daemon's launch ledger holds no launch of), `unwritten` (sent, but the
+  ledger write failed) and `stopping`.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -2250,9 +2263,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   when one never can. An edge releases when its predecessor is `done`, whatever settled
   it (`mark-done` always wins); `after: "opened"` also when it has a PR and its branch is
   `pushed` — a `here` predecessor has no task branch, so its PR alone — and `after:
-  "merged"` only at `done`, a merge being what makes a task done. `after: "done"` (#21,
-  M4; no client writes it yet) releases only at `done` too, the same as `merged` until a
-  `until: "reported"` task has a merged-but-open state of its own. A `failed` or
+  "merged"` only at `done`, a merge being what makes a task done. `after: "merged"` is also
+  released by a recorded merge (`Task.merged`), which an `until: "reported"` task keeps while it
+  stays open past its merge. `after: "done"` (#21) releases only at `done`, so for a
+  `reported` task it waits on the session's report (or `mark-done`, or its exit). A `failed` or
   `cancelled` predecessor fails its dependents, checked before the release, so a cancelled
   predecessor with a PR and a pushed branch fails `opened` too. A dependent already
   released has left `blocked` and is not judged again, so an outcome can depend on whether a
@@ -2317,11 +2331,19 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   it is `done`, `doneBy: "session"` — unless its machine reports a nonzero exit status
   (`TaskProgress.exit`), when it is `failed`, `session_failed`, and its dependents fail
   `dependency_failed` rather than start on a branch with nothing pushed (M4, `failed` from exit
-  status, M3 review R3; Daemon, "Exit status"). A live session's newer PR URL is recorded even when
-  its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
+  status, M3 review R3; Daemon, "Exit status"). **`until: "reported"`** (#21, 2026-10-23): a merge settles nothing there. It is
+  recorded on the task (`merged: true`, which still releases `after: "merged"` dependents) and the
+  task stays open, with its slot, until the session's `done` report (`doneBy: "reported"`),
+  `mark-done`, or its exit settles it; an `ended` session with a believed merge falls through to
+  the PR check, so a merged PR leaves it `awaiting-merge`, and a PR-less clean exit still
+  settles `done` by `session` and a nonzero one `failed`, `session_failed` — a lying report can do
+  no more than exiting can. The report counts only from the machine the task was placed or
+  reserved on, and under `until: "merged"` it is ignored. A reported task past the merge
+  expiry fails `merge_expired` as "never reported done". A live session's newer PR URL is
+  recorded even when its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
   the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
   within one branch, so the first pushed report with a PR releases `opened` for good — and
-  a merge makes the task `done`, `doneBy: "merged"`, a session still running included. A
+  under `until: "merged"` a merge makes the task `done`, `doneBy: "merged"`, a session still running included. A
   report naming a different branch than the one recorded starts it unpushed. A `merged`
   verdict is believed only of a branch seen pushed (`pushed` is per branch, sticky within
   one, so a remote branch deleted after its merge still reports pushed on takeover; a PR URL
@@ -2333,7 +2355,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   default branch, pushed and trivially merged; its `opened` comes from its PR and its
   `merged` only at `done`: an `awaiting-merge` `here` task is left out of the sweep, since no
   reply can change it, and reaches `done` only by mark-done before it expires (`merge_expired`, below), so
-  its `after: "merged"` dependents wait for that until then. What `branch-state` carried while no leader
+  its `after: "merged"` dependents wait for that until then. The exception is a `here` task
+  under `until: "reported"`: its report is read back (`progress.reported`), which `trusted` lets through, so it
+  stays in the sweep. What `branch-state` carried while no leader
   listened is read back from `SessionsResponse.progress` (`TaskSessionsReply.progress`):
   on takeover, on the sweep, and when a machine holding a placed or `awaiting-merge`
   task is connected again after a pass saw it away. In a reply the daemon trimmed
@@ -4369,9 +4393,32 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   there and becomes the notice. The queue is then read whole. Holds show whole or per account, by the account's
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
-  relevant `QUEUE_MAX_TASKS`. Authoring a batch or a dependency from the PWA has no UI yet
-  (docs/scheduler.md, M4, _Authoring surface_): the app client enforces the batch-index bound at
-  `createTask`, which is the only place an app could set it.
+  relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2 ·
+  one at a time"), and offers **Follow up** while the task can still be waited on or once it
+  is `done`: the form goes to `auto` with that task as its After edge at `opened`. See
+  "Authoring from the auto form" below.
+- **Authoring from the auto form** (2026-10-23, M4 #21). On `auto` — and only there, since
+  a machine pick is a direct spawn with no queue to wait in — the form adds AFTER and BATCH
+  tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
+  the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
+  each with an Opened, Merged or Done choice; Done is offered only while the verified leader
+  advertises `reportedDone`, as is the switch. An edge on a task the list no longer shows stays, by id, so it can
+  be removed. **BATCH** is an _open batch_: pick One at a time, Up to N at once or No limit,
+  and the next enqueues join it, numbered from 1, until End batch. It is `{id, strategy, next}`
+  in the persisted form: each enqueue takes index `next`, and the counter moves only for the
+  member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Picking the open strategy again keeps the
+  batch, so a tap cannot renumber one in flight. Deps, `until` and the Linear issue belong to one
+  task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
+  chain's shortcut: the form with that task as its one `opened` edge. Settling on the report appends the
+  report instruction to the prompt on the client (`withReportInstruction`, so the stored task
+  carries what the session reads), and the bound on the prompt is checked on the combined text; it also needs a prompt, since
+  the session is told in it. A leader that does not advertise the capability, a full batch
+  (`TASK_SPEC_LIMITS.batchIndex`) and an over-long combined prompt are refused before anything is
+  put, as unqueued verdicts. Rejected: a screen that builds the whole batch as a list (a second
+  editor beside a form that already makes one task at a time; Follow up chains the rest);
+  naming batch members by `ref` (the open batch's index order is the identity). A report needs
+  the session to be able to call the tool: one stopped on a permission prompt, or in plan mode,
+  cannot, so **Mark done** on the Queue screen is the fallback.
 - **Desktop shows three columns instead of a stack** (2026-10-18). From 1200px wide — room for
   three phone-width columns, the one breakpoint, in `app.tsx` — the form, the Machines screen and
   the Queue screen sit side by side, each scrolling on its own; below it the app is the phone stack
@@ -4510,12 +4557,40 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   keeps its shape. **The limits are in both tool descriptions**, since an agent would
   otherwise take the queue for a backlog: a task waiting for capacity is held by the relay
   and survives a leader change (every relay deploy, every daemon self-update), the next leader
-  taking it over; a placed session is ordinary; no deps or ordering. **Not
+  taking it over; a placed session is ordinary; ordering is what `after` and `queue_batch` say. **Not
   through the broker**: a keyless `seanced mcp` gets "auto needs this machine's own
   key; unavailable through the broker", and nothing falls back. A scheduler action
   would be a new broker action, which is a threat-model change ("Fleet broker"), so
   `brokerFleet` leases carry `scheduler: null`. The enqueue is a `store-put` through the
   app client, as the PWA's is.
+- **Authoring: `after`, `until`, `linear`, `queue_batch` and `report_task_done`** (2026-10-23, M4 #21).
+  `spawn_session` with machine `auto` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
+  `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
+  (`{issue}`, trimmed as the PWA's field is; a blank one is refused); any of them off `auto` is refused, since a direct spawn has
+  nothing to wait in — bar the defaults (`until: "merged"`, an empty `after`), which change nothing. **`queue_batch
+  { strategy, max?, tasks }`** puts up to 16 members as one batch (`sequential`, `parallel` with
+  `max`, or `auto`): ids are minted first so a member's `after` can name an earlier one by `ref`
+  (a later or unknown `ref`, two edges naming both fields or neither, and a ref used twice are refused in a
+  pre-flight pass before anything is created), indexes are 1.. in the order given, and the members
+  are `createTask`ed one by one. A failure partway stops the batch and answers with the ids that
+  had already landed, since a half-queued batch must be visible to be cancelled. Its tasks
+  carry `client: "mcp"` and the `mcp` origin's audit line, as an auto spawn does. `until: "reported"` and a `done` edge are written only
+  to a leader advertising `reportedDone` (`leaderTakesReported`), else refused with the reason, and the
+  report instruction is appended to the prompt client-side (`withReportedPrompt`). **`report_task_done`**
+  is the session's side: a no-argument tool that sends the `session-event` `done` frame to this
+  machine's own daemon (`report-done.ts`), which binds it to the pane by the MCP process's pid
+  (the server is a child of the session's `claude`, in the pane). It answers refusals in words —
+  not in a task pane (`untasked`), no launch of the task on this machine (`unrecorded`), a daemon
+  that is stopping (`stopping`), a report sent but not saved to disk (`unwritten`), a daemon that
+  predates it (`invalid`: run `seanced update`) — and imports nothing that logs. Its `ok` says
+  the report was sent, which settles the task only if it was queued to settle on its report. It is
+  MCP only, with no CLI subcommand (`seanced session-event` drops a `done` unsent): a session
+  reports from inside Claude, and the tool's description tells it to call only when the task's
+  prompt says so. `get_queue` also shows `until`, `merged`, the batch, `after` and the Linear link.
+  The session needs the seance MCP server installed in its exclave, which `seanced mcp
+  install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
+  permissions): a call stopped at a permission prompt is no report. Without either the report is
+  never made and the task waits for `mark-done`, its exit, or `merge_expired`.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -4665,9 +4740,9 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   origin on the `audit request` line too. True of the three `Plain` ops; the
   fleet broker below is the one deliberate exception, served only by a daemon
   whose key is service-delivered, and says so. The `session-event` kind below
-  grants no act at all. It is ingest, and what it ingests is bound to the
-  sender's own pane. Its first act, a `done` report for the sender's own task, is
-  decided and not built ("Session events").
+  grants no op: it is ingest, and what it ingests is bound to the
+  sender's own pane. Its one act beyond ingest, a `done` report for the sender's own
+  task, writes a ledger note and forwards it ("Session events").
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -4912,18 +4987,36 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   a frame. Its own only subprocesses are fixed-argv reads: `tmux list-panes`, and on
   macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
   No frame field reaches any argv. The one indirect run is the `/usage` refresh above:
-  poked, staleness-gated, fixed argv, built env.
-- **`done`: decided, not built** (#21, decided 2026-10-20; in the schema since the M4 schema
-  PR). A session reports that its task is finished, so a task can stay open past its merge
-  ("after X is in prod" is X's session merging, watching the deploy, then reporting). The
-  state is in `SESSION_STATES`, but `parseSessionEventFrame` refuses it, as it refused it
-  when the state was unknown, and the leader's `sessionChange` leaves a task as it is on
-  one. The decided act, landing with the authoring surface: the leader settles the
-  sender's task `done`, bound by peer pid like every event, so a session can finish only its
-  own task. Under `until: "reported"` it is the one settle beside `mark-done` and Linear
-  Done; `after: "done"` dependents release on it. It is the first act beyond ingest, so a
-  threat-model change (Threat model, item 6). A session that lies about being done can do
-  no more than one that exits, and `mark-done` stays the manual override.
+  poked, staleness-gated, fixed argv, built env. The one other act is the `done` report below:
+  noted in the launch ledger and forwarded, never a command.
+- **`done`** (#21, decided 2026-10-20, built 2026-10-23). A session reports that its task is
+  finished, so a task can stay open past its merge ("after X is in prod" is X's session
+  merging, watching the deploy, then reporting). The state has been in `SESSION_STATES` since
+  the schema PR. Ingest now accepts it, from `report_task_done` (MCP) alone: `seanced
+  session-event` drops a `done` unsent, so the mod's hook can never settle a task. For the
+  pane's own task only (the task is the pane's `@seance-task`, as for every event, never a frame
+  field), the daemon **notes it in the launch ledger** (`reported: true`, sticky, so a leader
+  that missed the event reads it from `progress` on takeover; it is written before the reply,
+  so `ok` tells the session its report is on disk) and **forwards it**, whatever the task's
+  `until`: the daemon does not read the spec, the leader decides. It forwards once per task: a
+  repeat finds the ledger holding `reported` and sends nothing. A pane with no task answers
+  `untasked`; a task the ledger holds no launch of answers `unrecorded`, with nothing noted or
+  sent; a failed ledger write answers `unwritten` (sent, but a restart could lose it); a stopped
+  ingest answers `stopping`; and a daemon that predates it answers `invalid`. The forward is
+  never coalesced into the outbox window, since a report is acted on once and a later state must
+  not replace it. The leader settles the task `done` by `reported` only under `until: "reported"` and only from the machine
+  the task was placed (or reserved) on, so a session can finish only its own task. Under `until:
+  "reported"` it settles beside `mark-done`, Linear Done and a session ending clean with no PR;
+  `after: "done"` dependents release on it. Under `until: "merged"` the report is ignored: a
+  merge settles, as before. Two things follow. The report is the first act beyond ingest, so a threat-model
+  change (Threat model, item 6), and a session that lies about being done can do no more than
+  one that exits. And the slot is freed at the report while the session may still be running
+  (Scheduler, "Done detection"): the leader counts `done` tasks as holding no capacity, so a
+  session that keeps working after reporting overcommits its machine until it ends. Accepted
+  (decided 2026-10-23): the instruction tells it to report last, and killing a session on a
+  claim would turn a report into a despawn. A session stopped on a permission prompt, or in plan
+  mode, cannot call the tool, so **Mark done** is the fallback; Linear Done (M4) is the other
+  settle.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
