@@ -448,7 +448,8 @@ export class Scheduler {
    * that ends with one is `awaiting-merge`, not `done`. One that ends with no
    * PR known, from a machine advertising `exitStatus`, waits for that
    * machine's answer (`sessionChange`, `#ending`): its exit says `failed` or
-   * `done`.
+   * `done`. `done` is the session's own report (#21): it settles a
+   * `until: "reported"` task from the machine it was placed on, and nothing else.
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
     const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);

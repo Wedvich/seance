@@ -160,6 +160,27 @@ describe("an awaiting-merge task", () => {
     expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "merge_expired" } });
   });
 
+  test("a merged `reported` task says it was never reported done, not that no merge was seen", async () => {
+    const { scheduler, put } = setup();
+    await put("t", waiting({ endedAt: NOW - MERGE_MS - 1, merged: true, spec: spec({ until: "reported" }) }));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "merge_expired" } });
+    expect(scheduler.task("t")?.failure?.message).toBe(
+      "its session ended over 7 days ago and it was never reported done",
+    );
+  });
+
+  test("a `reported` task whose merge was never seen says it was never reported done too", async () => {
+    const { scheduler, put } = setup();
+    await put("t", waiting({ endedAt: NOW - MERGE_MS - 1, spec: spec({ until: "reported" }) }));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")?.failure?.message).toBe(
+      "its session ended over 7 days ago and it was never reported done",
+    );
+  });
+
   test("a legacy record with no endedAt ages from createdAt", async () => {
     const { scheduler, put } = setup();
     await put("legacy", waiting({ createdAt: NOW - MERGE_MS - 1 }));

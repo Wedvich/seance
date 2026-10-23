@@ -7,6 +7,7 @@ import {
   type TaskProgress,
 } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import { branchChange, ended, progressed } from "../src/done.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
@@ -697,5 +698,64 @@ describe("markDone", () => {
 
     await scheduler.onSession("pred", "ended", FROM_A);
     expect(scheduler.task("pred")).toMatchObject({ state: "done", doneBy: "manual" });
+  });
+});
+
+/** `until: "reported"` (#21), on the pure functions: a merge is recorded and settles nothing; the report, or a clean PR-less exit, does. */
+describe("until: reported", () => {
+  const running = (until: "merged" | "reported", fields: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: spec({ until }),
+    state: "running",
+    createdAt: NOW,
+    assignment: ON_A,
+    ...fields,
+  });
+  const merged = { branch: "b", pushed: true, merged: true } as const;
+
+  test("progressed: a believed merge is recorded, not settled; under merged it still settles", () => {
+    expect(progressed(running("reported"), merged)).toMatchObject({ state: "running", merged: true });
+    expect(progressed(running("merged"), merged)).toMatchObject({ state: "done", doneBy: "merged" });
+    const open = running("reported", { merged: true, branch: "b", pushed: true });
+    expect(progressed(open, merged)).toBe(open);
+  });
+
+  test("progressed: a merge that is not believed (never pushed) is not recorded", () => {
+    const next = progressed(running("reported"), { branch: "b", merged: true });
+    expect(next.state).toBe("running");
+    expect(next.merged).toBeUndefined();
+  });
+
+  test("progressed: the report settles it done by reported; under merged it is ignored (a switch is deliberate)", () => {
+    expect(progressed(running("reported"), { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
+    const awaiting = running("reported", { state: "awaiting-merge", prUrl: PR });
+    expect(progressed(awaiting, { reported: true })).toMatchObject({ state: "done", doneBy: "reported" });
+    const ignored = running("merged");
+    expect(progressed(ignored, { reported: true })).toBe(ignored);
+  });
+
+  test("ended: a merge with a PR is awaiting-merge with merged recorded; under merged it is done", () => {
+    expect(ended(running("reported", { prUrl: PR }), merged)).toMatchObject({ state: "awaiting-merge", merged: true });
+    expect(ended(running("merged", { prUrl: PR }), merged)).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
+  test("ended: the report wins, a PR-less clean exit still settles by session, a failed one still fails", () => {
+    expect(ended(running("reported", { prUrl: PR }), { reported: true })).toMatchObject({
+      state: "done",
+      doneBy: "reported",
+    });
+    expect(ended(running("reported"), undefined)).toMatchObject({ state: "done", doneBy: "session" });
+    expect(ended(running("reported"), { exit: 0 })).toMatchObject({ state: "done", doneBy: "session" });
+    expect(ended(running("reported"), { exit: 1 })).toMatchObject({
+      state: "failed",
+      failure: { code: "session_failed" },
+    });
+    expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("branchChange: a live merge is recorded on a reported task", () => {
+    const state: BranchState = { taskId: "t", repo: "r", branch: "b", pushed: true, merged: true, at: NOW };
+    expect(branchChange(running("reported"), state, "a")).toMatchObject({ state: "running", merged: true });
+    expect(branchChange(running("merged"), state, "a")).toMatchObject({ state: "done", doneBy: "merged" });
   });
 });

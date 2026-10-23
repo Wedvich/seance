@@ -73,10 +73,11 @@ export function deviceOf(task: Task): string | undefined {
 /**
  * Whether its machine's `sessions` can move it (`settle`): a reservation, a
  * placed task, or one `awaiting-merge` on a task branch. A `here` task's merge
- * is never read from a machine (`trusted`), so no reply can change it.
+ * is never read from a machine (`trusted`), so no reply moves it — unless it
+ * settles on its session's report (`until: "reported"`), which `trusted` passes.
  */
 export function answerable(task: Task): boolean {
-  if (task.state === "awaiting-merge") return task.spec.mode !== "here";
+  if (task.state === "awaiting-merge") return task.spec.mode !== "here" || task.spec.until === "reported";
   return task.state === "reserved" || PLACED.includes(task.state);
 }
 
@@ -123,10 +124,33 @@ export function waitsForExit(
 }
 
 /**
+ * A session's own `done` report (#21): it settles its task `done` by `reported`,
+ * only under `until: "reported"` and only from the machine the task was placed
+ * (or reserved) on — a task is moved only by the machine it was given. Under
+ * `until: "merged"` it is ignored, so a switch is one line here and in `done.ts`.
+ */
+function reported(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Task | null {
+  if (task.spec.until !== "reported" || from === undefined) return null;
+  const pr = prUrl === undefined ? {} : { prUrl };
+  if (task.state === "reserved") {
+    const at = task.reservation;
+    if (at === undefined || at.deviceId !== from.deviceId) return null;
+    return advance(task, "done", { doneBy: "reported", assignment: assignmentOf(at, { id: from.pane }), ...pr });
+  }
+  if (!PLACED.includes(task.state) && task.state !== "awaiting-merge") return null;
+  const { assignment } = task;
+  if (assignment?.deviceId !== from.deviceId) return null;
+  // As `sessionChange` names a pane-less assignment: one never confirmed takes the report's pane.
+  const named = assignment.pane === undefined ? { assignment: { ...assignment, pane: from.pane } } : {};
+  return advance(task, "done", { doneBy: "reported", ...named, ...pr });
+}
+
+/**
  * A session event, with the PR URL it carried. A session that ended settles as
  * `ended` does (`awaiting-merge` with a PR, else `done`); one still live moves
  * between `running` and `needs-input`, and records a new PR URL even when its
- * state stands — `after: "opened"` and `awaiting-merge` read it.
+ * state stands — `after: "opened"` and `awaiting-merge` read it. One that
+ * reports `done` settles as `reported` says.
  *
  * `awaitsExit`: the sender's daemon reports exit statuses (`CAPABILITIES.exitStatus`).
  * Its `ended` with no PR known then settles nothing: the event's hook runs
@@ -141,9 +165,7 @@ export function sessionChange(
   prUrl?: string,
   awaitsExit = false,
 ): Task | null {
-  // `done` is decided (DESIGN.md "Session events") but its act is not built: ingest refuses it,
-  // and a leader that meets one anyway leaves the task alone rather than read it as running.
-  if (state === "done") return null;
+  if (state === "done") return reported(task, from, prUrl);
   const pr = prUrl === undefined ? {} : { prUrl };
   const deferred = waitsForExit(task, state, from, prUrl, awaitsExit);
   if (task.state === "reserved") {

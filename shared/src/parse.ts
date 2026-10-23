@@ -641,7 +641,7 @@ function parsePin(value: unknown): TaskSpec["pin"] | null {
   return { ...(deviceId === undefined ? {} : { deviceId }), ...(exclave === undefined ? {} : { exclave }) };
 }
 
-function parseBatchStrategy(value: unknown): BatchStrategy | null {
+export function parseBatchStrategy(value: unknown): BatchStrategy | null {
   if (!isRecord(value)) return null;
   const { mode, max } = value;
   if (mode === "sequential" || mode === "auto") return { mode };
@@ -887,11 +887,11 @@ function isOptionalFinite(value: unknown): value is number | undefined {
 
 /** The PR, branch, done and clock (`needsInputSince`, `endedAt`) fields M3 adds, checked as one group; null when any is malformed. */
 function parseProgressFields(value: Record<string, unknown>): Partial<Task> | null {
-  const { prUrl, branch, pushed, doneBy, needsInputSince, escalated, endedAt } = value;
+  const { prUrl, branch, pushed, merged, doneBy, needsInputSince, escalated, endedAt } = value;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
   if (branch !== undefined && (!isBoundedString(branch, BRANCH_MAX_LENGTH) || branch === "")) return null;
-  if (pushed !== undefined && pushed !== true) return null;
+  if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
   const signal = doneBy === undefined ? undefined : DONE_SIGNALS.find((s) => s === doneBy);
   if (doneBy !== undefined && signal === undefined) return null;
   if (
@@ -904,6 +904,7 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
     ...(url === undefined ? {} : { prUrl: url }),
     ...(branch === undefined ? {} : { branch }),
     ...(pushed === undefined ? {} : { pushed }),
+    ...(merged === undefined ? {} : { merged }),
     ...(signal === undefined ? {} : { doneBy: signal }),
     ...(needsInputSince === undefined ? {} : { needsInputSince }),
     ...(escalated === undefined ? {} : { escalated }),
@@ -1302,13 +1303,14 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
 
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, exit, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, reported, exit, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
   if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
   if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
   if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
+  if (reported !== undefined && reported !== true) return null;
   return {
     taskId,
     at,
@@ -1316,6 +1318,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(branch === undefined ? {} : { branch }),
     ...(pushed === undefined ? {} : { pushed }),
     ...(merged === undefined ? {} : { merged }),
+    ...(reported === undefined ? {} : { reported }),
     ...(exit === undefined ? {} : { exit }),
   };
 }

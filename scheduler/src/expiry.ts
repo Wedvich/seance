@@ -56,7 +56,12 @@ export function expiry(
       task.endedAt === undefined
         ? `it was created over ${days(config.mergeExpiryMs)} days ago`
         : `its session ended over ${days(config.mergeExpiryMs)} days ago`;
-    return fail(task, "merge_expired", `${age} and no merge of its pull request was seen`);
+    const unreported = task.spec.until === "reported";
+    return fail(
+      task,
+      "merge_expired",
+      unreported ? `${age} and it was never reported done` : `${age} and no merge of its pull request was seen`,
+    );
   }
   return null;
 }
