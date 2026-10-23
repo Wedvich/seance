@@ -7,9 +7,12 @@ import {
   type DespawnResponse,
   type PrStatus,
   type TaskProgress,
+  TASK_PHASES,
+  wantsPrReading,
 } from "@seance/shared";
-import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
+import { advance, DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { branchChange, ended, prBound, progressed } from "../src/done.ts";
+import { expiry } from "../src/expiry.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
@@ -843,6 +846,37 @@ describe("PR status", () => {
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged", leftRunning: true });
   });
 
+  test("(6b) a settle by branch state or by hand drops an open reading, read once more; a merge settle keeps its own", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("m", { assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await scheduler.load();
+    for (const id of ["t", "m"]) {
+      await scheduler.onPrStatus(id, PR, reading("open", READ, "pending"));
+    }
+    await scheduler.onBranchState(
+      { taskId: "t", repo: "app", branch: "fix", pushed: true, merged: false, at: NOW },
+      "a",
+    );
+    await scheduler.onBranchState(
+      { taskId: "t", repo: "app", branch: "fix", pushed: true, merged: true, at: NOW },
+      "a",
+    );
+    await scheduler.markDone("m");
+    for (const id of ["t", "m"]) {
+      const task = scheduler.task(id);
+      expect(task?.state).toBe("done");
+      expect(task?.pr).toBeUndefined();
+      expect(task === undefined ? false : wantsPrReading(task)).toBe(true);
+      await scheduler.onPrStatus(id, PR, reading("merged", READ + 1, "passing"));
+      const read = scheduler.task(id);
+      expect(read).toMatchObject({ state: "done", pr: { state: "merged", checks: "passing", at: READ + 1 } });
+      expect(read === undefined ? true : wantsPrReading(read)).toBe(false);
+    }
+    expect(scheduler.task("t")?.doneBy).toBe("merged");
+    expect(scheduler.task("m")?.doneBy).toBe("manual");
+  });
+
   test("(7) under until: reported a merge is recorded, settles nothing, and releases an after-merged dependent", async () => {
     const { fleet, scheduler, put } = setup();
     await put("t", { assignment: ON_A, prUrl: PR, spec: spec({ until: "reported" }) });
@@ -967,5 +1001,45 @@ describe("PR status", () => {
     const moved = prBound(before, { ...before, prUrl: "https://github.com/acme/app/pull/9" });
     expect(moved.pr).toBeUndefined();
     expect(moved.prUrl).toBe("https://github.com/acme/app/pull/9");
+  });
+});
+
+describe("a finishing transition and the task's PR reading", () => {
+  const open: PrStatus = { state: "open", checks: "pending", at: NOW };
+  const merged: PrStatus = { state: "merged", at: NOW };
+  const base = (fields: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: spec({ until: "reported" }),
+    state: "running",
+    createdAt: NOW,
+    assignment: ON_A,
+    prUrl: PR,
+    ...fields,
+  });
+  const FAR = NOW + 365 * 24 * 60 * 60_000;
+  // Each path to a finished state, from a task carrying `pr`.
+  const finishes: Record<string, (pr: PrStatus) => Task> = {
+    cancel: (pr) => advance(base({ pr }), "cancelled"),
+    "expiry to failed": (pr) => expiry(base({ pr, state: "awaiting-merge" }), FAR, DEFAULT_CONFIG) ?? base({ pr }),
+    "ended, done by session": (pr) => ended(base({ pr, prUrl: undefined }), undefined),
+    "ended, session_failed": (pr) => ended(base({ pr, prUrl: undefined }), { exit: 1 }),
+    "report settle": (pr) => progressed(base({ pr }), { reported: true }),
+  };
+
+  for (const [name, finish] of Object.entries(finishes)) {
+    test(`${name}: an open reading is dropped, a merged one kept`, () => {
+      const dropped = finish(open);
+      expect(TASK_PHASES[dropped.state]).toBe("finished");
+      expect(dropped.pr).toBeUndefined();
+      expect(wantsPrReading(dropped)).toBe(dropped.prUrl !== undefined);
+      const kept = finish(merged);
+      expect(TASK_PHASES[kept.state]).toBe("finished");
+      expect(kept.pr).toEqual(merged);
+    });
+  }
+
+  test("a transition that does not finish keeps any reading", () => {
+    expect(advance(base({ pr: open }), "needs-input").pr).toEqual(open);
+    expect(ended(base({ pr: open }), undefined)).toMatchObject({ state: "awaiting-merge", pr: open });
   });
 });
