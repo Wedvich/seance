@@ -184,7 +184,46 @@ describe("release", () => {
     expect(states(scheduler, "pred", "next")).toEqual({ pred: "awaiting-merge", next: "blocked" });
   });
 
-  test("a `done` session event is not acted on yet: the task stays as it was, not read as running", async () => {
+  test("a recorded merge releases `after: merged` only: a `reported` task is still running", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    const until = { until: "reported" } as const;
+    await put("pred", { state: "running", assignment: ON_A, spec: spec(until), merged: true });
+    await put("plain", { state: "running", assignment: ON_A, spec: spec(until) });
+    await put("viaMerged", after("pred", "merged"));
+    await put("viaDone", after("pred", "done"));
+    await put("unmerged", after("plain", "merged"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(states(scheduler, "viaMerged", "viaDone", "unmerged")).toEqual({
+      viaMerged: "ready",
+      viaDone: "blocked",
+      unmerged: "blocked",
+    });
+  });
+
+  test("a recorded merge does not save a failed predecessor's dependents", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("pred", {
+      state: "failed",
+      merged: true,
+      failure: { code: "merge_expired", message: "no report" },
+    });
+    await put("next", after("pred", "merged"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("next")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
+  test("a `here` predecessor still opens on its PR alone", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("pred", { state: "running", assignment: ON_A, spec: spec({ mode: "here" }), prUrl: PR });
+    await put("next", after("pred", "opened"));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("next")?.state).toBe("ready");
+  });
+
+  test("a `done` session event under until: merged is ignored: the task stays as it was, not read as running", async () => {
     const { store, scheduler, put } = setup(new FakeFleet([]));
     await put("asking", { state: "needs-input", assignment: ON_A, needsInputSince: NOW });
     await scheduler.load();
@@ -195,7 +234,7 @@ describe("release", () => {
     expect((await store.get("asking"))?.version).toBe(before?.version);
   });
 
-  test("a `done` session event on a reserved task leaves the reservation alone", async () => {
+  test("a `done` session event on a reserved task under until: merged leaves the reservation alone", async () => {
     const { store, scheduler, put } = setup(new FakeFleet([]));
     const { pane: _pane, ...target } = ON_A;
     await put("held", { state: "reserved", reservation: { ...target, expiresAt: NOW + 60_000 }, reservedAt: NOW });

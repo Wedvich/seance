@@ -25,6 +25,18 @@ export function queuedTask(spec: TaskSpec, now: number, id: string = crypto.rand
   return { id, spec, state: "queued", createdAt: now };
 }
 
+/** The seance MCP tool a `until: "reported"` task's session calls to settle itself (#21). */
+export const REPORT_DONE_TOOL = "report_task_done";
+
+export const REPORT_DONE_INSTRUCTION =
+  `When this task is fully finished, deploy watch included, call the seance MCP tool \`${REPORT_DONE_TOOL}\` once. ` +
+  "It settles the task and releases the tasks waiting on it, so do not call it earlier.";
+
+/** One copy of the report instruction for both clients; the prompt bound applies to the combined text. */
+export function withReportInstruction(prompt: string): string {
+  return `${prompt}\n\n${REPORT_DONE_INSTRUCTION}`;
+}
+
 /**
  * A `task:<id>` record as the store holds it: op `task`, sealed to
  * SCHEDULER_ID from its writer — `APP_ID` for an app's create, SCHEDULER_ID

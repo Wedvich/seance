@@ -792,6 +792,30 @@ describe("session state", () => {
   });
 });
 
+describe("a session's own done report (#21)", () => {
+  test("settles a reported task, and releases its after: done dependent on the next pass", async () => {
+    const { scheduler, store } = setup();
+    const pred = await enqueue(store, scheduler, spec({ until: "reported" }));
+    const next = await enqueue(store, scheduler, spec({ deps: [{ task: pred.id, after: "done" }] }));
+    await pass(scheduler);
+    expect(scheduler.task(pred.id)?.state).toBe("running");
+    expect(scheduler.task(next.id)?.state).toBe("blocked");
+
+    await scheduler.onSession(pred.id, "done", { deviceId: "a", pane: "%1" });
+    expect(scheduler.task(pred.id)).toMatchObject({ state: "done", doneBy: "reported" });
+    await pass(scheduler);
+    expect(scheduler.task(next.id)?.state).toBe("running");
+  });
+
+  test("a task that did not ask to settle on a report is left running", async () => {
+    const { scheduler, store } = setup();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    await scheduler.onSession(task.id, "done", { deviceId: "a", pane: "%1" });
+    expect(scheduler.task(task.id)?.state).toBe("running");
+  });
+});
+
 /**
  * The double spawn item 5 closes: a spawn lands, its reply is lost, and the
  * session ends inside the reservation TTL. Neither the session event nor the
@@ -1078,6 +1102,107 @@ describe("takeover", () => {
     await store.put("w", 0, { id: "w", spec: spec(), assignment: { deviceId: "b", ...at }, ...awaiting });
     await scheduler.takeover();
     expect(fleet.sessionCalls).toEqual(["b"]);
+  });
+
+  test("a `here` task awaiting its merge on `until: reported` is asked, and a report in `progress` settles it", async () => {
+    const { fleet, store, scheduler } = setup(new FakeFleet([machine("a")]));
+    const at = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" };
+    const prUrl = "https://github.com/acme/app/pull/1";
+    await store.put("h", 0, {
+      id: "h",
+      spec: spec({ mode: "here", until: "reported" }),
+      state: "awaiting-merge",
+      createdAt: NOW,
+      prUrl,
+      assignment: at,
+    });
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      progress: [{ taskId: "h", prUrl, at: NOW, reported: true }],
+    });
+    await scheduler.takeover();
+    expect(fleet.sessionCalls).toEqual(["a"]);
+    expect(scheduler.task("h")).toMatchObject({ state: "done", doneBy: "reported" });
+  });
+
+  test("takeover settles an awaiting-merge task on a worktree from a report in `progress`", async () => {
+    const { fleet, store, scheduler } = setup(new FakeFleet([machine("a")]));
+    const at = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" };
+    const prUrl = "https://github.com/acme/app/pull/1";
+    await store.put("w", 0, {
+      id: "w",
+      spec: spec({ until: "reported" }),
+      state: "awaiting-merge",
+      createdAt: NOW,
+      prUrl,
+      assignment: at,
+    });
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], progress: [{ taskId: "w", at: NOW, reported: true }] });
+    await scheduler.takeover();
+    expect(scheduler.task("w")).toMatchObject({ state: "done", doneBy: "reported" });
+  });
+
+  test("takeover settles a reservation whose spawn landed from a report in `progress`", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    const { store, clock, scheduler } = setup(fleet);
+    fleet.scripts.set("a", (request) => {
+      fleet.start("a", request);
+      return unreachable;
+    });
+    const task = await enqueue(store, scheduler, spec({ until: "reported" }));
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("reserved");
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: fleet.running.get("a") ?? [],
+      progress: [{ taskId: task.id, at: NOW, reported: true }],
+    });
+    const successor = new Scheduler({ store, fleet, now: () => clock.now });
+    await successor.takeover();
+    expect(successor.task(task.id)).toMatchObject({ state: "done", doneBy: "reported" });
+  });
+
+  test("takeover settles a running task, and one whose session is gone, from a report in `progress`", async () => {
+    const { fleet, store, scheduler } = setup();
+    const live = await enqueue(store, scheduler, spec({ until: "reported" }));
+    const gone = await enqueue(store, scheduler, spec({ until: "reported" }));
+    await pass(scheduler);
+    expect(scheduler.tasks().map((t) => t.state)).toEqual(["running", "running"]);
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: (fleet.running.get("a") ?? []).filter((s) => s.taskId === live.id),
+      ended: [gone.id],
+      progress: [
+        { taskId: live.id, at: NOW, reported: true },
+        { taskId: gone.id, at: NOW, reported: true },
+      ],
+    });
+    await scheduler.takeover();
+    expect(scheduler.task(live.id)).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(scheduler.task(gone.id)).toMatchObject({ state: "done", doneBy: "reported" });
+  });
+
+  test("a sweep settles an awaiting-merge `here` task from a report, and a report settles nothing under until: merged", async () => {
+    const { fleet, clock, scheduler, store } = setup();
+    const at = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" };
+    const awaiting = { state: "awaiting-merge", createdAt: NOW, assignment: at } as const;
+    await store.put("r", 0, { id: "r", spec: spec({ mode: "here", until: "reported" }), ...awaiting });
+    await store.put("m", 0, { id: "m", spec: spec({ mode: "here" }), ...awaiting });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      progress: [
+        { taskId: "r", at: NOW, reported: true },
+        { taskId: "m", at: NOW, reported: true },
+      ],
+    });
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(scheduler.task("r")).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(scheduler.task("m")?.state).toBe("awaiting-merge");
   });
 });
 

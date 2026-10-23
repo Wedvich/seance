@@ -26,12 +26,14 @@ type Judgement = Admission | { readonly state: "wait" };
 /**
  * Whether `pred` releases an edge. `done` releases every edge, whatever settled
  * it — `mark-done` always wins. `opened` needs a PR and the branch pushed; a
- * `here` predecessor has no task branch, so its PR alone. `merged` is `done`:
- * a merge is what makes a task done. `done` (a session's own report, #21) is
- * `done` too until a `reported` task has a state of its own to wait in.
+ * `here` predecessor has no task branch, so its PR alone. `merged` is `done`,
+ * or a recorded merge (`Task.merged`): under `until: "reported"` a merge settles
+ * nothing but still releases its `merged` dependents. `done` releases only at
+ * `done`, which for a `reported` task waits on its session's report.
  */
 export function released(pred: Task, after: DepAfter): boolean {
   if (pred.state === "done") return true;
+  if (after === "merged") return pred.merged === true;
   if (after !== "opened") return false;
   return pred.prUrl !== undefined && (pred.spec.mode === "here" || pred.pushed === true);
 }

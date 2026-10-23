@@ -42,6 +42,67 @@ describe("sessionChange awaiting an exit", () => {
   });
 });
 
+describe("sessionChange done (#21)", () => {
+  const reported = { spec: spec({ until: "reported" }) } as const;
+  const { pane: _pane, ...target } = ON_A;
+
+  test("a placed task settles done by reported, from the machine it is on", () => {
+    expect(sessionChange(task(reported), "done", FROM_A)).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(sessionChange(task({ ...reported, state: "needs-input" }), "done", FROM_A)?.state).toBe("done");
+  });
+
+  test("an awaiting-merge task settles too, and a PR on the report is kept", () => {
+    const pr = "https://github.com/acme/app/pull/7";
+    expect(sessionChange(task({ ...reported, state: "awaiting-merge" }), "done", FROM_A, pr)).toMatchObject({
+      state: "done",
+      doneBy: "reported",
+      prUrl: pr,
+    });
+  });
+
+  test("a reserved task settles on the reservation's machine, taking the pane", () => {
+    const held = task({
+      ...reported,
+      state: "reserved",
+      assignment: undefined,
+      reservation: { ...target, expiresAt: NOW + 60_000 },
+    });
+    expect(sessionChange(held, "done", FROM_A)).toMatchObject({
+      state: "done",
+      doneBy: "reported",
+      assignment: { deviceId: "a", pane: "%1" },
+    });
+    expect(sessionChange(held, "done", { deviceId: "b", pane: "%1" })).toBeNull();
+  });
+
+  test("a foreign machine, an unnamed sender and an app cannot settle it", () => {
+    expect(sessionChange(task(reported), "done", { deviceId: "b", pane: "%1" })).toBeNull();
+    expect(sessionChange(task(reported), "done", { deviceId: "app", pane: "%1" })).toBeNull();
+    expect(sessionChange(task(reported), "done", undefined)).toBeNull();
+  });
+
+  test("under until: merged (or absent) it is ignored", () => {
+    expect(sessionChange(task(), "done", FROM_A)).toBeNull();
+    expect(sessionChange(task({ spec: spec({ until: "merged" }) }), "done", FROM_A)).toBeNull();
+  });
+
+  test("a placed task with no pane takes the report's, as an event does", () => {
+    expect(sessionChange(task({ ...reported, assignment: target }), "done", FROM_A)).toMatchObject({
+      state: "done",
+      assignment: { deviceId: "a", pane: "%1" },
+    });
+    expect(sessionChange(task({ ...reported, assignment: { ...ON_A, pane: "%9" } }), "done", FROM_A)).toMatchObject({
+      assignment: { pane: "%9" },
+    });
+  });
+
+  test("a task that was never placed is left alone", () => {
+    for (const state of ["queued", "blocked", "ready"] as const) {
+      expect(sessionChange(task({ ...reported, state, assignment: undefined }), "done", FROM_A)).toBeNull();
+    }
+  });
+});
+
 describe("waitsForExit", () => {
   test("only the machine the task is on, and only a PR-less end", () => {
     expect(waitsForExit(task(), "ended", FROM_A, undefined, true)).toBe(true);

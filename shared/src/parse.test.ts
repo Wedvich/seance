@@ -515,6 +515,13 @@ describe("tasks and their records", () => {
     expect(parseTask({ ...task, state: "done", doneBy: "linear" })?.doneBy).toBe("linear");
   });
 
+  test("a recorded merge and a `reported` settle round-trip; a merge that is not `true` nulls the task", () => {
+    const reported = { ...task, merged: true, state: "done", doneBy: "reported" } as const;
+    expect(parseTask(reported)).toEqual(reported);
+    expect(parseTask({ ...task, merged: false })).toBeNull();
+    expect(parseTask({ ...task, merged: "yes" })).toBeNull();
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1058,10 +1065,17 @@ describe("parseTaskProgressList", () => {
     ]);
   });
 
+  test("a session's report is kept", () => {
+    const reported = { taskId: "t-4", reported: true, at: 4 } as const;
+    expect(parseTaskProgressList([reported])).toEqual([reported]);
+  });
+
   test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {
     for (const bad of [
       { ...entry, prUrl: "http://github.com/acme/app/pull/7" },
       { ...entry, merged: false },
+      { ...entry, reported: false },
+      { ...entry, reported: "yes" },
       { ...entry, pushed: "yes" },
       { ...entry, branch: "" },
       { ...entry, taskId: "t:1" },

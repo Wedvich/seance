@@ -936,12 +936,17 @@ export interface MachineInfo {
  * `sessions` `progress` carries `TaskProgress.exit` — a leader then settles a
  * PR-less `ended` event by that machine's next answer, not by the event, whose
  * hook runs before the pane dies (DESIGN.md, Daemon, "Exit status").
+ * `reportedDone`: this daemon ingests a session's `done` report, and as a
+ * leader acts on `TaskSpec.until` and `after: "done"` — what a client checks
+ * of the verified leader before writing either, since an older leader strips
+ * `until` on its first write and holds a `done` edge unreadable.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
   taskId: "taskId",
   baseBranch: "baseBranch",
   exitStatus: "exitStatus",
+  reportedDone: "reportedDone",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1400,6 +1405,12 @@ export interface TaskProgress {
   /** `BranchState.merged`'s verdict. */
   readonly merged?: true;
   /**
+   * The session reported its task done (#21), noted in the launch ledger. The
+   * leader reads it only for a `until: "reported"` task; it is here so a report
+   * the leader missed is recovered on a takeover or sweep.
+   */
+  readonly reported?: true;
+  /**
    * The session's exit status once its pane died (tmux's `pane_dead_status`,
    * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
@@ -1418,11 +1429,10 @@ export const EXIT_STATUS_MAX = 255;
 
 /**
  * What a session is doing, as `session-event` reports it (docs/scheduler.md).
- * `done` (M4, decided #21): the session reports its own task finished — after a
- * deploy it watched, say. Bound to the sender's pane like every event, so a
- * session can finish only its own task. Shape only: no daemon forwards it and
- * no leader acts on it until the authoring surface lands; an older daemon
- * refuses it as an unknown state.
+ * `done` (M4, #21): the session reports its own task finished — after a deploy
+ * it watched, say. Bound to the sender's pane like every event, so a session can
+ * finish only its own task, and acted on only for a `until: "reported"` task.
+ * An older daemon refuses it as an unknown state (`CAPABILITIES.reportedDone`).
  */
 export const SESSION_STATES = ["busy", "idle", "needs-input", "ended", "done"] as const;
 
@@ -1595,14 +1605,15 @@ export interface BatchMembership {
 /**
  * When a dependency edge releases. `opened`: the predecessor has a PR and its
  * branch is pushed (stacked work, the default a client offers), in whatever
- * state it is — `running` included. `merged`: its branch merged. A `done`
- * predecessor releases both, whatever settled it, since `mark-done` always
- * wins. A `here` predecessor has no task branch, so `opened` releases on its PR
- * alone and `merged` only at `done`. `done` (M4, decided #21): only the
- * predecessor's `done`, whatever settled it — under `until: "reported"` that
- * waits past its merge for its session's report, which is how a dependent waits
- * on a deploy. An older leader reads a task with a `done` edge as malformed and
- * holds it unreadable, never runs it.
+ * state it is — `running` included. `merged`: its branch merged — a `done`
+ * predecessor, or one under `until: "reported"` whose merge is recorded
+ * (`Task.merged`). A `done` predecessor releases both, whatever settled it,
+ * since `mark-done` always wins. A `here` predecessor has no task branch, so
+ * `opened` releases on its PR alone and `merged` only at `done`. `done` (M4,
+ * #21): only the predecessor's `done`, whatever settled it — under
+ * `until: "reported"` that waits past its merge for its session's report, which
+ * is how a dependent waits on a deploy. An older leader reads a task with a
+ * `done` edge as malformed and holds it unreadable, never runs it.
  */
 export const DEP_AFTER = ["opened", "merged", "done"] as const;
 
@@ -1657,9 +1668,9 @@ export const TASK_SPEC_LIMITS = {
 } as const;
 
 /**
- * What settles a task (M4, decided #21). `merged`, the default: its merge, as
- * today. `reported`: a merge is recorded but settles nothing; only its
- * session's `done` report, `mark-done` or Linear Done does.
+ * What settles a task (M4, #21). `merged`, the default: its merge, as today.
+ * `reported`: a merge is recorded but settles nothing; its session's `done`
+ * report, `mark-done`, Linear Done, or a session ending clean with no PR does.
  */
 export const TASK_UNTIL = ["merged", "reported"] as const;
 
@@ -1678,8 +1689,8 @@ export interface TaskSpec extends TaskRequest {
    * without it and seals that back on every write (reserve, place, settle), so
    * the field is lost from the record and the task settles at the merge, early
    * for a `reported` one; its `after: "done"` dependents it holds unreadable
-   * regardless (`DEP_AFTER`). The authoring item must not write it until
-   * leaders are upgraded.
+   * regardless (`DEP_AFTER`). A client writes it only when the verified
+   * leader advertises `CAPABILITIES.reportedDone`.
    */
   readonly until?: TaskUntil;
   readonly batch?: BatchMembership;
@@ -1885,6 +1896,11 @@ export interface Task {
    * believed only of a branch seen pushed (`scheduler/src/done.ts`).
    */
   readonly pushed?: true;
+  /**
+   * A believed merge of a `until: "reported"` task, which settles nothing; it
+   * releases `after: "merged"` dependents (`scheduler/src/deps.ts`).
+   */
+  readonly merged?: true;
   /** With `done`: which signal settled it (docs/scheduler.md, "Done detection"). */
   readonly doneBy?: DoneSignal;
   /** When it last entered `needs-input`, ms: the escalation clock, here so a new leader does not restart it. */
@@ -1904,9 +1920,10 @@ export interface Task {
  * with no PR to wait on. `manual`: `mark-done`, which always wins. `linear`
  * (M4, decided #18): its Linear issue went Done — a person closed it, so it
  * settles as `manual` does, open PR or not. An older leader reads a task done
- * by `linear` as malformed and holds it unreadable.
+ * by `linear` as malformed and holds it unreadable. `reported` (M4, #21): its
+ * session said so, under `until: "reported"`; older leaders read it likewise.
  */
-export const DONE_SIGNALS = ["merged", "session", "manual", "linear"] as const;
+export const DONE_SIGNALS = ["merged", "session", "manual", "linear", "reported"] as const;
 
 export type DoneSignal = (typeof DONE_SIGNALS)[number];
 

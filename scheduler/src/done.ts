@@ -8,7 +8,7 @@ import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
  * Pure: the scheduler writes what these return.
  */
 
-type Progress = Pick<TaskProgress, "prUrl" | "branch" | "pushed" | "merged" | "exit">;
+type Progress = Pick<TaskProgress, "prUrl" | "branch" | "pushed" | "merged" | "reported" | "exit">;
 
 /**
  * What `entry` may say of `task`. A `here` task's branch is the checkout's,
@@ -58,18 +58,34 @@ function hasWork(after: Task): boolean {
   return after.pushed === true;
 }
 
+/** `until: "reported"` (#21): a merge settles nothing there; the session's report, or its exit, does. */
+function settlesOnReport(task: Task): boolean {
+  return task.spec.until === "reported";
+}
+
+/** A believed merge recorded on a task it does not settle; the same object when already recorded. */
+function mergedOpen(task: Task): Task {
+  return task.merged === true ? task : { ...task, merged: true };
+}
+
 /**
  * A placed or `awaiting-merge` task with `entry` applied: its fields recorded,
  * and a believed merge making it `done` (`doneBy: "merged"`) — a session still
- * running included, since what it was for has landed. Unchanged (the same
- * object) when `entry` says nothing new.
+ * running included, since what it was for has landed. Under `until: "reported"`
+ * a merge is only recorded (`Task.merged`), and the session's report
+ * (`entry.reported`) settles it `done` by `reported`; a report under
+ * `until: "merged"` is ignored. Unchanged (the same object) when `entry` says
+ * nothing new.
  */
 export function progressed(task: Task, entry: Progress | undefined): Task {
   if (entry === undefined) return task;
   const seen = trusted(task, entry);
   const next = absorb(task, seen);
-  if (seen.merged === true && hasWork(next)) return advance(next, "done", { doneBy: "merged" });
-  return next;
+  const merged = seen.merged === true && hasWork(next);
+  if (!settlesOnReport(next)) return merged ? advance(next, "done", { doneBy: "merged" }) : next;
+  const settleable = PLACED.includes(next.state) || next.state === "awaiting-merge";
+  if (seen.reported === true && settleable) return advance(next, "done", { doneBy: "reported" });
+  return merged ? mergedOpen(next) : next;
 }
 
 /**
@@ -79,26 +95,33 @@ export function progressed(task: Task, entry: Progress | undefined): Task {
  * dependents waiting; neither, and a nonzero exit → `failed`
  * (`session_failed`), which fails its dependents; neither and no such exit
  * (0, or none known) → `done` by `session`. The exit counts only there: what
- * a merge or a PR shows landed stands however the session ended.
+ * a merge or a PR shows landed stands however the session ended. Under
+ * `until: "reported"` the session's report comes first (`done` by `reported`),
+ * and a merge is recorded and falls through to the PR check instead of
+ * settling; a PR-less exit still settles as above, since a lying report can do
+ * no more than exiting can.
  */
 export function ended(task: Task, entry: Progress | undefined, fields: TaskFields = {}): Task {
   const view: Task = { ...task, ...fields };
   const seen = entry === undefined ? undefined : trusted(view, entry);
   const known = seen === undefined ? view : absorb(view, seen);
-  if (seen?.merged === true && hasWork(known)) return advance(known, "done", { doneBy: "merged" });
-  if (known.prUrl !== undefined) return advance(known, "awaiting-merge");
+  if (settlesOnReport(known) && seen?.reported === true) return advance(known, "done", { doneBy: "reported" });
+  const merged = seen?.merged === true && hasWork(known);
+  if (merged && !settlesOnReport(known)) return advance(known, "done", { doneBy: "merged" });
+  const open = merged ? mergedOpen(known) : known;
+  if (open.prUrl !== undefined) return advance(open, "awaiting-merge");
   const exit = seen?.exit;
   if (exit !== undefined && exit !== 0) {
     const message = `its session exited with status ${exit} and reported no pull request`;
-    return advance(known, "failed", { failure: { code: "session_failed", message } });
+    return advance(open, "failed", { failure: { code: "session_failed", message } });
   }
-  return advance(known, "done", { doneBy: "session" });
+  return advance(open, "done", { doneBy: "session" });
 }
 
 /**
  * A live `branch-state`, from the machine that sealed it (`from`). Only the
  * machine the task was placed on may move it, as for a session event; a
- * reservation is left to its verdict.
+ * reservation is left to its verdict. A merge settles it as `progressed` says.
  */
 export function branchChange(task: Task, state: BranchState, from: string): Task | null {
   if (task.state !== "awaiting-merge" && !PLACED.includes(task.state)) return null;
