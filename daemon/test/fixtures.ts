@@ -1,5 +1,5 @@
 import { watch } from "node:fs";
-import { chmod, link, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { watchConfigFile } from "../src/config.ts";
 import { exec, execFailure } from "../src/exec.ts";
@@ -275,6 +275,131 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     return text;
   };
   return { ok, stuck, failing, exitPrompt, repl, deaf, argvFile, stdinFile, argv, machineTag, stdin };
+}
+
+/** One test's view of the `gh` stub: its own files, so a call from another test's late child never lands in them. */
+export interface GhRun {
+  /** NUL-separated argv of the latest call; overwritten per call. */
+  readonly argvFile: string;
+  /** `GH_PROMPT_DISABLED` as the latest call saw it, empty when unset. */
+  readonly promptFile: string;
+  /** Calls so far: one byte appended per call, so the count is the file's size. */
+  readonly calls: () => Promise<number>;
+  /** Calls so far, once none has landed for a short while: a child spawned just before a `stop()` is still starting. */
+  readonly settledCalls: () => Promise<number>;
+  /** Calls that were told to wait (`setReply`'s `delaySeconds`) and have started waiting. */
+  readonly delayed: () => Promise<number>;
+  /** The latest call's argv; polls until the first call has landed. */
+  readonly argv: () => Promise<readonly string[]>;
+  /** Every call's argv, in order. */
+  readonly argvs: () => Promise<readonly (readonly string[])[]>;
+  /** What the next calls print and exit with, after waiting `delaySeconds`, until set again. Data files only: the script is never rewritten. */
+  readonly setReply: (stdout: string, code: number, delaySeconds?: number) => Promise<void>;
+}
+
+export interface GhStub {
+  readonly path: string;
+  /** A new run: the stub's files for one test. Later calls (and children spawned after it) answer to it alone. */
+  readonly fresh: () => Promise<GhRun>;
+}
+
+/**
+ * A `gh` that records what it was asked and answers from data files, so one
+ * executable serves every test (`makeClaudeStub`'s warm-up note applies: it is
+ * written and executed once, in `beforeAll`). The files live in the directory
+ * `SEANCE_GH_STUB_RUN` names *when the call starts*: `fresh()` points it at a
+ * new one per test, and a child spawned before the switch keeps writing to the
+ * old one, so a previous test's late call cannot move this test's counts.
+ */
+export async function makeGhStub(base: string): Promise<GhStub> {
+  const dir = join(base, "gh-stub");
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "gh");
+  // reply: first line the exit code, second the delay in seconds, the rest stdout; replaced by
+  // rename, so a poll running while a test changes the reply sees the old one or the new, never a mix.
+  await Bun.write(
+    path,
+    [
+      "#!/bin/bash",
+      '[ "$1" = --stub-warm ] && exit 0',
+      'run="$SEANCE_GH_STUB_RUN"',
+      '[ -n "$run" ] || exit 99',
+      'printf \'%s\' "$GH_PROMPT_DISABLED" > "$run/prompt"',
+      'printf \'%s\\0\' "$@" > "$run/argv"',
+      "{ printf '%s\\0' \"$@\"; printf '\\n'; } >> \"$run/argv.log\"",
+      'printf x >> "$run/count"',
+      'exec 3< "$run/reply"',
+      "IFS= read -r code <&3",
+      "IFS= read -r delay <&3",
+      'if [ "$delay" != 0 ]; then printf x >> "$run/delayed"; sleep "$delay"; fi',
+      "cat <&3",
+      'exit "$code"',
+      "",
+    ].join("\n"),
+  );
+  await chmod(path, 0o755);
+  await run([path, "--stub-warm"]);
+
+  const fresh = async (): Promise<GhRun> => {
+    const runDir = await mkdtemp(join(dir, "run-"));
+    const file = (name: string): string => join(runDir, name);
+    const setReply = async (stdout: string, code: number, delaySeconds = 0): Promise<void> => {
+      await Bun.write(file("reply.next"), `${code}\n${delaySeconds}\n${stdout}`);
+      await rename(file("reply.next"), file("reply"));
+    };
+    await setReply("{}", 0);
+    process.env["SEANCE_GH_STUB_RUN"] = runDir;
+
+    const size = async (name: string): Promise<number> =>
+      Bun.file(file(name))
+        .text()
+        .then((text) => text.length)
+        .catch(() => 0);
+    const calls = (): Promise<number> => size("count");
+    const settledCalls = async (): Promise<number> => {
+      let seen = await calls();
+      for (;;) {
+        // oxlint-disable-next-line no-await-in-loop -- sampling in sequence is the point
+        await Bun.sleep(150);
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const now = await calls();
+        if (now === seen) return now;
+        seen = now;
+      }
+    };
+    const argv = async (): Promise<readonly string[]> => {
+      await pollUntil(
+        async () =>
+          (
+            await Bun.file(file("argv"))
+              .text()
+              .catch(() => "")
+          ).endsWith("\0"),
+        `gh stub argv at ${file("argv")}`,
+      );
+      return (await Bun.file(file("argv")).text()).split("\0").slice(0, -1);
+    };
+    const argvs = async (): Promise<readonly (readonly string[])[]> => {
+      const log = await Bun.file(file("argv.log"))
+        .text()
+        .catch(() => "");
+      return log
+        .split("\n")
+        .filter((record) => record !== "")
+        .map((record) => record.split("\0").slice(0, -1));
+    };
+    return {
+      argvFile: file("argv"),
+      promptFile: file("prompt"),
+      calls,
+      settledCalls,
+      delayed: () => size("delayed"),
+      argv,
+      argvs,
+      setReply,
+    };
+  };
+  return { path, fresh };
 }
 
 /**

@@ -27,6 +27,7 @@ import type { LocalOps } from "./handlers.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
+import { startPrPoller, type PrPollerOpts } from "./pr-status.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
 import type { Fetch } from "./seams.ts";
 import type { VersionFloor } from "./version-floor.ts";
@@ -40,7 +41,8 @@ import type { VersionFloor } from "./version-floor.ts";
  * library can move to a fixed box behind two new adapters.
  *
  * One term is one run: `lead { term }` builds an app-role leg of its own, the
- * `Fleet` over it, a `Scheduler`, and a tick timer. `follow`, the daemon's
+ * `Fleet` over it, a `Scheduler`, a tick timer and the PR poller
+ * (`pr-status.ts`, which reads the leader's own `gh`). `follow`, the daemon's
  * relay socket dropping, a `not_leader` answer, the leg's token rejected
  * (which also resigns the role, since the relay cannot know) or `stop` ends
  * it, and ending it stops every one of those. Nothing of a term survives it — the broker's discipline.
@@ -118,6 +120,8 @@ export interface LeaderBaseOpts {
   readonly now?: () => number;
   /** Outbound HTTP for the term (M4's push sends); defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
+  /** The PR poller's `gh` and cadence (`pr-status.ts`); absent, it runs on its defaults. */
+  readonly prStatus?: PrPollerOpts;
 }
 
 export interface Leader {
@@ -228,6 +232,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   let live = true;
   let running = false;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let prs: { readonly stop: () => void } | null = null;
   const now = opts.now ?? Date.now;
   // The relay answered `not_leader` to a write: `fencedStore` throws only once
   // `!live`, so a `StoreRevoked` while live can only be that, and the term is no
@@ -486,6 +491,15 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       for (const entry of scheduler.unreadable()) if (entry.reason === "created_ahead") changed.add(entry.id);
       tick();
     }, intervalMs);
+    // Only after takeover's load: the poller reads the held tasks and writes through the term's fenced store.
+    prs = startPrPoller({
+      ...opts.prStatus,
+      tasks: () => scheduler.tasks(),
+      onStatus: (id, url, status) =>
+        live && running ? scheduler.onPrStatus(id, url, status).catch(fail) : Promise.resolve(),
+      now,
+      log,
+    });
     log.info(
       `scheduler: term ${term} took over ${scheduler.tasks().length} tasks (${scheduler.unreadable().length} unreadable) — dispatching`,
     );
@@ -508,6 +522,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       retry?.wake();
       if (timer !== null) clearInterval(timer);
       timer = null;
+      prs?.stop();
+      prs = null;
       nudge.stop();
       unsubscribe();
       // Fails whatever the term still had out as "disconnected" → `unreachable`,

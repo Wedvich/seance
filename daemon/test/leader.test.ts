@@ -42,8 +42,18 @@ import type { Config } from "../src/config.ts";
 import type { LocalOps } from "../src/handlers.ts";
 import { boundedQueue } from "../src/leader-requests.ts";
 import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
+import type { PrPollerOpts } from "../src/pr-status.ts";
 import { startDaemon } from "../src/run.ts";
-import { captureLog, makeClaudeStub, makeGitFixture, pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
+import {
+  captureLog,
+  makeClaudeStub,
+  makeGhStub,
+  makeGitFixture,
+  pollUntil,
+  usePrivateTmux,
+  type GhStub,
+  type PrivateTmux,
+} from "./fixtures.ts";
 import { AsyncQueue, nextRequest, queuedRequests, startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -51,6 +61,7 @@ const TOKEN = "leader-bearer";
 let base: string;
 let key: CryptoKey;
 let privateTmux: PrivateTmux | undefined;
+let ghStub: GhStub;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-leader-"));
@@ -58,6 +69,7 @@ beforeAll(async () => {
   privateTmux = usePrivateTmux(base, "leader");
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
   process.env["SEANCE_CLAUDE_BIN"] = (await makeClaudeStub(base)).ok;
+  ghStub = await makeGhStub(base);
   key = await importPsk(PSK);
 });
 
@@ -94,7 +106,12 @@ const noLocalOps: LocalOps = {
  * the fake clock runs through: a ping whose pong cannot arrive inside one
  * synchronous advance would redial for a reason that is not the subject here.
  */
-function leaderOver(relay: TestRelay, store: QueueStore = new MemoryQueueStore(), tickIntervalMs?: number) {
+function leaderOver(
+  relay: TestRelay,
+  store: QueueStore = new MemoryQueueStore(),
+  tickIntervalMs?: number,
+  prStatus?: PrPollerOpts,
+) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
   let resigned = 0;
@@ -110,6 +127,7 @@ function leaderOver(relay: TestRelay, store: QueueStore = new MemoryQueueStore()
       resigned += 1;
     },
     ...(tickIntervalMs === undefined ? {} : { tickIntervalMs }),
+    ...(prStatus === undefined ? {} : { prStatus }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -1388,6 +1406,83 @@ describe("leader in the daemon", () => {
       expect(daemon.leader.term()).toBeNull();
     } finally {
       daemon.stop();
+      relay.stop();
+    }
+  });
+});
+
+describe("PR status", () => {
+  const PR_URL = "https://github.com/acme/app/pull/7";
+  const answer = (state: string): string =>
+    JSON.stringify({
+      data: {
+        p0: {
+          defaultBranchRef: { name: "main" },
+          pullRequest: {
+            state,
+            isDraft: false,
+            merged: state === "MERGED",
+            baseRefName: "main",
+            commits: { nodes: [] },
+          },
+        },
+      },
+    });
+
+  test("a term reads its tasks' PRs through gh and settles a merge; follow stops the poller, a new term starts it again", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    await store.put("pr1", 0, task("pr1", { state: "awaiting-merge", prUrl: PR_URL, endedAt: Date.now() }));
+    const gh = await ghStub.fresh();
+    await gh.setReply(answer("OPEN"), 0);
+    const { leader } = leaderOver(relay, store, undefined, { gh: ghStub.path, intervalMs: 50 });
+    try {
+      leader.lead(1);
+      await pollUntil(async () => (await store.get("pr1"))?.body?.pr?.state === "open", "the open reading");
+      expect((await store.get("pr1"))?.body?.state).toBe("awaiting-merge");
+
+      leader.follow("test");
+      // A child spawned just before the term ended is still starting: count once it has.
+      const after = await gh.settledCalls();
+      await Bun.sleep(300);
+      expect(await gh.calls()).toBe(after);
+
+      await gh.setReply(answer("MERGED"), 0);
+      relay.schedulerTerm = 2;
+      leader.lead(2);
+      await pollUntil(async () => (await store.get("pr1"))?.body?.state === "done", "the merge settling it");
+      expect((await store.get("pr1"))?.body).toMatchObject({ doneBy: "merged", pr: { state: "merged" } });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a poll still out when the term ends lands nowhere", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    await store.put("pr1", 0, task("pr1", { state: "awaiting-merge", prUrl: PR_URL, endedAt: Date.now() }));
+    const gh = await ghStub.fresh();
+    await gh.setReply(answer("OPEN"), 0);
+    const { leader } = leaderOver(relay, store, undefined, { gh: ghStub.path, intervalMs: 50 });
+    try {
+      leader.lead(1);
+      await pollUntil(async () => (await store.get("pr1"))?.body?.pr?.state === "open", "the open reading");
+      const written = (await store.get("pr1"))?.version;
+
+      // The merge is on its way, held back inside gh: end the term while it is.
+      await gh.setReply(answer("MERGED"), 0, 0.5);
+      await pollUntil(async () => (await gh.delayed()) > 0, "a merged answer in flight");
+      leader.follow("test");
+      // A non-event: the answer lands after this and must change nothing.
+      await Bun.sleep(900);
+      const record = await store.get("pr1");
+      expect(record?.version).toBe(written);
+      expect(record?.body).toMatchObject({ state: "awaiting-merge", pr: { state: "open" } });
+    } finally {
+      leader.stop();
       relay.stop();
     }
   });

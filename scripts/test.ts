@@ -103,7 +103,10 @@ if (filters.length === 0) {
  */
 const runDir = await mkdtemp(join(tmpdir(), "seance-run-"));
 // Passed explicitly: Bun.spawn's default env is the startup snapshot, blind to process.env writes.
-const shardEnv = { ...process.env, [TEST_RUN_DIR_ENV]: runDir };
+// SEANCE_GH_BIN names a gh that never exists: suites run real leaders over tasks with GitHub-shaped PR
+// URLs, and the developer's authenticated gh would otherwise read real GitHub. The PR-status suites
+// pass their own stub explicitly.
+const shardEnv = { ...process.env, [TEST_RUN_DIR_ENV]: runDir, SEANCE_GH_BIN: join(runDir, "no-gh") };
 const running = new Set<Bun.Subprocess>();
 /** Bounds each kill-server: a wedged server must not hang the run's exit. */
 const KILL_SERVER_TIMEOUT_MS = 10_000;

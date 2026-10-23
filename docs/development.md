@@ -75,6 +75,9 @@ a production change.
   there and removes the directory, so a suite that never reached its teardown leaks
   nothing either. A ^C at a terminal reaches only the shard reading the tty (the pty
   wrapper puts it in raw mode); the rest finish and the sweep runs as usual.
+  The runner also sets `SEANCE_GH_BIN` to a path that never exists, so a leader under test
+  never runs the developer's authenticated `gh` against real GitHub; the PR-status suites pass
+  their `makeGhStub` explicitly.
   The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
   tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
   Three fixtures stand in for what lies outside a machine, importable from daemon suites and e2e alike (no e2e file uses them yet):
