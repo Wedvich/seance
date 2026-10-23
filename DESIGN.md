@@ -4422,7 +4422,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   whenever auto is chosen, its repo changes, the leader changes or is verified, or the socket
   comes back from a drop (which can fail a preview in flight while leaving the leader as it was);
   and, 500ms after a burst settles, whenever a machine connects or drops or its repo set changes
-  (2026-10-17) — a status beat moves neither, so it asks nothing. The card's label says how old
+  (2026-10-17) — a status beat moves neither, so it asks nothing. A pause or resume asks it
+  again at once on the leader's answer, and a queue read whose holds differ from the list's
+  last ones (another device's pause, a reset lifting one) asks after the same 500ms
+  (2026-10-23): a hold decides the preview as much as the fleet does. The card's label says how old
   the decision is ("decided 2m ago"): load and quota move under it between asks.
   A preview answered `not_ready` — a term still taking over — is asked again every second, at
   most 10 times, rather than shown as a failure. The card shows the
