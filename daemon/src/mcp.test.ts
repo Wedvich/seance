@@ -203,7 +203,7 @@ describe("mcp tools", () => {
     const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
     const client = await connectedClient(lazy);
     const result = await client.callTool({ name: "list_machines", arguments: {} });
-    const listed = JSON.parse(toolText(result)) as Record<string, unknown>[];
+    const listed: Record<string, unknown>[] = JSON.parse(toolText(result));
     expect(listed).toEqual([
       {
         name: "MacBook Pro",
@@ -215,6 +215,21 @@ describe("mcp tools", () => {
         local: false,
       },
     ]);
+    lazy.stop();
+  });
+
+  test("list_machines lists each machine's exclave ids, and none for a machine that reports none", async () => {
+    const machines = [
+      machine({ exclaves: [exclave("default"), exclave("work")] }),
+      machine({ deviceId: "device-2", name: "Old Box" }),
+    ];
+    const lazy = new LazyRelay({ create: () => fakeRelay(machines) });
+    const client = await connectedClient(lazy);
+    const [updated, old]: Record<string, unknown>[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    expect(updated?.exclaves).toEqual(["default", "work"]);
+    expect(old).not.toHaveProperty("exclaves");
     lazy.stop();
   });
 
@@ -235,10 +250,9 @@ describe("mcp tools", () => {
       // oxlint-disable-next-line no-await-in-loop -- one client per leader state
       const client = await connectedClient(lazy);
       // oxlint-disable-next-line no-await-in-loop -- one client per leader state
-      const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as Record<
-        string,
-        unknown
-      >[];
+      const listed: Record<string, unknown>[] = JSON.parse(
+        toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+      );
       expect(listed.map((entry) => entry["scheduler"])).toEqual([...marks]);
       expect(listed[0]?.["source"]).toEqual({
         sha: source.sha.slice(0, 12),
@@ -573,12 +587,11 @@ describe("the local short circuit", () => {
     const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
     const client = await connectedClient(lazy, fakeLocal());
     const result = await client.callTool({ name: "list_machines", arguments: {} });
-    const listed = JSON.parse(toolText(result)) as {
-      machines: { name: string; local: boolean; connected: boolean }[];
-      note: string;
-    };
+    const listed: { machines: Record<string, unknown>[]; note: string } = JSON.parse(toolText(result));
     expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: true })]);
+    expect(listed.machines[0]).not.toHaveProperty("exclaves");
     expect(listed.note).toContain("only local spawns will work");
+    expect(listed.note).toContain("without its exclaves");
     lazy.stop();
   });
 
@@ -1608,6 +1621,48 @@ describe("get_queue", () => {
       ],
     });
     expect(fake.requests.map((r) => `${r.op}@${r.deviceId}`)).toEqual([`queue@${SCHEDULER_ID}`]);
+    lazy.stop();
+  });
+
+  test("shows a task's pin, naming its machine where the fleet knows it", async () => {
+    const pinned = (id: string, pin: NonNullable<Task["spec"]["pin"]>) =>
+      task({ id, state: "ready", spec: { repo: ORIGIN, mode: "worktree", pin } });
+    const fake = leaderRelay([
+      {
+        tasks: [
+          pinned("t-1", { deviceId: "device-2", exclave: "work" }),
+          pinned("t-2", { deviceId: "device-gone" }),
+          pinned("t-3", { exclave: "default" }),
+          task({ id: "t-4", state: "ready" }),
+          // Off the registry, but the decision's candidates still name it.
+          {
+            ...pinned("t-5", { deviceId: "device-lost" }),
+            decision: {
+              ...decision,
+              candidates: [
+                {
+                  deviceId: "device-lost",
+                  machine: "Lost Box",
+                  exclave: "default",
+                  rejected: [{ code: "auth_missing" }],
+                },
+              ],
+            },
+          },
+        ],
+        at: 6_000,
+      },
+    ]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks.map((t: { pin?: unknown }) => t.pin)).toEqual([
+      { machine: "Linux Box", deviceId: "device-2", exclave: "work" },
+      { deviceId: "device-gone" },
+      { exclave: "default" },
+      undefined,
+      { machine: "Lost Box", deviceId: "device-lost" },
+    ]);
     lazy.stop();
   });
 
