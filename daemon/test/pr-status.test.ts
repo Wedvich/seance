@@ -268,13 +268,13 @@ describe("chunking", () => {
 });
 
 describe("what is never read", () => {
-  test("a URL that is not a GitHub PR, one too big for GraphQL's Int, a finished task and a task with no PR never reach gh", async () => {
+  test("a URL that is not a GitHub PR, one too big for GraphQL's Int, a finished task already read and a task with no PR never reach gh", async () => {
     await gh.setReply(reply({ state: "OPEN" }), 0);
     const { seen } = start([
       pr(1, { id: "gitlab", prUrl: "https://gitlab.com/octo-org/widgets/pull/1" }),
       pr(1, { id: "files", prUrl: `${prUrl(1)}/files` }),
       pr(1, { id: "big", prUrl: prUrl(99_999_999_999) }),
-      pr(1, { id: "done", state: "done" }),
+      pr(1, { id: "done", state: "done", pr: { state: "open", at: 1 } }),
       pr(1, { id: "bare", prUrl: undefined }),
       pr(6, { id: "good" }),
     ]);
@@ -285,10 +285,27 @@ describe("what is never read", () => {
     expect(argv).toContain("n0=6");
   });
 
+  test("a finished task with no reading is read; once the forge refuses its PR, it is not read again", async () => {
+    await gh.setReply(reply({ state: "MERGED" }), 0);
+    const read = start([pr(3, { id: "done", state: "done" })]);
+    await pollUntil(() => read.seen.length > 0, "the finished task's reading");
+    expect(read.seen[0]).toMatchObject({ id: "done", status: { state: "merged" } });
+    read.stop();
+
+    gh = await stub.fresh();
+    await gh.setReply(reply(null), 1);
+    const refused = start([pr(4, { id: "gone", state: "failed" })]);
+    await pollUntil(async () => (await gh.calls()) >= 1, "the one read");
+    // A non-event cannot be polled for: several intervals, and still the one run.
+    await Bun.sleep(200);
+    expect(await gh.calls()).toBe(1);
+    expect(refused.logs.warn).toHaveLength(1);
+  });
+
   test("with nothing to poll gh never runs", async () => {
     const { seen } = start([
       pr(1, { prUrl: "https://gitlab.com/octo-org/widgets/pull/1" }),
-      pr(2, { state: "cancelled" }),
+      pr(2, { state: "cancelled", pr: { state: "closed", at: 1 } }),
       pr(3, { state: "queued" }),
       pr(4, { state: "blocked" }),
       pr(5, { state: "reserved" }),

@@ -1,4 +1,4 @@
-import { TASK_STATES, type TaskState } from "./types.ts";
+import { TASK_STATES, type Task, type TaskState } from "./types.ts";
 
 /**
  * Where a task stands, coarser than its state: what the scheduler, the PWA and
@@ -46,10 +46,20 @@ export function isSettled(state: TaskState): boolean {
 
 /**
  * A forge reading of the task's PR can change it: a session was placed (it may
- * have opened the PR) or ended with one open. The leader's poller and
- * `prChange` both ask this, so what is polled is what can be applied.
+ * have opened the PR) or ended with one open.
  */
 export function isPrReadable(state: TaskState): boolean {
   const phase = TASK_PHASES[state];
   return phase === "placed" || phase === "ended";
+}
+
+/**
+ * The leader's poller reads this task's PR: one a reading can change, or a
+ * finished one with no reading yet — marked done before the poller saw it — read
+ * once so its chip does not stay unknown for good. The poller and `prChange`
+ * both ask this, so what is polled is what can be applied.
+ */
+export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr">): boolean {
+  if (task.prUrl === undefined) return false;
+  return isPrReadable(task.state) || (TASK_PHASES[task.state] === "finished" && task.pr === undefined);
 }

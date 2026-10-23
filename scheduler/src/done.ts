@@ -1,4 +1,11 @@
-import { isPrReadable, PR_STATUS_REFRESH_MS, type BranchState, type PrStatus, type TaskProgress } from "@seance/shared";
+import {
+  isPrReadable,
+  PR_STATUS_REFRESH_MS,
+  wantsPrReading,
+  type BranchState,
+  type PrStatus,
+  type TaskProgress,
+} from "@seance/shared";
 import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
 
 /**
@@ -160,7 +167,15 @@ export function branchChange(task: Task, state: BranchState, from: string): Task
  */
 export function prChange(task: Task, prUrl: string, status: PrStatus): Task | null {
   if (task.prUrl !== prUrl) return null;
-  if (!isPrReadable(task.state)) return null;
+  if (!wantsPrReading(task)) return null;
+  const pr: PrStatus = {
+    state: status.state,
+    ...(status.checks === undefined ? {} : { checks: status.checks }),
+    ...(status.stacked === undefined ? {} : { stacked: status.stacked }),
+    at: status.at,
+  };
+  // A finished task's one reading is for its chip alone: nothing is left for a merge to settle.
+  if (!isPrReadable(task.state)) return { ...task, pr };
   const landed = status.state === "merged" && status.stacked !== true;
   const settles = landed && !settlesOnReport(task);
   const marks = landed && settlesOnReport(task) && task.merged !== true;
@@ -169,12 +184,6 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
   const fresh = task.pr !== undefined && status.at >= task.pr.at && status.at - task.pr.at < PR_STATUS_REFRESH_MS;
   // A merged chip never greys (`PR_STATUS_STALE_MS`), so an unchanged one needs no refresh write.
   if (same && (fresh || status.state === "merged") && !settles && !marks) return null;
-  const pr: PrStatus = {
-    state: status.state,
-    ...(status.checks === undefined ? {} : { checks: status.checks }),
-    ...(status.stacked === undefined ? {} : { stacked: status.stacked }),
-    at: status.at,
-  };
   const recorded: Task = { ...task, pr };
   if (!landed) return recorded;
   if (settlesOnReport(task)) return mergedOpen(recorded);

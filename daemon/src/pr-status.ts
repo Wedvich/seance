@@ -1,10 +1,19 @@
-import { isPrReadable, isRecord, quote, type PrChecks, type PrState, type PrStatus, type Task } from "@seance/shared";
+import {
+  isPrReadable,
+  isRecord,
+  quote,
+  type PrChecks,
+  type PrState,
+  type PrStatus,
+  type Task,
+  wantsPrReading,
+} from "@seance/shared";
 import { exec } from "./exec.ts";
 
 /**
  * Live PR status from the scheduler leader (DESIGN.md, "PR status"): one
- * batched GraphQL read per poll, through the operator's own `gh`, of every
- * unfinished task's GitHub PR. Runs only on the leader (`leader.ts` starts it
+ * batched GraphQL read per poll, through the operator's own `gh`, of the PR of
+ * every task `wantsPrReading` names. Runs only on the leader (`leader.ts` starts it
  * after takeover and stops it with the term) and is never reachable from
  * `seanced mcp`, whose stdout is its JSON-RPC channel — hence `log` is passed
  * in, and this module imports no `log.ts`.
@@ -72,7 +81,7 @@ const REMEDY: Record<Failure, string> = {
 
 interface Target {
   readonly pr: GithubPr;
-  /** Every unfinished task on this PR, each with the URL it holds: `prChange` compares them verbatim. */
+  /** Every task read on this PR, each with the URL it holds: `prChange` compares them verbatim. */
   readonly tasks: { readonly id: string; readonly prUrl: string }[];
 }
 
@@ -233,10 +242,12 @@ async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<
   return { kind: "ok", reads };
 }
 
-function targets(tasks: readonly Task[]): Target[] {
+/** `unreadable` skips a finished task's PR the forge would not answer: its one reading is not worth a read a minute. */
+function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>): Target[] {
   const byKey = new Map<string, Target>();
   for (const task of tasks) {
-    if (!isPrReadable(task.state) || task.prUrl === undefined) continue;
+    if (!wantsPrReading(task) || task.prUrl === undefined) continue;
+    if (!isPrReadable(task.state) && unreadable.has(task.prUrl)) continue;
     const pr = parseGithubPr(task.prUrl);
     if (pr === null) continue;
     // GitHub names are case-insensitive: two spellings are one PR.
@@ -274,7 +285,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
 
   /** The class the poll ended in, or null when there was nothing to poll. */
   async function poll(): Promise<"ok" | Failure | null> {
-    const wanted = targets(deps.tasks());
+    const wanted = targets(deps.tasks(), unreadable);
     if (wanted.length === 0) return null;
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);

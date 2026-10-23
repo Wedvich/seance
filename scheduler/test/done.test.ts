@@ -907,9 +907,9 @@ describe("PR status", () => {
     expect(scheduler.task("t")).toMatchObject({ state: "running", pr: { state: "closed" } });
   });
 
-  test("(9) a finished, a waiting and a reserved task are left alone", async () => {
+  test("(9) a finished task already read, a waiting and a reserved task are left alone", async () => {
     const { scheduler, put, store } = setup();
-    await put("done", { state: "done", doneBy: "manual", prUrl: PR });
+    await put("done", { state: "done", doneBy: "manual", prUrl: PR, pr: reading("open", NOW) });
     await put("queued", { state: "queued", prUrl: PR });
     await put("reserved", { state: "reserved", prUrl: PR });
     await scheduler.load();
@@ -917,7 +917,25 @@ describe("PR status", () => {
     const before = await Promise.all(ids.map((id) => version(store, id)));
     for (const id of ids) await scheduler.onPrStatus(id, PR, reading("merged"));
     expect(await Promise.all(ids.map((id) => version(store, id)))).toEqual(before);
-    expect(scheduler.task("done")?.pr).toBeUndefined();
+    expect(scheduler.task("done")?.pr).toEqual(reading("open", NOW));
+  });
+
+  test("(9b) a finished task with no reading takes one, once, and nothing else moves", async () => {
+    const { fleet, scheduler, put, store } = setup();
+    await put("done", { state: "done", doneBy: "manual", prUrl: PR });
+    await put("failed", { state: "failed", prUrl: PR, spec: spec({ until: "reported" }) });
+    await put("dep", { state: "queued", spec: spec({ deps: [{ task: "failed", after: "merged" }] }) });
+    await scheduler.load();
+    await scheduler.onPrStatus("done", PR, reading("merged"));
+    await scheduler.onPrStatus("failed", PR, reading("merged"));
+    expect(scheduler.task("done")).toMatchObject({ state: "done", doneBy: "manual", pr: { state: "merged" } });
+    expect(scheduler.task("failed")).toMatchObject({ state: "failed", pr: { state: "merged" } });
+    expect(scheduler.task("failed")?.merged).toBeUndefined();
+    const written = await version(store, "done");
+    await scheduler.onPrStatus("done", PR, reading("closed", READ + PR_STATUS_REFRESH_MS));
+    expect(await version(store, "done")).toBe(written);
+    await pass(scheduler);
+    expect(fleet.spawns).toEqual([]);
   });
 
   test("(10) a reading whose clock is behind the stored one still settles a merge and refreshes an unchanged one", async () => {
