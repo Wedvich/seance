@@ -306,6 +306,9 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       chunk.forEach((target, i) => {
         const read = answer.reads[i];
         if (read === undefined) return;
+        // Any answer spends a finished task's read, an unusable one too: else it is asked every poll.
+        // Only a task finished when targeted: one read while placed still owes its finished read.
+        for (const task of target.tasks) if (task.finished) readThisTerm.add(task.id);
         if (read.kind === "none") {
           const url = target.tasks[0]?.prUrl;
           if (read.error !== null && url !== undefined && !unreadable.has(url)) {
@@ -320,11 +323,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
           ...(read.stacked === undefined ? {} : { stacked: read.stacked }),
           at,
         };
-        for (const task of target.tasks) {
-          // Only a task finished when targeted: one read while placed still owes its finished read.
-          if (task.finished) readThisTerm.add(task.id);
-          writes.push(deps.onStatus(task.id, task.prUrl, status));
-        }
+        for (const task of target.tasks) writes.push(deps.onStatus(task.id, task.prUrl, status));
       });
       // oxlint-disable-next-line no-await-in-loop -- as above
       await Promise.all(writes);

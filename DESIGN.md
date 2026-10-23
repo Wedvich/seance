@@ -2879,7 +2879,7 @@ for the lot with its own `gh`.
   is never polled again; any other reading is read again by the next term's poller, which heals
   one taken while the task ran and kept by a finish from before `advance` dropped it (no rewrite
   of stored records on load: the ordinary poll and write path does it). The once-a-term bound
-  is the poller's own (an in-memory set of finished task ids it delivered a reading for, kept
+  is the poller's own (an in-memory set of finished task ids the forge answered for, usable or not, kept
   per term like the unreadable set), not a field on the record, so a task read while placed still
   takes its finished read. A repeated identical reading still writes, refreshing `at`: once a
   term is cheap, and the chip then says when it was last checked. Finishing drops any reading the task held (`advance` in

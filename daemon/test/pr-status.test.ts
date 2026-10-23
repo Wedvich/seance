@@ -322,6 +322,17 @@ describe("what is never read", () => {
     expect(next.seen.map((s) => s.id).toSorted()).toEqual(["open", "stale"]);
   });
 
+  test("a finished task whose PR answers with a state the poller cannot read is still read once per term", async () => {
+    await gh.setReply(reply({ state: "SOMETHING_NEW" }), 0);
+    const { seen, logs } = start([pr(1, { id: "odd", state: "done", pr: { state: "open", at: 1 } })]);
+    await pollUntil(async () => (await gh.calls()) >= 1, "the one read");
+    // A non-event cannot be polled for: several intervals, and still the one run.
+    await Bun.sleep(200);
+    expect(await gh.calls()).toBe(1);
+    expect(seen).toHaveLength(0);
+    expect(logs.warn).toHaveLength(0);
+  });
+
   test("a task read while running still takes its finished read once it finishes", async () => {
     await gh.setReply(reply({ state: "OPEN" }), 0);
     const tasks = [pr(1, { id: "t" })];

@@ -214,7 +214,9 @@ describe("a session's exit status", () => {
 
     // The next read is begun before the deadline and answers after it, with the exit.
     let release = (): void => {};
-    fleet.gate = new Promise<void>((resolve) => (release = resolve));
+    fleet.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 3 })] });
     clock.now += DEFAULT_CONFIG.endingTimeoutMs - 1;
     await scheduler.tick();
@@ -974,7 +976,12 @@ describe("PR status", () => {
 
   test("(9c) a finished task holding a stale open reading takes a merged one, and nothing else moves", async () => {
     const { fleet, scheduler, put } = setup();
-    await put("done", { state: "done", doneBy: "reported", prUrl: PR, pr: { ...reading("open", NOW), checks: "pending" } });
+    await put("done", {
+      state: "done",
+      doneBy: "reported",
+      prUrl: PR,
+      pr: { ...reading("open", NOW), checks: "pending" },
+    });
     await scheduler.load();
     await scheduler.onPrStatus("done", PR, reading("merged"));
     expect(scheduler.task("done")).toMatchObject({ state: "done", doneBy: "reported", pr: { state: "merged" } });
