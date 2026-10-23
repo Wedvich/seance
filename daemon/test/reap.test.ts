@@ -6,6 +6,7 @@ import type { RepoEntry } from "@seance/shared";
 import { reapAudit, type AuditSink } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
 import { tmuxHarvestPanes } from "../src/exit-status.ts";
+import type { FsmonitorDaemon, FsmonitorSeams } from "../src/fsmonitor.ts";
 import { resolveCommonDir } from "../src/gitdir.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import {
@@ -160,6 +161,7 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     audit: reapAudit("cli", collect),
     deadPaneMinAgeMs: 0,
     pruneLogPath: repo.pruneLog,
+    fsmonitor: null,
     ...overrides,
   });
 }
@@ -567,5 +569,137 @@ describe("withReapLock", () => {
     await writeFile(path, "2147483646");
     expect(await withReapLock(() => Promise.resolve("ran"), path)).toBe("ran");
     expect(await Bun.file(path).exists()).toBe(false);
+  });
+});
+
+describe("reap: fsmonitor daemons (injected — git has no built-in daemon on Linux)", () => {
+  interface FakeMonitors {
+    readonly seams: FsmonitorSeams;
+    /** Each stop, and whether its worktree was still on disk when asked. */
+    readonly stops: { readonly path: string; readonly existed: boolean }[];
+    readonly signalled: number[];
+  }
+
+  function fakeMonitors(daemons: readonly FsmonitorDaemon[], stopAnswers = true): FakeMonitors {
+    const stops: { path: string; existed: boolean }[] = [];
+    const signalled: number[] = [];
+    return {
+      stops,
+      signalled,
+      seams: {
+        list: () => Promise.resolve(daemons),
+        stop: async (path) => {
+          stops.push({ path, existed: await exists(path) });
+          return stopAnswers;
+        },
+        signal: (pid) => {
+          signalled.push(pid);
+          return true;
+        },
+      },
+    };
+  }
+
+  interface Fleet {
+    readonly repo: Repo;
+    readonly removable: string;
+    readonly young: string;
+    readonly gone: string;
+    readonly daemons: readonly FsmonitorDaemon[];
+  }
+
+  /** A merged, old, clean worktree reap removes, one too young to, the main clone, a vanished one and an unmapped daemon. */
+  async function fleet(): Promise<Fleet> {
+    const repo = await freshRepo();
+    const removable = join(repo.path, ".claude", "worktrees", "done");
+    const young = join(repo.path, ".claude", "worktrees", "busy");
+    await addWorktree(repo.path, removable);
+    await addWorktree(repo.path, young);
+    await age(removable);
+    const gone = join(base, `gone-${fixtures}`, ".git", "worktrees", "old");
+    const daemons = [
+      { pid: 11, rssKb: 5120, gitDir: await git(removable, "rev-parse", "--absolute-git-dir") },
+      { pid: 12, rssKb: 5120, gitDir: await git(young, "rev-parse", "--absolute-git-dir") },
+      { pid: 13, rssKb: 5120, gitDir: join(repo.path, ".git") },
+      { pid: 14, rssKb: 3072, gitDir: gone },
+      { pid: 15, rssKb: 5120, gitDir: null },
+    ];
+    return { repo, removable, young, gone, daemons };
+  }
+
+  test("stops a removed worktree's daemon before removing it, signals only one whose worktree is gone, audits both", async () => {
+    const { repo, removable, young, gone, daemons } = await fleet();
+    const fake = fakeMonitors(daemons);
+
+    const report = await reap(repo, { fsmonitor: fake.seams });
+    expect(report.repos[0]?.removedWorktrees.map((w) => w.path)).toEqual([removable]);
+    expect(fake.stops).toEqual([{ path: removable, existed: true }]);
+    // The young worktree's, the main clone's and the unmapped one are left alone.
+    expect(fake.signalled).toEqual([14]);
+    expect(await exists(young)).toBe(true);
+    expect(report.monitors).toEqual({
+      stopped: [
+        { path: removable, pid: 11, rssKb: 5120, how: "stop" },
+        { path: gone, pid: 14, rssKb: 3072, how: "signal" },
+      ],
+      unmapped: 1,
+    });
+    expect(lines).toContain(`audit reap origin=cli stopped-fsmonitor path="${removable}" pid=11 how=stop`);
+    expect(lines).toContain(`audit reap origin=cli stopped-fsmonitor path="${gone}" pid=14 how=signal`);
+    expect(lines.at(-1)).toContain("monitors=2");
+    const printed = formatReport(report).join("\n");
+    expect(printed).toContain("stopped 2 fsmonitor daemons (8.0 MB)");
+    expect(printed).toContain("1 daemon whose socket names no git dir");
+  });
+
+  test("a stop that finds no daemon records nothing, and the worktree it just removed is then swept by signal", async () => {
+    const { repo, removable, daemons } = await fleet();
+    const fake = fakeMonitors(daemons, false);
+
+    const report = await reap(repo, { fsmonitor: fake.seams });
+    expect(fake.stops.map((stop) => stop.path)).toEqual([removable]);
+    // Its git dir went with `worktree remove`: the sweep after the repos finds it gone.
+    expect(fake.signalled.toSorted()).toEqual([11, 14]);
+    expect(report.monitors.stopped.map((m) => [m.pid, m.how])).toEqual([
+      [11, "signal"],
+      [14, "signal"],
+    ]);
+  });
+
+  test("a worktree deleted by hand is pruned, and its daemon signalled", async () => {
+    const repo = await freshRepo();
+    const deleted = join(repo.path, ".claude", "worktrees", "deleted");
+    await addWorktree(repo.path, deleted);
+    const gitDir = await git(deleted, "rev-parse", "--absolute-git-dir");
+    await rm(deleted, { recursive: true, force: true });
+    const fake = fakeMonitors([{ pid: 21, rssKb: 1024, gitDir }]);
+
+    const report = await reap(repo, { fsmonitor: fake.seams });
+    expect(report.repos[0]?.pruned).toEqual([deleted]);
+    expect(fake.signalled).toEqual([21]);
+    expect(fake.stops).toEqual([]);
+  });
+
+  test("a dry run stops and signals nothing, records nothing, and says what it would stop", async () => {
+    const { repo, removable, daemons } = await fleet();
+    const fake = fakeMonitors(daemons);
+
+    const report = await reap(repo, { fsmonitor: fake.seams, dryRun: true });
+    expect(fake.stops).toEqual([]);
+    expect(fake.signalled).toEqual([]);
+    expect(lines).toEqual([]);
+    expect(report.monitors.stopped.map((m) => [m.pid, m.how])).toEqual([
+      [11, "stop"],
+      [14, "signal"],
+    ]);
+    expect(await exists(removable)).toBe(true);
+    expect(formatReport(report).join("\n")).toContain("would stop 2 fsmonitor daemons");
+  });
+
+  test("with no seams, as on Linux, the report says nothing about daemons", async () => {
+    const { repo } = await fleet();
+    const report = await reap(repo);
+    expect(report.monitors).toEqual({ stopped: [], unmapped: 0 });
+    expect(formatReport(report).join("\n")).not.toContain("fsmonitor");
   });
 });

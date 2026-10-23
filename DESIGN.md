@@ -182,6 +182,7 @@ reads as one to any EDR:
 | a local socket client's pid via `getsockopt`, walked up its parents                            | T1057                                                       |
 | `despawn`: keys into a session's pane, `kill-pane`, signals                                    | T1489-adjacent (stopping work)                              |
 | `reap`: git fetch/status, worktree removal, branch deletion per repo                           | T1070.004-adjacent (deletion)                               |
+| `reap` on macOS: `ps` + `lsof -U` over the user's fsmonitor daemons, SIGTERM to orphaned ones  | T1057, T1489-adjacent (own processes only)                  |
 | branch-state: periodic `git fetch --prune origin` and ref reads in repos holding a task branch | T1070.004-adjacent (fetch prunes refs; no deletion of work) |
 | `git pull` + service kickstart as the update path                                              | T1195.001                                                   |
 
@@ -658,7 +659,7 @@ nothing checked it. The last is the gap they leave.
   lines, because enumeration is the same signal as spawning. Ending a session
   is the same signal too: every despawn path audits through its own one
   formatter (`despawnAudit`), under the same origins. Reap destroys
-  things — worktrees, branches, windows — and audits each one (`reapAudit`)
+  things — worktrees, branches, windows, fsmonitor daemons — and audits each one (`reapAudit`)
   under `cli` or under `schedule`, the fourth origin, which is the daemon's own
   timer: a 3am cleanup must not read as someone at the desk. `harvest` is the daemon
   closing a dead task pane once its exit status is noted (Daemon, "Exit status"), on the
@@ -4027,6 +4028,24 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   recurses), and claude's own `--worktree` fetch, which runs in the session it
   starts. Its `FETCH_HEAD` goes stale once the base fetch is refused, so claude
   fetches with that config itself.
+- **fsmonitor daemons** (`fsmonitor.ts`, added 2026-10-23). With `core.fsmonitor=true` in a
+  user's own config, git starts a `git fsmonitor--daemon` per checkout it touches; nothing stops
+  them, and they outlive their worktrees — 554 of them, 2.9 GB RSS, on one Mac that was out of
+  memory. Reap's own git never starts one (`core.fsmonitor=false`, above). The daemon is built in
+  on macOS and Windows only, so the step runs on macOS alone (`platformFsmonitor`) and is a no-op
+  elsewhere. Which worktree a daemon watches comes from its IPC socket, read once per run with
+  `ps` then one `lsof -U` over the pids: `<git dir>/fsmonitor--daemon.ipc`. Its cwd says nothing (it
+  chdirs to `$HOME` after detaching), nor does its argv. A socket that doesn't read as one absolute
+  path — a repo on a network FS (`~/.git-fsmonitor-<hash>`), or a path past `sun_path`'s 104 bytes,
+  which git binds relative — leaves the daemon unmapped, counted and never signalled. Before a
+  worktree is removed, `git fsmonitor--daemon stop` in it (removal takes the socket it is found
+  by). After every repo, a mapped daemon whose git dir is gone, or whose linked git dir names a
+  checkout that is gone, gets SIGTERM. Not limited to the scan set: the gate is "the directory it
+  watches no longer exists", which destroys nothing, and a clone deleted outright has dropped out
+  of the scan set anyway. A daemon for a worktree still on disk is never touched — it may be a live
+  session's. Each stop is audited (`stopped-fsmonitor`, with `how=stop|signal`), and the report
+  sums the RSS freed. Rejected: `lsof -d cwd` (reads `$HOME`) and `fsmonitor--daemon status` per
+  worktree (names no pid, and can't run where the worktree is gone).
 - **Bounded**: four repos at a time (`mapLimit`, shared with the scan in
   `concurrency.ts`), four panes at a time for the screen captures; nothing
   here is on the session list's path.
