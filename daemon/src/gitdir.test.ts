@@ -50,8 +50,12 @@ async function adminDirOf(worktree: string): Promise<string> {
 describe("inspectCheckout", () => {
   test("a main clone, either worktree layout, and no checkout", async () => {
     const { main, nested, sibling } = await makeLayout();
-    expect(await inspectCheckout(main)).toEqual({ kind: "main", commonDir: join(main, ".git") });
-    expect((await inspectCheckout(nested)).kind).toBe("linked");
+    expect(await inspectCheckout(main)).toEqual({
+      kind: "main",
+      commonDir: join(main, ".git"),
+      gitDir: join(main, ".git"),
+    });
+    expect(await inspectCheckout(nested)).toMatchObject({ kind: "linked", gitDir: await adminDirOf(nested) });
     expect((await inspectCheckout(sibling)).kind).toBe("linked");
     expect(await inspectCheckout(join(main, ".claude"))).toEqual({ kind: "none" });
   });
@@ -62,7 +66,7 @@ describe("inspectCheckout", () => {
     const root = await makeRoot();
     const gitDir = join(root, "gitdirs", "web.git");
     const web = await makeSeparateGitDirClone(root, "web", gitDir);
-    expect(await inspectCheckout(web)).toEqual({ kind: "main", commonDir: gitDir });
+    expect(await inspectCheckout(web)).toEqual({ kind: "main", commonDir: gitDir, gitDir });
   });
 
   // Existence classifies; content only resolves. A fallback to "main" here

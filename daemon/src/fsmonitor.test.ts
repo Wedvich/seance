@@ -2,7 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDaemonProcesses, parseSocketDirs, platformFsmonitor, watchedWorktree } from "./fsmonitor.ts";
+import {
+  parseDaemonProcesses,
+  parseRootFds,
+  parseSocketDirs,
+  platformFsmonitor,
+  worktreeOfGitDir,
+} from "./fsmonitor.ts";
 
 describe("parseDaemonProcesses", () => {
   test("this user's `run` daemons only, whatever git binary path started them", () => {
@@ -22,34 +28,60 @@ describe("parseDaemonProcesses", () => {
   });
 });
 
-describe("parseSocketDirs", () => {
-  test("the git dir of the one absolute IPC socket a pid holds; relative, foreign or ambiguous reads as unknown", () => {
+describe("parseRootFds", () => {
+  test("fd 4 when it is an absolute directory; anything else on it maps nothing", () => {
     const raw = [
       "p101",
+      "f4",
+      "tDIR",
+      "n/Users/m/repos/a/.claude/worktrees/x",
+      "p102",
+      "f4",
+      "tREG",
+      "n/Users/m/some-file",
+      "p103",
+      "f3",
+      "tDIR",
+      "n/Users/m/repos/b",
+      "p104",
+    ].join("\n");
+    expect([...parseRootFds(raw)]).toEqual([[101, "/Users/m/repos/a/.claude/worktrees/x"]]);
+  });
+});
+
+describe("parseSocketDirs", () => {
+  test("the git dir of the one absolute IPC socket a pid holds; relative, foreign or ambiguous maps nothing", () => {
+    const raw = [
+      "p101",
+      "f5",
       "n/Users/m/repos/a/.git/worktrees/x/fsmonitor--daemon.ipc",
+      "f6",
       "n->0x1234",
       "p102",
+      "f5",
       "nfsmonitor--daemon.ipc",
       "p103",
+      "f5",
       "n/Users/m/.git-fsmonitor-abc123",
       "p104",
+      "f5",
       "n/Users/m/repos/a/.git/fsmonitor--daemon.ipc",
+      "f6",
       "n/Users/m/repos/b/.git/fsmonitor--daemon.ipc",
       "p105",
+      "f5",
       "n/Users/m/repos/c/.git/fsmonitor--daemon.ipc",
+      "f6",
       "n/Users/m/repos/c/.git/fsmonitor--daemon.ipc",
     ].join("\n");
     expect([...parseSocketDirs(raw)]).toEqual([
       [101, "/Users/m/repos/a/.git/worktrees/x"],
-      [102, null],
-      [103, null],
-      [104, null],
       [105, "/Users/m/repos/c/.git"],
     ]);
   });
 });
 
-describe("watchedWorktree", () => {
+describe("worktreeOfGitDir", () => {
   let base: string;
   beforeAll(async () => {
     base = await mkdtemp(join(tmpdir(), "seance-fsmonitor-"));
@@ -66,38 +98,31 @@ describe("watchedWorktree", () => {
     return gitDir;
   }
 
-  test("a git dir that is gone: the worktree is gone", async () => {
-    expect(await watchedWorktree(join(base, "nowhere", ".git"))).toEqual({
-      path: join(base, "nowhere", ".git"),
-      gone: true,
-    });
+  test("a git dir that is gone stands for itself", async () => {
+    expect(await worktreeOfGitDir(join(base, "nowhere", ".git"))).toBe(join(base, "nowhere", ".git"));
   });
 
-  test("a main clone's git dir watches the checkout around it, which is there", async () => {
-    const gitDir = join(base, "main", ".git");
-    await mkdir(gitDir, { recursive: true });
-    expect(await watchedWorktree(gitDir)).toEqual({ path: join(base, "main"), gone: false });
+  test("a main clone's `.git` is inside its checkout; any other main git dir can't be told", async () => {
+    await mkdir(join(base, "main", ".git"), { recursive: true });
+    await mkdir(join(base, "gitdirs", "web.git"), { recursive: true });
+    expect(await worktreeOfGitDir(join(base, "main", ".git"))).toBe(join(base, "main"));
+    expect(await worktreeOfGitDir(join(base, "gitdirs", "web.git"))).toBeNull();
   });
 
-  test("a linked git dir whose checkout was deleted by hand, before any prune: gone", async () => {
+  test("a linked git dir names its checkout, whether or not it is still there", async () => {
     const checkout = join(base, "deleted-checkout");
-    expect(await watchedWorktree(await linkedGitDir("deleted", checkout))).toEqual({ path: checkout, gone: true });
+    expect(await worktreeOfGitDir(await linkedGitDir("deleted", checkout))).toBe(checkout);
   });
 
-  test("a linked git dir whose checkout is there: kept", async () => {
-    const checkout = join(base, "live-checkout");
-    await mkdir(checkout);
-    expect(await watchedWorktree(await linkedGitDir("live", checkout))).toEqual({ path: checkout, gone: false });
-  });
-
-  test("a linked git dir whose `gitdir` can't be read reads as present", async () => {
+  test("a linked git dir whose `gitdir` can't be read can't be told", async () => {
     const gitDir = await linkedGitDir("unreadable", join(base, "whatever"));
     await rm(join(gitDir, "gitdir"));
-    expect(await watchedWorktree(gitDir)).toEqual({ path: gitDir, gone: false });
+    expect(await worktreeOfGitDir(gitDir)).toBeNull();
   });
 });
 
-test("only macOS gets the real seams: git has no built-in daemon on Linux", () => {
-  expect(platformFsmonitor("linux")).toBeNull();
+test("macOS and Linux get the real seams; native Windows, not a séance platform, gets none", () => {
   expect(platformFsmonitor("darwin")).not.toBeNull();
+  expect(platformFsmonitor("linux")).not.toBeNull();
+  expect(platformFsmonitor("win32")).toBeNull();
 });

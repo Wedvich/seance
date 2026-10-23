@@ -1,4 +1,4 @@
-import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
@@ -6,7 +6,7 @@ import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
 import { owesExit } from "./exit-status.ts";
-import { watchedWorktree, type FsmonitorDaemon, type FsmonitorSeams } from "./fsmonitor.ts";
+import type { FsmonitorDaemon, FsmonitorSeams } from "./fsmonitor.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
 import { runDir } from "./paths.ts";
@@ -46,6 +46,14 @@ const PANE_CONCURRENCY = 4;
 const DEAD_PANE_MIN_AGE_MS = 60_000;
 /** How long an answered exit prompt gets to turn into a closed window before reap reports it still open. */
 const EXIT_WAIT_MS = 5_000;
+/**
+ * An fsmonitor daemon whose repo nothing has used for this long is stopped. Short,
+ * unlike a worktree's days: stopping one destroys nothing, and costs only the
+ * restart git makes when the repo is next used.
+ */
+export const MONITOR_IDLE_MS = 60 * 60 * 1000;
+/** Each judged with a few `stat`s, stopped with one git process. */
+const MONITOR_CONCURRENCY = 8;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface ReapOptions {
@@ -72,6 +80,7 @@ export interface ReapOptions {
    * would signal the developer's own daemons.
    */
   readonly fsmonitor: FsmonitorSeams | null;
+  readonly monitorIdleMs?: number;
 }
 
 export interface RepoReport {
@@ -103,13 +112,34 @@ export interface PaneNote {
   readonly window: string;
 }
 
+/**
+ * Why reap stopped an fsmonitor daemon: reap removed its worktree, the
+ * directory is gone, it holds no repo any more, or it went unused for
+ * `monitorIdleMs` with no tmux pane inside.
+ */
+export type MonitorReason = "removed" | "gone" | "no-repo" | "idle";
+
 export interface StoppedMonitor {
-  /** The worktree it watched; its git dir when that says no more. */
+  /** The directory it watched. */
   readonly path: string;
+  /** Null for a `removed` one `stop` reached but lsof couldn't map. */
   readonly pid: number | null;
   readonly rssKb: number | null;
-  /** `stop`: asked to quit before its worktree was removed. `signal`: its worktree was already gone. */
+  /** `git fsmonitor--daemon stop` in its directory, or SIGTERM where there is no repo to ask through. */
   readonly how: "stop" | "signal";
+  readonly why: MonitorReason;
+}
+
+/** The daemons reap left running, by why: with `stopped`, every daemon listed. */
+export interface KeptMonitors {
+  /** A tmux pane is inside its directory. */
+  readonly inUse: number;
+  /** Used within `monitorIdleMs`. */
+  readonly recent: number;
+  /** Its directory's `.git` couldn't be read. */
+  readonly unreadable: number;
+  /** Neither fd 4 nor its socket says what it watches. */
+  readonly unmapped: number;
 }
 
 export interface ReapReport {
@@ -121,8 +151,8 @@ export interface ReapReport {
   readonly openPanes: readonly (PaneNote & { readonly state: PaneState })[];
   readonly monitors: {
     readonly stopped: readonly StoppedMonitor[];
-    /** Daemons whose socket doesn't say which git dir they watch: never signalled. */
-    readonly unmapped: number;
+    readonly kept: KeptMonitors;
+    readonly idleMs: number;
   };
 }
 
@@ -202,7 +232,7 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   );
   const repos = [...reaped, ...refused];
   // After the repos, so a worktree this run removed whose daemon `stop` missed is swept too.
-  if (monitors !== null) await sweepMonitors(monitors, opts);
+  const kept = monitors === null ? NO_KEPT_MONITORS : await sweepMonitors(monitors, opts, now);
 
   if (!opts.dryRun) {
     const pruned = targets.filter((_, i) => reaped[i]?.fetch?.kind === "fetched");
@@ -223,19 +253,18 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
     minAgeDays: opts.minAgeMs / DAY_MS,
     repos,
     ...panes,
-    monitors: {
-      stopped: monitors?.stopped ?? [],
-      unmapped: monitors?.daemons.filter((daemon) => daemon.gitDir === null).length ?? 0,
-    },
+    monitors: { stopped: monitors?.stopped ?? [], kept, idleMs: opts.monitorIdleMs ?? MONITOR_IDLE_MS },
   };
 }
+
+const NO_KEPT_MONITORS: KeptMonitors = { inUse: 0, recent: 0, unreadable: 0, unmapped: 0 };
 
 /** The run's one read of this user's fsmonitor daemons, and what it stopped of them. */
 interface Monitors {
   readonly seams: FsmonitorSeams;
   readonly daemons: readonly FsmonitorDaemon[];
-  /** By canonical git dir, the form `gitDirOf` is compared in. */
-  readonly byGitDir: ReadonlyMap<string, FsmonitorDaemon>;
+  /** By canonical worktree, the form a worktree's `real` path is compared in. */
+  readonly byWorktree: ReadonlyMap<string, FsmonitorDaemon>;
   readonly stopped: StoppedMonitor[];
 }
 
@@ -243,48 +272,128 @@ async function readMonitors(seams: FsmonitorSeams): Promise<Monitors> {
   const daemons = await seams.list();
   const keyed = await Promise.all(
     daemons.flatMap((daemon) =>
-      daemon.gitDir === null ? [] : [canonical(daemon.gitDir).then((dir) => [dir, daemon] as const)],
+      daemon.worktree === null ? [] : [canonical(daemon.worktree).then((dir) => [dir, daemon] as const)],
     ),
   );
-  return { seams, daemons, byGitDir: new Map(keyed), stopped: [] };
+  return { seams, daemons, byWorktree: new Map(keyed), stopped: [] };
 }
 
 /** Before the worktree is removed, which takes the socket `stop` reaches its daemon by. */
-async function stopMonitor(monitors: Monitors, path: string, gitDir: string, opts: ReapOptions): Promise<void> {
-  const mapped = monitors.byGitDir.get(await canonical(gitDir));
-  const stopped: StoppedMonitor = { path, pid: mapped?.pid ?? null, rssKb: mapped?.rssKb ?? null, how: "stop" };
+async function stopMonitor(monitors: Monitors, path: string, real: string, opts: ReapOptions): Promise<void> {
+  const mapped = monitors.byWorktree.get(real);
+  const stopped: StoppedMonitor = {
+    path,
+    pid: mapped?.pid ?? null,
+    rssKb: mapped?.rssKb ?? null,
+    how: "stop",
+    why: "removed",
+  };
   if (opts.dryRun) {
     if (mapped !== undefined) monitors.stopped.push(stopped);
     return;
   }
-  // Asked even unmapped: a socket lsof can't name is still git's to find.
+  // Asked even unmapped: git finds its own socket whatever lsof could see.
   if (!(await monitors.seams.stop(path))) return;
   monitors.stopped.push(stopped);
-  await opts.audit.stoppedMonitor(path, stopped.pid, "stop");
+  await opts.audit.stoppedMonitor(path, stopped.pid, "stop", "removed");
+}
+
+type MonitorVerdict = Exclude<keyof KeptMonitors, "unmapped"> | { readonly why: Exclude<MonitorReason, "removed"> };
+
+/**
+ * Pane cwds, and the checkout each sits in. A pane uses the daemon of its own
+ * checkout only: a session in `<repo>/.claude/worktrees/x` keeps that worktree's
+ * daemon, not the main clone's around it.
+ */
+interface PaneCheckouts {
+  readonly dirs: readonly string[];
+  readonly roots: ReadonlySet<string | null>;
+}
+
+/** The nearest directory at or above `dir` holding a `.git`, as git's own discovery finds it. */
+async function checkoutRoot(dir: string): Promise<string | null> {
+  for (let current = dir; ; current = dirname(current)) {
+    // oxlint-disable-next-line no-await-in-loop -- one stat per level, nearest first
+    if ((await stat(join(current, ".git")).catch(() => null)) !== null) return current;
+    if (dirname(current) === current) return null;
+  }
+}
+
+async function mtimeOf(path: string): Promise<number> {
+  return (await stat(path).catch(() => null))?.mtimeMs ?? 0;
 }
 
 /**
- * Signals a daemon only once its socket maps it to a worktree gone from disk:
- * nothing can be using it, and git starts a new one if the path ever returns. A
- * daemon for a worktree still there may be a live session's, and an unmapped
- * one could be watching anything — both are left alone.
+ * Whether a daemon's directory has a live session or recent use. A tmux pane
+ * in its checkout keeps it whatever its age. Use is `lastTouched` — HEAD, index,
+ * reflog, the root, Claude transcripts — and the daemon's cookie dir, which every
+ * query moves: the daemon answers one by creating and deleting a cookie file
+ * under `<git dir>/fsmonitor--daemon/cookies`. The git dir and the level between
+ * are read too, in case a git version puts them higher.
  */
-async function sweepMonitors(monitors: Monitors, opts: ReapOptions): Promise<void> {
-  const taken = new Set(monitors.stopped.map((stopped) => stopped.pid));
-  const candidates = monitors.daemons.flatMap((daemon) =>
-    daemon.gitDir === null || taken.has(daemon.pid) ? [] : [{ daemon, gitDir: daemon.gitDir }],
+async function judgeMonitor(path: string, panes: PaneCheckouts, now: number, idleMs: number): Promise<MonitorVerdict> {
+  const real = await canonical(path);
+  if ((await stat(real).catch(() => null)) === null) return { why: "gone" };
+  const checkout = await inspectCheckout(real);
+  if (checkout.kind === "unreadable") return "unreadable";
+  const repo = checkout.kind === "main" || checkout.kind === "linked";
+  if (repo ? panes.roots.has(real) : panes.dirs.some((dir) => inside(real, dir))) return "inUse";
+  // Its `.git` gone — a scratchpad left with only `.claude` — no git can ask it anything.
+  if (!repo) return { why: "no-repo" };
+  const cookies = [
+    checkout.gitDir,
+    join(checkout.gitDir, "fsmonitor--daemon"),
+    join(checkout.gitDir, "fsmonitor--daemon", "cookies"),
+  ];
+  const touched = Math.max(
+    await lastTouched(real, checkout.gitDir, [path]),
+    ...(await Promise.all(cookies.map(mtimeOf))),
   );
-  const watched = await Promise.all(candidates.map(({ gitDir }) => watchedWorktree(gitDir)));
-  for (const [i, { daemon }] of candidates.entries()) {
-    const worktree = watched[i];
-    if (worktree === undefined || !worktree.gone) continue;
-    if (!opts.dryRun) {
-      if (!monitors.seams.signal(daemon.pid)) continue;
-      // oxlint-disable-next-line no-await-in-loop -- one audit line each, in order
-      await opts.audit.stoppedMonitor(worktree.path, daemon.pid, "signal");
+  return now - touched < idleMs ? "recent" : { why: "idle" };
+}
+
+/**
+ * Every daemon reap didn't stop with a removal, judged: one whose directory is
+ * gone, holds no repo, or has gone unused for `monitorIdleMs` with no tmux pane
+ * inside is stopped — `git fsmonitor--daemon stop` where there is a repo to ask
+ * through, SIGTERM where there is none or that fails. Stopping costs one
+ * restart, which git does unasked the next time the repo needs it. Unmapped
+ * daemons are never touched: nothing says what they watch.
+ */
+async function sweepMonitors(monitors: Monitors, opts: ReapOptions, now: number): Promise<KeptMonitors> {
+  // Read again: a pane opened during the run may now sit in one of these.
+  const paneDirs = await Promise.all((await listPanes()).map((pane) => canonical(pane.path)));
+  const panes = { dirs: paneDirs, roots: new Set(await Promise.all(paneDirs.map(checkoutRoot))) };
+  const idleMs = opts.monitorIdleMs ?? MONITOR_IDLE_MS;
+  const taken = new Set(monitors.stopped.map((stopped) => stopped.pid));
+  const kept = { inUse: 0, recent: 0, unreadable: 0, unmapped: 0 };
+  await mapLimit(monitors.daemons, MONITOR_CONCURRENCY, async (daemon) => {
+    if (taken.has(daemon.pid)) return;
+    if (daemon.worktree === null) {
+      kept.unmapped += 1;
+      return;
     }
-    monitors.stopped.push({ path: worktree.path, pid: daemon.pid, rssKb: daemon.rssKb, how: "signal" });
-  }
+    const verdict = await judgeMonitor(daemon.worktree, panes, now, idleMs);
+    if (typeof verdict === "string") {
+      kept[verdict] += 1;
+      return;
+    }
+    const path = daemon.worktree;
+    const askable = verdict.why === "idle";
+    if (opts.dryRun) {
+      const how = askable ? "stop" : "signal";
+      monitors.stopped.push({ path, pid: daemon.pid, rssKb: daemon.rssKb, how, why: verdict.why });
+      return;
+    }
+    let how: StoppedMonitor["how"] = "stop";
+    if (!askable || !(await monitors.seams.stop(path))) {
+      if (!monitors.seams.signal(daemon.pid)) return;
+      how = "signal";
+    }
+    monitors.stopped.push({ path, pid: daemon.pid, rssKb: daemon.rssKb, how, why: verdict.why });
+    await opts.audit.stoppedMonitor(path, daemon.pid, how, verdict.why);
+  });
+  return kept;
 }
 
 type PaneOutcome =
@@ -524,7 +633,7 @@ async function reapRepo(
     const idleDays = Math.floor((now - touched) / DAY_MS);
     // oxlint-disable-next-line no-await-in-loop
     // oxlint-disable-next-line no-await-in-loop
-    if (monitors !== null) await stopMonitor(monitors, worktree.path, gitDir, opts);
+    if (monitors !== null) await stopMonitor(monitors, worktree.path, real, opts);
     if (!opts.dryRun) {
       // oxlint-disable-next-line no-await-in-loop
       const removed = await removeWorktree(repo.path, worktree.path);
@@ -646,17 +755,23 @@ export function formatReport(report: ReapReport): readonly string[] {
   ];
   if (paneRows.length > 0) lines.push("sessions", ...paneRows);
 
-  const monitorRows = report.monitors.stopped.map((monitor) =>
+  const { stopped: stoppedMonitors, kept, idleMs } = report.monitors;
+  const monitorRows = stoppedMonitors.map((monitor) =>
     row(
       stopped,
-      `${tilde(monitor.path)}   ${monitor.pid === null ? "" : `pid ${monitor.pid}, `}${
-        monitor.how === "stop" ? "before removing it" : "its worktree is gone"
-      }${monitor.rssKb === null ? "" : `, ${megabytes(monitor.rssKb)}`}`,
+      `${tilde(monitor.path)}   ${monitor.pid === null ? "" : `pid ${monitor.pid}, `}${MONITOR_LABELS[monitor.why]}${
+        monitor.rssKb === null ? "" : `, ${megabytes(monitor.rssKb)}`
+      }`,
     ),
   );
-  if (report.monitors.unmapped > 0) {
-    monitorRows.push(row("left alone", `${plural(report.monitors.unmapped, "daemon")} whose socket names no git dir`));
-  }
+  const keptParts = [
+    kept.inUse > 0 ? `${kept.inUse} with a tmux pane inside` : null,
+    kept.recent > 0 ? `${kept.recent} used in the last ${Math.round(idleMs / 3_600_000)}h` : null,
+    kept.unreadable > 0 ? `${kept.unreadable} whose .git couldn't be read` : null,
+    kept.unmapped > 0 ? `${kept.unmapped} whose directory lsof didn't say` : null,
+  ].filter((part) => part !== null);
+  const keptTotal = kept.inUse + kept.recent + kept.unreadable + kept.unmapped;
+  if (keptTotal > 0) monitorRows.push(row("left running", `${plural(keptTotal, "daemon")}: ${keptParts.join(", ")}`));
   if (monitorRows.length > 0) lines.push("fsmonitor daemons", ...monitorRows);
 
   const sum = (pick: (repo: RepoReport) => number): number =>
@@ -673,7 +788,7 @@ export function formatReport(report: ReapReport): readonly string[] {
         "branches",
       )}`,
       `${closed} ${plural(report.closedPanes.length, "window")}`,
-      // Only where there were any: a platform without the daemon has nothing to say.
+      // Only where there were any: a git without the daemon has nothing to say.
       ...(report.monitors.stopped.length === 0
         ? []
         : [
@@ -688,6 +803,13 @@ export function formatReport(report: ReapReport): readonly string[] {
   );
   return lines;
 }
+
+const MONITOR_LABELS: Readonly<Record<MonitorReason, string>> = {
+  removed: "before removing it",
+  gone: "its directory is gone",
+  "no-repo": "no repo there any more",
+  idle: "unused, no tmux pane inside",
+};
 
 const PANE_LABELS: Readonly<Record<PaneState, string>> = {
   dead: "dead",
