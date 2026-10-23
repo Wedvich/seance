@@ -308,8 +308,8 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   if (err instanceof FleetUnreachable) return `${err.message} Only this machine is listed.`;
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
-    ? `${why} — only this machine is listed, and only local spawns will work`
-    : `${why} — only this machine is listed, and its daemon is not listening either, so nothing will spawn until ` +
+    ? `${why} — only this machine is listed (without its exclaves: auto needs the relay), and only local spawns will work`
+    : `${why} — only this machine is listed (without its exclaves: auto needs the relay), and its daemon is not listening either, so nothing will spawn until ` +
         "seanced is running (`seanced status`)";
 }
 
@@ -732,7 +732,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclave ids (the accounts' homes), the values an auto task's pin.exclave takes; a machine without the field reports none, so no pin can target it until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclave ids (the accounts' homes), the values an auto task's pin.exclave takes; a machine with the field absent or empty reports none, so no pin can target it until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -796,7 +796,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, its pin (the machine by name where known, with its deviceId, and the exclave), where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, its pin (whichever of machine and exclave it pins: the machine by name where known, plus its deviceId, and the exclave), where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
