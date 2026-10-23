@@ -14,6 +14,8 @@ import {
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
+  PR_CHECKS,
+  PR_STATES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   PUSH_SERVICE_HOSTS,
@@ -50,6 +52,7 @@ import {
   type PauseRecord,
   type PauseReply,
   type PauseRequest,
+  type PrStatus,
   type Placement,
   type QueueChanged,
   type QueueRequest,
@@ -912,6 +915,23 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
   };
 }
 
+/** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */
+export function parsePrStatus(value: unknown): PrStatus | null {
+  if (!isRecord(value)) return null;
+  const { state, checks, stacked, at } = value;
+  const known = PR_STATES.find((s) => s === state);
+  if (known === undefined || !isFiniteNumber(at)) return null;
+  const rollup = checks === undefined ? undefined : PR_CHECKS.find((c) => c === checks);
+  if (checks !== undefined && rollup === undefined) return null;
+  if (stacked !== undefined && stacked !== true) return null;
+  return {
+    state: known,
+    ...(rollup === undefined ? {} : { checks: rollup }),
+    ...(stacked === undefined ? {} : { stacked }),
+    at,
+  };
+}
+
 /**
  * A task as `queue`, `cancel` and `mark-done` carry it, and as its
  * record holds it at rest. A state this build does not know nulls the task: it
@@ -954,6 +974,8 @@ export function parseTask(value: unknown): Task | null {
   }
   const progress = parseProgressFields(value);
   if (progress === null) return null;
+  // Apart from `progress`: a display cache must not make a task unreadable when a later build adds a state.
+  const pr = value["pr"] === undefined ? null : parsePrStatus(value["pr"]);
   return {
     id,
     state: known,
@@ -967,6 +989,7 @@ export function parseTask(value: unknown): Task | null {
     ...(reservedAt === undefined ? {} : { reservedAt }),
     ...(leftRunning === undefined ? {} : { leftRunning }),
     ...progress,
+    ...(pr === null ? {} : { pr }),
   };
 }
 

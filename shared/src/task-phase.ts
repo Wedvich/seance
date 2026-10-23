@@ -43,3 +43,13 @@ export function isSettled(state: TaskState): boolean {
   const phase = TASK_PHASES[state];
   return phase !== "waiting" && phase !== "dispatching";
 }
+
+/**
+ * A forge reading of the task's PR can change it: a session was placed (it may
+ * have opened the PR) or ended with one open. The leader's poller and
+ * `prChange` both ask this, so what is polled is what can be applied.
+ */
+export function isPrReadable(state: TaskState): boolean {
+  const phase = TASK_PHASES[state];
+  return phase === "placed" || phase === "ended";
+}
