@@ -254,6 +254,8 @@ function describeMachine(
     connected: machine.connected,
     lastSeen: new Date(machine.lastSeen).toISOString(),
     repos: machine.repos.map((repo) => repo.name),
+    // Absent, not empty, on a daemon predating exclaves: no pin can target it.
+    ...(machine.exclaves === undefined ? {} : { exclaves: machine.exclaves.map((info) => info.id) }),
     // Named so the model knows which target costs nothing to reach; spawning
     // there goes straight to the daemon on this box.
     local: local !== null && machine.deviceId === local.deviceId,
@@ -306,8 +308,8 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   if (err instanceof FleetUnreachable) return `${err.message} Only this machine is listed.`;
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
-    ? `${why} — only this machine is listed, and only local spawns will work`
-    : `${why} — only this machine is listed, and its daemon is not listening either, so nothing will spawn until ` +
+    ? `${why} — only this machine is listed (without its exclaves: auto needs the relay), and only local spawns will work`
+    : `${why} — only this machine is listed (without its exclaves: auto needs the relay), and its daemon is not listening either, so nothing will spawn until ` +
         "seanced is running (`seanced status`)";
 }
 
@@ -438,14 +440,30 @@ interface TaskPlacement {
   readonly window?: string;
 }
 
+function machineName(task: Task, machines: readonly Machine[], deviceId: string): string | undefined {
+  return (
+    machines.find((m) => m.deviceId === deviceId)?.name ??
+    task.decision?.candidates.find((c) => c.deviceId === deviceId)?.machine
+  );
+}
+
+/** A task's pin, its deviceId named where this view knows the machine. */
+function describePin(task: Task, machines: readonly Machine[]): Record<string, string> | null {
+  const { pin } = task.spec;
+  if (pin === undefined) return null;
+  const machine = pin.deviceId === undefined ? undefined : machineName(task, machines, pin.deviceId);
+  return {
+    ...(machine === undefined ? {} : { machine }),
+    ...(pin.deviceId === undefined ? {} : { deviceId: pin.deviceId }),
+    ...(pin.exclave === undefined ? {} : { exclave: pin.exclave }),
+  };
+}
+
 /** Where a task landed, or is landing, by registry name where this view still has it. */
 function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | null {
   const target = task.assignment ?? task.reservation;
   if (target === undefined) return null;
-  const machine =
-    machines.find((m) => m.deviceId === target.deviceId)?.name ??
-    task.decision?.candidates.find((c) => c.deviceId === target.deviceId)?.machine ??
-    target.deviceId;
+  const machine = machineName(task, machines, target.deviceId) ?? target.deviceId;
   const { deviceId, exclave, clone } = target;
   const window = task.assignment?.window;
   return { machine, deviceId, exclave, clone, ...(window === undefined ? {} : { window }) };
@@ -507,7 +525,7 @@ const PIN_FIELD = z
       .string()
       .optional()
       .describe(
-        `An exclave id (the account's home, e.g. "default") on that machine — or, with no machine, on any machine that has it. At most ${TASK_SPEC_LIMITS.placement} characters`,
+        `An exclave id (the account's home, e.g. "default") on that machine — or, with no machine, on any machine that has it; list_machines lists each machine's exclaves. At most ${TASK_SPEC_LIMITS.placement} characters`,
       ),
   })
   .optional()
@@ -608,6 +626,7 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
 
 function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
   const placement = placementOf(task, machines);
+  const pin = describePin(task, machines);
   const { spec } = task;
   return {
     id: task.id,
@@ -618,6 +637,7 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     ...(spec.prompt === undefined ? {} : { prompt: spec.prompt }),
     createdAt: new Date(task.createdAt).toISOString(),
     ...(placement === null ? {} : { placement }),
+    ...(pin === null ? {} : { pin }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
@@ -712,7 +732,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        'List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. Offline machines are listed with their last-seen time. `source` is the build a machine\'s daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: "leader"` marks the verified scheduler leader that `auto` tasks go through; `"unverified"` marks a nominee that has not proven it holds this fleet\'s key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.',
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclave ids (the accounts' homes), the values an auto task's pin.exclave takes; a machine with the field absent or empty reports none, so no pin can target it until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -776,7 +796,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, its pin (whichever of machine and exclave it pins: the machine by name where known, plus its deviceId, and the exclave), where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
