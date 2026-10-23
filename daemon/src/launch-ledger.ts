@@ -69,10 +69,15 @@ export interface TaskNote {
   readonly ahead?: true;
   readonly pushed?: true;
   readonly merged?: true;
+  /** The session reported its task done (#21): sticky, and read by the leader only for `until: "reported"`. */
+  readonly reported?: true;
   readonly prUrl?: string;
   /** The session's exit status, noted from its dead pane before the pane is closed (`exit-status.ts`). */
   readonly exit?: number;
 }
+
+/** How `LaunchLedger.apply` ended; see there. */
+export type NoteOutcome = "refused" | "same" | "written" | "unwritten";
 
 export interface NotedTask extends TaskNote {
   readonly taskId: string;
@@ -105,7 +110,7 @@ function boundedText(value: unknown, max: number): string | undefined {
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
 function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   if (!isRecord(raw)) return null;
-  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, prUrl, exit } = raw;
+  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, reported, prUrl, exit } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
   const pathText = boundedText(path, PATH_MAX_LENGTH);
@@ -123,6 +128,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(ahead === true ? { ahead: true as const } : {}),
     ...(pushed === true ? { pushed: true as const } : {}),
     ...(merged === true ? { merged: true as const } : {}),
+    ...(reported === true ? { reported: true as const } : {}),
     ...(url === undefined ? {} : { prUrl: url }),
     ...(isExitStatus(exit) ? { exit } : {}),
   };
@@ -188,6 +194,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(patch.ahead === true || base?.ahead === true ? { ahead: true as const } : {}),
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
+    ...(patch.reported === true || base?.reported === true ? { reported: true as const } : {}),
   };
 }
 
@@ -201,7 +208,8 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.exit === b.exit &&
     a.ahead === b.ahead &&
     a.pushed === b.pushed &&
-    a.merged === b.merged
+    a.merged === b.merged &&
+    a.reported === b.reported
   );
 }
 
@@ -326,21 +334,31 @@ export class LaunchLedger {
    * note. False when the patch was refused (unknown id, or stale `under`).
    */
   async note(taskId: string, patch: TaskNote, under?: { readonly siteAt: number | undefined }): Promise<boolean> {
-    if (!this.#tasks.has(taskId)) return false;
+    return (await this.apply(taskId, patch, under)) !== "refused";
+  }
+
+  /**
+   * `note` saying how it went, for the one caller whose reply promises the
+   * note is on disk: `same` when the patch changed nothing (a report already
+   * held), `unwritten` when memory has it and the write failed.
+   */
+  async apply(taskId: string, patch: TaskNote, under?: { readonly siteAt: number | undefined }): Promise<NoteOutcome> {
+    if (!this.#tasks.has(taskId)) return "refused";
     const old = this.#notes.get(taskId);
-    if (under !== undefined && old?.siteAt !== under.siteAt) return false;
+    if (under !== undefined && old?.siteAt !== under.siteAt) return "refused";
     const resited = patch.path !== undefined && patch.path !== old?.path;
     const base = resited ? undefined : old;
     const next = mergeNote(taskId, base, patch);
-    if (old !== undefined && base !== undefined && sameNote(old, next)) return true;
+    if (old !== undefined && base !== undefined && sameNote(old, next)) return "same";
     const stamp = this.#now();
     this.#notes.set(taskId, { ...next, at: stamp, ...(resited ? { siteAt: stamp } : {}) });
     try {
       await this.#persist();
     } catch (err) {
       log.warn(`launch ledger: could not record task progress (${String(err)})`);
+      return "unwritten";
     }
-    return true;
+    return "written";
   }
 
   /**
@@ -401,6 +419,7 @@ export class LaunchLedger {
         note.branch === undefined &&
         note.pushed === undefined &&
         note.merged === undefined &&
+        note.reported === undefined &&
         note.exit === undefined
       )
         continue;
@@ -411,6 +430,7 @@ export class LaunchLedger {
         ...(note.branch === undefined ? {} : { branch: note.branch }),
         ...(note.pushed === undefined ? {} : { pushed: note.pushed }),
         ...(note.merged === undefined ? {} : { merged: note.merged }),
+        ...(note.reported === undefined ? {} : { reported: note.reported }),
         ...(note.exit === undefined ? {} : { exit: note.exit }),
       };
       if (parseTaskProgressList([entry]) === null) {

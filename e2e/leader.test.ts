@@ -6,7 +6,7 @@ import { exec } from "../daemon/src/exec.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { listRegisteredWindows, listWindows, startApp, type SecondDaemon, type Stack } from "./harness.ts";
+import { killWindow, listRegisteredWindows, listWindows, startApp, type SecondDaemon, type Stack } from "./harness.ts";
 import { fixtureOrigin, q, startSuite, watchLeader, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
@@ -130,6 +130,122 @@ describe("session event: mod's CLI ↔ remote daemon ↔ relay ↔ leader", () =
     } finally {
       if (pane !== null) await tmux(["kill-session", "-t", "e2e-event-sender"]);
       await second?.stop();
+    }
+  });
+});
+
+describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leader (#21)", () => {
+  // A real dispatch, not a seeded record: the daemon notes a report only for a task its launch
+  // ledger holds (`unrecorded` otherwise), and only a spawn writes it there.
+  test("a pane carrying an until: reported task reports done: the task settles by it and a done-dependent leaves blocked", async () => {
+    const predecessor = "e2e-report-pred";
+    const dependent = "e2e-report-next";
+    const nudge = "e2e-report-nudge";
+    const app = startApp(stack, { auto: true });
+    let window: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      // A spawn before the machine's repos are listed resolves no repo and does nothing, silently.
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some((m) => m.deviceId === stack.deviceId && m.connected && m.repos.length > 0),
+        "the leader verified and the machine's repos listed",
+      );
+      const origin = fixtureOrigin(ready);
+      if (origin === null) throw new Error("the fixture machine lists no repo origin");
+      const queued = await app.client.createTask({
+        id: predecessor,
+        spec: { repo: origin, mode: "worktree", until: "reported" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(queued).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(predecessor))?.body?.state === "running",
+        "the predecessor to run",
+        20_000,
+      );
+      window = (await stack.queue().get(predecessor))?.body?.assignment?.window;
+      // A repo no machine holds, so the released dependent only leaves `blocked` and spawns nothing.
+      const waiting = await app.client.createTask({
+        id: dependent,
+        spec: { repo: "github.com/acme/never-cloned", mode: "worktree", deps: [{ task: predecessor, after: "done" }] },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(waiting).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(dependent))?.body?.state === "blocked",
+        "the dependent to wait on the report",
+        10_000,
+      );
+
+      const out = join(base, "report.json");
+      const script = join(base, "report.ts");
+      const go = join(base, "report.go");
+      await rm(out, { force: true });
+      await rm(go, { force: true });
+      const tool = join(import.meta.dir, "..", "daemon", "src", "report-done.ts");
+      const socket = join(process.env["SEANCE_STATE_DIR"] ?? "", "run", "seanced.sock");
+      await Bun.write(
+        script,
+        `import { reportDone } from ${JSON.stringify(tool)};\nawait Bun.write(${JSON.stringify(out)}, JSON.stringify(await reportDone({ path: ${JSON.stringify(socket)} })));\n`,
+      );
+      // The reporter takes over the spawned pane, so it runs where the session would: the daemon binds
+      // it by its parent walk to that pane, and the pane carries the task the spawn tagged it with.
+      // (Its assignment carries no pane until the session registers, which the stub does not.)
+      const panes = await tmuxOk(["list-panes", "-a", "-F", "#{pane_id} #{@seance-task}"]);
+      const pane = panes
+        .split("\n")
+        .map((line) => line.split(" "))
+        .find(([, task]) => task === predecessor)?.[0];
+      if (pane === undefined) throw new Error(`no pane carries ${predecessor}: ${panes}`);
+      await tmuxOk([
+        "respawn-pane",
+        "-k",
+        "-t",
+        pane,
+        "sh",
+        "-c",
+        `while [ ! -e ${q(go)} ]; do sleep 0.05; done; ${q(process.execPath)} ${q(script)}; exec sleep 600`,
+      ]);
+      await pollUntil(() => localSocketReachable(socket), "the suite daemon's op socket", 10_000);
+      await Bun.write(go, "");
+
+      await pollUntil(async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "", "the report");
+      expect(JSON.parse(await Bun.file(out).text())).toEqual({
+        ok: true,
+        text: "sent — settles the task if it was queued to settle on its report",
+      });
+      await pollUntil(
+        async () => (await stack.queue().get(predecessor))?.body?.state === "done",
+        "the leader to settle the task on its report",
+        10_000,
+      );
+      expect((await stack.queue().get(predecessor))?.body).toMatchObject({
+        doneBy: "reported",
+        assignment: { deviceId: stack.deviceId, pane },
+      });
+      // A report moves its task and nothing else: the dependent waits for the leader's next pass (30s), which
+      // an app's create nudges (`store-changed`), as in auto.test.ts.
+      const nudged = await app.client.createTask({
+        id: nudge,
+        spec: { repo: "github.com/acme/never-cloned", mode: "worktree" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(nudged).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(dependent))?.body?.state === "ready",
+        "the dependent to be released",
+        10_000,
+      );
+    } finally {
+      await app.client.cancel(nudge).catch(() => null);
+      app.stop();
+      if (window !== undefined) await killWindow(window);
     }
   });
 });

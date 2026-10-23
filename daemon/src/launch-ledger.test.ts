@@ -403,3 +403,59 @@ describe("LaunchLedger progress notes", () => {
     expect(reopened.progress()).toEqual([]);
   });
 });
+
+describe("LaunchLedger reported notes (#21)", () => {
+  test("a report survives a reopen, is sticky across later notes, reaches progress, and a relaunch starts without it", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    expect(await ledger.note("t1", { reported: true })).toBe(true);
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, reported: true }]);
+    expect(parseTaskProgressList(ledger.progress())).not.toBeNull();
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.progress()).toEqual([{ taskId: "t1", at: 9, reported: true }]);
+    await reopened.note("t1", { branch: "b" });
+    expect(reopened.progress()).toEqual([{ taskId: "t1", at: 10, branch: "b", reported: true }]);
+
+    await reopened.startNote("t1");
+    expect(reopened.progress()).toEqual([]);
+  });
+
+  test("a report for an id never launched here is not noted, and a non-true value is not read back", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    expect(await ledger.note("ghost", { reported: true })).toBe(false);
+    await ledger.record("t1");
+    await ledger.note("t1", { reported: true });
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].reported = "yes";
+    await writeFile(path, JSON.stringify(file));
+    expect((await LaunchLedger.open(path, () => 11)).notes()[0]).not.toHaveProperty("reported");
+  });
+
+  test("apply says refused for an unknown id, written the first time, and same once the report is held", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    expect(await ledger.apply("ghost", { reported: true })).toBe("refused");
+    await ledger.record("t1");
+    expect(await ledger.apply("t1", { reported: true })).toBe("written");
+    expect(await ledger.apply("t1", { reported: true })).toBe("same");
+  });
+
+  test("apply says unwritten when the file cannot be written, with the note kept in memory", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    // A directory where the file goes: the write fails, the record in memory stands.
+    await rm(path, { force: true });
+    await mkdir(path);
+    expect(await ledger.apply("t1", { reported: true })).toBe("unwritten");
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, reported: true }]);
+  });
+
+  test("an older daemon's reader skips the unknown note field: the file keeps the pairs it reads", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.note("t1", { reported: true });
+    const file = JSON.parse(await readFile(path, "utf8"));
+    expect(file.tasks).toEqual([["t1", 9]]);
+    expect(file.progress[0]).toMatchObject({ taskId: "t1", reported: true });
+  });
+});

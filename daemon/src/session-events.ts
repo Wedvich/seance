@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, type HarvestPanes } from "./exit-status.ts";
-import { LaunchLedger, type LaunchSite } from "./launch-ledger.ts";
+import { LaunchLedger, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
-import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION } from "./session-event-frame.ts";
+import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION, type SessionEventReply } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -56,19 +56,6 @@ export interface SessionEventFrame {
   readonly pane?: string;
 }
 
-export const SESSION_EVENT_REPLY_CODES = [
-  /** Not a frame this daemon reads: wrong version, mistyped fields, nothing to report. */
-  "invalid",
-  /** The sender runs in no live tmux pane this daemon can see. */
-  "unbound",
-  /** This daemon runs no session-event ingest. */
-  "unsupported",
-] as const;
-
-export type SessionEventReply =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly code: (typeof SESSION_EVENT_REPLY_CODES)[number] };
-
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
 export function isSessionEventFrameKind(raw: unknown): boolean {
   return isRecord(raw) && raw["kind"] === SESSION_EVENT_KIND;
@@ -87,9 +74,6 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
   const { state, prUrl, rateLimits, pane } = raw;
   if (state !== undefined && !isSessionState(state)) return null;
-  // `done` is in the schema (#21) ahead of its act, which lands with the authoring surface:
-  // until then ingest refuses it as it did when the state was unknown.
-  if (state === "done") return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (state === undefined && rateLimits === undefined) return null;
@@ -248,6 +232,15 @@ export class EndedTasks {
         await finish();
       }
     };
+  }
+
+  /**
+   * A session's own `done` report (#21), kept for `progress` so a leader that
+   * missed the event reads it on takeover. `refused`: the ledger holds no such
+   * launch; `same`: already reported, so already forwarded.
+   */
+  noteReported(taskId: string): Promise<NoteOutcome> {
+    return this.#ledger.apply(taskId, { reported: true });
   }
 
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
@@ -416,6 +409,11 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     outboxes.set(event.session, box);
     const prUrl = event.prUrl ?? box.pending?.prUrl;
     const merged: SessionEvent = { ...event, ...(prUrl === undefined ? {} : { prUrl }) };
+    // A report is acted on once and not repeated, so no later state in the window may replace it.
+    if (event.state === "done") {
+      deps.forward(merged);
+      return;
+    }
     const wait = box.lastSentAt + windowMs - now();
     if (wait <= 0 && box.timer === null) {
       send(box, merged);
@@ -457,22 +455,36 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
-      if (frame.state === undefined || pane.taskId === null || stopped) return { ok: true };
+      if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
+      if (frame.state === undefined || pane.taskId === null) return { ok: true };
+      // A stopped ingest sends nothing, so a report must not be told it went.
+      if (stopped) return frame.state === "done" ? { ok: false, code: "stopping" } : { ok: true };
       if (frame.state === "ended") deps.ended.ended(pane.taskId);
+      // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
+      let reported: NoteOutcome | null = null;
+      if (frame.state === "done") {
+        reported = await deps.ended.noteReported(pane.taskId).catch((): NoteOutcome => "unwritten");
+        // No launch of this task here: nothing this machine could settle, and nothing to recover it from.
+        if (reported === "refused") return { ok: false, code: "unrecorded" };
+      }
       const prUrl = frame.prUrl === undefined ? null : httpsUrl(frame.prUrl);
       if (frame.prUrl !== undefined && prUrl === null) {
         log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
       }
       if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
-      enqueue({
-        session: pane.id,
-        taskId: pane.taskId,
-        exclave,
-        state: frame.state,
-        at,
-        ...(prUrl === null ? {} : { prUrl }),
-      });
-      return { ok: true };
+      // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
+      if (reported !== "same") {
+        enqueue({
+          session: pane.id,
+          taskId: pane.taskId,
+          exclave,
+          state: frame.state,
+          at,
+          ...(prUrl === null ? {} : { prUrl }),
+        });
+      }
+      // Forwarded either way: only the proof that survives a restart is missing.
+      return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
     },
     stop: (): void => {
       stopped = true;

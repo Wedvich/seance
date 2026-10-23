@@ -29,8 +29,12 @@ describe("parseSessionEventFrame", () => {
     });
     expect(parseSessionEventFrame(frame({}))).toBeNull();
     expect(parseSessionEventFrame(frame({ state: "asleep" }))).toBeNull();
-    // In the schema ahead of its act (#21): ingest refuses it as it did any unknown state.
-    expect(parseSessionEventFrame(frame({ state: "done", pane: "%1" }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ state: "done", pane: "%1" }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "done",
+      pane: "%1",
+    });
     expect(parseSessionEventFrame({ v: 2, kind: "session-event", state: "busy" })).toBeNull();
   });
 
@@ -355,6 +359,118 @@ describe("the PR URL is kept for the scheduler's progress", () => {
     } finally {
       events.stop();
       stranger.events.stop();
+    }
+  });
+});
+
+describe("a session's done report (#21)", () => {
+  const tasked: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+  const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" };
+
+  function setup(coalesceMs = 0, ledger = LaunchLedger.memory()) {
+    const ended = new EndedTasks(ledger);
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve([tasked, bare]),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended,
+      coalesceMs,
+      hostNamesPeers: () => false,
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    return { ledger, ended, forwarded, events, send };
+  }
+
+  test("a tasked pane's report is on disk before the reply, and forwarded", async () => {
+    const { ledger, ended, forwarded, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      expect(await send("%1", { state: "done" })).toEqual({ ok: true });
+      expect(ended.progress()).toEqual([{ taskId: "t1", at: expect.any(Number), reported: true }]);
+      expect(forwarded.map((e) => [e.taskId, e.state])).toEqual([["t1", "done"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a task-less pane is told untasked, and nothing is forwarded", async () => {
+    const { forwarded, events, send } = setup();
+    try {
+      expect(await send("%2", { state: "done" })).toEqual({ ok: false, code: "untasked" });
+      expect(await send("%9", { state: "done" })).toEqual({ ok: false, code: "unbound" });
+      expect(forwarded).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a task's report is forwarded once: a repeat is told ok and sends nothing", async () => {
+    const { ledger, forwarded, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      expect(await send("%1", { state: "done" })).toEqual({ ok: true });
+      expect(await send("%1", { state: "done" })).toEqual({ ok: true });
+      expect(forwarded.map((e) => e.state)).toEqual(["done"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a report for a task the ledger holds no launch of is refused unrecorded and sent nowhere", async () => {
+    const { ended, forwarded, events, send } = setup();
+    try {
+      expect(await send("%1", { state: "done" })).toEqual({ ok: false, code: "unrecorded" });
+      expect(forwarded).toEqual([]);
+      expect(ended.progress()).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a report whose ledger write failed is forwarded but answered unwritten, not ok", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-report-ledger-"));
+    const path = join(dir, "launched.json");
+    const ledger = await LaunchLedger.open(path);
+    const { forwarded, events, send } = setup(0, ledger);
+    try {
+      await ledger.record("t1");
+      // A directory where the file goes: the next write fails.
+      await rm(path, { force: true });
+      await mkdir(path);
+      expect(await send("%1", { state: "done" })).toEqual({ ok: false, code: "unwritten" });
+      expect(forwarded.map((e) => e.state)).toEqual(["done"]);
+    } finally {
+      events.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a stopped ingest answers a report stopping, and the other states ok", async () => {
+    const { ledger, forwarded, events, send } = setup();
+    await ledger.record("t1");
+    events.stop();
+    expect(await send("%1", { state: "done" })).toEqual({ ok: false, code: "stopping" });
+    expect(await send("%1", { state: "busy" })).toEqual({ ok: true });
+    expect(forwarded).toEqual([]);
+  });
+
+  test("it goes at once inside a window holding a pending state, and the PR URL it carries is noted too", async () => {
+    const { ledger, ended, forwarded, events, send } = setup(10_000);
+    try {
+      await ledger.record("t1");
+      await send("%1", { state: "busy" });
+      await send("%1", { state: "idle" });
+      expect(forwarded.map((e) => e.state)).toEqual(["busy"]);
+      await send("%1", { state: "done", prUrl: "https://github.com/a/b/pull/1" });
+      expect(forwarded.map((e) => [e.state, e.prUrl])).toEqual([
+        ["busy", undefined],
+        ["done", "https://github.com/a/b/pull/1"],
+      ]);
+      await pollUntil(() => ended.progress()[0]?.prUrl !== undefined, "the PR URL in progress");
+      expect(ended.progress()[0]).toMatchObject({ reported: true, prUrl: "https://github.com/a/b/pull/1" });
+    } finally {
+      events.stop();
     }
   });
 });

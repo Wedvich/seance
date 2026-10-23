@@ -322,6 +322,28 @@ describe("PR URLs", () => {
   });
 });
 
+describe("`seanced session-event` and a done report (#21)", () => {
+  /** The CLI run outside any pane, as the mod's hook runs it; it exits once the daemon has answered or it gave up. */
+  async function runCli(input: object): Promise<void> {
+    const proc = Bun.spawn([process.execPath, MAIN, "session-event"], {
+      stdin: new Blob([JSON.stringify(input)]),
+      stdout: "ignore",
+      stderr: "ignore",
+      env: { ...process.env, SEANCE_STATE_DIR: stateDir },
+    });
+    expect(await proc.exited).toBe(0);
+  }
+
+  test("refuses state: done — the MCP tool is the only report path — while other states still reach the daemon", async () => {
+    const before = handled.length;
+    await runCli({ state: "done" });
+    // The CLI waits for the daemon's answer before it exits, so a frame it sent is already handled.
+    expect(handled.length).toBe(before);
+    await runCli({ state: "busy" });
+    expect(handled.length).toBe(before + 1);
+  });
+});
+
 describe("activity", () => {
   test("a report through `seanced session-event` pokes the sender's exclave — an older mod's rate limits included — and forwards nothing", async () => {
     const input = join(base, "legacy.json");

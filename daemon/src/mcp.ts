@@ -9,6 +9,7 @@ import {
   reasonText,
   RequestFailure,
   QUEUE_MAX_TASKS,
+  REPORT_DONE_TOOL,
   schedulerErrorText,
   schedulerRole,
   taskFailureText,
@@ -51,6 +52,7 @@ import {
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
+import { reportDone } from "./report-done.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -426,7 +428,12 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  * enqueue reaches no daemon, so this process records it in the audit log itself,
  * as `seanced spawn` does — never on stdout, the JSON-RPC channel.
  */
-export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, audit: AuditSink = cliSink): McpServer {
+export function buildMcpServer(
+  fleet: Fleet,
+  local: LocalMachine | null = null,
+  audit: AuditSink = cliSink,
+  report: typeof reportDone = reportDone,
+): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
 
@@ -741,6 +748,20 @@ export function buildMcpServer(fleet: Fleet, local: LocalMachine | null = null, 
           return errorResult(failureText("despawn_session", err));
         }
       });
+    },
+  );
+
+  server.registerTool(
+    REPORT_DONE_TOOL,
+    {
+      title: "Report this session's scheduler task done",
+      description:
+        "Settle the scheduler task this session runs as done, releasing the tasks that wait on it. Call it only when the task's prompt asks you to, and only once the work is fully finished, a deploy you were watching included: it cannot be taken back. Outside a scheduler task it does nothing and says so. Goes to this machine's own daemon, which binds it to this session's tmux pane.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async () => {
+      const result = await report();
+      return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );
 
