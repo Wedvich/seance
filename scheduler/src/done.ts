@@ -189,7 +189,8 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
   if (settlesOnReport(task)) return mergedOpen(recorded);
   // The session is left alive, as for a `branch-state` settle; a placed task says so, as a lost one does.
   const placed = PLACED.includes(task.state);
-  return advance(recorded, "done", { doneBy: "merged", ...(placed ? { leftRunning: true } : {}) });
+  // Its own reading is the fresh one `advance` would drop: kept.
+  return { ...advance(recorded, "done", { doneBy: "merged", ...(placed ? { leftRunning: true } : {}) }), pr };
 }
 
 /**

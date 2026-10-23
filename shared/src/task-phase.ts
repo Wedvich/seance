@@ -55,8 +55,9 @@ export function isPrReadable(state: TaskState): boolean {
 
 /**
  * The leader's poller reads this task's PR: one a reading can change, or a
- * finished one with no reading yet — marked done before the poller saw it — read
- * once so its chip does not stay unknown for good. The poller and `prChange`
+ * finished one with no reading yet — marked done before the poller saw it, or
+ * settled by a path that dropped its last one (`advance`) — read once so its
+ * chip does not stay unknown or stale for good. The poller and `prChange`
  * both ask this, so what is polled is what can be applied.
  */
 export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr">): boolean {

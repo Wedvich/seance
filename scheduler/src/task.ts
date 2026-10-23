@@ -1,4 +1,4 @@
-import { statesIn, type Task, type TaskState } from "@seance/shared";
+import { statesIn, TASK_PHASES, type Task, type TaskState } from "@seance/shared";
 
 // The task's shapes are wire types — `queue` replies carry them — so they live
 // in the schema of record; this module owns only how a task moves.
@@ -87,20 +87,23 @@ export function isUnconfirmed(task: Task): boolean {
  * an input error, so it throws rather than returning a code. Leaving
  * `reserved` drops the reservation; returning to `ready` drops the assignment;
  * leaving `lost` drops when its machine went absent; `reservedAt` survives only
- * from `reserved` into `lost`.
+ * from `reserved` into `lost`. Finishing drops the PR reading (`pr`): a settle
+ * by any other path than the forge's own may leave an open reading behind, and
+ * with none `wantsPrReading` reads the finished task once more.
  */
 export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
   if (task.state === "lost" && to === "ready" && !isUnconfirmed(task)) {
     throw new Error(`task ${task.id}: a lost task that ran never returns to ready`);
   }
-  const { reservation, assignment, absentSince: _absent, reservedAt, ...rest } = task;
+  const { reservation, assignment, absentSince: _absent, reservedAt, pr, ...rest } = task;
   const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
   return {
     ...rest,
     ...(to === "reserved" && reservation !== undefined ? { reservation } : {}),
     ...(keepsReservedAt && reservedAt !== undefined ? { reservedAt } : {}),
     ...(to !== "ready" && assignment !== undefined ? { assignment } : {}),
+    ...(TASK_PHASES[to] !== "finished" && pr !== undefined ? { pr } : {}),
     ...fields,
     state: to,
   };

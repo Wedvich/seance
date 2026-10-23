@@ -7,6 +7,7 @@ import {
   type DespawnResponse,
   type PrStatus,
   type TaskProgress,
+  wantsPrReading,
 } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import { branchChange, ended, prBound, progressed } from "../src/done.ts";
@@ -841,6 +842,37 @@ describe("PR status", () => {
     await scheduler.load();
     await scheduler.onPrStatus("t", PR, reading("merged"));
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged", leftRunning: true });
+  });
+
+  test("(6b) a settle by branch state or by hand drops an open reading, read once more; a merge settle keeps its own", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("m", { assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await scheduler.load();
+    for (const id of ["t", "m"]) {
+      await scheduler.onPrStatus(id, PR, reading("open", READ, "pending"));
+    }
+    await scheduler.onBranchState(
+      { taskId: "t", repo: "app", branch: "fix", pushed: true, merged: false, at: NOW },
+      "a",
+    );
+    await scheduler.onBranchState(
+      { taskId: "t", repo: "app", branch: "fix", pushed: true, merged: true, at: NOW },
+      "a",
+    );
+    await scheduler.markDone("m");
+    for (const id of ["t", "m"]) {
+      const task = scheduler.task(id);
+      expect(task?.state).toBe("done");
+      expect(task?.pr).toBeUndefined();
+      expect(task === undefined ? false : wantsPrReading(task)).toBe(true);
+      await scheduler.onPrStatus(id, PR, reading("merged", READ + 1, "passing"));
+      const read = scheduler.task(id);
+      expect(read).toMatchObject({ state: "done", pr: { state: "merged", checks: "passing", at: READ + 1 } });
+      expect(read === undefined ? true : wantsPrReading(read)).toBe(false);
+    }
+    expect(scheduler.task("t")?.doneBy).toBe("merged");
+    expect(scheduler.task("m")?.doneBy).toBe("manual");
   });
 
   test("(7) under until: reported a merge is recorded, settles nothing, and releases an after-merged dependent", async () => {
