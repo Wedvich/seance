@@ -212,7 +212,14 @@ export type QueueState =
       readonly holds: readonly PauseHold[];
       /** Records the leader cannot read: they hold store slots no prune frees, until a person discards them. */
       readonly unreadable: readonly UnreadableTaskRef[];
+      /** The leader's clock when it answered, ms. */
       readonly at: number;
+      /**
+       * The leader's clock minus this device's as the reply arrived (the trip
+       * included), ms: what a leader-stamped time (`Task.pr.at`) needs added to
+       * this device's `now` to be compared with it. Local; no frame carries it.
+       */
+      readonly skew: number;
     }
   | { readonly kind: "failed"; readonly message: string };
 

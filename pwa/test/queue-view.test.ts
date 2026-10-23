@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  PR_CHECKS,
+  PR_STATES,
+  PR_STATUS_STALE_MS,
   QUEUE_MAX_TASKS,
   type ExclaveInfo,
   type Machine,
   type PauseHold,
+  type PrStatus,
   type RelayState,
   type Task,
 } from "@seance/shared";
@@ -77,8 +81,8 @@ function task(id: string, fields: Partial<Task> = {}): Task {
 
 const placedAt = { deviceId: "dev-a", exclave: "default", clone: "app", window: "w" };
 
-function ok(tasks: readonly Task[], holds: readonly PauseHold[] = []): QueueState {
-  return { kind: "ok", tasks, holds, unreadable: [], at: NOW };
+function ok(tasks: readonly Task[], holds: readonly PauseHold[] = [], skew = 0): QueueState {
+  return { kind: "ok", tasks, holds, unreadable: [], at: NOW + skew, skew };
 }
 
 function titles(view: ReturnType<typeof deriveQueue>): string[] {
@@ -204,11 +208,70 @@ describe("deriveQueue", () => {
     expect(prOf("https://github.com/acme/app/pull/123")).toEqual({
       url: "https://github.com/acme/app/pull/123",
       label: "#123",
+      state: null,
+      checks: null,
+      stale: false,
+      description: "Pull request #123",
+      accessibleName: "Open pull request #123",
     });
+    expect(prOf("https://example.com/review?id=5")?.description).toBe("Pull request");
     expect(prOf("https://gitlab.com/acme/app/-/merge_requests/7/")?.label).toBe("#7");
     expect(prOf("https://github.com/acme/app/pull/123/files")?.label).toBe("#123");
     expect(prOf("https://example.com/review?id=5")?.label).toBe("PR");
     expect(prOf()).toBeNull();
+  });
+
+  describe("the leader's forge reading of the PR", () => {
+    const URL = "https://github.com/acme/app/pull/123";
+    const chip = (pr: PrStatus | undefined, now = NOW, skew = 0) =>
+      deriveQueue(
+        state(ok([task("a", { state: "awaiting-merge", prUrl: URL, ...(pr === undefined ? {} : { pr }) })], [], skew)),
+        now,
+      ).sections[0]?.rows[0]?.pr;
+
+    test("each state and check maps through, with the words for the chip's title", () => {
+      for (const prState of PR_STATES) expect(chip({ state: prState, at: NOW })?.state).toBe(prState);
+      for (const checks of PR_CHECKS) expect(chip({ state: "open", checks, at: NOW })?.checks).toBe(checks);
+      expect(chip({ state: "open", at: NOW })?.checks).toBeNull();
+      expect(chip({ state: "open", checks: "failing", at: NOW - 3 * 60_000 })).toMatchObject({
+        stale: false,
+        description: "Pull request #123 · open · checks failing · read 3m ago",
+        accessibleName: "Open pull request #123 (open, checks failing, read 3m ago)",
+      });
+      expect(chip({ state: "draft", at: NOW })?.description).toBe("Pull request #123 · draft · read just now");
+    });
+
+    test("a merged chip shows no CI dot, whatever the reading carried", () => {
+      expect(chip({ state: "merged", checks: "passing", at: NOW })).toMatchObject({
+        state: "merged",
+        checks: null,
+        description: "Pull request #123 · merged · read just now",
+        accessibleName: "Open pull request #123 (merged, read just now)",
+      });
+    });
+
+    test("a reading is aged by the leader's clock, not the phone's", () => {
+      const HOUR = 3_600_000;
+      for (const skew of [HOUR, -HOUR]) {
+        const at = (ago: number): number => NOW + skew - ago;
+        expect(chip({ state: "open", at: at(3 * 60_000) }, NOW, skew)).toMatchObject({
+          stale: false,
+          description: "Pull request #123 · open · read 3m ago",
+        });
+        expect(chip({ state: "open", at: at(PR_STATUS_STALE_MS + 1) }, NOW, skew)?.stale).toBe(true);
+      }
+    });
+
+    test("a reading past the stale threshold is stale, except a merge, which never un-merges", () => {
+      expect(chip({ state: "open", at: NOW - PR_STATUS_STALE_MS })?.stale).toBe(false);
+      expect(chip({ state: "open", at: NOW - PR_STATUS_STALE_MS - 1 })?.stale).toBe(true);
+      expect(chip({ state: "closed", at: NOW - 60 * 60_000 })?.stale).toBe(true);
+      expect(chip({ state: "merged", at: NOW - 60 * 60_000 })?.stale).toBe(false);
+    });
+
+    test("no reading is today's chip", () => {
+      expect(chip(undefined)).toMatchObject({ state: null, checks: null, stale: false, label: "#123" });
+    });
   });
 
   test("a row is busy while its action is in flight", () => {
@@ -299,6 +362,7 @@ describe("deriveQueue", () => {
       holds: [],
       unreadable: Array.from({ length: count }, (_, i) => ({ taskId: `j${i}`, version: 1, reason: "unopenable" })),
       at: NOW,
+      skew: 0,
     });
     expect(deriveQueue(state(listing(1)), NOW).unreadable).toBe(
       "1 unreadable record holds a queue slot — junk, or sealed under an earlier key",

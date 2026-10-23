@@ -1,4 +1,4 @@
-import type { JSX } from "preact";
+import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { QueueRow, QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
@@ -149,13 +149,16 @@ export function QueueScreen(props: {
                   <div className="queue-actions">
                     {row.pr !== null && (
                       <a
-                        className="fleet-badge queue-pr"
+                        className={`fleet-badge queue-pr${row.pr.state === null ? "" : ` queue-pr-${row.pr.state}`}${row.pr.stale ? " queue-pr-stale" : ""}`}
                         href={row.pr.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        aria-label={`Open pull request ${row.pr.label}`}
+                        title={row.pr.description}
+                        aria-label={row.pr.accessibleName}
                       >
+                        <PrStateIcon state={row.pr.state} />
                         {row.pr.label}
+                        {row.pr.checks !== null && <PrChecksIcon checks={row.pr.checks} />}
                       </a>
                     )}
                     {row.canFollowUp && (
@@ -203,5 +206,57 @@ export function QueueScreen(props: {
         </button>
       </footer>
     </>
+  );
+}
+
+/** Same stroke vocabulary as the header's icons; colour comes from the chip's `currentColor`. */
+function PrIcon(props: { size: number; className: string; children: ComponentChildren }): JSX.Element {
+  return (
+    <svg
+      className={props.className}
+      viewBox="0 0 24 24"
+      width={props.size}
+      height={props.size}
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      {props.children}
+    </svg>
+  );
+}
+
+/** GitHub's vocabulary: a pull request, dotted when a draft, merged, or crossed out when closed. */
+function PrStateIcon(props: { state: NonNullable<QueueRow["pr"]>["state"] }): JSX.Element {
+  const { state } = props;
+  return (
+    <PrIcon size={16} className="queue-pr-icon">
+      <circle cx="6" cy="5.5" r="2.5" />
+      <circle cx="6" cy="18.5" r="2.5" />
+      <path d="M6 8v8" />
+      <circle cx="18" cy={state === "merged" ? 13 : 18.5} r="2.5" />
+      {state === "merged" && <path d="M6 8v1a4 4 0 0 0 4 4h5.5" />}
+      {(state === null || state === "open") && <path d="M18 16V10a4 4 0 0 0-4-4h-2M14.5 3.5 12 6l2.5 2.5" />}
+      {state === "draft" && <path d="M18 15.5V6" stroke-dasharray="0.1 3.4" />}
+      {state === "closed" && <path d="M18 16v-3.5M15.5 4.5l5 5M20.5 4.5l-5 5" />}
+    </PrIcon>
+  );
+}
+
+function PrChecksIcon(props: { checks: NonNullable<NonNullable<QueueRow["pr"]>["checks"]> }): JSX.Element {
+  const { checks } = props;
+  return (
+    <PrIcon size={13} className={`queue-pr-ci queue-pr-ci-${checks}`}>
+      {checks === "pending" ? (
+        <circle cx="12" cy="12" r="4.5" fill="currentColor" />
+      ) : (
+        <circle cx="12" cy="12" r="9.5" />
+      )}
+      {checks === "passing" && <path d="M8 12.5l2.8 2.8L16 9.5" />}
+      {checks === "failing" && <path d="M9 9l6 6M15 9l-6 6" />}
+    </PrIcon>
   );
 }

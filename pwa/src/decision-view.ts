@@ -213,6 +213,12 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       if (task.merged === true) return `Merged${place} — waiting for its session to report it done.`;
       return `Its session ended${place} — waiting for the PR to merge.`;
     case "done":
+      // `leftRunning` is "marked by hand" only for `manual`: the leader settles a merged PR whose session it never stopped.
+      if (task.doneBy === "merged") {
+        return task.leftRunning === true
+          ? `Its PR merged — its session may still be running${place}.`
+          : `Its PR merged${place}.`;
+      }
       if (task.leftRunning === true) return `Marked done — its session may still be running${place}.`;
       // Marked by hand: nothing saw it finish, so "finished" would claim too much.
       if (task.doneBy === "linear") return `Its Linear issue was closed${place}.`;
@@ -263,6 +269,13 @@ export function queuedBody(task: Task): string {
       }
       return "The session ended with a pull request open. Tasks that wait for it to merge stay blocked until it does; the scheduler gives up after a week, and they fail.";
     case "done":
+      if (task.doneBy === "merged") {
+        const merged = "Its pull request merged, so the scheduler marked it done.";
+        // Not LEFT_RUNNING: a settle off a live session leaves it running with its machine present.
+        return task.leftRunning === true
+          ? `${merged} Its session was left as it was. End the session on that machine if it is still running.`
+          : merged;
+      }
       if (task.leftRunning === true) return `Marked done by hand. ${LEFT_RUNNING}`;
       if (task.doneBy === "linear") return "Its Linear issue was closed, so the scheduler marked it done.";
       if (task.doneBy === "reported") return "Its session reported it done.";
