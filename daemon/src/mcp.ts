@@ -37,11 +37,20 @@ import {
   type SpawnResponse,
   type Task,
   type TaskDep,
+  type TaskSpec,
   type TaskUntil,
 } from "@seance/shared";
 import { appRelayClient, LazyRelay } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
-import { enqueueAuto, leaderTakesReported, resolveOrigin, specError, usesReported, type AutoSpec } from "./auto.ts";
+import {
+  enqueueAuto,
+  leaderTakesReported,
+  pinExclaveError,
+  resolveOrigin,
+  specError,
+  usesReported,
+  type AutoSpec,
+} from "./auto.ts";
 import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
@@ -122,6 +131,88 @@ export function resolveMachine(
   }
   const known = machines.map((machine) => machine.name).join(", ");
   return { error: `no machine named "${ref}" — known machines: ${known === "" ? "(none registered)" : known}` };
+}
+
+/** `pin` as a tool takes it: a machine by name or deviceId, which the spec holds only as a deviceId. */
+interface PinInput {
+  readonly machine?: string | undefined;
+  readonly exclave?: string | undefined;
+}
+
+/** What a pin needs before the fleet is known, refused before anything dials the relay. */
+function pinInputError(pin: PinInput | undefined): string | null {
+  if (pin === undefined) return null;
+  if (pin.machine === undefined && pin.exclave === undefined) return "pin names neither a machine nor an exclave";
+  if (pin.machine === "") return "pin.machine is empty";
+  return pin.exclave === undefined ? null : pinExclaveError(pin.exclave);
+}
+
+/**
+ * A pin resolved at submit time: the machine name becomes the deviceId the
+ * scheduler matches (a name is not stable, nor unique), and `machines` is the
+ * pinned scope — the pinned machine, its clones cut to the pinned exclave — a
+ * repo name is read against, since a name can be ambiguous across the fleet yet
+ * mean one clone where the task may run.
+ *
+ * An exclave is checked only against machines that report exclaves: one that
+ * reports none is never a candidate for `auto` (`exclaves_unknown`), so it
+ * cannot vouch for a name, and with none reported at all nothing can be judged.
+ */
+export function resolvePin(
+  machines: readonly Machine[],
+  input: PinInput,
+):
+  | {
+      readonly pin: NonNullable<TaskSpec["pin"]>;
+      readonly machines: readonly Machine[];
+      /** What `resolveOrigin` names the scope by. */
+      readonly scope: string;
+    }
+  | { readonly error: string } {
+  const { exclave } = input;
+  // Strict, as the scheduler's clone match is: a clone from a daemon predating exclaves is in none.
+  const inExclave = (machine: Machine): Machine =>
+    exclave === undefined ? machine : { ...machine, repos: machine.repos.filter((entry) => entry.exclave === exclave) };
+  if (input.machine !== undefined) {
+    const resolved = resolveMachine(machines, input.machine);
+    if ("error" in resolved) return { error: `pin.machine: ${resolved.error}` };
+    const target = resolved.machine;
+    const ids = (target.exclaves ?? []).map((info) => info.id);
+    if (exclave !== undefined && ids.length > 0 && !ids.includes(exclave)) {
+      return {
+        error: `pin.exclave "${exclave}" is not an exclave of ${target.name} (${target.deviceId}) — its exclaves: ${ids.join(", ")}`,
+      };
+    }
+    return {
+      pin: { deviceId: target.deviceId, ...(exclave === undefined ? {} : { exclave }) },
+      machines: [inExclave(target)],
+      scope: `auto pinned to ${exclave === undefined ? target.name : `${target.name}/${exclave}`}`,
+    };
+  }
+  if (exclave === undefined) return { error: "pin names neither a machine nor an exclave" };
+  const reported = [...new Set(machines.flatMap((machine) => (machine.exclaves ?? []).map((info) => info.id)))];
+  if (reported.length > 0 && !reported.includes(exclave)) {
+    return {
+      error: `pin.exclave "${exclave}" is on no machine — the fleet's exclaves: ${reported.toSorted().join(", ")}`,
+    };
+  }
+  return { pin: { exclave }, machines: machines.map(inExclave), scope: `auto pinned to exclave ${exclave}` };
+}
+
+/** `repo` as the scheduler keys it, and the pin as the spec holds it: the repo read within the pin's scope. */
+function autoTarget(
+  machines: readonly Machine[],
+  repo: string,
+  pin: PinInput | undefined,
+): { readonly fields: Pick<AutoSpec, "repo" | "pin"> } | { readonly error: string } {
+  if (pin === undefined) {
+    const resolved = resolveOrigin(machines, repo);
+    return "error" in resolved ? resolved : { fields: { repo: resolved.origin } };
+  }
+  const pinned = resolvePin(machines, pin);
+  if ("error" in pinned) return pinned;
+  const resolved = resolveOrigin(pinned.machines, repo, pinned.scope);
+  return "error" in resolved ? resolved : { fields: { repo: resolved.origin, pin: pinned.pin } };
 }
 
 interface ToolResult {
@@ -259,7 +350,7 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches and Linear links are set with spawn_session's after, until and linear fields and with queue_batch.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links and pins are set with spawn_session's after, until, linear and pin fields and with queue_batch.";
 
 /** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
@@ -387,6 +478,24 @@ const UNTIL_FIELD = z
   .optional()
   .describe(
     `What settles the task. "merged" (default): its PR merging, or its session ending. "reported": a merge settles nothing; the session settles it by calling ${REPORT_DONE_TOOL} when it is truly finished (a deploy watched, say), which lets dependents wait for that. It needs a prompt, to which the instruction to report is appended, and the session needs the seance MCP server installed in its exclave`,
+  );
+
+const PIN_FIELD = z
+  .object({
+    machine: z
+      .string()
+      .optional()
+      .describe("Machine name (or deviceId) from list_machines. A name two machines share is refused: use a deviceId"),
+    exclave: z
+      .string()
+      .optional()
+      .describe(
+        `An exclave id (the account's home, e.g. "default") on that machine — or, with no machine, on any machine that has it. At most ${TASK_SPEC_LIMITS.placement} characters`,
+      ),
+  })
+  .optional()
+  .describe(
+    'Machine "auto" only: restrict where the scheduler may place the task — to one machine, one exclave, or both; give at least one. An unknown machine, a name two machines share, or an exclave the machine (or fleet) does not report is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine lists it, or by origin',
   );
 
 const REPORTED_GATE =
@@ -713,7 +822,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account, and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (or only the exclave, or neither, under a pin), and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()
@@ -721,7 +830,7 @@ export function buildMcpServer(
         repo: z
           .string()
           .describe(
-            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter)",
+            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter). With a pin, the name is read only where the pin points: the pinned machine's repo list (its clones in the pinned exclave), or the origin",
           ),
         prompt: z.string().optional().describe("The task for the spawned session"),
         title: z
@@ -753,13 +862,16 @@ export function buildMcpServer(
           ),
         until: UNTIL_FIELD,
         linear: LINEAR_FIELD,
+        pin: PIN_FIELD,
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear }) => {
+    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin }) => {
       if (isAutoRef(machine)) {
         const reported = withReportedPrompt(until, prompt);
         if ("error" in reported) return errorResult(`auto refused: ${reported.error}`);
+        const pinInvalid = pinInputError(pin);
+        if (pinInvalid !== null) return errorResult(`auto refused: ${pinInvalid}`);
         // `client` is not a TaskRequest field: the leader stamps its own
         // dispatch `client=scheduler`, so the target audits the session as the
         // scheduler's.
@@ -780,10 +892,10 @@ export function buildMcpServer(
           if (lease.scheduler === null) return errorResult(keylessText("auto"));
           const leg = { machines: lease.machines, scheduler: lease.scheduler };
           if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
-          const resolved = resolveOrigin(lease.machines, repo);
+          const resolved = autoTarget(lease.machines, repo, pin);
           if ("error" in resolved) return errorResult(resolved.error);
           // The origin a clone name resolved to is what the leader bounds, not the name.
-          const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin };
+          const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
           const longOrigin = specError(resolvedSpec);
           if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
           const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit);
@@ -791,9 +903,14 @@ export function buildMcpServer(
         });
       }
       // `until: "merged"` and an empty `after` are the defaults, which a named machine honours trivially.
-      if ((after !== undefined && after.length > 0) || until === "reported" || linear !== undefined) {
+      if (
+        (after !== undefined && after.length > 0) ||
+        until === "reported" ||
+        linear !== undefined ||
+        pin !== undefined
+      ) {
         return errorResult(
-          'after, until and linear apply to machine "auto" only — a named machine starts the session now, with nothing to wait for',
+          'after, until, linear and pin apply to machine "auto" only — a named machine starts the session there now, with nothing to wait for or place',
         );
       }
       const request: SpawnRequest = {
@@ -860,7 +977,7 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch with a shared strategy: "sequential" runs them one at a time in the order given, "parallel" runs at most max at once, "auto" leaves it to the dependencies and the fleet's capacity. Always machine "auto". Name a task's own dependencies with after: another member by its ref (an earlier one only), or an existing task by its id. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch with a shared strategy: "sequential" runs them one at a time in the order given, "parallel" runs at most max at once, "auto" leaves it to the dependencies and the fleet's capacity. Always machine "auto". Name a task's own dependencies with after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an exclave or both with its pin, as spawn_session's: an unknown or ambiguous machine or an unknown exclave refuses the whole batch, and a pinned member waits for a slot where it is pinned. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         strategy: z.enum(["sequential", "parallel", "auto"]),
         max: z
@@ -877,7 +994,7 @@ export function buildMcpServer(
                 .string()
                 .optional()
                 .describe("A name for this task within the batch, for later members' after to point at"),
-              repo: z.string().describe('As spawn_session\'s repo with machine "auto"'),
+              repo: z.string().describe("As spawn_session's repo with machine \"auto\", read within this member's pin"),
               prompt: z.string().optional().describe("The task for the spawned session"),
               title: z.string().optional().describe("Name for the spawned session, its window and its worktree branch"),
               mode: z.enum(["worktree", "here"]).default("worktree"),
@@ -897,6 +1014,7 @@ export function buildMcpServer(
                 .describe("Each entry names exactly one of task and ref"),
               until: UNTIL_FIELD,
               linear: LINEAR_FIELD,
+              pin: PIN_FIELD,
             }),
           )
           .min(1)
@@ -908,7 +1026,12 @@ export function buildMcpServer(
       const shared = batchStrategy(strategy, max);
       if ("error" in shared) return errorResult(`queue_batch: ${shared.error}`);
       const batchId = crypto.randomUUID();
-      const planned: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
+      const planned: {
+        readonly id: string;
+        readonly ref: string | undefined;
+        readonly spec: AutoSpec;
+        readonly pin: PinInput | undefined;
+      }[] = [];
       const refs = new Map<string, string>();
       for (const [i, member] of tasks.entries()) {
         const n = i + 1;
@@ -941,6 +1064,8 @@ export function buildMcpServer(
         }
         const reported = withReportedPrompt(member.until, member.prompt);
         if ("error" in reported) return errorResult(`queue_batch refused: task ${n}: ${reported.error}`);
+        const pinInvalid = pinInputError(member.pin);
+        if (pinInvalid !== null) return errorResult(`queue_batch refused: task ${n}: ${pinInvalid}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({ ...member, prompt: reported.prompt }),
@@ -951,7 +1076,7 @@ export function buildMcpServer(
         if (invalid !== null) {
           return errorResult(`queue_batch refused: task ${n}: ${invalid}${lengthNote(invalid, member.until)}`);
         }
-        planned.push({ id, ref: member.ref, spec });
+        planned.push({ id, ref: member.ref, spec, pin: member.pin });
       }
       return withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(keylessText("queue_batch"));
@@ -959,19 +1084,19 @@ export function buildMcpServer(
         if (planned.some(({ spec }) => usesReported(spec)) && !leaderTakesReported(leg)) {
           return errorResult(reportedGateError(leg));
         }
-        // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name.
+        // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
         const resolvedPlan: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
         for (const [i, member] of planned.entries()) {
-          const resolved = resolveOrigin(lease.machines, member.spec.repo);
+          const resolved = autoTarget(lease.machines, member.spec.repo, member.pin);
           if ("error" in resolved) return errorResult(`queue_batch refused: task ${i + 1}: ${resolved.error}`);
-          const spec: AutoSpec = { ...member.spec, repo: resolved.origin };
+          const spec: AutoSpec = { ...member.spec, ...resolved.fields };
           const invalid = specError(spec);
           if (invalid !== null) {
             return errorResult(
               `queue_batch refused: task ${i + 1}: ${invalid}${lengthNote(invalid, member.spec.until)}`,
             );
           }
-          resolvedPlan.push({ ...member, spec });
+          resolvedPlan.push({ id: member.id, ref: member.ref, spec });
         }
         // One at a time, in order: a dependent's record lands after its predecessor's, and a failure stops the rest.
         const landed: string[] = [];
