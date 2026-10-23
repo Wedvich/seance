@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { sessionChange, waitsForExit } from "../src/settle.ts";
-import type { Task } from "../src/index.ts";
+import { advance, type Task } from "../src/index.ts";
 import { NOW, spec } from "./fixtures.ts";
 
 /** `sessionChange` with `awaitsExit`: an `ended` that waits for the machine's exit status settles nothing itself. */
@@ -113,5 +113,47 @@ describe("waitsForExit", () => {
     expect(waitsForExit(task({ state: "queued", assignment: undefined }), "ended", FROM_A, undefined, true)).toBe(
       false,
     );
+  });
+});
+
+describe("sessionChange remote session", () => {
+  const remote = "session_01TuECqfR7Twko9QJm98sWAw";
+  const FROM_REMOTE = { ...FROM_A, remoteSession: remote } as const;
+
+  test("a new id is written, with or without a state change; the same id again is no write", () => {
+    expect(sessionChange(task(), "busy", FROM_REMOTE)).toMatchObject({ state: "running", remoteSession: remote });
+    expect(sessionChange(task(), "needs-input", FROM_REMOTE)).toMatchObject({
+      state: "needs-input",
+      remoteSession: remote,
+    });
+    expect(sessionChange(task({ remoteSession: remote }), "busy", FROM_REMOTE)).toBeNull();
+    expect(sessionChange(task({ remoteSession: "session_old" }), "busy", FROM_REMOTE)?.remoteSession).toBe(remote);
+  });
+
+  test("an event without one keeps the id the record holds", () => {
+    expect(sessionChange(task({ remoteSession: remote }), "needs-input", FROM_A)?.remoteSession).toBe(remote);
+  });
+
+  test("it resolves a reservation with the id, and an end waiting on the exit still writes it", () => {
+    const reserved = task({
+      state: "reserved",
+      assignment: undefined,
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 1 },
+    });
+    expect(sessionChange(reserved, "busy", FROM_REMOTE)?.remoteSession).toBe(remote);
+    expect(sessionChange(task(), "ended", FROM_REMOTE, undefined, true)).toMatchObject({
+      state: "running",
+      remoteSession: remote,
+    });
+  });
+
+  test("another machine's id is never written", () => {
+    expect(sessionChange(task(), "needs-input", { deviceId: "b", pane: "%1", remoteSession: remote })).toBeNull();
+  });
+
+  test("a task sent back to ready forgets it: the next session has its own", () => {
+    const lost = task({ state: "lost", remoteSession: remote, reservedAt: NOW });
+    expect(advance(lost, "ready").remoteSession).toBeUndefined();
+    expect(advance(task({ remoteSession: remote }), "done").remoteSession).toBe(remote);
   });
 });

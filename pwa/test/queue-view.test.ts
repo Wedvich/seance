@@ -221,6 +221,18 @@ describe("deriveQueue", () => {
     expect(prOf()).toBeNull();
   });
 
+  test("a reported remote session links the row to its claude.ai page", () => {
+    const sessionOf = (remoteSession?: string) =>
+      deriveQueue(
+        state(ok([task("a", { state: "needs-input", ...(remoteSession === undefined ? {} : { remoteSession }) })])),
+        NOW,
+      ).sections[0]?.rows[0]?.session;
+    expect(sessionOf("session_01TuECqfR7Twko9QJm98sWAw")).toBe(
+      "https://claude.ai/code/session_01TuECqfR7Twko9QJm98sWAw",
+    );
+    expect(sessionOf()).toBeNull();
+  });
+
   describe("the leader's forge reading of the PR", () => {
     const URL = "https://github.com/acme/app/pull/123";
     const chip = (pr: PrStatus | undefined, now = NOW, skew = 0) =>

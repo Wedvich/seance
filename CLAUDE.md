@@ -201,8 +201,11 @@ green:
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
   no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
   only from the machine it was placed or reserved on.
-  Giving it any other act, or taking a session or task id from the frame, is the same kind of
-  change too.
+  The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
+  display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
+  never used to bind, route or move anything.
+  Giving it any other act, or taking a session or task id from the frame to bind by, is the same
+  kind of change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
