@@ -14,6 +14,7 @@ import {
   taskFailureText,
   withReportInstruction,
   type Decision,
+  type ExclaveInfo,
   type Machine,
   type RepoEntry,
   type RequestOp,
@@ -37,6 +38,7 @@ import {
   mcpScriptCheck,
   mcpScriptPath,
   resolveMachine,
+  resolvePin,
   type LocalMachine,
 } from "./mcp.ts";
 
@@ -1218,6 +1220,222 @@ describe("spawn_session on auto, authoring fields", () => {
     // Nothing the old leader cannot read: an ordinary dependency needs no capability.
     const old = leaderRelay();
     expect((await callAuto(old, { after: [{ task: PRED, when: "merged" }] })).error).toBe(false);
+  });
+});
+
+const HQ = "github.com/pengefix/pengefix-hq";
+const HQ2 = "github.com/pengefix2/pengefix-hq";
+
+function exclave(id: string): ExclaveInfo {
+  return { id, accountId: `org:${id}`, extraUsageEnabled: false, authOk: true, skills: [] };
+}
+
+/**
+ * Thad holds both orgs' clones, one per exclave; WSL and Mac each call theirs
+ * plain `pengefix-hq` — for different repos, so the bare name is ambiguous
+ * across the fleet though each machine's own list is not.
+ */
+function pinMachines(): Machine[] {
+  return [
+    machine({
+      deviceId: "device-thad",
+      name: "Thad",
+      exclaves: [exclave("default"), exclave("work")],
+      repos: [
+        { name: "pengefix/pengefix-hq", path: "/t/a", defaultBranch: "main", exclave: "default", origin: HQ },
+        { name: "pengefix2/pengefix-hq", path: "/t/b", defaultBranch: "main", exclave: "work", origin: HQ2 },
+      ],
+    }),
+    machine({
+      deviceId: "device-wsl",
+      name: "WSL",
+      exclaves: [exclave("default")],
+      repos: [{ name: "pengefix-hq", path: "/w", defaultBranch: "main", exclave: "default", origin: HQ }],
+    }),
+    machine({
+      deviceId: "device-mac",
+      name: "Mac",
+      exclaves: [exclave("default")],
+      repos: [{ name: "pengefix-hq", path: "/m", defaultBranch: "main", exclave: "default", origin: HQ2 }],
+    }),
+  ];
+}
+
+describe("resolvePin", () => {
+  test("a machine name resolves to its deviceId in any case, and a deviceId passes as itself", () => {
+    for (const ref of ["thad", "Thad", "device-thad"]) {
+      const resolved = resolvePin(pinMachines(), { machine: ref, exclave: "work" });
+      if ("error" in resolved) throw new Error(resolved.error);
+      expect(resolved.pin).toEqual({ deviceId: "device-thad", exclave: "work" });
+      // Only the pinned exclave's clones are left to read a repo name against.
+      expect(resolved.machines.map((m) => m.repos.map((r) => r.name))).toEqual([["pengefix2/pengefix-hq"]]);
+    }
+  });
+
+  test("an unknown machine lists the known ones; a name two machines share lists their deviceIds", () => {
+    expect(resolvePin(pinMachines(), { machine: "nope" })).toEqual({
+      error: 'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
+    });
+    const twins = [...pinMachines(), machine({ deviceId: "device-wsl2", name: "wsl", exclaves: [exclave("default")] })];
+    const resolved = resolvePin(twins, { machine: "WSL" });
+    if (!("error" in resolved)) throw new Error("expected an error");
+    expect(resolved.error).toContain('"WSL" names more than one machine');
+    expect(resolved.error).toContain("WSL (device-wsl), wsl (device-wsl2)");
+  });
+
+  test("an exclave the pinned machine does not report is refused with its exclaves; one reporting none takes any", () => {
+    expect(resolvePin(pinMachines(), { machine: "WSL", exclave: "work" })).toEqual({
+      error: 'pin.exclave "work" is not an exclave of WSL (device-wsl) — its exclaves: default',
+    });
+    const old = [machine({ deviceId: "device-old", name: "Old" })];
+    expect(resolvePin(old, { machine: "Old", exclave: "work" })).toMatchObject({
+      pin: { deviceId: "device-old", exclave: "work" },
+    });
+  });
+
+  test("an exclave alone must be on some machine that reports exclaves, and scopes every machine to it", () => {
+    const resolved = resolvePin(pinMachines(), { exclave: "work" });
+    if ("error" in resolved) throw new Error(resolved.error);
+    expect(resolved.pin).toEqual({ exclave: "work" });
+    expect(resolved.machines.flatMap((m) => m.repos.map((r) => r.name))).toEqual(["pengefix2/pengefix-hq"]);
+    expect(resolvePin(pinMachines(), { exclave: "home" })).toEqual({
+      error: 'pin.exclave "home" is on no machine — the fleet\'s exclaves: default, work',
+    });
+    // Nothing reports exclaves: nothing to judge the name by, as nothing can run auto either.
+    expect(resolvePin(autoMachines(), { exclave: "home" })).toMatchObject({ pin: { exclave: "home" } });
+  });
+});
+
+describe("spawn_session on auto, pinned", () => {
+  test("a machine name is stored as its deviceId, and a repo name is read as the pinned machine lists it", async () => {
+    // Fleet-wide, `pengefix-hq` names two repos; on WSL it names one.
+    const unpinned = await callAuto(leaderRelay([], pinMachines()), { repo: "pengefix-hq" });
+    expect(unpinned.error).toBe(true);
+    expect(unpinned.text).toContain('"pengefix-hq" names clones of more than one repo');
+
+    const fake = leaderRelay([], pinMachines());
+    const { error } = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "wsl" } });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toEqual({
+      repo: HQ,
+      mode: "worktree",
+      prompt: "fix it",
+      client: "mcp",
+      pin: { deviceId: "device-wsl" },
+    } satisfies TaskSpec);
+
+    const mac = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "device-mac" } });
+    expect(mac.error).toBe(false);
+    expect(fake.creates[1]?.spec).toMatchObject({ repo: HQ2, pin: { deviceId: "device-mac" } });
+  });
+
+  test("an exclave narrows the names further, and an origin works wherever its clone is", async () => {
+    const fake = leaderRelay([], pinMachines());
+    const work = await callAuto(fake, { repo: "pengefix2/pengefix-hq", pin: { machine: "Thad", exclave: "work" } });
+    expect(work.error).toBe(false);
+    expect(fake.creates[0]?.spec).toMatchObject({ repo: HQ2, pin: { deviceId: "device-thad", exclave: "work" } });
+
+    const elsewhere = await callAuto(fake, {
+      repo: "pengefix2/pengefix-hq",
+      pin: { machine: "Thad", exclave: "default" },
+    });
+    expect(elsewhere.error).toBe(true);
+    expect(elsewhere.text).toContain(
+      `no repo "pengefix2/pengefix-hq" for auto pinned to Thad/default — known origins: ${HQ}`,
+    );
+    // Another machine's clone name is not read on the pinned one.
+    const other = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "Thad" } });
+    expect(other.error).toBe(true);
+    expect(other.text).toContain('no repo "pengefix-hq" for auto pinned to Thad');
+
+    const origin = await callAuto(fake, { repo: `https://${HQ}.git`, pin: { exclave: "default" } });
+    expect(origin.error).toBe(false);
+    expect(fake.creates[1]?.spec).toMatchObject({ repo: HQ, pin: { exclave: "default" } });
+    expect(fake.creates).toHaveLength(2);
+  });
+
+  test("an unknown machine or exclave is refused with the choices, and nothing is stored", async () => {
+    const fake = leaderRelay([], pinMachines());
+    const cases: [Record<string, unknown>, string][] = [
+      [{ machine: "nope" }, 'pin.machine: no machine named "nope"'],
+      [{ machine: "WSL", exclave: "work" }, "its exclaves: default"],
+      [{ exclave: "home" }, "the fleet's exclaves: default, work"],
+    ];
+    for (const [pin, text] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const answer = await callAuto(fake, { repo: HQ, pin });
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain(text);
+    }
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("an empty pin, an empty machine and an exclave past its bound are refused before the relay is dialled", async () => {
+    const fake = leaderRelay([], pinMachines());
+    const cases: [Record<string, unknown>, string][] = [
+      [{}, "pin names neither a machine nor an exclave"],
+      [{ machine: "" }, "pin.machine is empty"],
+      [{ exclave: "" }, "pin.exclave is empty"],
+      [{ exclave: "x".repeat(65) }, "pin.exclave is 65 characters; at most 64"],
+    ];
+    for (const [pin, text] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const answer = await callAuto(fake, { repo: HQ, pin });
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain(`auto refused: ${text}`);
+    }
+    expect(fake.started).toBe(0);
+  });
+
+  test("a named machine refuses a pin: the session starts there now", async () => {
+    const local = fakeLocal();
+    const fake = leaderRelay();
+    const { text, error } = await callTool(
+      fake,
+      "spawn_session",
+      { machine: "device-1", repo: "seance", pin: { machine: "device-1" } },
+      local,
+    );
+    expect(error).toBe(true);
+    expect(text).toContain('after, until, linear and pin apply to machine "auto" only');
+    expect(local.requests).toEqual([]);
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("queue_batch pins each member on its own, and one bad pin refuses the batch before the first create", async () => {
+    const fake = leaderRelay([], pinMachines());
+    const ok = await callTool(fake, "queue_batch", {
+      strategy: "auto",
+      tasks: [
+        { repo: "pengefix-hq", prompt: "a", pin: { machine: "WSL" } },
+        { repo: "pengefix2/pengefix-hq", prompt: "b", pin: { exclave: "work" } },
+        { repo: HQ, prompt: "c" },
+      ],
+    });
+    expect(ok.error).toBe(false);
+    expect(fake.creates.map((t) => [t.spec.repo, t.spec.pin])).toEqual([
+      [HQ, { deviceId: "device-wsl" }],
+      [HQ2, { exclave: "work" }],
+      [HQ, undefined],
+    ]);
+
+    for (const [pin, text] of [
+      [{ machine: "nope" }, 'task 2: pin.machine: no machine named "nope"'],
+      [{}, "task 2: pin names neither a machine nor an exclave"],
+    ] as const) {
+      const refused = leaderRelay([], pinMachines());
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const answer = await callTool(refused, "queue_batch", {
+        strategy: "auto",
+        tasks: [
+          { repo: HQ, prompt: "a" },
+          { repo: HQ, prompt: "b", pin },
+        ],
+      });
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain(`queue_batch refused: ${text}`);
+      expect(refused.creates).toEqual([]);
+    }
   });
 });
 
