@@ -2877,9 +2877,10 @@ for the lot with its own `gh`.
   `prUrl` and no `pr`, it is read once, and the reading is only recorded: a merge on it settles
   nothing and releases nothing, because nothing is left to settle. Once it holds a reading it
   is never polled again. Finishing drops any reading the task held (`advance` in
-  `scheduler/src/task.ts`), except the merged one `prChange` settles on: a settle by branch
-  state, a report, a session end or by hand would otherwise leave an open, pending reading behind
-  for good, so the finished task is read once more. A PR still open after that read keeps it,
+  `scheduler/src/task.ts`) unless it is merged, which cannot go stale (nor does `prChange`'s own
+  reading on a merge settle): a settle by branch state, a report, a session end or by hand would
+  otherwise leave an open, pending (or reopenable closed) reading behind for good, so the
+  finished task is read once more. A PR still open after that read keeps it,
   greying past the stale threshold. A finished task's PR that the forge does not answer for is
   skipped for the rest of the term, rather than read every minute for a chip. Rejected: polling
   finished tasks until their PR is merged or closed, because an abandoned open PR would then be

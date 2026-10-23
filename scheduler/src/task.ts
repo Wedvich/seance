@@ -87,9 +87,10 @@ export function isUnconfirmed(task: Task): boolean {
  * an input error, so it throws rather than returning a code. Leaving
  * `reserved` drops the reservation; returning to `ready` drops the assignment;
  * leaving `lost` drops when its machine went absent; `reservedAt` survives only
- * from `reserved` into `lost`. Finishing drops the PR reading (`pr`): a settle
- * by any other path than the forge's own may leave an open reading behind, and
- * with none `wantsPrReading` reads the finished task once more.
+ * from `reserved` into `lost`. Finishing drops the PR reading (`pr`) unless it
+ * is merged: any other reading can go stale (open, or closed and reopened) and
+ * with none `wantsPrReading` reads the finished task once more, but a merge
+ * can't un-merge.
  */
 export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Task {
   if (!canTransition(task.state, to)) throw new Error(`task ${task.id}: ${task.state} → ${to} is not a transition`);
@@ -103,7 +104,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(to === "reserved" && reservation !== undefined ? { reservation } : {}),
     ...(keepsReservedAt && reservedAt !== undefined ? { reservedAt } : {}),
     ...(to !== "ready" && assignment !== undefined ? { assignment } : {}),
-    ...(TASK_PHASES[to] !== "finished" && pr !== undefined ? { pr } : {}),
+    ...(pr !== undefined && (TASK_PHASES[to] !== "finished" || pr.state === "merged") ? { pr } : {}),
     ...fields,
     state: to,
   };
