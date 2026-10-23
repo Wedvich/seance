@@ -2079,8 +2079,8 @@
   opacity: 0.5;
 }
 
-/* The PR chip is a link, so the accent rather than `auto`'s colour, and a rounded rectangle
-   rather than the badge's pill: at this size it reads as a control. Sized near the buttons
+/* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
+   size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
    the pill. Leads the actions row; the auto margin keeps the buttons right, and a finished
    task's row holds the chip alone. */
@@ -2092,10 +2092,10 @@
   align-self: center;
   margin-right: auto;
   padding: 7px 10px 8px;
-  border-color: var(--acc);
+  border-color: var(--line);
   border-radius: 8px;
   font-size: 14px;
-  color: var(--acc);
+  color: var(--fg2);
   text-decoration: none;
   font-variant-numeric: tabular-nums;
 }
@@ -2106,29 +2106,21 @@
   inset: -5px -4px;
 }
 
-/* The leader's forge reading (`Task.pr`) colours the chip: merged is the one filled state, since
-   it is the one that settles the task; open and draft are outlines, draft the quiet one. A
-   reading older than the stale threshold greys, as a leader that stopped reading must not look
-   like a PR that did not change; a merge is exempt (`prOf`). The CI icon says only pending,
-   passing or failing, and the `title` carries the words; a merged chip has none (`prOf`
-   gives it no checks), its CI no longer saying anything. */
-.queue-pr-open {
-  border-color: var(--ok);
+/* The leader's forge reading (`Task.pr`) colours the state icon only, in GitHub's vocabulary:
+   open green, merged the accent, closed red, draft quiet like no reading. A reading older than
+   the stale threshold drops its colour, as a leader that stopped reading must not look like a
+   PR that did not change; a merge is exempt (`prOf`). The CI icon says only pending, passing or
+   failing, and the `title` carries the words; a merged chip has none (`prOf` gives it no
+   checks), its CI no longer saying anything. */
+.queue-pr-open .queue-pr-icon {
   color: var(--ok);
 }
 
-.queue-pr-draft {
-  border-color: var(--fg2);
-  color: var(--fg2);
+.queue-pr-merged .queue-pr-icon {
+  color: var(--acc);
 }
 
-.queue-pr-merged {
-  background: var(--acc);
-  color: var(--acc-fg);
-}
-
-.queue-pr-closed {
-  border-color: var(--err);
+.queue-pr-closed .queue-pr-icon {
   color: var(--err);
 }
 
@@ -2149,13 +2141,9 @@
   color: var(--warn);
 }
 
-.queue-pr-stale {
-  border-color: var(--line);
-  background: none;
-  color: var(--fg2);
-}
-
+.queue-pr-stale .queue-pr-icon,
 .queue-pr-stale .queue-pr-ci {
+  color: inherit;
   opacity: 0.5;
 }
 
