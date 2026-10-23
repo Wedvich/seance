@@ -225,6 +225,15 @@ machine leads. List the machines that are usually awake; the role moves between
 them as they come and go. Putting a secret rolls a new relay version, so every
 daemon and app drops and reconnects once.
 
+Every machine on that list also needs [`gh`](https://cli.github.com) on the `PATH` that
+`seanced install` captured, and `gh auth login` run as the service's user (under
+`--system`, that user), so the leader can read each task's PR status from GitHub: the
+queue card's coloured chip, and a merged PR settling its task. On a Linux service with no
+keyring or D-Bus session, `gh` must hold its token in `hosts.yml`
+(`gh auth login --insecure-storage`), or the unit must carry `GH_TOKEN`; otherwise `gh`
+reads as not logged in. Without `gh`, PR status does not show, the leader logs one
+`pr-status:` warning, and nothing else breaks.
+
 ### 5. Set up the phone
 
 Open `https://seance-pwa.<subdomain>.workers.dev`, add it to your home screen,

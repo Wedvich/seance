@@ -178,7 +178,9 @@ green:
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
   lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an
   event — a session event or a branch state — moves only a task placed (or, for a session event,
-  reserved) on the machine that sealed it. Don't let changes drift from them.
+  reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
+  bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
+  carries one. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
