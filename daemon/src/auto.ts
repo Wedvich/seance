@@ -1,12 +1,18 @@
 import {
+  CAPABILITIES,
   failureReasonText,
+  httpsUrl,
+  isTaskId,
+  parseTaskSpec,
   queuedTask,
   RequestFailure,
   schedulerRefusal,
   storeErrorText,
   TASK_REQUEST_LIMITS,
+  TASK_SPEC_LIMITS,
   type Machine,
   type TaskRequest,
+  type TaskSpec,
 } from "@seance/shared";
 import { enqueueAudit, type AuditSink } from "./audit.ts";
 import type { SchedulerLeg } from "./fleet.ts";
@@ -87,6 +93,9 @@ function overBound(field: keyof typeof TASK_REQUEST_LIMITS, value: string | unde
   return `the ${field} is ${value.length} characters; auto takes at most ${limit}${fix}`;
 }
 
+/** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), never placement or lineage. */
+export type AutoSpec = TaskRequest & Pick<TaskSpec, "deps" | "batch" | "until" | "linear">;
+
 export function taskRequestError(request: TaskRequest): string | null {
   return (
     overBound("prompt", request.prompt) ??
@@ -95,6 +104,51 @@ export function taskRequestError(request: TaskRequest): string | null {
     overBound("effort", request.effort) ??
     overBound("repo", request.repo)
   );
+}
+
+/**
+ * `createTask` refuses a record `parseTaskSpec` would null as a bare
+ * `invalid_request`, which tells an agent nothing: every bound it can cross is
+ * named here first, and the parser itself is the backstop for the rest.
+ */
+export function specError(spec: AutoSpec): string | null {
+  const request = taskRequestError(spec);
+  if (request !== null) return request;
+  const { deps, linear } = spec;
+  if (deps !== undefined) {
+    if (deps.length > TASK_SPEC_LIMITS.deps) {
+      return `after lists ${deps.length} tasks; a task waits on at most ${TASK_SPEC_LIMITS.deps}`;
+    }
+    const stray = deps.find((dep) => !isTaskId(dep.task));
+    if (stray !== undefined) return `after: ${JSON.stringify(stray.task.slice(0, 64))} is not a task id from get_queue`;
+  }
+  if (linear !== undefined) {
+    if (linear.issue.trim() === "") return "linear.issue is empty";
+    if (linear.issue.length > TASK_SPEC_LIMITS.linearIssue) {
+      return `linear.issue is ${linear.issue.length} characters; at most ${TASK_SPEC_LIMITS.linearIssue}`;
+    }
+    if (linear.url !== undefined && httpsUrl(linear.url) === null) return "linear.url must be an https: URL";
+  }
+  return parseTaskSpec({ ...spec, client: "mcp" }) === null ? "invalid task spec" : null;
+}
+
+/** Whether the spec needs a leader that understands `until: "reported"` or `after: "done"` (`CAPABILITIES.reportedDone`). */
+export function usesReported(spec: Pick<AutoSpec, "until" | "deps">): boolean {
+  return spec.until === "reported" || spec.deps?.some((dep) => dep.after === "done") === true;
+}
+
+/**
+ * The rollout gate: the verified leader's own advertisement. An older leader strips `until` on its first
+ * write and holds a `done` edge unreadable, so neither is written to one — or to none, which cannot say.
+ */
+export function leaderTakesReported(lease: {
+  readonly machines: readonly Machine[];
+  readonly scheduler: SchedulerLeg;
+}): boolean {
+  const leader = lease.scheduler.availability();
+  if (leader.kind !== "ready") return false;
+  const machine = lease.machines.find((m) => m.deviceId === leader.deviceId);
+  return machine?.capabilities?.includes(CAPABILITIES.reportedDone) === true;
 }
 
 /** Tries at one create: each re-sends the same task, so a lost reply can never queue it twice. */
@@ -111,10 +165,11 @@ const ENQUEUE_RETRY_MS = 1_000;
  */
 export async function enqueueAuto(
   scheduler: SchedulerLeg,
-  request: TaskRequest,
+  request: AutoSpec,
   audit: AuditSink,
+  id?: string,
 ): Promise<AutoEnqueued> {
-  const task = queuedTask({ ...request, client: "mcp" }, Date.now());
+  const task = queuedTask({ ...request, client: "mcp" }, Date.now(), id);
   const audited = enqueueAudit(audit);
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;

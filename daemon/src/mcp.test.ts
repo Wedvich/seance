@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
+  CAPABILITIES,
   RequestFailure,
   SCHEDULER_ID,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   storeErrorText,
   taskFailureText,
+  withReportInstruction,
   type Decision,
   type Machine,
   type RepoEntry,
@@ -1060,6 +1062,303 @@ describe("spawn_session on auto", () => {
   });
 });
 
+/** The leader (device-1) advertises done reports, as a daemon of this build does. */
+function reportingMachines(): Machine[] {
+  const [leader, ...rest] = autoMachines();
+  return [machine({ ...leader, capabilities: [CAPABILITIES.reportedDone] }), ...rest];
+}
+
+async function callTool(
+  fake: ReturnType<typeof fakeRelay>,
+  name: string,
+  args: Record<string, unknown>,
+  local: LocalMachine | null = null,
+): Promise<{ text: string; error: boolean }> {
+  const lazy = new LazyRelay({ create: () => fake });
+  const client = await connectedClient(lazy, local);
+  try {
+    const result = await client.callTool({ name, arguments: args });
+    return { text: toolText(result), error: result.isError === true };
+  } finally {
+    lazy.stop();
+  }
+}
+
+const PRED = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
+
+describe("spawn_session on auto, authoring fields", () => {
+  test("after, until and linear reach the stored record; reported appends the instruction to the prompt", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { error } = await callAuto(fake, {
+      after: [{ task: PRED }, { task: PRED, when: "done" }],
+      until: "reported",
+      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+    });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toEqual({
+      repo: ORIGIN,
+      mode: "worktree",
+      prompt: withReportInstruction("fix it"),
+      client: "mcp",
+      deps: [
+        { task: PRED, after: "opened" },
+        { task: PRED, after: "done" },
+      ],
+      until: "reported",
+      linear: { issue: "ENG-123", url: "https://linear.app/pengefix/issue/ENG-123" },
+    } satisfies TaskSpec);
+  });
+
+  test("the default until is not written, and an empty linear url is left off", async () => {
+    const fake = leaderRelay();
+    const { error } = await callAuto(fake, { until: "merged", linear: { issue: "ENG-1", url: "" } });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toEqual({
+      repo: ORIGIN,
+      mode: "worktree",
+      prompt: "fix it",
+      client: "mcp",
+      linear: { issue: "ENG-1" },
+    } satisfies TaskSpec);
+  });
+
+  test("a named machine refuses them: it starts the session now, with nothing to wait for", async () => {
+    const local = fakeLocal();
+    const fake = leaderRelay();
+    for (const extra of [{ after: [{ task: PRED }] }, { until: "reported" }, { linear: { issue: "ENG-1" } }]) {
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const { text, error } = await callTool(
+        fake,
+        "spawn_session",
+        { machine: "device-1", repo: "seance", ...extra },
+        local,
+      );
+      expect(error).toBe(true);
+      expect(text).toContain('apply to machine "auto" only');
+    }
+    expect(local.requests).toEqual([]);
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("a named machine takes the defaults, which change nothing: until merged and an empty after", async () => {
+    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }));
+    const { text, error } = await callTool(
+      leaderRelay(),
+      "spawn_session",
+      { machine: "device-1", repo: "seance", until: "merged", after: [] },
+      local,
+    );
+    expect(text).not.toContain('apply to machine "auto" only');
+    expect(error).toBe(false);
+    expect(local.requests).toHaveLength(1);
+  });
+
+  test("a Linear issue is trimmed as the PWA trims it, and a blank one is refused", async () => {
+    const fake = leaderRelay();
+    expect((await callAuto(fake, { linear: { issue: "  ENG-7 " } })).error).toBe(false);
+    expect(fake.creates[0]?.spec.linear).toEqual({ issue: "ENG-7" });
+    const blank = await callAuto(fake, { linear: { issue: "   " } });
+    expect(blank.error).toBe(true);
+    expect(blank.text).toContain("linear.issue is empty");
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("a bound the scheduler would null the task on is refused here, by name, before the relay is dialled", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const cases: [Record<string, unknown>, string][] = [
+      [{ after: [{ task: "not an id" }] }, 'after: "not an id" is not a task id from get_queue'],
+      [{ after: Array.from({ length: 17 }, () => ({ task: PRED })) }, "expected array to have <=16 items"],
+      [{ linear: { issue: "" } }, "linear.issue is empty"],
+      [{ linear: { issue: "E".repeat(65) } }, "linear.issue is 65 characters; at most 64"],
+      [{ linear: { issue: "ENG-1", url: "http://linear.app/x" } }, "linear.url must be an https: URL"],
+      [{ until: "reported", prompt: "" }, 'until "reported" needs a prompt'],
+    ];
+    for (const [extra, text] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const answer = await callAuto(fake, extra);
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain(text);
+    }
+    expect(fake.started).toBe(0);
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("the appended instruction counts toward the prompt bound, and the refusal says so", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const prompt = "x".repeat(TASK_REQUEST_LIMITS.prompt - 5);
+    const { text, error } = await callAuto(fake, { prompt, until: "reported" });
+    expect(error).toBe(true);
+    expect(text).toContain("auto takes at most");
+    expect(text).toContain("the instruction to report is appended to the prompt and counts");
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("until reported and after done are written only to a leader that advertises them", async () => {
+    for (const extra of [{ until: "reported" }, { after: [{ task: PRED, when: "done" }] }]) {
+      const old = leaderRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const refused = await callAuto(old, extra);
+      expect(refused.error).toBe(true);
+      expect(refused.text).toContain("leader does not take until: reported / after: done yet");
+      expect(old.creates).toEqual([]);
+
+      const none = leaderRelay([], reportingMachines());
+      none.setState({ scheduler: { kind: "none" } });
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const unknown = await callAuto(none, extra);
+      expect(unknown.error).toBe(true);
+      expect(unknown.text).toContain("no verified scheduler is leading");
+      expect(none.creates).toEqual([]);
+
+      const current = leaderRelay([], reportingMachines());
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      expect((await callAuto(current, extra)).error).toBe(false);
+      expect(current.creates).toHaveLength(1);
+    }
+    // Nothing the old leader cannot read: an ordinary dependency needs no capability.
+    const old = leaderRelay();
+    expect((await callAuto(old, { after: [{ task: PRED, when: "merged" }] })).error).toBe(false);
+  });
+});
+
+describe("queue_batch", () => {
+  const member = (extra: Record<string, unknown> = {}) => ({ repo: "seance", prompt: "do it", ...extra });
+
+  test("queues the members in order under one batch, resolving refs to the ids it minted", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { text, error } = await callTool(fake, "queue_batch", {
+      strategy: "sequential",
+      tasks: [
+        member({ ref: "schema", title: "Schema", linear: { issue: "ENG-1" } }),
+        member({ ref: "api", after: [{ ref: "schema" }] }),
+        member({ after: [{ ref: "api", when: "merged" }, { task: PRED }] }),
+      ],
+    });
+    expect(error).toBe(false);
+    const [first, second, third] = fake.creates;
+    expect(fake.creates).toHaveLength(3);
+    const batchId = first?.spec.batch?.id ?? "";
+    expect(batchId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(fake.creates.map((t) => t.spec.batch)).toEqual([
+      { id: batchId, index: 1, strategy: { mode: "sequential" } },
+      { id: batchId, index: 2, strategy: { mode: "sequential" } },
+      { id: batchId, index: 3, strategy: { mode: "sequential" } },
+    ]);
+    expect(first?.spec.deps).toBeUndefined();
+    expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
+    expect(second?.spec.deps).toEqual([{ task: first?.id ?? "", after: "opened" }]);
+    expect(third?.spec.deps).toEqual([
+      { task: second?.id ?? "", after: "merged" },
+      { task: PRED, after: "opened" },
+    ]);
+    expect(text).toContain(`batch ${batchId}: 3 tasks queued (sequential)`);
+    expect(text).toContain(`task 1 (schema): ${first?.id}`);
+    expect(text).toContain(`task 3: ${third?.id}`);
+    expect(fake.requests).toEqual([]);
+  });
+
+  test("a parallel batch carries its max, and max is refused on the others", async () => {
+    const fake = leaderRelay();
+    const ok = await callTool(fake, "queue_batch", { strategy: "parallel", max: 2, tasks: [member(), member()] });
+    expect(ok.error).toBe(false);
+    expect(fake.creates.map((t) => t.spec.batch?.strategy)).toEqual([
+      { mode: "parallel", max: 2 },
+      { mode: "parallel", max: 2 },
+    ]);
+    expect(ok.text).toContain("parallel, at most 2 at once");
+
+    const bare = leaderRelay();
+    const noMax = await callTool(bare, "queue_batch", { strategy: "parallel", tasks: [member()] });
+    expect(noMax.error).toBe(true);
+    expect(noMax.text).toContain('strategy "parallel" needs max');
+    const stray = await callTool(bare, "queue_batch", { strategy: "auto", max: 2, tasks: [member()] });
+    expect(stray.error).toBe(true);
+    expect(stray.text).toContain('max applies to strategy "parallel" only');
+    expect(bare.started).toBe(0);
+  });
+
+  test("a bad ref, a task waiting on itself, or an ambiguous edge refuses the whole batch before anything is stored", async () => {
+    const cases: [Record<string, unknown>[], string][] = [
+      [
+        [member({ after: [{ ref: "later" }] }), member({ ref: "later" })],
+        'task 1: after ref "later" is not the ref of an earlier task',
+      ],
+      [[member({ ref: "me", after: [{ ref: "me" }] })], 'task 1: after ref "me" is not the ref of an earlier task'],
+      [[member({ ref: "a" }), member({ ref: "a" })], 'task 2: ref "a" is empty or already used'],
+      [[member({ ref: "" })], 'task 1: ref "" is empty or already used'],
+      [[member({ after: [{}] })], "task 1: each after entry names exactly one of task and ref"],
+      [
+        [member({ ref: "a" }), member({ after: [{ ref: "a", task: PRED }] })],
+        "task 2: each after entry names exactly one",
+      ],
+      [[member(), member({ until: "reported", prompt: "" })], 'task 2: until "reported" needs a prompt'],
+      [[member(), member({ linear: { issue: "ENG-1", url: "http://x" } })], "task 2: linear.url must be an https: URL"],
+    ];
+    for (const [tasks, text] of cases) {
+      const fake = leaderRelay([], reportingMachines());
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const answer = await callTool(fake, "queue_batch", { strategy: "auto", tasks });
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain(text);
+      expect(fake.creates).toEqual([]);
+      expect(fake.started).toBe(0);
+    }
+  });
+
+  test("an unknown repo on any member refuses the batch before the first create", async () => {
+    const fake = leaderRelay();
+    const { text, error } = await callTool(fake, "queue_batch", {
+      strategy: "auto",
+      tasks: [member(), member({ repo: "nope" })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain('task 2: no repo "nope" for auto');
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("a create that fails stops the batch and names the member, with the ids that had already queued", async () => {
+    const fake = leaderRelay();
+    fake.onCreate = () =>
+      fake.creates.length === 2 ? { ok: false, code: "store_full" } : { ok: true, landedEarlier: false };
+    const { text, error } = await callTool(fake, "queue_batch", {
+      strategy: "sequential",
+      tasks: [member(), member(), member()],
+    });
+    expect(error).toBe(true);
+    expect(fake.creates).toHaveLength(2);
+    expect(text).toContain("queue_batch failed at task 2 of 3");
+    expect(text).toContain(`already queued: ${fake.creates[0]?.id}`);
+    expect(text).toContain(storeErrorText("store_full"));
+  });
+
+  test("reported tasks need a leader that advertises them, as spawn_session does", async () => {
+    const old = leaderRelay();
+    const { text, error } = await callTool(old, "queue_batch", {
+      strategy: "auto",
+      tasks: [member(), member({ until: "reported" })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("leader does not take until: reported / after: done yet");
+    expect(old.creates).toEqual([]);
+
+    const current = leaderRelay([], reportingMachines());
+    const ok = await callTool(current, "queue_batch", {
+      strategy: "auto",
+      tasks: [member(), member({ until: "reported", after: [{ task: PRED, when: "done" }] })],
+    });
+    expect(ok.error).toBe(false);
+    expect(current.creates[1]?.spec.prompt).toBe(withReportInstruction("do it"));
+  });
+
+  test("with no leader the batch still queues and says it waits", async () => {
+    const fake = leaderRelay();
+    fake.setState({ scheduler: { kind: "none" } });
+    const { text, error } = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member()] });
+    expect(error).toBe(false);
+    expect(text).toContain("No scheduler is leading right now");
+  });
+});
+
 describe("get_queue", () => {
   test("lists the leader's tasks with state, placement and the decision's one line", async () => {
     const fake = leaderRelay([
@@ -1159,6 +1458,44 @@ describe("get_queue", () => {
     expect(stuck).toMatchObject({ escalated: true, needsInputSince: new Date(4_500).toISOString() });
     expect(manual.doneBy).toBe("manual");
     expect(finished.doneBy).toBe("session");
+    lazy.stop();
+  });
+
+  test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
+    const batch = { id: "b-1", index: 2, strategy: { mode: "parallel", max: 3 } } as const;
+    const fake = leaderRelay([
+      {
+        tasks: [
+          task({
+            id: "t-1",
+            state: "blocked",
+            spec: {
+              repo: ORIGIN,
+              mode: "worktree",
+              until: "reported",
+              batch,
+              deps: [{ task: "t-0", after: "done" }],
+              linear: { issue: "ENG-9" },
+            },
+          }),
+          task({ id: "t-2", state: "running", merged: true }),
+          task({ id: "t-3", state: "done", doneBy: "reported" }),
+        ],
+        at: 6_000,
+      },
+    ]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0]).toMatchObject({
+      until: "reported",
+      batch,
+      after: [{ task: "t-0", when: "done" }],
+      linear: { issue: "ENG-9" },
+    });
+    expect(tasks[1].merged).toBe(true);
+    expect(tasks[2].doneBy).toBe("reported");
+    expect(tasks[2]).not.toHaveProperty("until");
     lazy.stop();
   });
 
