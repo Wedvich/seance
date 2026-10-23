@@ -24,6 +24,8 @@ export function QueueScreen(props: {
   onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
+  /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
+  onFollowUp: (taskId: string) => void;
   onPause: () => void;
   onResume: (account?: string) => void;
   onDiscard: () => void;
@@ -140,8 +142,10 @@ export function QueueScreen(props: {
                     </p>
                   </div>
                 </div>
+                {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
+                {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {(row.pr !== null || row.canMarkDone || row.canCancel) && (
+                {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp) && (
                   <div className="queue-actions">
                     {row.pr !== null && (
                       <a
@@ -153,6 +157,11 @@ export function QueueScreen(props: {
                       >
                         {row.pr.label}
                       </a>
+                    )}
+                    {row.canFollowUp && (
+                      <button type="button" className="quiet" onClick={() => props.onFollowUp(row.id)}>
+                        Follow up
+                      </button>
                     )}
                     {row.canMarkDone && (
                       <button

@@ -7,7 +7,7 @@ import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import { readRelayUrl } from "./relay/keys.ts";
 import { deriveMachines } from "./machines-view.ts";
-import { deriveQueue } from "./queue-view.ts";
+import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
 import { screenKey, TransitionRunner } from "./transition.ts";
@@ -65,6 +65,7 @@ export function App(props: { store: Store }): JSX.Element {
         now={now}
         rescan={state.rescan}
         preview={state.preview}
+        afterSheet={state.sheet === "after" ? deriveAfterSheet(state, now) : null}
         columns={wide}
       />
     );
@@ -79,6 +80,7 @@ export function App(props: { store: Store }): JSX.Element {
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
+      onFollowUp={(id) => store.followUp(id)}
       onPause={() => void store.pauseQueue()}
       onResume={(account) => void store.resumeQueue(account)}
       onDiscard={() => void store.discardUnreadable()}
@@ -240,6 +242,12 @@ function useSpawnActions(store: Store): SpawnActions {
       rescan: () => void store.rescan(),
       setModel: (model) => store.setModel(model),
       setEffort: (effort) => store.setEffort(effort),
+      addAfter: (taskId, after) => store.addAfter(taskId, after),
+      removeAfter: (taskId) => store.removeAfter(taskId),
+      setUntil: (until) => store.setUntil(until),
+      setLinearIssue: (issue) => store.setLinearIssue(issue),
+      startBatch: (strategy) => store.startBatch(strategy),
+      endBatch: () => store.endBatch(),
     }),
     [store],
   );

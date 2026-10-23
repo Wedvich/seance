@@ -1,7 +1,21 @@
-import { QUEUE_MAX_TASKS, TASK_PHASES, type PauseHold, type Task } from "@seance/shared";
+import {
+  QUEUE_MAX_TASKS,
+  TASK_PHASES,
+  TASK_SPEC_LIMITS,
+  type DepAfter,
+  type PauseHold,
+  type Task,
+} from "@seance/shared";
 import { taskHeadline } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
-import { failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
+import {
+  deriveReportedAvailability,
+  describeStrategy,
+  failedBody,
+  formatSeen,
+  originLabel,
+  type AppState,
+} from "./view.ts";
 
 /**
  * The Queue screen as data: sections, rows and the hold lines, derived in one
@@ -24,6 +38,12 @@ export interface QueueRow {
   readonly cancelEndsSession: boolean;
   /** Mark done may despawn a session (live, or `lost` with its machine back; the PWA can't tell which): asks twice. */
   readonly markDoneEndsSession: boolean;
+  /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
+  readonly canFollowUp: boolean;
+  /** What it waits on, one line; null when it waits on nothing. */
+  readonly deps: string | null;
+  /** Its place in a batch, one line; null outside one. */
+  readonly batch: string | null;
   readonly busy: boolean;
   /** The PR its session reported, for the card's chip: `#123` where the URL names a number. */
   readonly pr: { readonly url: string; readonly label: string } | null;
@@ -135,7 +155,22 @@ function prOf(task: Task): QueueRow["pr"] {
   return { url: task.prUrl, label: number === undefined ? "PR" : `#${number}` };
 }
 
-function rowOf(task: Task, state: AppState, now: number): QueueRow {
+function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+  const deps = task.spec.deps ?? [];
+  const [first] = deps;
+  if (first === undefined) return null;
+  // One word for the edges only when they agree: a mix would be wrong about some of them.
+  const when = deps.every((dep) => dep.after === first.after) ? ` (${first.after})` : "";
+  if (deps.length === 1) return `After ${titles.get(first.task) ?? "1 task"}${when}`;
+  return `After ${deps.length} tasks${when}`;
+}
+
+function batchLine(task: Task): string | null {
+  const { batch } = task.spec;
+  return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
+}
+
+function rowOf(task: Task, state: AppState, now: number, titles: ReadonlyMap<string, string>): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
   return {
@@ -149,6 +184,9 @@ function rowOf(task: Task, state: AppState, now: number): QueueRow {
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
+    canFollowUp: phase !== "finished" || task.state === "done",
+    deps: depsLine(task, titles),
+    batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task),
   };
@@ -176,6 +214,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const view = state.queueView;
   const ok = view?.kind === "ok" ? view : null;
   const tasks = ok?.tasks ?? [];
+  const titles = new Map(tasks.map((task) => [task.id, titleOf(task)]));
 
   const sections = SECTIONS.map(({ title, pick }) => {
     const members = tasks
@@ -183,7 +222,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now)) };
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, titles)) };
   }).filter((section) => section.rows.length > 0);
 
   const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, now));
@@ -209,5 +248,65 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     sections,
     empty,
     attention: tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+  };
+}
+
+export interface AfterOption {
+  readonly id: string;
+  readonly title: string;
+  readonly headline: string;
+  /** The edge the form holds on it; null when it waits on nothing here. */
+  readonly when: DepAfter | null;
+}
+
+export interface AfterSheetView {
+  readonly options: readonly AfterOption[];
+  /** The form already holds as many edges as a task may: only removing is offered. */
+  readonly full: boolean;
+  /** `Done` is offered: the verified leader takes it. */
+  readonly doneAvailable: boolean;
+  /** Shown beneath the list: why it is short, or empty. */
+  readonly note: string | null;
+}
+
+/**
+ * The tasks a new one may wait on: any the leader still lists that has not failed
+ * or been cancelled, since an edge on those would fail the task at once. An edge
+ * the form holds on a task the list no longer shows stays, by id, so it can be removed.
+ */
+export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
+  const view = state.queueView;
+  const tasks = view?.kind === "ok" ? view.tasks : [];
+  const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
+  const listed = tasks
+    .filter((task) => task.state !== "failed" && task.state !== "cancelled")
+    .map((task) => ({
+      id: task.id,
+      title: titleOf(task),
+      headline: taskHeadline(task, state.relay.machines, now),
+      when: held.get(task.id) ?? null,
+    }));
+  const shown = new Set(listed.map((option) => option.id));
+  const strays = state.form.after
+    .filter((dep) => !shown.has(dep.task))
+    .map((dep) => ({
+      id: dep.task,
+      title: `Task ${dep.task.slice(0, 8)}`,
+      headline: "No longer in the queue",
+      when: dep.after,
+    }));
+  // Chosen first: what the form holds is what a person came to check.
+  const options = [...strays, ...listed].toSorted((a, b) => Number(b.when !== null) - Number(a.when !== null));
+  let note: string | null = null;
+  if (listed.length === 0) {
+    if (view === null || view.kind === "loading") note = "Loading the queue…";
+    else if (view.kind === "failed") note = view.message;
+    else note = "No task in the queue to wait on.";
+  }
+  return {
+    options,
+    full: state.form.after.length >= TASK_SPEC_LIMITS.deps,
+    doneAvailable: deriveReportedAvailability(state.relay),
+    note,
   };
 }

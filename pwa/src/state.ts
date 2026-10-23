@@ -2,6 +2,7 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   METRIC_NAMES,
+  type BatchStrategy,
   type MetricName,
   type MetricsSeries,
   type MetricsStep,
@@ -10,6 +11,8 @@ import {
   type SessionEntry,
   type SpawnErrorCode,
   type Task,
+  type TaskDep,
+  type TaskUntil,
   type UnreadableTaskRef,
 } from "@seance/shared";
 
@@ -36,7 +39,7 @@ export const MODEL_LABELS: Record<Model, string> = {
   haiku: "Haiku",
 };
 
-export type SheetKind = "machine" | "repo" | "model" | "effort";
+export type SheetKind = "machine" | "repo" | "model" | "effort" | "after" | "batch";
 
 /** The repo sheet's rescan row: inline scanning/failure state instead of a fire-and-forget close. */
 export type RescanState = "idle" | "scanning" | "failed";
@@ -128,6 +131,25 @@ export interface PersistedForm {
   readonly worktree: boolean;
   readonly model: Model;
   readonly effort: Effort;
+  /** Per task, `auto` only: the tasks this one waits on. Cleared once a task is queued. */
+  readonly after: readonly TaskDep[];
+  /** Per task: what settles it. `reported` waits for its session's own done report. */
+  readonly until: TaskUntil;
+  /** Per task: the Linear issue it is for; empty is none. */
+  readonly linearIssue: string;
+  /** Spans enqueues: the batch the next one joins, until it is ended. */
+  readonly batch: OpenBatch | null;
+}
+
+/**
+ * A batch has no record of its own: each member carries the id and strategy, so
+ * the form keeps them and numbers the next member. `next` moves only when a
+ * member is stored, so a retry re-sends the same index.
+ */
+export interface OpenBatch {
+  readonly id: string;
+  readonly strategy: BatchStrategy;
+  readonly next: number;
 }
 
 /** Enough to reconcile a spawn whose reply never arrived, across an app kill. */
@@ -229,6 +251,10 @@ export const DEFAULT_FORM: PersistedForm = {
   worktree: true,
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
+  after: [],
+  until: "merged",
+  linearIssue: "",
+  batch: null,
 };
 
 export function isModel(value: unknown): value is Model {

@@ -1,4 +1,5 @@
-import { DEFAULT_FORM, isEffort, isModel, type PendingSpawn, type PersistedForm } from "./state.ts";
+import { DEP_AFTER, isTaskId, parseBatchStrategy, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PendingSpawn, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -43,6 +44,31 @@ function asRepoMap(value: unknown): Readonly<Record<string, string>> {
   return Object.fromEntries(Object.entries(value).filter(([, repo]) => typeof repo === "string"));
 }
 
+function asDeps(value: unknown): readonly TaskDep[] {
+  if (!Array.isArray(value)) return [];
+  const deps: TaskDep[] = [];
+  for (const entry of value) {
+    if (deps.length === TASK_SPEC_LIMITS.deps) break;
+    if (typeof entry !== "object" || entry === null) continue;
+    const task: unknown = Reflect.get(entry, "task");
+    const after = DEP_AFTER.find((when) => when === Reflect.get(entry, "after"));
+    if (isTaskId(task) && after !== undefined) deps.push({ task, after });
+  }
+  return deps;
+}
+
+function asBatch(value: unknown): OpenBatch | null {
+  if (typeof value !== "object" || value === null) return null;
+  const id: unknown = Reflect.get(value, "id");
+  const next: unknown = Reflect.get(value, "next");
+  const strategy = parseBatchStrategy(Reflect.get(value, "strategy"));
+  if (!isTaskId(id) || strategy === null) return null;
+  // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
+  if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
+    return null;
+  return { id, strategy, next };
+}
+
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
@@ -57,6 +83,10 @@ export function readForm(): PersistedForm {
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
+    after: asDeps(record["after"]),
+    until: TASK_UNTIL.find((until) => until === record["until"]) ?? DEFAULT_FORM.until,
+    linearIssue: (asString(record["linearIssue"]) ?? "").slice(0, TASK_SPEC_LIMITS.linearIssue),
+    batch: asBatch(record["batch"]),
   };
 }
 
