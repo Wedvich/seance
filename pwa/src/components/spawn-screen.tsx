@@ -762,27 +762,27 @@ export function SpawnScreen(props: {
           <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
         )}
 
-        <button
-          type="button"
-          className="worktree card"
-          onClick={actions.toggleWorktree}
-          role="switch"
-          aria-checked={form.worktree}
-        >
-          <span className="worktree-text">
-            <span className="worktree-title">Fresh worktree</span>
-            <span className="worktree-hint">{view.worktreeHint}</span>
-          </span>
-          <span className={form.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
-            <span className="toggle-knob" />
-          </span>
-        </button>
+        <div className="switches card">
+          <button
+            type="button"
+            className="worktree"
+            onClick={actions.toggleWorktree}
+            role="switch"
+            aria-checked={form.worktree}
+          >
+            <span className="worktree-text">
+              <span className="worktree-title">Fresh worktree</span>
+              <span className="worktree-hint">{view.worktreeHint}</span>
+            </span>
+            <span className={form.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+              <span className="toggle-knob" />
+            </span>
+          </button>
 
-        {view.auto !== null && (
-          <>
+          {view.auto !== null && (
             <button
               type="button"
-              className="worktree card"
+              className="worktree"
               onClick={() => actions.setUntil(form.until === "reported" ? "merged" : "reported")}
               role="switch"
               aria-checked={form.until === "reported"}
@@ -802,7 +802,11 @@ export function SpawnScreen(props: {
                 <span className="toggle-knob" />
               </span>
             </button>
+          )}
+        </div>
 
+        {view.auto !== null && (
+          <>
             <label className="field linear card" htmlFor="linear-issue">
               <span className="label">LINEAR ISSUE</span>
               <input
