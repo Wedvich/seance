@@ -1,6 +1,7 @@
 import {
   httpsUrl,
   isRecord,
+  isRemoteSessionId,
   isSessionState,
   isTaskId,
   quote,
@@ -52,6 +53,8 @@ export interface SessionEventFrame {
   /** Absent only on an older mod's rate-limit report: activity, nothing else. */
   readonly state?: SessionState;
   readonly prUrl?: string;
+  /** `$CLAUDE_CODE_BRIDGE_SESSION_ID` as the session saw it — kept only as `isRemoteSessionId` passes it. */
+  readonly remoteSession?: string;
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
 }
@@ -72,9 +75,10 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, rateLimits, pane } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane } = raw;
   if (state !== undefined && !isSessionState(state)) return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
+  if (remoteSession !== undefined && typeof remoteSession !== "string") return null;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (state === undefined && rateLimits === undefined) return null;
   return {
@@ -82,6 +86,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
     kind: SESSION_EVENT_KIND,
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
+    ...(remoteSession === undefined ? {} : { remoteSession }),
     ...(pane === undefined ? {} : { pane }),
   };
 }
@@ -400,7 +405,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     if (event.state === "ended") outboxes.delete(event.session);
   };
 
-  // The newest state wins a window; a PR URL seen earlier in it is carried, not lost.
+  // The newest state wins a window; a PR URL or remote session seen earlier in it is carried, not lost.
   const enqueue = (event: SessionEvent): void => {
     for (const [id, box] of outboxes) {
       if (box.timer === null && now() - box.lastSentAt > 10 * windowMs) outboxes.delete(id);
@@ -408,7 +413,12 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     const box = outboxes.get(event.session) ?? { lastSentAt: -Infinity, pending: null, timer: null };
     outboxes.set(event.session, box);
     const prUrl = event.prUrl ?? box.pending?.prUrl;
-    const merged: SessionEvent = { ...event, ...(prUrl === undefined ? {} : { prUrl }) };
+    const remoteSession = event.remoteSession ?? box.pending?.remoteSession;
+    const merged: SessionEvent = {
+      ...event,
+      ...(prUrl === undefined ? {} : { prUrl }),
+      ...(remoteSession === undefined ? {} : { remoteSession }),
+    };
     // A report is acted on once and not repeated, so no later state in the window may replace it.
     if (event.state === "done") {
       deps.forward(merged);
@@ -472,6 +482,12 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
       }
       if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
+      const remoteSession = isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null;
+      if (frame.remoteSession !== undefined && remoteSession === null) {
+        log.warn(
+          `local socket: session-event pane=${quote(pane.id)} carried a malformed remote session id — dropped it`,
+        );
+      }
       // The ledger already held a report: it was forwarded then, and a repeat only re-sends what a lost frame is recovered by on the next sweep.
       if (reported !== "same") {
         enqueue({
@@ -481,6 +497,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           state: frame.state,
           at,
           ...(prUrl === null ? {} : { prUrl }),
+          ...(remoteSession === null ? {} : { remoteSession }),
         });
       }
       // Forwarded either way: only the proof that survives a restart is missing.

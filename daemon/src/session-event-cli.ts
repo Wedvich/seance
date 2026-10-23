@@ -20,6 +20,9 @@ const EVENT_TIMEOUT_MS = 2_000;
  *
  * `TMUX_PANE` rides along as `pane`; the daemon reads it only on a host where
  * the kernel cannot name a socket's peer (DESIGN.md, "Session events").
+ * `CLAUDE_CODE_BRIDGE_SESSION_ID` rides along as `remoteSession`: Claude Code
+ * sets it once the session's Remote Control bridge connects, and the hook's
+ * `$.process.run` inherits it, so the mod need not read it.
  */
 export async function cmdSessionEvent(): Promise<void> {
   try {
@@ -28,11 +31,13 @@ export async function cmdSessionEvent(): Promise<void> {
     // A done report is `report_task_done`'s alone: the mod's input is whatever its hook was fed, and a report settles a task.
     if (input["state"] === "done") return;
     const pane = process.env["TMUX_PANE"];
+    const remoteSession = process.env["CLAUDE_CODE_BRIDGE_SESSION_ID"];
     const frame = {
       ...input,
       v: SESSION_EVENT_VERSION,
       kind: SESSION_EVENT_KIND,
       ...(pane === undefined || pane === "" ? {} : { pane }),
+      ...(remoteSession === undefined || remoteSession === "" ? {} : { remoteSession }),
     };
     await exchange(frame, {
       path: socketPath(),

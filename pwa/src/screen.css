@@ -2079,6 +2079,20 @@
   opacity: 0.5;
 }
 
+/* A task title that opens its session on claude.ai: still the title, so the underline is faint
+   until hovered, and the ellipsis on `.fleet-name` still cuts it. */
+.queue-session {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+.queue-session:hover,
+.queue-session:focus-visible {
+  text-decoration-color: currentColor;
+}
+
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
    size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing

@@ -136,7 +136,21 @@ export function QueueScreen(props: {
                 <div className="fleet-card-head">
                   {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
                   <div className="fleet-card-title">
-                    <h3 className="fleet-name">{row.title}</h3>
+                    <h3 className="fleet-name">
+                      {row.session === null ? (
+                        row.title
+                      ) : (
+                        <a
+                          className="queue-session"
+                          href={row.session}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Open the session on claude.ai"
+                        >
+                          {row.title}
+                        </a>
+                      )}
+                    </h3>
                     <p className="fleet-meta">
                       {row.headline} · {row.age}
                     </p>

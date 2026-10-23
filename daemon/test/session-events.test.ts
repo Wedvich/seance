@@ -322,6 +322,29 @@ describe("PR URLs", () => {
   });
 });
 
+describe("remote sessions", () => {
+  test("the CLI carries its Remote Control id from the env, and only a well-formed one reaches a forwarded event", async () => {
+    const id = "session_01TuECqfR7Twko9QJm98sWAw";
+    const input = join(base, "remote.json");
+    await writeFile(input, JSON.stringify({ state: "needs-input" }));
+    const cli = `CLAUDE_CODE_BRIDGE_SESSION_ID=${id} ${shq(process.execPath)} ${shq(MAIN)} session-event < ${shq(input)}`;
+    const viaCli = await senderPane("remote-cli", base, cli, "remote-cli");
+    // What would bend the PWA's claude.ai link toward another path, if it got through.
+    const forged = await rawSender("remote-bad", { state: "busy", remoteSession: "session_01/../../settings" });
+    const viaRaw = await senderPane("remote-bad", base, forged.script, "remote-bad");
+    await Promise.all([viaCli.go(), viaRaw.go()]);
+    await pollUntil(
+      () => forwardedFor("remote-cli").length === 1 && forwardedFor("remote-bad").length === 1,
+      "both remote-session events",
+      10_000,
+    );
+    expect(forwardedFor("remote-cli")[0]).toMatchObject({ state: "needs-input", remoteSession: id });
+    const [bad] = forwardedFor("remote-bad");
+    expect(bad?.state).toBe("busy");
+    expect(bad !== undefined && "remoteSession" in bad).toBe(false);
+  });
+});
+
 describe("`seanced session-event` and a done report (#21)", () => {
   /** The CLI run outside any pane, as the mod's hook runs it; it exits once the daemon has answered or it gave up. */
   async function runCli(input: object): Promise<void> {

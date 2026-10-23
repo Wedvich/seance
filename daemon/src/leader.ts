@@ -1,6 +1,7 @@
 import {
   StoreRevoked,
   Scheduler,
+  sourceOf,
   type QueueStore,
   type SchedulerConfig,
   type SessionSource,
@@ -53,8 +54,16 @@ import type { VersionFloor } from "./version-floor.ts";
  * not the broker's: then either lifecycle could end the other's socket.
  */
 
-// For the daemon's tests, which the layering rule keeps from importing `scheduler/` themselves.
-export { MemoryQueueStore, StoreRevoked, type QueueStore, type StoreEntry, type Task } from "@seance/scheduler";
+// For the daemon's tests and its other modules (`sourceOf`: `run-capabilities.ts`), which the
+// layering rule keeps from importing `scheduler/` themselves.
+export {
+  MemoryQueueStore,
+  sourceOf,
+  StoreRevoked,
+  type QueueStore,
+  type StoreEntry,
+  type Task,
+} from "@seance/scheduler";
 
 /** The library's own cadence for ready tasks (docs/scheduler.md, Routing). */
 const TICK_INTERVAL_MS = 30_000;
@@ -381,7 +390,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       log.warn(`scheduler: dropped op=${quote(plain.op)} from=${quote(from)} — not a session event or branch state`);
       return;
     }
-    void onSession(event.taskId, event.state, { deviceId: from, pane: event.session }, event.prUrl);
+    void onSession(event.taskId, event.state, sourceOf(from, event), event.prUrl);
   };
   const relay = opts.createRelay(term, onEvent);
   const isLive = (): boolean => live;

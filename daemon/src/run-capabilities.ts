@@ -5,7 +5,7 @@ import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { ExclaveScan } from "./exclaves.ts";
-import type { Leader } from "./leader.ts";
+import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { pruneLogPath } from "./paths.ts";
@@ -103,12 +103,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
     // relay routes to whoever leads now.
     forward: (event) => {
       if (ctx.leader.term() !== null) {
-        void ctx.leader.onSession(
-          event.taskId,
-          event.state,
-          { deviceId: ctx.deviceId, pane: event.session },
-          event.prUrl,
-        );
+        void ctx.leader.onSession(event.taskId, event.state, sourceOf(ctx.deviceId, event), event.prUrl);
         return;
       }
       void ctx.client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));

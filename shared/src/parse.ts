@@ -569,20 +569,41 @@ export function httpsUrl(value: unknown): string | null {
 }
 
 /**
+ * Remote Control's session id as Claude Code mints it (`session_` then base62).
+ * The PWA splices it into a claude.ai path, so nothing but that alphabet passes:
+ * no `/`, `?`, `#` or `..` can reach the URL.
+ */
+const REMOTE_SESSION_ID = /^session_[0-9A-Za-z]{1,64}$/u;
+
+export function isRemoteSessionId(value: unknown): value is string {
+  return typeof value === "string" && REMOTE_SESSION_ID.test(value);
+}
+
+/**
  * The leader's check on a forwarded event. The sender is a PSK holder, so this
  * is skew and bug hygiene rather than a trust boundary — the daemon already
- * bound the event to its pane — but a `prUrl` is re-checked all the same: it is
- * the one field that reaches an `href`.
+ * bound the event to its pane — but a `prUrl` and a `remoteSession` are
+ * re-checked all the same: they are the fields that reach an `href`. A bad
+ * `remoteSession` is dropped rather than the event: a link is not worth losing
+ * the state it rode with.
  */
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
-  const { session, taskId, exclave, state, prUrl, at } = value;
+  const { session, taskId, exclave, state, prUrl, remoteSession, at } = value;
   if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isSessionState(state) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const url = prUrl === undefined ? null : httpsUrl(prUrl);
   if (prUrl !== undefined && url === null) return null;
-  return { session, taskId, exclave, state, at, ...(url === null ? {} : { prUrl: url }) };
+  return {
+    session,
+    taskId,
+    exclave,
+    state,
+    at,
+    ...(url === null ? {} : { prUrl: url }),
+    ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
+  };
 }
 
 function isBoundedString(value: unknown, max: number): value is string {
@@ -976,6 +997,7 @@ export function parseTask(value: unknown): Task | null {
   if (progress === null) return null;
   // Apart from `progress`: a display cache must not make a task unreadable when a later build adds a state.
   const pr = value["pr"] === undefined ? null : parsePrStatus(value["pr"]);
+  const { remoteSession } = value;
   return {
     id,
     state: known,
@@ -990,6 +1012,8 @@ export function parseTask(value: unknown): Task | null {
     ...(leftRunning === undefined ? {} : { leftRunning }),
     ...progress,
     ...(pr === null ? {} : { pr }),
+    // Dropped, never fatal, like `pr`: a link is display-only.
+    ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
   };
 }
 

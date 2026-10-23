@@ -22,7 +22,10 @@ Control's session ID is only observable from inside the spawned `claude` process
 (`$CLAUDE_CODE_BRIDGE_SESSION_ID`, set once its own async connection to the Anthropic
 API completes), and the relay's blind request/response design has no channel to
 deliver a value that becomes known only after the spawn reply already went out.
-Handoff to the right session in the list is manual.
+Handoff to the right session in the list is manual. That still holds for the spawn
+verdict. Scheduler tasks got the late channel on 2026-10-23: session events carry
+the id once the bridge connects, and the Queue screen links a task's title to
+`https://claude.ai/code/<id>` (Session events, "The remote session id").
 
 ## Topology: blind relay, daemons dial out
 
@@ -5028,7 +5031,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, pane?}`, routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?}`, routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -5190,6 +5193,25 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   `Scheduler.onSession` (done detection: a session that ends with a PR is `awaiting-merge`). The daemon also
   records the checked URL in the launch ledger (`EndedTasks.notePr`, for a task launched here
   only), where `progress` carries it to a leader that missed the event.
+- **The remote session id** (added 2026-10-23, threat-model change accepted by the owner).
+  Remote Control names each session `session_<base62>`, and claude.ai opens it at
+  `https://claude.ai/code/<id>`. Claude Code sets it as `$CLAUDE_CODE_BRIDGE_SESSION_ID` once
+  the bridge connects, and `$.process.run` inherits it, so `seanced session-event` adds it to
+  every frame as `remoteSession`, as it adds `pane`. The mod reads nothing new. An event raised
+  before the bridge connects has none, and a later one fills it in. It is the session's claim,
+  and a display-only one: it binds nothing and moves no state, and the task is still the pane's
+  `@seance-task`. It is kept only as `isRemoteSessionId` (`shared/src/parse.ts`) passes it, at
+  ingest, at the leader's `parseSessionEvent` and at `parseTask`: `session_` and base62 alone,
+  so no `/`, `?`, `#` or `..` reaches the PWA's URL, and the origin is the PWA's constant,
+  never the frame's. Anything else is dropped from the event, never echoed, and never costs the
+  event or the record, since a link is not worth the state it rides with. The leader writes it
+  through `sessionChange` (on `SessionSource`, so only where the event may move the task: its
+  own machine) onto `Task.remoteSession`, and only when it changed, since every event carries
+  it again. `advance` drops it on a return to `ready`, as it does the assignment. It skips the
+  launch ledger: a leader that missed it learns it from the session's next event. The residual
+  is the one above: a same-uid process on the task's machine can make the title link to
+  another claude.ai session the same account owns. Not covered: the spawn verdict (above,
+  "Out of scope for v1"), and sessions with no task, whose events go nowhere.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the

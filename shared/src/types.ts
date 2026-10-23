@@ -1442,7 +1442,8 @@ export type SessionState = (typeof SESSION_STATES)[number];
  * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
  * fire-and-forget. Every field is the daemon's own, never what the session
  * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
- * path, `prUrl` only once it parsed as `https:` (DESIGN.md, "Session events").
+ * path, `prUrl` only once it parsed as `https:`, `remoteSession` only once it
+ * matched `isRemoteSessionId` (DESIGN.md, "Session events").
  * Sent only for sessions that carry a task id.
  */
 export interface SessionEvent {
@@ -1453,6 +1454,12 @@ export interface SessionEvent {
   readonly state: SessionState;
   /** The newest pull request URL the session reported, `https:` only. */
   readonly prUrl?: string;
+  /**
+   * Remote Control's id for the session (`session_…`), as its CLI read
+   * `$CLAUDE_CODE_BRIDGE_SESSION_ID`: absent until the session's bridge has
+   * connected. A claim, display-only — it names the session's claude.ai page.
+   */
+  readonly remoteSession?: string;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -1918,6 +1925,12 @@ export interface Task {
   readonly leftRunning?: true;
   /** The newest `https:` PR URL its session reported — what `after: "opened"` and `awaiting-merge` read. */
   readonly prUrl?: string;
+  /**
+   * Remote Control's id for its session (`SessionEvent.remoteSession`), the
+   * newest its machine reported: what the PWA links to claude.ai by. Display-only,
+   * and dropped when the task goes back to `ready`, since a new session gets a new id.
+   */
+  readonly remoteSession?: string;
   /**
    * The leader's forge reading of `prUrl`. Dropped whenever `prUrl` changes
    * (`prBound`); display-only, except that `merged` settles the task
