@@ -1,4 +1,4 @@
-import type { BranchState, TaskProgress } from "@seance/shared";
+import { isPrReadable, PR_STATUS_REFRESH_MS, type BranchState, type PrStatus, type TaskProgress } from "@seance/shared";
 import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
 
 /**
@@ -132,4 +132,64 @@ export function branchChange(task: Task, state: BranchState, from: string): Task
     ...(state.merged ? { merged: true } : {}),
   });
   return next === task ? null : next;
+}
+
+/**
+ * The leader's forge reading of `prUrl` (`daemon/src/pr-status.ts`), applied to
+ * `task`: recorded as `Task.pr`, and a merge into the default branch settling it
+ * `done` by `merged` — a session still running included, so a placed task is
+ * marked `leftRunning` as `markDone` marks a `lost` one. A `stacked` merge (into
+ * another PR's branch) is recorded and settles nothing: the work is not on the
+ * default branch, and a dependent would be released on nothing. Under `until: "reported"` a merge is only recorded
+ * (`Task.merged`), as `progressed` does. `closed` is recorded and moves
+ * nothing. Null when it changes nothing: the task finished, waiting or
+ * reserved (no session to have opened a PR yet), `prUrl` no longer the one read,
+ * or an unchanged reading still inside `PR_STATUS_REFRESH_MS`.
+ *
+ * No `trusted`/`hasWork`/branch gate, unlike `progressed`: the forge answers
+ * for the exact PR the session reported, so a `here` task settles too, and
+ * /ship opens PRs from branches it creates by hand, so the recorded `branch`
+ * cannot be required to match the PR's head. The cost is that `absorb` keeps
+ * `prUrl` across a branch switch (DESIGN.md, "PR status").
+ *
+ * No ordering check on `status.at` against the stored one: within a term the
+ * poller never overlaps, `#update` is serialised per task, and an ended term's
+ * write is refused by the term fence, so it would only compare two leaders'
+ * clocks — which drift — and could block a merge for good. A reading behind the
+ * stored `at` just counts as not fresh.
+ */
+export function prChange(task: Task, prUrl: string, status: PrStatus): Task | null {
+  if (task.prUrl !== prUrl) return null;
+  if (!isPrReadable(task.state)) return null;
+  const landed = status.state === "merged" && status.stacked !== true;
+  const settles = landed && !settlesOnReport(task);
+  const marks = landed && settlesOnReport(task) && task.merged !== true;
+  const same =
+    task.pr?.state === status.state && task.pr?.checks === status.checks && task.pr?.stacked === status.stacked;
+  const fresh = task.pr !== undefined && status.at >= task.pr.at && status.at - task.pr.at < PR_STATUS_REFRESH_MS;
+  // A merged chip never greys (`PR_STATUS_STALE_MS`), so an unchanged one needs no refresh write.
+  if (same && (fresh || status.state === "merged") && !settles && !marks) return null;
+  const pr: PrStatus = {
+    state: status.state,
+    ...(status.checks === undefined ? {} : { checks: status.checks }),
+    ...(status.stacked === undefined ? {} : { stacked: status.stacked }),
+    at: status.at,
+  };
+  const recorded: Task = { ...task, pr };
+  if (!landed) return recorded;
+  if (settlesOnReport(task)) return mergedOpen(recorded);
+  // The session is left alive, as for a `branch-state` settle; a placed task says so, as a lost one does.
+  const placed = PLACED.includes(task.state);
+  return advance(recorded, "done", { doneBy: "merged", ...(placed ? { leftRunning: true } : {}) });
+}
+
+/**
+ * `after` without `pr` when it moved `prUrl` off `before`'s: a reading speaks
+ * only for the URL it was taken for, and `prUrl` changes in several paths
+ * (`absorb`, a resumed `progress` entry), so this holds at the write boundary.
+ */
+export function prBound(before: Task, after: Task): Task {
+  if (after.prUrl === before.prUrl || after.pr === undefined) return after;
+  const { pr: _pr, ...rest } = after;
+  return rest;
 }

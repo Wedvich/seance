@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
+  PR_STATUS_REFRESH_MS,
   type BranchState,
   type DespawnRequest,
   type DespawnResponse,
+  type PrStatus,
   type TaskProgress,
 } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import { branchChange, ended, progressed } from "../src/done.ts";
+import { branchChange, ended, prBound, progressed } from "../src/done.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
 /**
@@ -757,5 +759,195 @@ describe("until: reported", () => {
     const state: BranchState = { taskId: "t", repo: "r", branch: "b", pushed: true, merged: true, at: NOW };
     expect(branchChange(running("reported"), state, "a")).toMatchObject({ state: "running", merged: true });
     expect(branchChange(running("merged"), state, "a")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+});
+
+describe("PR status", () => {
+  const READ = NOW + 1_000;
+  const reading = (state: PrStatus["state"], at = READ, checks?: PrStatus["checks"]): PrStatus => ({
+    state,
+    ...(checks === undefined ? {} : { checks }),
+    at,
+  });
+  const version = async (store: MemoryQueueStore, id: string): Promise<number | undefined> =>
+    (await store.get(id))?.version;
+
+  test("(1) an open reading is recorded; the same one a minute later writes nothing", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("open", READ, "pending"));
+    expect(scheduler.task("t")).toMatchObject({ state: "running", pr: { state: "open", checks: "pending", at: READ } });
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", PR, reading("open", READ + 60_000, "pending"));
+    expect(await version(store, "t")).toBe(written);
+    expect(scheduler.task("t")?.pr?.at).toBe(READ);
+  });
+
+  test("(2) the same reading PR_STATUS_REFRESH_MS later refreshes `at`", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("open"));
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", PR, reading("open", READ + PR_STATUS_REFRESH_MS));
+    expect(await version(store, "t")).toBe((written ?? 0) + 1);
+    expect(scheduler.task("t")?.pr?.at).toBe(READ + PR_STATUS_REFRESH_MS);
+  });
+
+  test("(3) changed checks write, and a lost `checks` is dropped, not kept", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("open", READ, "pending"));
+    await scheduler.onPrStatus("t", PR, reading("open", READ + 1, "failing"));
+    expect(scheduler.task("t")?.pr).toEqual({ state: "open", checks: "failing", at: READ + 1 });
+    await scheduler.onPrStatus("t", PR, reading("open", READ + 2));
+    expect(scheduler.task("t")?.pr).toEqual({ state: "open", at: READ + 2 });
+  });
+
+  test("(4) a reading for another URL than the task's writes nothing, even a merge", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("bare", { assignment: { ...ON_A, pane: "%2" } });
+    await scheduler.load();
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", "https://github.com/acme/app/pull/8", reading("merged"));
+    await scheduler.onPrStatus("bare", PR, reading("merged"));
+    expect(await version(store, "t")).toBe(written);
+    expect(scheduler.task("t")?.state).toBe("running");
+    expect(scheduler.task("bare")).toMatchObject({ state: "running" });
+    expect(scheduler.task("bare")?.pr).toBeUndefined();
+  });
+
+  test("(5) a merge settles a running, a needs-input, an awaiting-merge and a `here` task with no push; a live session is marked leftRunning", async () => {
+    const { scheduler, put } = setup();
+    await put("run", { assignment: ON_A, prUrl: PR });
+    await put("input", { state: "needs-input", assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await put("wait", { state: "awaiting-merge", assignment: { ...ON_A, pane: "%3" }, prUrl: PR });
+    await put("here", { assignment: { ...ON_A, pane: "%4" }, prUrl: PR, spec: spec({ mode: "here" }) });
+    await scheduler.load();
+    for (const id of ["run", "input", "wait", "here"]) {
+      await scheduler.onPrStatus(id, PR, reading("merged", READ, "passing"));
+      expect(scheduler.task(id)).toMatchObject({ state: "done", doneBy: "merged", pr: { state: "merged" } });
+      expect(scheduler.task(id)?.pushed).toBeUndefined();
+      expect(scheduler.task(id)?.leftRunning).toBe(id === "wait" ? undefined : true);
+    }
+  });
+
+  test("(6) a merge on a lost task settles it, marked leftRunning", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { state: "lost", assignment: ON_A, prUrl: PR, absentSince: NOW });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("merged"));
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged", leftRunning: true });
+  });
+
+  test("(7) under until: reported a merge is recorded, settles nothing, and releases an after-merged dependent", async () => {
+    const { fleet, scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, spec: spec({ until: "reported" }) });
+    await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(fleet.spawns).toEqual([]);
+    await scheduler.onPrStatus("t", PR, reading("merged"));
+    expect(scheduler.task("t")).toMatchObject({ state: "running", merged: true, pr: { state: "merged" } });
+    expect(scheduler.task("t")?.doneBy).toBeUndefined();
+    await pass(scheduler);
+    expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["dep"]);
+  });
+
+  test("(7b) a second identical merged reading a minute later on that task writes nothing", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, spec: spec({ until: "reported" }) });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("merged"));
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", PR, reading("merged", READ + 60_000));
+    expect(await version(store, "t")).toBe(written);
+  });
+
+  test("(7c) nor does one past the refresh window: a merged chip never greys, so it needs no refresh", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR, spec: spec({ until: "reported" }) });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("merged"));
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", PR, reading("merged", READ + 6 * 60_000));
+    expect(await version(store, "t")).toBe(written);
+    expect(scheduler.task("t")?.pr?.at).toBe(READ);
+  });
+
+  test("(7d) a merge into a non-default branch is recorded, settles nothing and releases no dependent", async () => {
+    const { fleet, scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("wait", { state: "awaiting-merge", assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await put("rep", { assignment: { ...ON_A, pane: "%3" }, prUrl: PR, spec: spec({ until: "reported" }) });
+    await put("dep", { state: "queued", spec: spec({ deps: [{ task: "wait", after: "merged" }] }) });
+    await scheduler.load();
+    const stacked: PrStatus = { state: "merged", stacked: true, at: READ };
+    for (const id of ["t", "wait", "rep"]) await scheduler.onPrStatus(id, PR, stacked);
+    expect(scheduler.task("t")).toMatchObject({ state: "running", pr: stacked });
+    expect(scheduler.task("wait")).toMatchObject({ state: "awaiting-merge", pr: stacked });
+    expect(scheduler.task("rep")).toMatchObject({ state: "running", pr: stacked });
+    expect(scheduler.task("rep")?.merged).toBeUndefined();
+    await pass(scheduler);
+    expect(fleet.spawns).toEqual([]);
+    // The same PR read again at the default branch (retargeted, or its parent landed) settles as any merge does.
+    await scheduler.onPrStatus("t", PR, reading("merged", READ + 1_000));
+    expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
+    expect(scheduler.task("t")?.pr).toEqual({ state: "merged", at: READ + 1_000 });
+  });
+
+  test("(8) closed is recorded and moves nothing", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({ state: "running", pr: { state: "closed" } });
+  });
+
+  test("(9) a finished, a waiting and a reserved task are left alone", async () => {
+    const { scheduler, put, store } = setup();
+    await put("done", { state: "done", doneBy: "manual", prUrl: PR });
+    await put("queued", { state: "queued", prUrl: PR });
+    await put("reserved", { state: "reserved", prUrl: PR });
+    await scheduler.load();
+    const ids = ["done", "queued", "reserved"];
+    const before = await Promise.all(ids.map((id) => version(store, id)));
+    for (const id of ids) await scheduler.onPrStatus(id, PR, reading("merged"));
+    expect(await Promise.all(ids.map((id) => version(store, id)))).toEqual(before);
+    expect(scheduler.task("done")?.pr).toBeUndefined();
+  });
+
+  test("(10) a reading whose clock is behind the stored one still settles a merge and refreshes an unchanged one", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: PR });
+    await put("u", { assignment: { ...ON_A, pane: "%2" }, prUrl: PR });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", PR, reading("open", READ + 600_000));
+    await scheduler.onPrStatus("t", PR, reading("open", READ));
+    expect(scheduler.task("t")?.pr?.at).toBe(READ);
+    await scheduler.onPrStatus("u", PR, reading("open", READ + 600_000));
+    await scheduler.onPrStatus("u", PR, reading("merged", READ));
+    expect(scheduler.task("u")).toMatchObject({ state: "done", doneBy: "merged" });
+  });
+
+  test("(11) a session event that moves prUrl drops the reading", async () => {
+    const { scheduler, put } = setup();
+    const next = "https://github.com/acme/app/pull/9";
+    await put("t", { assignment: ON_A, prUrl: PR, pr: reading("open") });
+    await scheduler.load();
+    await scheduler.onSession("t", "busy", FROM_A, next);
+    expect(scheduler.task("t")).toMatchObject({ state: "running", prUrl: next });
+    expect(scheduler.task("t")?.pr).toBeUndefined();
+  });
+
+  test("prBound keeps a reading while prUrl stays, drops it when prUrl moves", () => {
+    const before: Task = { id: "t", spec: spec(), state: "running", createdAt: NOW, prUrl: PR, pr: reading("open") };
+    expect(prBound(before, { ...before, branch: "b" })).toEqual({ ...before, branch: "b" });
+    const moved = prBound(before, { ...before, prUrl: "https://github.com/acme/app/pull/9" });
+    expect(moved.pr).toBeUndefined();
+    expect(moved.prUrl).toBe("https://github.com/acme/app/pull/9");
   });
 });
