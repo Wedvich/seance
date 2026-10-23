@@ -1,6 +1,7 @@
 // The Claude Code mods under claude-mods/, installed through Claude's own
 // plugin CLI with this checkout as a directory marketplace. A directory
-// marketplace is read in place, never copied, so a `git pull` reaches the next
+// marketplace is read in place (the copy Claude records under plugins/cache is
+// not what loads; DESIGN.md, "Claude Code mods"), so a `git pull` reaches the next
 // session (or `/reload-plugins`) with nothing to re-run — unlike the Raycast
 // import. Marketplace and plugin names are read from the marketplace file
 // rather than restated here. Plugins live per config dir, so every command here

@@ -1025,7 +1025,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                    | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes                                                              | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                               | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
-| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                   | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); apps drop it until account records handle it                                                                                                                                                |
+| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                   | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (none subscribe yet)                                                                                     |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                         | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                         | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
@@ -1049,7 +1049,7 @@ places on: sealed `from: "scheduler"` with its `term` on its app-role leg (`term
 "leader")`, which never touches this wire (Scheduler, "The leader").
 
 `session-event` starts on that socket too, as a third frame kind the session-events
-mod sends through `seanced session-event` (see "Session events"). What crosses the
+mod sends through the CLI's `session-event` (see "Session events"). What crosses the
 relay is the daemon's own event, built from its pane map, never the mod's frame.
 
 Layer 1 (plaintext, daemon↔relay): `register { deviceId, info: <envelope>,
@@ -1724,9 +1724,10 @@ enforces is what it can see: who is asking, the key, a version and a size.
   either leg, it also goes to every app socket but the writer (`#nudgeApps`), so an alias set in
   one client shows in another; `task:` is creatable by apps but not app-writable, and its changes
   reach apps as the leader's `queue-changed`. Only send failures are logged — a line per fan-out
-  would be a timeline of edits. An app-client from before this drops the frame
-  (`wire dropped reason=frame`): it has no `re`, so it is no reply; handling it is the account
-  records' item.
+  would be a timeline of edits. The app-client parses it with `parseStoreChanged` (it has no
+  `re`, so it is no reply) and hands `key, version` to `onStoreChanged` listeners; a malformed one
+  is `wire dropped reason=frame`. Nothing subscribes yet — the account records item re-reads
+  `account:` on it.
 - **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…`, with no `key=` on
   `version_conflict` (the normal answer to an enqueue retry and to leader races, so a key with a
   time would link task ids to retries) — and none for an accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
@@ -3611,7 +3612,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   leader's sweep makes of every machine holding placed tasks. The CLI's
   reap, in a process that does not own the ledger, leaves them. The tmux calls are injected where
   `EndedTasks` is built (`tmuxHarvestPanes`), so only the daemon's wiring touches tmux. The live `ended` event cannot carry the status: the mod's
-  SessionEnd hook runs before the process exits. So a leader settles a PR-less `ended` from a
+  `session.end` hook runs before the process exits. So a leader settles a PR-less `ended` from a
   machine advertising `CAPABILITIES.exitStatus` by nothing but that machine's next answer — a
   reservation it resolves is `running` on the reporting pane meanwhile — and checks the machine
   at once, then every pass (`#ending`) until a reply no longer lists the session, since a check
@@ -3619,7 +3620,7 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   Only the machine the task is on defers (`waitsForExit`): a foreign sender's `ended` changes
   and waits for nothing. The wait is bounded by `endingTimeoutMs` (5 min, well past
   `sweepIntervalMs` plus the `sessions` op's 10s): past it the task settles as the event would
-  have without an exit, so a claude that stays alive after its SessionEnd hook does not hold its
+  have without an exit, so a claude that stays alive after its `session.end` hook does not hold its
   slot and get asked about for good. The deadline spares a machine whose check is out, and waits
   for a read begun after it that still lists the session (`#awaited`), or a late answer would
   be dropped for a task already `done` and its dependents would run on a failed predecessor. A
@@ -4304,8 +4305,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
   refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
-  each candidate was judged on; the queued task's record shows it, its age read as the account
-  cards read it, observer named and "asleep" when it is. **Queue on auto** is an enqueue
+  each candidate was judged on (the task record keeps it). **Queue on auto** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
   and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
@@ -4314,8 +4314,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
   stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
   decision card is not on the verdict at all — the owner's call: the form's preview says where
-  it would go, the Queue screen's row says why there, and the verdict says only that it is
-  running; `verdict-view.ts` derives the rest): a `queue-changed` nudge that names the task (or
+  it would go and the verdict says only that it is running; `verdict-view.ts` derives the rest.
+  The Queue screen's rows once carried it too, behind a "Why there" disclosure, removed
+  2026-10-22 as unread — the task record still holds the decision): a `queue-changed` nudge that names the task (or
   none) re-reads
   `queue {tasks: [id]}` at once, a reconnect or a new leader re-reads it, and a poll every 2s, at
   most 30 times, is the fallback while the task has not settled (`isSettled`,
@@ -4354,7 +4355,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
-  credits", not "would spend"). **Cancel** and **Mark done** are offered where the leader allows
+  credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
+  the record keeps no other) carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
+  number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
+  because the parser admits only `https:`. **Cancel** and **Mark done** are offered where the leader allows
   them. Mark done sets the task `done` by hand, ending its session first when it is running,
   `needs-input` or `lost`. Either one that ends a live session takes a second tap within four
   seconds. A `done` or `cancelled` task with `leftRunning` says its session may still be running
@@ -4840,9 +4844,13 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
-  reaches the socket through `seanced session-event` (JSON on stdin). A hooks module
+  reaches the socket through the CLI's `session-event` (JSON on stdin). A hooks module
   runs with no Node and no sockets of its own, so it runs that command through
-  `$.process.run`. The command is silent, always exits 0, and waits for the daemon's
+  `$.process.run`, as `bun <checkout>/daemon/src/main.ts session-event` from its own
+  `$.plugin.root`, never the `seanced` name on PATH (changed 2026-10-22): the mod is
+  read in place from the checkout (Claude Code mods), so the path always names the same
+  checkout's CLI, while the PATH link is opt-in and nothing re-points it on a pull — a
+  machine without it, or with a link into another clone, reported nothing, silently. The command is silent, always exits 0, and waits for the daemon's
   one-line answer before exiting: the binding below needs the sender alive. It runs
   two or three times a turn in every session on the machine, so `main.ts` dispatches it
   before loading anything else of the CLI (`cli.ts` pulls in the MCP SDK and zod), and the
@@ -4852,6 +4860,50 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   is unset: such a session is in no pane the daemon could bind it to, so every report
   would be `unbound` (below) at the cost of a Bun start and the daemon's tmux and
   parent-walk reads. The daemon still binds every report that does arrive.
+- **Where the states come from: engine events, never `classic.*`** (changed 2026-10-22,
+  mod 0.2.0). On Team/Enterprise orgs Claude Code 2.1.308's built-in
+  `cc-plugin-sec-default` sits first on the classic chain and passes every classic event
+  past the plugins a person installs, so the first mod's `classic.*` hooks never ran there.
+  Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
+  on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
+  the next turn event; gating on a first start would take a `$.state` contract for a
+  report the next turn event corrects); the main loop's `turn.start` and `turn.complete`
+  (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
+  its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
+  `ask` with `approver: "person"` on a real call (a `$.tool.check` query has no
+  `tool_use_id`) is a dialog, from any loop, as the old permission notification was; an
+  `AskUserQuestion` call is one too. Each dialog is kept in one map, `tool_use_id` to the
+  loop it holds (`agentId`; core's check for `AskUserQuestion` settles `ask`/person under
+  the same id, so it enters once), until its `tool.call` settles or rejects. **One function
+  names the state every report carries**: needs-input while any dialog is outstanding, else
+  idle while `atPrompt`, else busy. A report goes out whenever that changes (and only then,
+  bar a PR below), so two overlapping prompts report busy after the second, and a subagent's
+  dialog closing after the main turn ended resumes to idle, not busy. A rejection resumes
+  the same way when it empties the map. The main loop's own turn events drop its own entries
+  (a main-loop dialog cannot be open across them: any left is a leak that would silence
+  busy) and never a subagent's: a continuation turn starts with no typed prompt
+  (`text: ""`) while a background subagent's dialog may be open.
+  A Bash `gh pr create` that printed an `https:` `/pull/<n>` URL adds `prUrl` to the current
+  state, needs-input included: the daemon refuses a frame without a `state` (its note of the
+  PR is behind that check), so a bare `prUrl` would be lost. The map is updated before the
+  result is read, so an odd result shape cannot drop the resume. `session.end` is ended
+  unless its reason is `clear` or `resume`, carrying the last `prUrl` seen. Reports go out
+  one in flight and one pending slot, in the order raised, never awaited by a hook: the
+  latest state overwrites the pending slot (a `prUrl` is kept), since an Esc on a prompt
+  raises busy then idle within a millisecond and two Bun starts race, and a wedged daemon
+  (3 s a run) must not grow a queue. `ended` skips the queue and replaces the pending slot:
+  it is terminal, so nothing queued is still true, and it must not wait out a wedged daemon.
+  All of it is per registration (a tracker value created in `register`), not module state.
+  **The verdict is the one beneath the mod**: `await next(e)` at `tool.check` returns what
+  the hooks below it settled, and a plugin above may still override it. One that asks over
+  an allow is a missed needs-input; one that turns an ask into an allow or deny is a brief
+  needs-input with no dialog, until the call settles. No hook can see either. **Auto mode
+  reports needs-input then busy for each call its
+  classifier settles**: core answers `ask` there too, and no engine event says a dialog
+  was shown, nor does `$` read the permission mode. Accepted: the leader escalates only
+  a needs-input that lasts (`escalation`), so the flicker alerts nobody; it costs two
+  task-record writes per such call in a task's session. **Not covered**: an MCP server's elicitation, which
+  has no engine event (only the skipped `classic.Elicitation`).
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
@@ -5266,7 +5318,12 @@ are tmux-rename's, except where they say mods.
 - **Installed as a directory marketplace**: `.claude-plugin/marketplace.json` at
   the repo root lists the mods; `seanced mod install` runs `claude plugin
   marketplace add <checkout>` then `claude plugin install <mod>@seance` for each.
-  A directory marketplace is read in place, never copied, so unlike the Raycast
+  A directory marketplace's plugins are read in place: Claude also records a copy
+  under `plugins/cache/<marketplace>/<mod>/<version>` and names it `installPath`, but
+  loads the folder (`readFromFolder` in `claude plugin list --json`; checked on
+  2.1.308, where `claude plugin update` on one says "read from its folder: nothing to
+  update"), so the copy goes stale harmlessly. A mod's version still moves with its
+  behaviour, so `list`'s `folderVersion` says which one a machine runs. So unlike the Raycast
   import a `git pull` (or a self-update) reaches the next session with nothing
   re-run. `marketplace add` is idempotent and repoints in place when the name is
   registered from another folder, carrying installed plugins along — so no

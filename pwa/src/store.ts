@@ -22,6 +22,7 @@ import {
 } from "@seance/shared";
 import {
   DEFAULT_FORM,
+  DEFAULT_HISTORY_RANGE,
   RANGE_SPANS,
   TARGET_METRICS,
   type Effort,
@@ -111,6 +112,8 @@ export class Store {
    */
   #wokenAt = new Map<string, number>();
   #pending: PendingSpawn | null = null;
+  /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
+  #historyRange: HistoryRange = DEFAULT_HISTORY_RANGE;
   /** Tells this document's history entries from ones a previous load left behind. */
   readonly #owner = crypto.randomUUID();
   /**
@@ -483,7 +486,9 @@ export class Store {
    * One chart at a time: a new pick replaces whatever is open or still loading.
    * The window ends on the tier's newest bucket, so it never ends mid-bucket.
    */
-  async showHistory(target: HistoryTarget, range: HistoryRange): Promise<void> {
+  async showHistory(target: HistoryTarget, pick?: HistoryRange): Promise<void> {
+    const range = pick ?? this.#historyRange;
+    this.#historyRange = range;
     const { span, step } = RANGE_SPANS[range];
     const to = Math.floor(Date.now() / 1000 / step) * step;
     const from = to - span + step;

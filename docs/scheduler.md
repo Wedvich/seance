@@ -387,7 +387,8 @@ item: every M3 item needed one within hours.
 **Every _Decided_ entry below was settled by the owner on 2026-10-20** (the M3 review's R8). Each
 started as the review's recommendation; where the owner chose otherwise, the entry says so. The
 numbers (#) are the review's owner-decision list; #7 and #13 lapsed with the OAuth poll, #1, #2
-and #20 were settled earlier, and #21 was added in the same session.
+and #20 were settled earlier, and #21 was added in the same session. #22 (junk under `account:`,
+found after store rules v2 landed) is still open.
 
 **Order.** Wave 0 settles the seams the items share. Wave 1 is the items nothing else in M4 has to
 precede. Wave 2 waits on the wave-1 item named.
@@ -512,6 +513,15 @@ precede. Wave 2 waits on the wave-1 item named.
   answered and a read begun after it still lists the session; a machine that is not connected
   settles on the deadline alone, never `lost` at the defaults), so the event path and the sweep are one path; a nonzero exit (a signal death as `128 + signal`) fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
   status", records the rest and what was rejected.
+
+  _Open gaps (follow-up, not yet planned):_
+  - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
+    in the ledger (`progress.prUrl`) but the leader never recorded settles `done` by `session`,
+    not `awaiting-merge`, and releases `after: "merged"` dependents early. Same blindness the
+    event path had before; narrower now. Fix direction: settle from the machine's last
+    `progress` entry where one was read.
+  - A spawn that times out before claude registers and then dies untitled gets no status
+    (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
 
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
@@ -685,6 +695,27 @@ precede. Wave 2 waits on the wave-1 item named.
     (#8) — and that is accepted: a daemon socket needs a signed register on top of the bearer
     token, so it is harder to open than the app leg that already has those rights, and a writer
     without the PSK writes only records whose `accountId` does not hash to their key.
+  - _Open (#22), junk under `account:`:_ a bearer-token holder can create junk keys under
+    `account:` up to its cap of 64, and with deletes refused (#8) nothing in the product removes
+    them, so while they stand the fleet can alias no account it has not named already (DESIGN.md
+    _Threat model_, item 3, records it as a residual). `task:` has `discard` for the same junk (M3
+    review S2); `queue:` and `quota:` take one key each, so they cannot be squatted. Records
+    sealed under an old PSK are unreadable the same way, and stay for the same reason. Options:
+    - **(a) a leader-only purge op** for unreadable `account:` records, shaped like `discard`:
+      sealed `from: "app"`, parsed by its own parser, checked against `schedulerGuard`, at the
+      version an app listed it under, audited. It refuses every readable record (`conflict` if
+      the record changed since) and writes no tombstone. The relay's `account:` rule then allows
+      a delete on the leader's term socket only, so this reopens the deterministic-key delete #8
+      avoided. Deleting an _unreadable_ record is still safe: what a token holder can put back
+      on that key is either junk again (the squat it already had) or an old genuine blob, which
+      is readable and which an overwrite already lets it plant. A tombstone would only block the
+      key's real account for 30 days. Cost: one relay rule change, one leader op, a PWA action.
+    - **(b) a larger cap.** Raises the cost of the squat without removing it, and every app pays
+      for the larger list it reads on open.
+    - **(c) accept it and rotate the token.** Rotation stops new junk and clears none, so the
+      taken slots stay taken.
+    - _Recommended:_ (a). It is the only option that clears the squat, and it reuses `discard`'s
+      shape and its guard instead of adding a new kind of write.
 - **Fleet quota record** (decided 2026-10-17, no longer conditional) — one record of
   `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) by
   read-open-compare-`expect`: a daemon writes only an observation newer than the one stored, so
