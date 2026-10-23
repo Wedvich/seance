@@ -229,9 +229,21 @@ function PrIcon(props: { size: number; className: string; children: ComponentChi
   );
 }
 
-/** GitHub's vocabulary: a pull request, dotted when a draft, merged, or crossed out when closed. */
+/**
+ * GitHub's vocabulary: a pull request, dotted when a draft, merged, or crossed out when closed. No
+ * reading is a question mark, not a pull request: a grey one reads as a draft.
+ */
 function PrStateIcon(props: { state: NonNullable<QueueRow["pr"]>["state"] }): JSX.Element {
   const { state } = props;
+  if (state === null) {
+    return (
+      <PrIcon size={16} className="queue-pr-icon">
+        <circle cx="12" cy="12" r="9.5" />
+        <path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6" />
+        <circle cx="12" cy="17" r="0.4" fill="currentColor" />
+      </PrIcon>
+    );
+  }
   return (
     <PrIcon size={16} className="queue-pr-icon">
       <circle cx="6" cy="5.5" r="2.5" />
@@ -239,7 +251,7 @@ function PrStateIcon(props: { state: NonNullable<QueueRow["pr"]>["state"] }): JS
       <path d="M6 8v8" />
       <circle cx="18" cy={state === "merged" ? 13 : 18.5} r="2.5" />
       {state === "merged" && <path d="M6 8v1a4 4 0 0 0 4 4h5.5" />}
-      {(state === null || state === "open") && <path d="M18 16V10a4 4 0 0 0-4-4h-2M14.5 3.5 12 6l2.5 2.5" />}
+      {state === "open" && <path d="M18 16V10a4 4 0 0 0-4-4h-2M14.5 3.5 12 6l2.5 2.5" />}
       {state === "draft" && <path d="M18 15.5V6" stroke-dasharray="0.1 3.4" />}
       {state === "closed" && <path d="M18 16v-3.5M15.5 4.5l5 5M20.5 4.5l-5 5" />}
     </PrIcon>

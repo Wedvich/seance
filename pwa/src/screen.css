@@ -2107,7 +2107,8 @@
 }
 
 /* The leader's forge reading (`Task.pr`) colours the state icon only, in GitHub's vocabulary:
-   open green, merged the accent, closed red, draft quiet like no reading. A reading older than
+   open green, merged the accent, closed red, draft quiet. No reading is a grey question mark,
+   not a pull request, so it never passes for a draft. A reading older than
    the stale threshold drops its colour, as a leader that stopped reading must not look like a
    PR that did not change; a merge is exempt (`prOf`). The CI icon says only pending, passing or
    failing, and the `title` carries the words; a merged chip has none (`prOf` gives it no

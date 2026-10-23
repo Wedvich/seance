@@ -2839,8 +2839,9 @@ Branch state sees a merge only through the clone that launched the task, so a PR
 branch the daemon does not track (a /ship session creates its branches by hand, a hub opens PRs
 in sub-repos) never settled, and the PWA could say nothing of a PR beyond its number. The
 forge knows. The scheduler leader reads it: every minute from the start of its term (after
-takeover's load) it takes the `prUrl` of every unfinished task that matches
-`https://github.com/<owner>/<repo>/pull/<n>` and asks GitHub for the lot with its own `gh`.
+takeover's load) it takes the `prUrl` of every unfinished task, and of every finished one that
+holds no reading yet, that matches `https://github.com/<owner>/<repo>/pull/<n>` and asks GitHub
+for the lot with its own `gh`.
 
 - **One batched GraphQL call per chunk of 50.** Each PR is an alias (`p0`, `p1`, …) of
   `repository(owner:, name:){ defaultBranchRef{ name } pullRequest(number:){ state isDraft
@@ -2868,9 +2869,18 @@ takeover's load) it takes the `prUrl` of every unfinished task that matches
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,
   and apps are nudged. A reading for a URL other than the task's current `prUrl` writes nothing,
-  nor does one on a task that is finished, waiting or reserved: the poller and `prChange` ask
-  one predicate for which tasks a reading can change (`isPrReadable`, `shared/src/task-phase.ts`),
-  so nothing is polled that cannot be applied. An unchanged reading writes
+  nor does one on a task that is waiting or reserved, or finished with a reading already: the
+  poller and `prChange` ask one predicate for which tasks to read (`wantsPrReading`,
+  `shared/src/task-phase.ts`), so nothing is polled that cannot be applied.
+- **A finished task is read once.** One marked done by hand, or finished before this poller
+  existed, never had its PR read, and its chip would show no reading for good. If it holds a
+  `prUrl` and no `pr`, it is read once, and the reading is only recorded: a merge on it settles
+  nothing and releases nothing, because nothing is left to settle. Once it holds a reading it
+  is never polled again, so a PR still open when its task was marked done keeps that reading,
+  greying past the stale threshold. A finished task's PR that the forge does not answer for is
+  skipped for the rest of the term, rather than read every minute for a chip. Rejected: polling
+  finished tasks until their PR is merged or closed, because an abandoned open PR would then be
+  read for as long as the store keeps its task. An unchanged reading writes
   nothing either — until its `at` is `PR_STATUS_REFRESH_MS` (5 minutes) old, when it is
   written again: the PWA greys a chip whose reading is past `PR_STATUS_STALE_MS` (10 minutes)
   so that grey means the leader stopped reading, and that needs a fresh `at` on a PR that did
