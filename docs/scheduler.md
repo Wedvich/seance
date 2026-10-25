@@ -406,9 +406,9 @@ of M4 has landed.
 | 1     | Skills filter — **Done**                                           | —                                                                      | S; M with project skills |
 | 1     | Account records — **Done**                                         | store rules v2                                                         | M                        |
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
-| 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
+| 1     | CLI `auto` — **Done**                                              | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
-| 2     | Spawn defaults to the scheduler, in three PRs                      | account pins (PR #303); keyless `auto` for MCP                         | M–L                      |
+| 2     | Spawn defaults to the scheduler, in three PRs                      | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -778,25 +778,19 @@ of M4 has landed.
     with the reason shown, as an unpinned one does.
   - _Decided:_ the direct path survives only as the CLI's `--now`. The daemon keeps answering
     an app's `spawn` op, so an older PWA or MCP keeps working through the rollout.
-  - **Keyless `auto` (below) lands first** (owner, 2026-10-25, lifting #16's deferral): a
-    keyless `seanced mcp` reaches the relay only through the fleet broker, which has no
-    enqueue action, so moving MCP onto the scheduler before it takes spawning away from
-    every keyless box.
+  - **Keyless `auto` (below) has landed** (owner, 2026-10-25, lifting #16's deferral): a
+    keyless `seanced mcp` or `seanced spawn --auto` reaches the scheduler through the broker's
+    `scheduler` action (DESIGN.md "Fleet broker", "The scheduler actions"), so moving MCP onto
+    the scheduler no longer takes spawning away from a keyless box.
   - In three PRs: (1) CLI and MCP on the new model; (2) the PWA's two pickers; (3) a task's
     pin and `avoid` on its queue card. Exit: a plain `seanced spawn` and a PWA spawn with both
     pickers on `auto` land as tasks (e2e); a PWA spawn with a machine picked lands there as a
     pinned task, and waits with its reason when that machine is full (e2e); `seanced spawn
     --now` still works with the relay unreachable (daemon).
 
-- **Keyless `auto`** — MCP's `auto` and `seanced spawn --auto` on a box that reads the key
-  itself are built (DESIGN.md "MCP server", "CLI `auto`"). What remains:
-  - Keyless `seanced mcp` and `seanced spawn --auto`. They reach the relay only through
-    the fleet broker, whose actions are fixed; today both refuse ("needs this machine's
-    own key"). An enqueue there is a new broker action, which is a threat-model change
-    (DESIGN.md "Fleet broker"); without it, a keyless box gets no `auto`.
-  - _Decided (#16):_ defer the broker action. Lifted 2026-10-25: it is the prerequisite of
-    "Spawn defaults to the scheduler" (above), and is built next.
-  - Exit: keyless `seanced mcp`'s `auto` queues a task through the broker (refused today).
+- **Keyless `auto`** — **Done**: MCP's `auto` and `seanced spawn --auto` on a box that cannot
+  read the key go through the daemon's fleet broker (DESIGN.md "Fleet broker", "The scheduler
+  actions").
 
   Raycast `auto` attaches the same way as the CLI's.
 

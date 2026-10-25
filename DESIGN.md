@@ -689,7 +689,11 @@ nothing checked it. The last is the gap they leave.
   and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
   covers spawn, despawn and queue (added 2026-10-25, M4). A process interrupted after a
   send (Ctrl-C) leaves no enqueue line, for either surface: accepted, since the store
-  record and the leader's `op=admit` line still show the task. The daemon writes
+  record and the leader's `op=admit` line still show the task. On a credential-delivered box
+  neither process holds the key, so the daemon enqueues for it and writes the
+  `audit enqueue origin=local-broker claimed_client=mcp|cli` line itself, beside the surface's own
+  (added 2026-10-25, "Fleet broker"); `local-broker` stays one origin, the daemon acting for a keyless
+  local process, whatever it asked for. The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -1086,7 +1090,10 @@ only in the audit origin they are tagged with — see "Local op socket".
 The same three ops have a third sender on a credential-delivered box, and only
 there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client acting for a keyless
 `seanced mcp` that reached it over the local op socket with a broker frame — not a
-`Plain`, and not on this wire. To the relay and the target it is one more app.
+`Plain`, and not on this wire. To the relay and the target it is one more app. The
+same broker is the sender of `task:` `store-put`s (an enqueue it sealed itself, `expect: 0`),
+of `queue` and `cancel` to the scheduler, and of the `account:` list, all for a keyless
+`seanced mcp` or `seanced spawn --auto` ("Fleet broker").
 
 A fourth is the scheduler leader, which dispatches the same three ops to the machines it
 places on: sealed `from: "scheduler"` with its `term` on its app-role leg (`termFleet` in
@@ -4947,8 +4954,8 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   because repos ride the register blob; each entry's `source` build and
   `lastUpdate` from the same blob, and `scheduler: "leader"` on the nominee
   whose lead proof verified or `"unverified"` on one whose did not — never a
-  leader on the relay's word alone, and no mark at all through the fleet
-  broker, which has no scheduler view; still a bare array, so the field is
+  leader on the relay's word alone, and the same mark through the fleet broker,
+  whose `fleet` action carries the daemon's scheduler view (2026-10-25); still a bare array, so the field is
   per entry rather than a wrapper), `get_sessions { machine }`,
   `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort?, plan? }`
   and `despawn_session { machine, id, force? }` (added 2026-10-09, see
@@ -5002,12 +5009,12 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   keeps its shape. **The limits are in both tool descriptions**, since an agent would
   otherwise take the queue for a backlog: a task waiting for capacity is held by the relay
   and survives a leader change (every relay deploy, every daemon self-update), the next leader
-  taking it over; a placed session is ordinary; ordering is what `after` and `queue_batch` say. **Not
-  through the broker**: a keyless `seanced mcp` gets "auto needs this machine's own
-  key; unavailable through the broker", and nothing falls back. A scheduler action
-  would be a new broker action, which is a threat-model change ("Fleet broker"), so
-  `brokerFleet` leases carry `scheduler: null`. The enqueue is a `store-put` through the
-  app client, as the PWA's is.
+  taking it over; a placed session is ordinary; ordering is what `after` and `queue_batch` say. **Keyless
+  boxes go through the broker** (2026-10-25, M4): a keyless `seanced mcp` asks the daemon for
+  `fleet` and the `scheduler` ops ("Fleet broker"), and `brokerFleet` leases carry a scheduler leg
+  built on them. Only a daemon that predates those actions leaves the leg `null`, and `auto` then
+  says so (the daemon "predates brokered auto") rather than falling back. On the keyed path the enqueue
+  is a `store-put` through the app client, as the PWA's is.
 - **Authoring: `after`, `until`, `linear`, `queue_batch` and `report_task_done`** (2026-10-23, M4 #21).
   `spawn_session` with machine `auto` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
   `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
@@ -5208,16 +5215,18 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
   turns an unreachable relay into "not queued" rather than a hang. A direct
   `seanced spawn` loads nothing of this and stays relay-free.
-- _Keyless boxes:_ refused ("needs this machine's own key"), never brokered — the
-  broker's actions are fixed and an enqueue action is a threat-model change, deferred
-  for MCP and CLI alike (docs/scheduler.md, M4).
+- _Keyless boxes:_ through the daemon's fleet broker, as `seanced mcp` is (2026-10-25): `autoFleet`
+  resolves no key and takes `brokerFleet`, so `--auto`, `--account` and `--not` work on a
+  credential-delivered box. A daemon that predates the broker's scheduler actions is named as the
+  cause ("predates brokered auto"). The daemon's own `audit enqueue origin=local-broker` line sits beside this
+  surface's `origin=cli` one ("Fleet broker").
 
 _Threat-model delta._ One new path in: a user at this machine's shell holding the
 config and the PSK can now enqueue a task, where before they could spawn on any
 machine with the same two. Nothing they can reach widens — a queued task runs only
 through the leader's own gates — and no new key is at rest: the process imports the
 key this shell already reads, and a service-delivered credential is never read by it
-(refused, above). The audit is the `audit enqueue origin=cli` line; prompt text is
+(it goes through the broker, above). The audit is the `audit enqueue origin=cli` line; prompt text is
 never logged. A process interrupted after a send (Ctrl-C) leaves no line, as with
 MCP: accepted, since the store record and the leader's `op=admit` line still show
 the task.
@@ -5353,8 +5362,9 @@ on product grounds and that has not changed.
 On a credential-delivered box `seanced mcp` can read no PSK, so on its own it
 reaches only the machine it runs on. The broker gives it the rest of the fleet: a
 second frame kind on the same socket, through which the server asks the daemon for
-the registry or for one of three ops on one other machine, and the daemon makes that
-request itself as an app-role relay client with the key it imported at start.
+the registry, for one of three ops on one other machine, or for the scheduler (enqueue,
+read the queue, cancel, list accounts), and the daemon makes that request itself as an
+app-role relay client with the key it imported at start.
 
 - **Only on a daemon whose key is service-delivered.** `run-capabilities.ts` builds the broker
   when the daemon's `loadPsk` answered `source: "credential"`, and nowhere else: on
@@ -5377,8 +5387,9 @@ request itself as an app-role relay client with the key it imported at start.
   macOS and WSL, where it reads the key outright. The gate is the one MCP always had,
   Claude Code's per-tool approval. What the same-uid process still cannot do is
   hold the key: read it, derive it, seal or open anything, address the `"machines"`
-  group, or send any op but `sessions`/`spawn`/`despawn`. Strictly less than the key
-  it would have on any other platform, and every request recorded.
+  group, or send any remote op but `sessions`/`spawn`/`despawn`. Strictly less than the key
+  it would have on any other platform, and every request recorded. The scheduler actions
+  widen it again, by exactly what "The scheduler actions" below lists.
 - **A separate app-role connection, not the daemon's own socket.** The daemon's relay
   leg is daemon-role: it registers and answers, the relay never pushes it the
   registry, and it cannot address another daemon. Being an app is the only way to
@@ -5388,14 +5399,20 @@ request itself as an app-role relay client with the key it imported at start.
   idle-closing like `seanced mcp`'s (`daemon/src/app-relay.ts` holds both), shared by
   every MCP process on the box, stopped with the daemon handle so a reload builds a
   fresh one and leaks none.
-- **Semantic, allowlisted, fail-closed.** Two actions: `machines` (the decrypted
-  registry) and `request` (`remoteOp` ∈ `sessions`/`spawn`/`despawn`, to an exact
-  `deviceId` this daemon's key can read — never a name, `"app"`, `"machines"`, or the
-  daemon's own id, which belongs on the local op path). The payload is validated with
-  the handler's own checks and rebuilt from the validated fields, so nothing else a
-  peer adds reaches the wire. `client` is stamped `"mcp"` by the broker, never copied
-  from the peer, so the target audits the spawn as `origin=relay client="mcp"`
-  exactly as a direct MCP spawn — and a same-uid process cannot pass as the PWA. Rejected: a crypto
+- **Semantic, allowlisted, fail-closed.** Four actions: `machines` (the decrypted
+  registry), `fleet` (the registry and the scheduler's availability together, which is
+  what `list_machines`' leader mark and a brokered `auto` need), `request` (`remoteOp` ∈
+  `sessions`/`spawn`/`despawn`, to an exact `deviceId` this daemon's key can read — never a
+  name, `"app"`, `"machines"`, or the daemon's own id, which belongs on the local op path)
+  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`accounts`). The payload is
+  validated with the handler's own checks and rebuilt from the validated fields, so nothing
+  else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
+  broker, never copied from the peer, so the target audits the spawn as
+  `origin=relay client="mcp"` exactly as a direct MCP spawn — and a same-uid process cannot
+  pass as the PWA. For a `scheduler` enqueue the peer's `mcp` or `cli` is kept in the record
+  (the daemon cannot tell `seanced mcp` from `seanced spawn --auto`, and a same-uid process
+  can run either) and audited as `claimed_client`, never `client`: an unverified claim, and
+  nothing else (`pwa`, `raycast` and `scheduler` are refused). Rejected: a crypto
   oracle (seal/open on request) — same-uid peers make it unpoliceable, and it is the
   key's whole reach; raw relay forwarding (`{to, op, plaintext}`), which is the oracle
   by another name; a transient systemd service per MCP call to receive the credential
@@ -5410,7 +5427,15 @@ request itself as an app-role relay client with the key it imported at start.
   meant for another machine.
 - **Its own audit origin.** `audit broker origin=local-broker` with action, op, target
   and client — never the payload, so never the prompt. Not `local`: a `local` line
-  says this box's tmux was touched, and a brokered spawn touches someone else's.
+  says this box's tmux was touched, and a brokered spawn touches someone else's. A
+  scheduler frame logs `action=scheduler op="enqueue|queue|cancel|accounts"` with the task id
+  and, for an enqueue, `claimed_client`; `fleet` logs `action=fleet`. An enqueue also writes
+  `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
+  (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
+  answered or lost, because the surface's own `audit enqueue origin=mcp|cli` line records the
+  surface's view and only the daemon saw the store answer. The transport is not a surface:
+  `mcp` and `cli` keep their meaning, and `local-broker` is the daemon acting for a keyless
+  local process, whatever it asked for.
 - **Structured failures, and honest ones.** Refusals, relay trouble and shutdown are
   codes, and a `RequestFailure` crosses with its reason so the MCP side renders it
   exactly as the direct path does — a relay timeout still reads "may have landed
@@ -5439,6 +5464,66 @@ request itself as an app-role relay client with the key it imported at start.
   the daemon, not a running `seanced mcp`: an MCP older than `broker_disabled` parses
   the unknown code as an unreadable reply ("a mismatched seanced version?"), which a
   new Claude session resolves; on a credential-delivered box nothing changes.
+  The scheduler actions add two actions to `BROKER_VERSION = 1` rather than a version
+  (2026-10-25). A new client on an old daemon gets `unsupported` for `fleet`, which is side-effect
+  free, so it falls back to `machines` with no scheduler leg — `auto` then says the daemon predates
+  brokered auto — and scheduler frames never fall back, since a retry of one could repeat a write. A
+  new daemon with an old client changes nothing. A `seanced mcp` that started before the
+  daemon updated keeps the old refusal ("auto needs this machine's own key") until that
+  Claude session restarts, the same lag as above.
+
+### The scheduler actions (2026-10-25, M4)
+
+`auto`, `queue_batch`, `get_queue` and `cancel_task` in a keyless `seanced mcp`, and
+`seanced spawn --auto`, run through `fleet` and `scheduler` frames. The decisions:
+
+- **The daemon seals, the peer never does.** The peer sends `{taskId, spec}`; the broker parses
+  the spec, builds the task record itself and calls its own app-role client's `createTask`,
+  which binds and seals it `from: "app"` with the key the daemon imported and `store-put`s it at
+  `expect: 0`. The key never leaves the daemon and the broker is still no crypto oracle: it
+  seals one parsed `TaskSpec` into a fixed record shape at a fixed key prefix. Rejected: the
+  client sealing, which would need the key in the process that by design cannot have it.
+- **`createdAt` is the daemon's clock**, so a same-uid peer can neither back-date a task (to
+  jump FIFO order or outlive admission's age limit) nor forward-date one. The cost is that the
+  surface's `audit enqueue` line and the daemon's can differ by milliseconds.
+- **The peer still mints the task id**: `enqueueAuto` needs it to retry and `queue_batch` needs
+  it for `deps`. Reuse is harmless, since the create is at `expect: 0` and a taken id answers
+  `version_conflict`, which the client reads as `landedEarlier`. Nothing is ever overwritten. But
+  because the peer chooses the id, a brokered `landedEarlier` is the peer's claim about its own
+  id, not proof that the task is its own earlier try: the id may stand for another client's task
+  or a tombstone. It is not a verified fact.
+- **Validation fails closed.** `taskId` must be a task id; `spec` must parse through
+  `parseTaskSpec` (the length bounds, `parsePin`'s two fields, a bounded unique avoid list); `lineage`
+  and `base` must be absent; `client` must be `mcp` or `cli`. The parsed value, a fresh object
+  holding known fields only, is what is sealed. `cancel` takes a parsed task ref. `queue` and
+  `accounts` take no payload and anything extra is dropped. The gates `leaderTakesReported` and
+  `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them
+  in the broker — any app can write those fields anyway, and the record's `PIN_SENTINEL`
+  already keeps an older leader from misreading a pin.
+- **Account names resolve in the client.** The broker serves the account listing, and the client
+  runs the same `resolvePlacement`, so there is one implementation. The daemon keeps one
+  `AccountCache` per app-role client, so every keyless process on the box together stays under
+  the relay's four account lists per minute per socket.
+- **Replies are rebuilt, not forwarded.** The registry crosses with its exclaves, capabilities and
+  status (the placement code needs them); the scheduler's availability, a created task and the
+  queue are parsed on the peer side by the same parsers the keyed path uses. A reply the peer
+  cannot parse is `bad_reply`; a scheduler failure arrives as the same `RequestFailure` the
+  keyed path throws, so the retry and wording code is shared.
+- **Threat-model delta.** For the same-uid process on a credential-delivered box, new: it can
+  create `task:` records sealed `from: "app"` and bounded as above; read the fleet queue,
+  including other clients' titles and prompt previews; cancel any task; read account records
+  (aliases and accountIds — the emails are already in `list_machines`' exclaves); and spend the
+  broker socket's relay write floor (60 creates per 60 s, shared by every keyless process on the
+  box) and the store's caps — an availability concern it shares with any key holder. A
+  `queue_batch` of up to 16 members can therefore stop part-way on `rate_limited`, leaving the
+  earlier members queued; the answer names them. Weighed against what it already could do:
+  spawn directly on any machine, bypassing every scheduler cap. An enqueue is narrower, since the
+  leader's caps, quota and gates apply. Still out of reach: holding, sealing or opening the key,
+  sealing arbitrary bytes, overwriting a record, writing `account:`, pausing, resuming,
+  marking done or discarding, previewing routes, choosing `createdAt` or a client outside
+  `mcp`/`cli`, setting lineage or base, or addressing `"machines"` or the app id.
+- **Raycast is unchanged**: it is a local-only app-role client with the key, never keyless.
+  A `seanced doctor` line probing `fleet` is deferred.
 
 Untested in CI: the systemd-credential arrangement itself (TPM, `LoadCredentialEncrypted=`,
 an unprivileged LXC). The e2e suite runs a keyless MCP against two real daemons, but the
