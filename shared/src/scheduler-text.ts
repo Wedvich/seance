@@ -96,7 +96,9 @@ export function reasonText(reason: Reason): string {
     case "pressure_unknown":
       return "it reports no CPU or memory load";
     case "pin_mismatch":
-      return reason.field === "deviceId" ? "not the pinned machine" : "not the pinned exclave";
+      return reason.field === "deviceId" ? "not the pinned machine" : "not the pinned account";
+    case "avoided":
+      return "the task avoids this machine";
     case "repo_absent":
       return "no clone of this repo there";
     case "auth_missing":

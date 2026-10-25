@@ -657,12 +657,24 @@ function parsePlacement(value: unknown): Placement | null {
   return isRoutingId(deviceId) && isPlacementField(exclave) ? { deviceId, exclave } : null;
 }
 
-function parsePin(value: unknown): TaskSpec["pin"] | null {
+/**
+ * Undefined for a pin with nothing left to restrict. `exclave` is read by no
+ * one: an older record's exclave pin is dropped (exclave pins are gone), and
+ * `PIN_SENTINEL` is there only for older leaders to refuse.
+ */
+function parsePin(value: unknown): TaskSpec["pin"] | null | undefined {
   if (!isRecord(value)) return null;
-  const { deviceId, exclave } = value;
+  const { deviceId, account } = value;
   if (deviceId !== undefined && !isRoutingId(deviceId)) return null;
-  if (exclave !== undefined && !isPlacementField(exclave)) return null;
-  return { ...(deviceId === undefined ? {} : { deviceId }), ...(exclave === undefined ? {} : { exclave }) };
+  if (account !== undefined && !isAccountId(account)) return null;
+  if (deviceId === undefined && account === undefined) return undefined;
+  return { ...(deviceId === undefined ? {} : { deviceId }), ...(account === undefined ? {} : { account }) };
+}
+
+function parseAvoid(value: unknown): readonly string[] | null {
+  const ids = parseList(value, (id) => (isRoutingId(id) ? id : null));
+  if (ids === null || ids.length > TASK_SPEC_LIMITS.avoid || new Set(ids).size !== ids.length) return null;
+  return ids;
 }
 
 export function parseBatchStrategy(value: unknown): BatchStrategy | null {
@@ -707,14 +719,16 @@ function parseLinear(value: unknown): LinearLink | null {
 export function parseTaskSpec(value: unknown): TaskSpec | null {
   const request = parseTaskRequest(value);
   if (request === null || !isRecord(value)) return null;
-  const { pin, lineage, base, batch, deps, linear, client, until } = value;
+  const { pin, avoid, lineage, base, batch, deps, linear, client, until } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
+  const avoids = avoid === undefined ? undefined : parseAvoid(avoid);
   const continues = lineage === undefined ? undefined : parsePlacement(lineage);
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const edges = deps === undefined ? undefined : parseList(deps, parseDep);
   const issue = linear === undefined ? undefined : parseLinear(linear);
-  if (pinned === null || continues === null || builds === null || member === null || issue === null) return null;
+  if (pinned === null || avoids === null || continues === null || builds === null || member === null) return null;
+  if (issue === null) return null;
   if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
   if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
   const settles = until === undefined ? undefined : TASK_UNTIL.find((u) => u === until);
@@ -722,6 +736,7 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   return {
     ...request,
     ...(pinned === undefined ? {} : { pin: pinned }),
+    ...(avoids === undefined ? {} : { avoid: avoids }),
     ...(continues === undefined ? {} : { lineage: continues }),
     ...(builds === undefined ? {} : { base: builds }),
     ...(member === undefined ? {} : { batch: member }),
@@ -780,8 +795,10 @@ function parseReason(value: unknown): Reason | null {
       return isFiniteNumber(value["freeMib"]) ? { code, freeMib: value["freeMib"] } : null;
     case "pin_mismatch": {
       const field = value["field"];
-      return field === "deviceId" || field === "exclave" ? { code, field } : null;
+      return field === "deviceId" || field === "account" ? { code, field } : null;
     }
+    case "avoided":
+      return { code };
     case "quota_unknown": {
       const why = value["why"];
       return why === "unobserved" || why === "trimmed" ? { code, why } : null;
@@ -1053,11 +1070,8 @@ export function bindTaskRecord(
   return record;
 }
 
-/** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
-const ACCOUNT_ID_MAX_LENGTH = 128;
-
 function isAccountId(value: unknown): value is string {
-  return isBoundedString(value, ACCOUNT_ID_MAX_LENGTH) && value !== "";
+  return isBoundedString(value, TASK_SPEC_LIMITS.account) && value !== "";
 }
 
 function parsePauseHold(value: unknown): PauseHold | null {

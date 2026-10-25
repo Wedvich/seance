@@ -24,6 +24,7 @@ usage: seanced [command]
   sessions    list running claude tmux windows, each with the id despawn takes
   spawn       spawn locally: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]
               --auto: queue it for the scheduler instead, which picks the machine (needs this shell's key and the relay)
+                --machine <name|here> / --account <alias|email|id>: pin it; --not <machine|here>: keep it off (repeatable)
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config

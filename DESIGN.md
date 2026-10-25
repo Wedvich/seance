@@ -753,6 +753,12 @@ nothing checked it. The last is the gap they leave.
   (`shared/src/fleet-quota.ts`): sealed `to: "app"`, its op, its parser, and its sealed
   `version` the store's. Its `from` is not checked — any PSK holder may write it, and it
   carries readings, never authority.
+- **A task record carrying `pin.account` or `avoid` always carries `pin.exclave: ""`.** Every
+  such record is sealed through the one task sealer (`sealTaskRecord`, via `taskRecordAtRest`
+  in `shared/src/task-record.ts`), which emits the sentinel (`PIN_SENTINEL`); an older leader's
+  `parsePin` refuses it, so one taking over holds the record unreadable instead of placing it
+  unrestricted. The parser never nulls a spec over `pin.exclave` (Scheduler, "Rollout: a gate
+  and a sentinel").
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -1442,6 +1448,11 @@ an old peer's frames parse as before. Mixed versions:
 - `TaskProgress.reported` (the launch ledger's note of a session's `done` report, sticky): an
   older leader drops it, and does not know `until: "reported"` either, which is why clients write
   that only to a leader advertising `reportedDone`.
+- `TaskSpec.pin.account` and `TaskSpec.avoid` (M4): an older leader would strip both and place the
+  task unrestricted, so a client writes them only to a verified leader advertising `pinAccount`,
+  and every record carrying either also carries `pin.exclave: ""`, which an older `parsePin`
+  refuses — an older leader that takes over later holds the record unreadable instead
+  (Scheduler, "`pin` and `avoid` on auto"). A stored `pin.exclave` is ignored by the current parser.
 - `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
   list costs the field, never the entry or the machine. Scanned and routed on since
   2026-10-25 (Daemon, "Exclaves"; Scheduler, "Skills filter"). `MachineStatus.ax` (the exclave
@@ -2157,7 +2168,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `Decision.trimmed`. Reasons are structured codes: `offline`, `status_stale`, `task_id_unsupported`,
   `exclaves_unknown` (a daemon predating exclaves cannot say which account a spawn
   bills; an empty list reads the same, since a real daemon always lists `default`, and
-  stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch`, `repo_absent` (matched on
+  stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch` (`field`: `deviceId` or `account`), `avoided` (the
+  task's `avoid` names the machine), `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Routing caps" below; or `scope:
@@ -2717,7 +2729,9 @@ A Claude account is named once, by any PSK holder, and every app client shows th
 is a sealed `account:<hmac>` record in the relay's store (rules v2); `shared/src/account-record.ts`
 is what a record is and who reads it how, `RelayClient.listAccounts` / `getAccountRecord` /
 `putAccountAlias` the app leg, and `pwa/src/account-store.ts` the PWA's side. The leader and the
-daemons never read one, and `seanced mcp` and Raycast show no alias yet.
+daemons never read one. `seanced mcp` and `seanced spawn --auto` read them for one thing only: to
+resolve an account pin's alias at submit time ("`pin` and `avoid` on auto" below); they show no
+alias, and Raycast reads none.
 
 - **The key is derived, not the PSK's AES key reused.** `deriveAccountKey` (`shared/src/crypto.ts`)
   is HKDF-SHA-256 over the 32 raw PSK bytes, salt the UTF-8 `seance hkdf v1` and info
@@ -2755,8 +2769,9 @@ daemons never read one, and `seanced mcp` and Raycast show no alias yet.
   redeploy to a fresh worker or account) restarts every key at version 1 and reopens rollback.
   The rule: rotate the PSK, or bump `ACCOUNT_KEY_HKDF_INFO` (a new label moves every account to a
   new key), whenever that storage is reset. It holds against a token holder, not the relay, which can serve a stale blob at the
-  matching version (Threat model, item 4): accepted, since an alias is display-only and never routes,
-  binds or places anything. A blob moved to another account's key reads `key_mismatch`, so a writer
+  matching version (Threat model, item 4): accepted, since an alias never routes, binds or places
+  anything — the one place it is read past display, an account pin's submit-time resolution, is
+  bounded below. A blob moved to another account's key reads `key_mismatch`, so a writer
   without the PSK files no record under any account's key.
 - **A rename is a compare-and-set.** `putAccountAlias(accountId, alias, expect)` seals version
   `expect + 1` and puts at `expect`, the version the client last read for the key (0: none). A
@@ -2787,7 +2802,15 @@ daemons never read one, and `seanced mcp` and Raycast show no alias yet.
   the alias.
 - **Residuals.** Junk keys under `account:` up to its cap of 64, which nothing in the product removes
   (#22, still open); records sealed under an earlier PSK, which a rotation orphans as unopenable
-  slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or place.
+  slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or
+  place. The one exception, by owner decision: a person may name an account pin by its alias, which
+  `seanced mcp` and `seanced spawn --auto` resolve once, at submit time, to an `accountId` some
+  sealed registry entry reports signed in; only that id is stored, the answer echoes it with the
+  email, and an email or raw id skips the aliases. Its residuals: the relay can serve a stale
+  alias record (replay at its version) or leave one out of a listing, so an alias can resolve to
+  an account it no longer names, or not at all. Both are bounded to the owner's own accounts — the
+  registry check means no record names an account no machine of this fleet reports — and the
+  echoed id and email are what the person checks.
 - **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
   clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
   pause holds: alias, else email, else `acct` and the first eight characters of the account half.
@@ -5005,28 +5028,57 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
-- **`pin` on auto** (2026-10-23). `spawn_session` with machine `auto` and each `queue_batch` member
-  take `pin { machine?, exclave? }`, stored as `TaskSpec.pin` — the restriction the leader has
-  routed on since M2 (`pinFilter`: a candidate off the pin is `pin_mismatch`), so a pinned task
-  waits for a slot where it is pinned and never goes elsewhere. No capability gate: `parsePin` has
-  been in the task-record parser since the store's records themselves (M3 schema), so every leader
-  that can read the record keeps the pin. `machine` is a name or deviceId, resolved by
-  `resolveMachine` at submit time and stored as the deviceId only: an unknown name is refused
-  listing the machines, a shared one listing their deviceIds. `exclave` is checked against the
-  pinned machine's reported exclave ids, or with no machine against every machine's. A machine
-  reporting none is refused as a pin target (the leader never places on it, `exclaves_unknown`,
-  and its clones carry no exclave), naming `seanced update`; an exclave alone is refused likewise
-  while no machine reports any. A pin with neither field, an empty one, or a machine or exclave
-  past `TASK_SPEC_LIMITS.placement` is refused before the relay is dialled; a named machine refuses `pin`
-  with the other auto-only fields. **`repo` under a pin** is resolved by `resolveOrigin` against the
-  pin's scope only — the pinned machine (or every machine), its clones cut to the pinned exclave by
-  `RepoEntry.exclave`, as the leader's clone match is — so a name ambiguous or absent across the
-  fleet works as the pinned machine lists it, and an origin with no clone where the task is pinned
-  is refused rather than queued to wait forever. Unpinned resolution is unchanged. `list_machines`
-  lists each machine's exclave ids (`exclaves`, absent or empty on a machine reporting none; the
-  relay-unreachable local fallback entry omits it, since `auto` needs the relay anyway), and
-  `get_queue` shows a task's `pin`, its deviceId named by the registry (or the decision's
-  candidates) where known, so an agent learns pin targets without a refusal.
+- **`pin` and `avoid` on auto** (2026-10-23; accounts and `avoid` 2026-10-25, M4). `spawn_session`
+  with machine `auto`, each `queue_batch` member and `seanced spawn --auto` (`--machine`,
+  `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
+  machines to avoid, stored as `TaskSpec.pin { deviceId?, account? }` and `TaskSpec.avoid` (at most
+  `TASK_SPEC_LIMITS.avoid`, 4: with a 128-character account and ten candidates a record at that
+  bound still seals under `STORE_MAX_CT_LENGTH`). The leader routes on them in `placementFilter`
+  (`scheduler/src/route.ts`): a candidate off the pinned machine or account is `pin_mismatch`
+  (`field`), one on an avoided machine `avoided`, so a restricted task waits for a slot it may take
+  and never goes elsewhere — a task avoiding every machine waits too. An `accountId` that is null
+  (signed out) never matches. The exclave pin is gone with no legacy read path: `parsePin` ignores
+  a stored `exclave`, so a task pinned to one before this reads as unpinned there.
+  - **Resolution, at submit time only.** `machine` (`here` on the CLI: this box's deviceId from
+    `state.json`) is a name or deviceId through `resolveMachine`, stored as the deviceId; an unknown
+    name is refused listing the machines, a shared one listing their deviceIds, and a machine
+    reporting no exclaves is refused (the leader never places there, `exclaves_unknown`). `account`
+    is matched by alias (the account records), then by the email some registry entry reports
+    (`ExclaveInfo.email`), then as a raw `accountId`, and only an account a sealed registry entry
+    reports signed in matches — signed in nowhere, or not on the pinned machine, is refused. An
+    alias or email two accounts share (one person in two orgs) is refused listing each account by
+    its full `accountId`, alias, email and machine/exclave places. Only the `accountId` is stored:
+    the alias and the email never reach the record, a log or an audit line, and every account-pin
+    answer echoes the resolved `accountId` and email so the person can check it. `avoid` resolves
+    like `machine`, deduplicated; naming the pinned machine is refused. **`repo` under a pin** is
+    resolved by `resolveOrigin` against the pin's scope only — the pinned machine (or every
+    machine), its clones cut to the exclaves where the pinned account is signed in — so a name
+    ambiguous or absent across the fleet works as the pinned scope lists it; `avoid` narrows no
+    scope. Malformed input (no field in a pin, an empty one, a machine past
+    `TASK_SPEC_LIMITS.placement`, too many avoided machines) is refused before the relay is
+    dialled, and a named machine refuses `pin` and `avoid` with the other auto-only fields.
+  - **Account listings.** An alias needs the account records, and the relay's `account:` list
+    bucket is per socket and shared in effect with the PWA. So `AccountCache` (`daemon/src/account-cache.ts`)
+    lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
+    reopen, and only an account pin asks. `get_queue` and `list_machines` spend no listing: they
+    label an account by the email a registry entry reports, else a short id. A refused or lost
+    listing is not cached and says aliases are unavailable right now, asking for an email or id —
+    never that the account is unknown.
+  - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
+    `avoid` as nothing and place the task anywhere. Two guards, both required. At submit, a client
+    writes either field only when the verified leader's registry entry advertises
+    `CAPABILITIES.pinAccount` (else refused, naming `seanced update`, or that no verified leader
+    leads). At rest, `taskRecordAtRest` adds `pin.exclave: ""` (`PIN_SENTINEL`) to every record
+    carrying either field: an older `parsePin` refuses an empty exclave, so an older leader that
+    takes over later holds the record unreadable instead of placing it unrestricted, and every
+    re-seal goes through the same function, so the sentinel survives the leader's own writes. The
+    new parser ignores `exclave`. This replaces an "accepted window" between gate and takeover:
+    the gate alone checks only the leader of the moment.
+  - `list_machines` lists each machine's exclaves as `{ id, accountId?, email? }` (absent on a
+    machine reporting none; the relay-unreachable local fallback entry omits it, since `auto`
+    needs the relay anyway), and `get_queue` shows a task's `pin` — the machine by name where the
+    registry (or the decision's candidates) knows it plus its deviceId, the account by label plus
+    its `accountId` — and its `avoid`, each machine named where known.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -5123,8 +5175,8 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
 
 ### CLI `auto` (`daemon/src/cli-auto.ts`) — added 2026-10-25, scheduler M4
 
-`seanced spawn --auto <repo> [--here]
-[-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
+`seanced spawn --auto [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
+<repo> [--here] [-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
 MCP's `auto` (`cli-auto.ts` is only the CLI's wiring): the clone name resolves to its
 origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
 queues with no leader up, and the answer is `task <id>: queued`. The record's `client`
@@ -5135,8 +5187,12 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
 - _Spelling:_ a flag, not MCP's `machine: "auto"` as a positional — `auto` is a
   legal repo name, and `seanced spawn auto` would read as one.
 - _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
-  `prompt`; the prompt is optional, as in MCP. Model, effort, plan, pins and the
-  authoring fields are not CLI flags at all, so v1 adds none.
+  `prompt`; the prompt is optional, as in MCP. Model, effort, plan and the
+  authoring fields are not CLI flags at all, so v1 adds none. The placement flags came
+  after (2026-10-25): `--machine`, `--account` and repeatable `--not`, resolved and gated
+  exactly as MCP's `pin` and `avoid` ("`pin` and `avoid` on auto" above), with `here` for
+  this box's own deviceId. Each needs `--auto` — a direct spawn runs here, now — and a
+  value; `--machine` and `--account` are given once.
 - _Key and relay:_ the one CLI form that dials the relay, as an app with this shell's
   own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
   turns an unreachable relay into "not queued" rather than a hang. A direct

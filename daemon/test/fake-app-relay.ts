@@ -1,6 +1,8 @@
 import {
   RequestFailure,
   SCHEDULER_ID,
+  type AccountListing,
+  type AccountRecord,
   type ErrorResponse,
   type Machine,
   type QueueReply,
@@ -42,6 +44,12 @@ export interface FakeRelay extends AppRelay {
   /** What a create answers; an Error rejects, null is a reply this build cannot read. Defaults to stored. */
   onCreate: (task: Task) => Promise<TaskCreated | StoreRefusal | null> | TaskCreated | StoreRefusal | null | Error;
   setState: (next: Partial<RelayState>) => void;
+  /** The account records a listing answers with; an Error rejects, a refusal or null answers as such. */
+  accounts: readonly AccountRecord[] | StoreRefusal | null | Error;
+  /** How many `listAccounts` calls reached the fake: the relay's list floor is what the cache saves. */
+  accountLists: number;
+  /** Delivers a `store-changed` nudge to every listener, as the relay does after another client's write. */
+  storeChanged: (key: string, version: number) => void;
 }
 
 /**
@@ -69,6 +77,7 @@ export function fakeRelay(
     scheduler: { kind: "none" },
   };
   const listeners = new Set<() => void>();
+  const storeListeners = new Set<(key: string, version: number) => void>();
   const pending = new Set<(err: Error) => void>();
   const schedule = async <T>(op: SchedulerOp, payload: unknown): Promise<T | ErrorResponse> => {
     if (state.scheduler.kind === "none") throw new RequestFailure("no_leader", "no scheduler is leading");
@@ -120,6 +129,26 @@ export function fakeRelay(
     },
     queue: () => schedule<QueueReply | null>("queue", {}),
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
+    accounts: [],
+    accountLists: 0,
+    listAccounts: async (): Promise<AccountListing | StoreRefusal | null> => {
+      fake.accountLists += 1;
+      const { accounts } = fake;
+      if (accounts instanceof Error) throw accounts;
+      if (accounts === null || "ok" in accounts) return accounts;
+      return {
+        ok: true,
+        accounts: accounts.map((record) => ({ key: `account:${record.accountId}`, record })),
+        unreadable: [],
+      };
+    },
+    onStoreChanged: (listener) => {
+      storeListeners.add(listener);
+      return () => storeListeners.delete(listener);
+    },
+    storeChanged: (key, version) => {
+      for (const listener of storeListeners) listener(key, version);
+    },
   };
   return fake;
 }

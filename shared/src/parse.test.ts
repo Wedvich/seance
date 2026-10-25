@@ -45,6 +45,7 @@ import {
   parseTaskSpec,
 } from "./parse.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
+import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   BRANCH_MAX_LENGTH,
@@ -67,6 +68,7 @@ import {
   MAX_TASKS,
   OP_TIMEOUT_MS,
   QUEUE_MAX_TASKS,
+  PIN_SENTINEL,
   ROUTING_ID_MAX_LENGTH,
   SESSIONS_MAX_PROGRESS,
   STORE_CREATE_MAX_CT_LENGTH,
@@ -106,7 +108,12 @@ const exclave = { id: "default", accountId: "org:acct", extraUsageEnabled: true,
 
 async function sealedLength(task: Task): Promise<number> {
   const key = await importPsk(toBase64(new Uint8Array(32)));
-  const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+  const plain = {
+    id: crypto.randomUUID(),
+    ts: Date.now(),
+    op: "task",
+    payload: taskRecordAtRest({ version: 1, task }),
+  } as const;
   return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
 }
 
@@ -444,7 +451,8 @@ describe("parseTaskSpec", () => {
   const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it" };
   const full: TaskSpec = {
     ...request,
-    pin: { exclave: "work" },
+    pin: { deviceId: "dev-a", account: "org-1:acct-1" },
+    avoid: ["dev-b", "dev-c"],
     lineage: { deviceId: "dev-a", exclave: "default" },
     base: { deviceId: "dev-b", exclave: "work" },
     batch: { id: "batch-1", index: 2, strategy: { mode: "parallel", max: 3 } },
@@ -468,7 +476,14 @@ describe("parseTaskSpec", () => {
 
   test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
     for (const bad of [
-      { ...full, pin: { exclave: "" } },
+      { ...full, pin: { account: "" } },
+      { ...full, pin: { account: "a".repeat(TASK_SPEC_LIMITS.account + 1) } },
+      { ...full, pin: { deviceId: "has space" } },
+      { ...full, pin: "dev-a" },
+      { ...full, avoid: ["dev-b", "dev-b"] },
+      { ...full, avoid: ["has space"] },
+      { ...full, avoid: "dev-b" },
+      { ...full, avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid + 1 }, (_, i) => `dev-${i}`) },
       { ...full, lineage: { deviceId: "dev-a" } },
       { ...full, batch: { ...full.batch, id: "has space" } },
       { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
@@ -488,6 +503,25 @@ describe("parseTaskSpec", () => {
     ]) {
       expect(parseTaskSpec(bad)).toBeNull();
     }
+  });
+
+  test("an exclave in a pin is read by no one: a legacy exclave pin, or the sentinel, parses without it", () => {
+    expect(parseTaskSpec({ ...request, pin: { exclave: "work" } })).toEqual(request);
+    expect(parseTaskSpec({ ...request, pin: { deviceId: "dev-a", exclave: "work" } })?.pin).toEqual({
+      deviceId: "dev-a",
+    });
+    // Once refused as malformed; now there is nothing to refuse.
+    expect(parseTaskSpec({ ...request, pin: { exclave: "" } })).toEqual(request);
+    expect(parseTaskSpec({ ...full, pin: { ...full.pin, exclave: PIN_SENTINEL } })).toEqual(full);
+    expect(parseTaskSpec({ ...request, pin: {} })).toEqual(request);
+  });
+
+  test("an account and the avoid list are bounded, the limits themselves allowed", () => {
+    const account = "a".repeat(TASK_SPEC_LIMITS.account);
+    expect(parseTaskSpec({ ...request, pin: { account } })?.pin).toEqual({ account });
+    const avoid = Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `dev-${i}`);
+    expect(parseTaskSpec({ ...request, avoid })?.avoid).toEqual(avoid);
+    expect(parseTaskSpec({ ...request, avoid: [] })?.avoid).toEqual([]);
   });
 
   test("deps are bounded, the limit itself allowed", () => {
@@ -646,6 +680,18 @@ describe("tasks and their records", () => {
     for (const model of ["", "x".repeat(TASK_REQUEST_LIMITS.model + 1), 7, undefined]) {
       expect(parseDecision(decision({ code: "model_not_included", model }))?.candidates[0]?.rejected).toEqual([]);
     }
+  });
+
+  test("a pin mismatch names the machine or the account; an exclave one, from an older leader, drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const reasons: readonly Reason[] = [
+      { code: "pin_mismatch", field: "deviceId" },
+      { code: "pin_mismatch", field: "account" },
+      { code: "avoided" },
+    ];
+    for (const reason of reasons) expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
+    expect(parseDecision(decision({ code: "pin_mismatch", field: "exclave" }))?.candidates[0]?.rejected).toEqual([]);
   });
 
   test("a pause reads with its scope and how it lifts; a malformed one drops the reason", () => {
@@ -879,7 +925,9 @@ describe("store", () => {
       effort: "e".repeat(TASK_REQUEST_LIMITS.effort),
       plan: true,
       skill: "s".repeat(SKILL_NAME_MAX_LENGTH),
-      pin: placement,
+      // The longest account id and every avoid slot at its longest id: the sentinel rides along too.
+      pin: { deviceId: device, account: "ø".repeat(TASK_SPEC_LIMITS.account) },
+      avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
       batch: { id: crypto.randomUUID(), index: 15, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel } },

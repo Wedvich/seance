@@ -24,6 +24,18 @@ export async function accountStoreKey(accountKey: CryptoKey, accountId: string):
 }
 
 /**
+ * What an account is called to a person: its alias, else its email, else the
+ * account half of `organizationUuid:accountUuid` shortened — enough to tell two
+ * apart. Every client's one rule. Display only, never a key.
+ */
+export function accountName(accountId: string, email: string | undefined, alias?: string): string {
+  if (alias !== undefined) return alias;
+  if (email !== undefined) return email;
+  const account = accountId.split(":").at(-1) ?? accountId;
+  return `acct ${account.slice(0, 8)}`;
+}
+
+/**
  * The one place a writer builds a record. The alias is trimmed and an empty one
  * is a clear (null); null back means the alias is no name (over its bound).
  */

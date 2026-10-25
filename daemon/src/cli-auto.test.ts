@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CAPABILITIES,
   RequestFailure,
   storeErrorText,
   TASK_REQUEST_LIMITS,
   toBase64,
+  type Capability,
+  type ExclaveInfo,
   type SchedulerAvailability,
   type TaskSpec,
 } from "@seance/shared";
@@ -28,6 +31,7 @@ function scheduledRelay(scheduler: SchedulerAvailability = LEADING): ReturnType<
 async function run(
   fake: ReturnType<typeof fakeRelay>,
   args: Partial<SpawnCliArgs> = {},
+  self: () => Promise<string | null> = async () => "device-self",
 ): Promise<{ ok: boolean; text: string; audited: readonly string[] }> {
   const lazy = new LazyRelay({ create: () => fake });
   const audited: string[] = [];
@@ -38,6 +42,7 @@ async function run(
       (line) => {
         audited.push(line);
       },
+      { self },
     );
     return { ...outcome, audited };
   } finally {
@@ -184,5 +189,86 @@ describe("autoFleet", () => {
       built.fleet.stop();
     }
     expect(audited).toEqual([]);
+  });
+});
+
+describe("spawnAuto's placement flags", () => {
+  const EMAIL = "me@pengefix.no";
+  const exclaveOf = (accountId: string): ExclaveInfo => ({
+    id: "default",
+    accountId,
+    email: EMAIL,
+    extraUsageEnabled: false,
+    authOk: true,
+    skills: [],
+  });
+  const clone = { name: "seance", path: "/repos/seance", defaultBranch: "main", exclave: "default", origin: ORIGIN };
+  /** This box leads and routes on accounts; another box holds the employer account. */
+  const placingRelay = (capabilities: readonly Capability[] = [CAPABILITIES.pinAccount]) => {
+    const fake = fakeRelay([
+      machine({
+        deviceId: "device-self",
+        name: "Thad",
+        exclaves: [exclaveOf("org-a:me")],
+        repos: [clone],
+        capabilities,
+      }),
+      machine({ deviceId: "device-other", name: "WSL", exclaves: [exclaveOf("org-b:me")], repos: [clone] }),
+    ]);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-self", term: 3 } });
+    fake.accounts = [{ accountId: "org-b:me", alias: "employer", version: 1 }];
+    return fake;
+  };
+
+  test("--machine here pins this box by its deviceId, with no account listing", async () => {
+    const fake = placingRelay();
+    const { ok } = await run(fake, { machine: "here" });
+    expect(ok).toBe(true);
+    expect(fake.creates[0]?.spec.pin).toEqual({ deviceId: "device-self" });
+    expect(fake.accountLists).toBe(0);
+  });
+
+  test("--account takes an alias, stores only the accountId, and the answer names it by id and email", async () => {
+    const fake = placingRelay();
+    const { ok, text, audited } = await run(fake, { account: "employer" });
+    expect(ok).toBe(true);
+    expect(fake.creates[0]?.spec.pin).toEqual({ account: "org-b:me" });
+    expect(text).toContain(`pinned to account org-b:me (${EMAIL})`);
+    expect(JSON.stringify(fake.creates[0])).not.toContain(EMAIL);
+    expect(audited.join("\n")).not.toContain(EMAIL);
+  });
+
+  test("--not here keeps it off this box; naming the pinned machine is refused by flag", async () => {
+    const fake = placingRelay();
+    expect((await run(fake, { not: ["here", "WSL"] })).ok).toBe(true);
+    expect(fake.creates[0]?.spec.avoid).toEqual(["device-self", "device-other"]);
+    const contradiction = await run(fake, { machine: "WSL", not: ["wsl"] });
+    expect(contradiction.ok).toBe(false);
+    expect(contradiction.text).toContain(
+      "auto refused: --not names WSL (device-other), the machine the task is pinned to",
+    );
+    const unknown = await run(fake, { machine: "nope" });
+    expect(unknown.text).toContain('auto refused: --machine: no machine named "nope"');
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("--account and --not are refused unless the leader advertises pinAccount", async () => {
+    for (const args of [{ account: "employer" }, { not: ["WSL"] }]) {
+      const fake = placingRelay([]);
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const { ok, text } = await run(fake, args);
+      expect(ok).toBe(false);
+      expect(text).toContain("leader does not route on --account / --not yet");
+      expect(fake.creates).toEqual([]);
+      expect(fake.accountLists).toBe(0);
+    }
+  });
+
+  test("here without a state file is refused before the relay is dialled", async () => {
+    const fake = placingRelay();
+    const { ok, text } = await run(fake, { not: ["here"] }, async () => null);
+    expect(ok).toBe(false);
+    expect(text).toContain("`here` names this machine, which has no seanced state yet");
+    expect(fake.started).toBe(0);
   });
 });

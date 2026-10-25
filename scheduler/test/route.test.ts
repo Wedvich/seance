@@ -150,23 +150,71 @@ describe("filter", () => {
     expect(codes(candidate)).toEqual(["pressure_unknown"]);
   });
 
-  test("pin_mismatch: by machine and by exclave", () => {
-    const fleet = [
-      machine("a", {
-        exclaves: [exclave("main", "org:a"), exclave("work", "org:w")],
-        repos: [clone("app", "main"), clone("app-1", "work")],
-        status: status({ quota: [obs(0), obs(1)] }),
-      }),
-      machine("b"),
-    ];
-    const decision = decide(fleet, { task: task({ spec: spec({ pin: { deviceId: "a", exclave: "work" } }) }) });
-    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
-    const reasons = Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
-    expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "exclave" }]);
-    expect(reasons["b/main"]).toEqual([
-      { code: "pin_mismatch", field: "deviceId" },
-      { code: "pin_mismatch", field: "exclave" },
-    ]);
+  describe("the task's own restrictions", () => {
+    /** `a` holds accounts `org:a` and `org:w`; `b` and `c` hold `org:w` too, each with a clone. */
+    function fleet(): Machine[] {
+      return [
+        machine("a", {
+          exclaves: [exclave("main", "org:a"), exclave("work", "org:w")],
+          repos: [clone("app", "main"), clone("app-1", "work")],
+          status: status({ quota: [obs(0), obs(1)] }),
+        }),
+        machine("b", { exclaves: [exclave("main", "org:w")] }),
+        machine("c", { exclaves: [exclave("main", "org:w")] }),
+      ];
+    }
+    const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+      Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+
+    test("pin_mismatch by machine and by account: only the pinned account on the pinned machine is left", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ pin: { deviceId: "a", account: "org:w" } }) }) });
+      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
+      const reasons = reasonsOf(decision);
+      expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "account" }]);
+      expect(reasons["b/main"]).toEqual([{ code: "pin_mismatch", field: "deviceId" }]);
+    });
+
+    test("an account pin alone matches the account wherever it is signed in", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ pin: { account: "org:w" } }) }) });
+      const reasons = reasonsOf(decision);
+      expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "account" }]);
+      for (const where of ["a/work", "b/main", "c/main"]) expect(reasons[where]).toEqual([]);
+      expect(decision.chosen).not.toBeNull();
+      expect(decision.chosen).not.toMatchObject({ deviceId: "a", exclave: "main" });
+    });
+
+    test("an exclave signed in to no account never matches an account pin", () => {
+      const signedOut = machine("a", { exclaves: [exclave("main", null)] });
+      const candidate = only(decide([signedOut], { task: task({ spec: spec({ pin: { account: "org:a" } }) }) }));
+      expect(candidate.rejected).toContainEqual({ code: "pin_mismatch", field: "account" });
+    });
+
+    test("avoided: every exclave of an avoided machine is turned away, the rest are judged as before", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ avoid: ["a", "b"] }) }) });
+      const reasons = reasonsOf(decision);
+      for (const where of ["a/main", "a/work", "b/main"]) expect(reasons[where]).toEqual([{ code: "avoided" }]);
+      expect(reasons["c/main"]).toEqual([]);
+      expect(decision.chosen?.deviceId).toBe("c");
+    });
+
+    test("a pin and an avoid list together: each candidate carries every restriction it breaks", () => {
+      const restricted = spec({ pin: { deviceId: "a", account: "org:w" }, avoid: ["b"] });
+      const decision = decide(fleet(), { task: task({ spec: restricted }) });
+      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
+      expect(reasonsOf(decision)["b/main"]).toEqual([{ code: "pin_mismatch", field: "deviceId" }, { code: "avoided" }]);
+    });
+
+    test("avoiding every machine leaves nothing to choose: the task waits", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ avoid: ["a", "b", "c"] }) }) });
+      expect(decision.chosen).toBeNull();
+      expect(decision.candidates.every((c) => c.rejected.some((r) => r.code === "avoided"))).toBe(true);
+    });
+
+    test("unrestricted, the same fleet is judged with no restriction reason at all", () => {
+      const decision = decide(fleet());
+      expect(decision.candidates.every((c) => c.rejected.length === 0)).toBe(true);
+      expect(decision.chosen).not.toBeNull();
+    });
   });
 
   test("repo_absent: an exclave with no clone of the task's origin, whatever the local name", () => {

@@ -84,6 +84,40 @@ describe("parseSpawnArgs", () => {
     // `-p` takes the next word as given, so a prompt that reads like the flag stays a prompt.
     expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
   });
+
+  test("--machine, --account and repeatable --not ride --auto, each taking the next word", () => {
+    expect(
+      parseSpawnArgs([
+        "--auto",
+        "--machine",
+        "here",
+        "seance",
+        "--account",
+        "me@pengefix.no",
+        "--not",
+        "wsl",
+        "--not",
+        "here",
+        "go",
+      ]),
+    ).toEqual({
+      repo: "seance",
+      here: false,
+      auto: true,
+      prompt: "go",
+      machine: "here",
+      account: "me@pengefix.no",
+      not: ["wsl", "here"],
+    });
+  });
+
+  test("a placement flag without --auto, without a value, or given twice is a usage error", () => {
+    expect(() => parseSpawnArgs(["seance", "--machine", "wsl"])).toThrow("--machine, --account and --not need --auto");
+    expect(() => parseSpawnArgs(["seance", "--not", "wsl"])).toThrow("need --auto");
+    expect(() => parseSpawnArgs(["--auto", "seance", "--account"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--auto", "seance", "--machine", "a", "--machine", "b"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--auto", "seance", "--account", "a", "--account", "b"])).toThrow("usage:");
+  });
 });
 
 describe("parseInstallArgs", () => {

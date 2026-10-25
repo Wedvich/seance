@@ -142,7 +142,7 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const lacking = (r: RepoEntry | undefined): string | undefined =>
     skills.find((s) => !exclave.skills.includes(s) && r?.skills?.includes(s) !== true);
   const clone = clones.find((r) => lacking(r) === undefined) ?? clones[0];
-  const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
+  const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, exclave)];
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
@@ -314,13 +314,15 @@ function knownSkills(task: Task, machines: readonly Machine[]): readonly string[
   return [...new Set(skillCandidates(task).filter(known))];
 }
 
-function pinFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
-  const pin = task.spec.pin;
+/** The task's own restrictions: its pin, and the machines it avoids. An exclave signed in to no account matches no account pin. */
+function placementFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
+  const { pin, avoid } = task.spec;
   const reasons: Reason[] = [];
   if (pin?.deviceId !== undefined && pin.deviceId !== machine.deviceId)
     reasons.push({ code: "pin_mismatch", field: "deviceId" });
-  if (pin?.exclave !== undefined && pin.exclave !== exclave.id)
-    reasons.push({ code: "pin_mismatch", field: "exclave" });
+  if (pin?.account !== undefined && pin.account !== exclave.accountId)
+    reasons.push({ code: "pin_mismatch", field: "account" });
+  if (avoid?.includes(machine.deviceId) === true) reasons.push({ code: "avoided" });
   return reasons;
 }
 
