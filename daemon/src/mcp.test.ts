@@ -1372,10 +1372,38 @@ describe("resolvePlacement", () => {
 
   test("a failed listing says aliases are unavailable and asks for an email or id, which still resolve", async () => {
     const error = await refused({ account: "employer" }, null);
-    expect(error).toContain("aliases are unavailable right now");
+    expect(error).toContain("aliases unavailable: the account listing is unavailable right now");
     expect(error).toContain("give the account's email or id");
     expect(error).not.toContain("no account");
     expect((await placed({ account: EMPLOYER }, null)).fields).toEqual({ pin: { account: EMPLOYER } });
+  });
+
+  test("a stale record holding a live account's alias does not make it ambiguous", async () => {
+    const records = [...ALIASES, { accountId: "org-c:gone", alias: "employer", version: 1 }];
+    expect((await placed({ account: "employer" }, records)).fields).toEqual({ pin: { account: EMPLOYER } });
+    // With no live match the alias still names an account signed in nowhere.
+    expect(await refused({ account: "old" }, records)).toContain("which no machine reports signed in");
+  });
+
+  test("an account matches any email a machine reports for it", async () => {
+    const mixed = [
+      machine({ deviceId: "device-a", name: "A", exclaves: [{ ...exclave("default"), email: "first@a.no" }] }),
+      machine({ deviceId: "device-b", name: "B", exclaves: [{ ...exclave("default"), email: "second@a.no" }] }),
+    ];
+    for (const email of ["first@a.no", "SECOND@a.no"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      const resolved = await resolvePlacement(mixed, listed().accounts, { account: email });
+      expect(resolved).toMatchObject({ fields: { pin: { account: "org:default" } } });
+    }
+  });
+
+  test("avoid covering every machine signed in to the pinned account is refused", async () => {
+    const error = await refused({ account: "employer", avoid: ["Thad", "Mac"] });
+    expect(error).toContain(`avoid covers every machine signed in to account ${EMPLOYER} (Thad, Mac)`);
+    expect((await placed({ account: "employer", avoid: ["Thad"] })).fields).toEqual({
+      pin: { account: EMPLOYER },
+      avoid: ["device-thad"],
+    });
   });
 
   test("avoid stores deviceIds once each; naming the pinned machine or an unknown one is refused, avoiding all others is not", async () => {
@@ -1489,7 +1517,7 @@ describe("spawn_session on auto, pinned", () => {
     fake.accounts = { ok: false, code: "rate_limited" };
     const alias = await callAuto(fake, { repo: HQ, pin: { account: "personal" } });
     expect(alias.error).toBe(true);
-    expect(alias.text).toContain("aliases are unavailable right now");
+    expect(alias.text).toContain("aliases unavailable: the account listing is unavailable right now");
     expect(alias.text).toContain("give the account's email or id");
     const byId = await callAuto(fake, { repo: HQ, pin: { account: PERSONAL } });
     expect(byId.error).toBe(false);
@@ -1539,6 +1567,8 @@ describe("spawn_session on auto, pinned", () => {
     const fake = pinRelay();
     const cases: [Record<string, unknown>, string][] = [
       [{ pin: {} }, "pin names neither a machine nor an account"],
+      [{ pin: { exclave: "work" } }, "exclave pins are gone — pin an account"],
+      [{ pin: { account: "personal", exclave: "work" } }, "exclave pins are gone — pin an account"],
       [{ pin: { machine: "" } }, "pin.machine is empty"],
       [{ pin: { machine: "m".repeat(65) } }, "pin.machine is 65 characters; at most 64"],
       [{ pin: { account: " " } }, "pin.account is empty"],
@@ -1723,6 +1753,32 @@ describe("queue_batch", () => {
     expect(text).toContain("queue_batch failed at task 2 of 3");
     expect(text).toContain(`already queued: ${fake.creates[0]?.id}`);
     expect(text).toContain(storeErrorText("store_full"));
+  });
+
+  test("a failed create keeps the account echoes of the members that had queued, and none for those that had not", async () => {
+    const fake = pinRelay();
+    fake.onCreate = () =>
+      fake.creates.length === 2 ? { ok: false, code: "store_full" } : { ok: true, landedEarlier: false };
+    const { text, error } = await callTool(fake, "queue_batch", {
+      strategy: "sequential",
+      tasks: [
+        { repo: HQ, prompt: "a", pin: { account: "personal" } },
+        { repo: HQ, prompt: "b" },
+        { repo: HQ, prompt: "c", pin: { account: "personal" } },
+      ],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("queue_batch failed at task 2 of 3");
+    expect(text).toContain(`task 1: pinned to account ${PERSONAL} (${EMAIL})`);
+    expect(text).not.toContain("task 3: pinned");
+  });
+
+  test("a failed auto create does not claim the task was pinned", async () => {
+    const fake = pinRelay();
+    fake.onCreate = () => ({ ok: false, code: "store_full" });
+    const answer = await callAuto(fake, { repo: HQ, pin: { account: "personal" } });
+    expect(answer.error).toBe(true);
+    expect(answer.text).not.toContain("pinned to account");
   });
 
   test("reported tasks need a leader that advertises them, as spawn_session does", async () => {

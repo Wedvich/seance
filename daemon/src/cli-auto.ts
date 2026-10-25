@@ -145,7 +145,7 @@ export async function spawnAuto(
     const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`auto refused: ${longOrigin}`);
     const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli");
-    return placed.echo === null ? enqueued : { ...enqueued, text: `${enqueued.text}\n${placed.echo}` };
+    return placed.echo === null || !enqueued.ok ? enqueued : { ...enqueued, text: `${enqueued.text}\n${placed.echo}` };
   } finally {
     lease.release();
   }

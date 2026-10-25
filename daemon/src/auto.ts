@@ -184,10 +184,10 @@ interface AccountMatch {
   readonly accountId: string;
 }
 
-/** Each account a registry entry reports signed in, with where and the email it reports (display only). */
+/** Each account a registry entry reports signed in, with where and every email a machine reports for it. */
 interface SignedIn {
   readonly places: string[];
-  email: string | undefined;
+  readonly emails: Set<string>;
 }
 
 function signedInAccounts(machines: readonly Machine[]): ReadonlyMap<string, SignedIn> {
@@ -195,9 +195,9 @@ function signedInAccounts(machines: readonly Machine[]): ReadonlyMap<string, Sig
   for (const machine of machines) {
     for (const exclave of machine.exclaves ?? []) {
       if (exclave.accountId === null) continue;
-      const held = accounts.get(exclave.accountId) ?? { places: [], email: undefined };
+      const held = accounts.get(exclave.accountId) ?? { places: [], emails: new Set<string>() };
       held.places.push(`${machine.name}/${exclave.id}`);
-      held.email ??= exclave.email;
+      if (exclave.email) held.emails.add(exclave.email);
       accounts.set(exclave.accountId, held);
     }
   }
@@ -216,7 +216,7 @@ function describeAccount(
 ): string {
   const alias = records?.find((r) => r.accountId === accountId)?.alias ?? null;
   const held = signedIn.get(accountId);
-  const named = [alias === null ? null : `alias "${alias}"`, held?.email ?? null].filter((n) => n !== null);
+  const named = [alias === null ? null : `alias "${alias}"`, ...(held?.emails ?? [])];
   const where = held === undefined ? "signed in nowhere" : `on ${held.places.join(", ")}`;
   return `${accountId} (${[...named, where].join(", ")})`;
 }
@@ -253,14 +253,19 @@ export function resolveAccount(
     }
     return { accountId: only };
   };
-  const byAlias = (records ?? []).filter((r) => r.alias?.trim().toLowerCase() === wanted).map((r) => r.accountId);
-  const byEmail = [...signedIn].filter(([, held]) => held.email?.toLowerCase() === wanted).map(([id]) => id);
+  const aliased = (records ?? []).filter((r) => r.alias?.trim().toLowerCase() === wanted).map((r) => r.accountId);
+  // A stale record holding the alias must not make a live one ambiguous: narrow to signed-in accounts first.
+  const live = aliased.filter((id) => signedIn.has(id));
+  const byAlias = live.length > 0 ? live : aliased;
+  const byEmail = [...signedIn]
+    .filter(([, held]) => [...held.emails].some((email) => email.toLowerCase() === wanted))
+    .map(([id]) => id);
   const byId = signedIn.has(input.trim()) || records?.some((r) => r.accountId === input.trim()) === true;
   const found = pick(byAlias, "alias") ?? pick(byEmail, "email") ?? (byId ? pick([input.trim()], "id") : null);
   if (found !== null) return found;
   if (records === null) {
     return {
-      error: `${name}: aliases are unavailable right now (the relay did not answer the account listing), and "${input}" is not an email or id a machine reports — give the account's email or id: ${listAccounts(signedIn, null)}`,
+      error: `${name}: aliases unavailable: the account listing is unavailable right now, and "${input}" is not an email or id a machine reports — give the account's email or id: ${listAccounts(signedIn, null)}`,
     };
   }
   return { error: `${name}: no account "${input}" — the fleet's accounts: ${listAccounts(signedIn, records)}` };
@@ -323,8 +328,8 @@ export async function resolvePlacement(
         error: `${names.account}: ${describeAccount(account, signedIn, records)} is signed in on no exclave of ${target.name} (${target.deviceId})`,
       };
     }
-    const email = signedIn.get(account)?.email;
-    echo = `pinned to account ${account} (${email ?? "no email reported"})`;
+    const emails = [...(signedIn.get(account)?.emails ?? [])];
+    echo = `pinned to account ${account} (${emails.length === 0 ? "no email reported" : emails.join(", ")})`;
   }
   const avoid: string[] = [];
   for (const ref of input.avoid ?? []) {
@@ -340,6 +345,14 @@ export async function resolvePlacement(
   }
   if (avoid.length > TASK_SPEC_LIMITS.avoid) {
     return { error: `${names.avoid} names ${avoid.length} machines; a task avoids at most ${TASK_SPEC_LIMITS.avoid}` };
+  }
+  if (account !== undefined) {
+    const reporting = machines.filter((m) => (m.exclaves ?? []).some((x) => x.accountId === account));
+    if (reporting.length > 0 && reporting.every((m) => avoid.includes(m.deviceId))) {
+      return {
+        error: `${names.avoid} covers every machine signed in to account ${account} (${reporting.map((m) => m.name).join(", ")}), so auto could never place it`,
+      };
+    }
   }
   // Strict, as the scheduler's clone match is: a clone from a daemon predating exclaves is in no account.
   const inAccount = (machine: Machine): Machine => {

@@ -118,6 +118,8 @@ export function isLocalRef(local: LocalMachine, ref: string): boolean {
 interface PinInput {
   readonly machine?: string | undefined;
   readonly account?: string | undefined;
+  /** Only to refuse it: the exclave pin is gone, and zod would otherwise strip the key without a word. */
+  readonly exclave?: unknown;
 }
 
 /** `pin` and `avoid` as one placement, refused before anything dials the relay when malformed. */
@@ -125,10 +127,17 @@ function placementInput(
   pin: PinInput | undefined,
   avoid: readonly string[] | undefined,
 ): { readonly input: PlacementInput } | { readonly error: string } {
+  if (pin !== undefined && "exclave" in pin) {
+    return { error: "exclave pins are gone — pin an account (list_machines shows each exclave's account)" };
+  }
   if (pin !== undefined && pin.machine === undefined && pin.account === undefined) {
     return { error: "pin names neither a machine nor an account" };
   }
-  const input: PlacementInput = { ...pin, ...(avoid === undefined ? {} : { avoid }) };
+  const input: PlacementInput = {
+    machine: pin?.machine,
+    account: pin?.account,
+    ...(avoid === undefined ? {} : { avoid }),
+  };
   const invalid = placementInputError(input);
   return invalid === null ? { input } : { error: invalid };
 }
@@ -474,6 +483,8 @@ const PIN_FIELD = z
         "A Claude account: its alias (as the PWA names it), its email, or its accountId (organization:account) — list_machines lists each exclave's accountId and email. Only an account some machine reports signed in is taken; the task stores its accountId, never the alias or email",
       ),
   })
+  // Loose so a stale `exclave` key reaches `placementInput` and is refused, not stripped.
+  .loose()
   .optional()
   .describe(
     'Machine "auto" only: restrict where the scheduler may place the task — to one machine, one account, or both; give at least one. An unknown machine, a name two machines share, an account no machine (or not the pinned one) reports signed in, or an alias or email two accounts share is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine (or the account\'s clones) list it, or by origin',
@@ -896,8 +907,8 @@ export function buildMcpServer(
           const longOrigin = specError(resolvedSpec);
           if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
           const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp");
-          const text = resolved.echo === null ? enqueued.text : `${enqueued.text}\n${resolved.echo}`;
-          return enqueued.ok ? textResult(text) : errorResult(text);
+          if (!enqueued.ok) return errorResult(enqueued.text);
+          return textResult(resolved.echo === null ? enqueued.text : `${enqueued.text}\n${resolved.echo}`);
         });
       }
       // `until: "merged"` and an empty `after` are the defaults, which a named machine honours trivially.
@@ -1090,12 +1101,12 @@ export function buildMcpServer(
         }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
         const resolvedPlan: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
-        const echoes: string[] = [];
+        const echoes: { readonly task: number; readonly text: string }[] = [];
         for (const [i, member] of planned.entries()) {
           // oxlint-disable-next-line no-await-in-loop -- the account cache lists once; later members read what it holds
           const resolved = await autoTarget(leg, member.spec.repo, member.placement);
           if ("error" in resolved) return errorResult(`queue_batch refused: task ${i + 1}: ${resolved.error}`);
-          if (resolved.echo !== null) echoes.push(`task ${i + 1}: ${resolved.echo}`);
+          if (resolved.echo !== null) echoes.push({ task: i + 1, text: `task ${i + 1}: ${resolved.echo}` });
           const spec: AutoSpec = { ...member.spec, ...resolved.fields };
           const invalid = specError(spec);
           if (invalid !== null) {
@@ -1112,8 +1123,12 @@ export function buildMcpServer(
           const enqueued = await enqueueAuto(lease.scheduler, member.spec, audit, "mcp", member.id);
           if (!enqueued.ok) {
             const queued = landed.length === 0 ? "none had queued" : `already queued: ${landed.join(", ")}`;
+            const pinned = echoes.filter(({ task }) => task <= landed.length).map(({ text }) => text);
             return errorResult(
-              `queue_batch failed at task ${i + 1} of ${resolvedPlan.length} (${queued}; cancel_task takes them out if the batch is unwanted) — ${enqueued.text}`,
+              [
+                `queue_batch failed at task ${i + 1} of ${resolvedPlan.length} (${queued}; cancel_task takes them out if the batch is unwanted) — ${enqueued.text}`,
+                ...pinned,
+              ].join("\n"),
             );
           }
           landed.push(member.id);
@@ -1121,7 +1136,7 @@ export function buildMcpServer(
         const lines = [
           `batch ${batchId}: ${resolvedPlan.length} tasks queued (${describeStrategy(shared.strategy)})`,
           ...resolvedPlan.map(({ id, ref }, i) => `task ${i + 1}${ref === undefined ? "" : ` (${ref})`}: ${id}`),
-          ...echoes,
+          ...echoes.map(({ text }) => text),
           "The scheduler places them as capacity and their dependencies allow; get_queue shows where each lands and why, and cancel_task takes one out.",
         ];
         if (schedulerRefusal(lease.scheduler.availability()) !== null) {
