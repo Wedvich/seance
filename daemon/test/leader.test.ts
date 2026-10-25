@@ -1256,6 +1256,141 @@ describe("leader push", () => {
     }
   });
 
+  const unsubscribe = async (
+    leader: Leader,
+    replies: AsyncQueue<{ readonly to: string; readonly response: Plain }>,
+    payload: unknown,
+  ): Promise<unknown> => {
+    leader.deliver(await appRequest("push-unsubscribe", payload));
+    return (await replies.next()).response.payload;
+  };
+
+  test("push-unsubscribe removes a held endpoint, keeps the others, and audits the request id only", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings([sub("one"), sub("two"), sub("three")]);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await pollUntil(async () => {
+          const answer = await unsubscribe(leader, replies, { endpoint: sub("two").endpoint });
+          return !(isRecord(answer) && answer["code"] === "not_ready");
+        }, "the settings to load");
+        expect(settings.subscriptions()).toEqual([sub("one"), sub("three")]);
+        expect(settings.puts).toHaveLength(1);
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audit = lines.filter((line) => line.includes("op=push-unsubscribe"));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatch(/audit queue origin=relay op=push-unsubscribe id="?[\w-]+"? ok$/u);
+    expect(lines.some((line) => line.includes("fcm.googleapis.com") || line.includes("/fcm/send/"))).toBe(false);
+  });
+
+  test("an endpoint the record does not hold answers its endpoint and writes nothing; a malformed one is invalid_request", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings([sub("one")]);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      const gone = sub("gone").endpoint;
+      await pollUntil(async () => {
+        const answer = await unsubscribe(leader, replies, { endpoint: gone });
+        return isRecord(answer) && answer["endpoint"] === gone;
+      }, "the settings to load");
+      expect(settings.puts).toEqual([]);
+      for (const bad of [
+        { endpoint: sub("x", "example.com").endpoint },
+        { endpoint: `${sub("x").endpoint}${"e".repeat(1024)}` },
+        { endpoint: 7 },
+        sub("one").endpoint,
+        null,
+      ]) {
+        // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+        expect(await unsubscribe(leader, replies, bad)).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+      // A daemon's request is an event, never an unsubscribe.
+      leader.deliver(await appRequest("push-unsubscribe", { endpoint: sub("one").endpoint }, "remote"));
+      await Bun.sleep(100);
+      expect(replies.size).toBe(0);
+      expect(settings.puts).toEqual([]);
+      expect(settings.subscriptions()).toEqual([sub("one")]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a refused push-unsubscribe answers as push-subscribe's would, audited under its reply's code", async () => {
+    const lost = async (code: "version_conflict" | "store_full"): Promise<SettingsWrite> => ({ ok: false, code });
+    const cases: readonly { readonly code: string; readonly wrap: (inner: SettingsStore) => SettingsStore }[] = [
+      { code: "internal_error", wrap: (inner) => ({ ...inner, put: () => lost("store_full") }) },
+      { code: "conflict", wrap: (inner) => ({ ...inner, put: () => lost("version_conflict") }) },
+      {
+        code: "settings_unavailable",
+        wrap: (inner) => {
+          let reads = 0;
+          return {
+            put: () => lost("version_conflict"),
+            get: () => (reads++ === 0 ? inner.get() : Promise.resolve(null)),
+          };
+        },
+      },
+      {
+        code: "settings_unavailable",
+        wrap: () => ({
+          get: () => Promise.resolve({ version: 3, reason: "unopenable" }),
+          put: () => Promise.reject(new Error("must not write")),
+        }),
+      },
+    ];
+    for (const { code, wrap } of cases) {
+      const relay = startTestRelay(TOKEN);
+      // oxlint-disable-next-line no-await-in-loop -- one term per case
+      const settings = await heldSettings([sub("held")]);
+      const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, wrap(settings.store));
+      // oxlint-disable-next-line no-await-in-loop -- one term per case
+      const lines = await captureLog(async () => {
+        try {
+          leader.lead(1);
+          await leader.settled();
+          await pollUntil(async () => {
+            const answer = await unsubscribe(leader, replies, { endpoint: sub("held").endpoint });
+            return isRecord(answer) && answer["code"] === code;
+          }, `the ${code} answer`);
+        } finally {
+          leader.stop();
+          relay.stop();
+        }
+      });
+      const audit = lines.filter((line) => line.includes("op=push-unsubscribe"));
+      expect(audit.length).toBeGreaterThan(0);
+      for (const line of audit) expect(line).toEndWith(`refused code=${code}`);
+      expect(lines.some((line) => line.includes("/fcm/send/"))).toBe(false);
+    }
+
+    const slowRelay = startTestRelay(TOKEN);
+    const slow = leaderOver(slowRelay, new MemoryQueueStore(), undefined, undefined, {
+      get: () => Promise.withResolvers<SettingsRead>().promise,
+      put: () => Promise.reject(new Error("must not write")),
+    });
+    try {
+      slow.leader.lead(1);
+      await slow.leader.settled();
+      expect(await unsubscribe(slow.leader, slow.replies, { endpoint: sub("x").endpoint })).toMatchObject({
+        ok: false,
+        code: "not_ready",
+      });
+    } finally {
+      slow.leader.stop();
+      slowRelay.stop();
+    }
+  });
+
   test("an alert raised while the settings are still being read is pushed once they load, not lost", async () => {
     const relay = startTestRelay(TOKEN);
     const push = startPushEndpoint();
