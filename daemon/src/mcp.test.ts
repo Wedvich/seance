@@ -1507,9 +1507,9 @@ describe("spawn_session on auto, pinned", () => {
   test("placement errors name machine, not pin.machine, when the top-level field was given", async () => {
     const unknown = await callAuto(pinRelay(), { machine: "nope", repo: "pengefix-hq" });
     expect(unknown.error).toBe(true);
-    expect(unknown.text).toStartWith("machine: ");
+    expect(unknown.text).toStartWith("spawn refused: machine: ");
     const exclaveless = await callAuto(leaderRelay(), { machine: "device-1", repo: "seance" });
-    expect(exclaveless.text).toStartWith("machine: MacBook Pro (device-1) reports no exclaves");
+    expect(exclaveless.text).toStartWith("spawn refused: machine: MacBook Pro (device-1) reports no exclaves");
   });
 
   test("queue_batch places each member on its own, and one bad pin refuses the batch before the first create", async () => {

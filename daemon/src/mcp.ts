@@ -935,7 +935,7 @@ export function buildMcpServer(
         const gate = placementNeedsPinAccount(placement.input) ? pinAccountGateError(leg, "pin.account / avoid") : null;
         if (gate !== null) return errorResult(gate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
-        if ("error" in resolved) return errorResult(resolved.error);
+        if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
         // The origin a clone name resolved to is what the leader bounds, not the name.
         const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
         const longOrigin = specError(resolvedSpec);
