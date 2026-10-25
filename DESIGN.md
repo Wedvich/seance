@@ -525,7 +525,11 @@ Séance's noise is cover for a real intruder.
    push subscriptions and the Linear key, are as readable as a prompt is. A thief leader
    (above) can overwrite the record inside its term — the other leaders' floor stops only a
    rollback — which would orphan every subscription; the same class as its queue writes,
-   accepted, and the remedy is the one above.
+   accepted, and the remedy is the one above. It can also write a junk `settings:main` (one no
+   build opens): every later leader reads it as unusable and never replaces it, and settings
+   deletes are refused, so push stays off for good. The remedy above removes the thief but not
+   the record, so it does not bring push back; recorded under the Settings record's residual, as
+   a gap with no repair path yet.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -1074,8 +1078,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                       | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                   |
 | op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                            | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                       |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                         | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
-| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
-| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                    | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
+| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes                                                | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
+| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                    | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                           |
 | `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                        | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                                              | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
@@ -2140,7 +2144,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     written, and one warning per term names the reason, never the content. The one repair of
     an existing record is one with no `vapid` at all (a Linear-only record, which no writer
     makes yet), given a key at its own version. A read that fails or a create whose answer was
-    lost is no verdict: the term's tick tries it again, one warning per outage.
+    lost is no verdict: the term's tick tries it again, one warning per outage, backing off (the
+    gap doubles per failure, up to about five minutes).
   - **Held to the version floor** (_The queue store_, "The version floor"): a `settings` slot,
     raised by reads and by the leader's own write.
   - **Never logged.** `settings-store.ts` makes no log call; the record, its `env` and `ct`
@@ -2152,11 +2157,17 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     writing: `push-subscribe` (Web Push) is the first settings op from an app, and the Linear
     key's write, parser and UI belong to the Linear item, which round-trips through the
     record's `linearKey` untouched.
+  - **Accepted:** the one repair write (a record that parses but has no `vapid`) is rebuilt from
+    the parsed record, so a field a newer build added and this build's parser drops is lost with
+    it.
   - **Residual, with no repair path yet:** rotating the PSK leaves `settings:main` `unopenable`,
-    and a relay that lost its storage leaves it `version_regressed` on every leader whose floor
-    saw it, so push stays off there until an operator path exists (settings deletes are `never`
-    and the leader never overwrites a record it cannot read); a leader whose floor never saw it
-    creates a new keypair. Offered as a follow-up, not built.
+    and so does a junk record a leader-capture thief wrote (Threat model, item 3), which no
+    leader ever replaces: push stays off until an operator path exists (settings deletes are
+    `never` and the leader never overwrites a record it cannot read). A relay that lost its
+    storage leaves the record `version_regressed` on every leader whose floor saw it, the same
+    way. A leader that never saw a settings record recreates it, and in this build the record
+    exists only at version 1: it gets a new VAPID pair, leaders whose floor is 1 accept that
+    silently, and the PWAs subscribe again. Offered as a follow-up, not built.
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL with its `sessions` check unanswered and its
   machine not connected, or 15 minutes past its TTL with every check failing on a machine that
@@ -2899,7 +2910,7 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   confirmed delete sets the floor one past the deleted version, so any record there reads
   regressed; a delete whose answer was lost lets the next null read count as it landing.
   The **settings slot** (`settings`, `createSettingsStore`) is a floor beside the pause's, in the
-  same file and absent at 0, so the file is byte-identical for a daemon that never led: raised by
+  same file and absent at 0, so the file is byte-identical for a leader that never saw a settings record: raised by
   a read and by the leader's own write; below it a record reads `version_regressed`, and missing
   once one was seen reads the same, so push is off for the term. Unlike the pause's, a settings
   write only raises it, since no settings write is a way back from a rolled-back record. `v`
