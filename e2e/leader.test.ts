@@ -1,12 +1,23 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { SessionEntry } from "@seance/shared";
+import {
+  AT_REST_OPS,
+  openAtRest,
+  parseSettingsRecord,
+  parseStoreReply,
+  SCHEDULER_ID,
+  SETTINGS_KEY,
+  STORE_TIMEOUT_MS,
+  type SessionEntry,
+  type SettingsRecord,
+} from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { killWindow, listRegisteredWindows, listWindows, startApp, type SecondDaemon, type Stack } from "./harness.ts";
+import { connectApp } from "../relay/test/harness.ts";
 import { fixtureOrigin, q, startSuite, watchLeader, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
@@ -396,4 +407,65 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
       audit.mockRestore();
     }
   }, 60_000);
+});
+
+describe("settings record: the leader's term creates it, and no later term replaces it", () => {
+  /** What an app's `store-get` of `settings:main` opens to, as any PSK holder reads it. */
+  const readSettings = async (): Promise<{ readonly version: number; readonly record: SettingsRecord } | null> => {
+    const app = await connectApp(stack.relay);
+    try {
+      const id = crypto.randomUUID();
+      app.send({ t: "store-get", id, key: SETTINGS_KEY });
+      const reply = parseStoreReply(await app.waitForRe<{ re: string }>(id, STORE_TIMEOUT_MS));
+      if (reply?.t !== "store-record") throw new Error(`store-get answered ${JSON.stringify(reply)}`);
+      if (reply.record === null) return null;
+      expect(reply.record.env.to).toBe(SCHEDULER_ID);
+      const opened = await openAtRest(stack.appKey, reply.record.env, AT_REST_OPS.settings);
+      const record = parseSettingsRecord(opened.payload);
+      if (record === null) throw new Error("the settings record does not parse");
+      return { version: reply.record.version, record };
+    } finally {
+      app.close();
+    }
+  };
+
+  test("a term with no record creates one with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
+    const lines: string[] = [];
+    const out = spyOn(console, "log").mockImplementation((...args) => void lines.push(args.join(" ")));
+    const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
+    try {
+      await stack.restartDaemon();
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      // Created beside takeover, not before it.
+      await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
+      const created = await readSettings();
+      expect(created?.version).toBe(1);
+      expect(created?.record.version).toBe(1);
+      const publicKey = created?.record.vapid?.publicKey ?? "";
+      const privateKey = created?.record.vapid?.privateKey ?? "";
+      expect(publicKey).toHaveLength(87);
+
+      // A new term on the same relay: it reads the record, whose floor it already holds.
+      const term = stack.daemon.leader.term();
+      await stack.restartDaemon();
+      await pollUntil(
+        () => stack.daemon.leader.term() !== null && stack.daemon.leader.term() !== term,
+        "a later term",
+        10_000,
+      );
+      await stack.daemon.leader.settled();
+      // A sleep is right before a negative assertion: a write that never happened cannot be polled.
+      await Bun.sleep(500);
+      const again = await readSettings();
+      expect(again?.version).toBe(1);
+      expect(again?.record.vapid?.publicKey).toBe(publicKey);
+
+      expect(lines.some((line) => line.includes("settings unavailable"))).toBe(false);
+      expect(lines.some((line) => line.includes(publicKey) || line.includes(privateKey))).toBe(false);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+  }, 30_000);
 });

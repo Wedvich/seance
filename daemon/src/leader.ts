@@ -32,6 +32,8 @@ import { log } from "./log.ts";
 import { startPrPoller, type PrPollerOpts } from "./pr-status.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
 import type { Fetch } from "./seams.ts";
+import { createTermSettings, type TermSettings } from "./settings.ts";
+import { createSettingsStore, type SettingsStore } from "./settings-store.ts";
 import type { VersionFloor } from "./version-floor.ts";
 
 /**
@@ -91,8 +93,19 @@ export interface LeaderRelay extends AppRelay {
  * default — a leader that fell back to memory silently would lose its queue.
  */
 export type LeaderStore =
-  | { readonly store: QueueStore; readonly storeLeg?: undefined; readonly key?: undefined }
-  | { readonly storeLeg: StoreLeg; readonly key: CryptoKey; readonly store?: undefined };
+  | {
+      readonly store: QueueStore;
+      /** The settings record's store, for a test that wants one; absent, the term has no settings. */
+      readonly settings?: SettingsStore;
+      readonly storeLeg?: undefined;
+      readonly key?: undefined;
+    }
+  | {
+      readonly storeLeg: StoreLeg;
+      readonly key: CryptoKey;
+      readonly store?: undefined;
+      readonly settings?: undefined;
+    };
 
 export type LeaderOpts = LeaderBaseOpts & LeaderStore;
 
@@ -406,6 +419,43 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   const isLive = (): boolean => live;
   const store =
     opts.store !== undefined ? opts.store : createQueueStore({ leg: opts.storeLeg, key: opts.key, term, now });
+  // Settings (the VAPID pair, later push subscriptions) are optional: a fault there never touches the queue.
+  const settingsStore: SettingsStore | null =
+    opts.store !== undefined
+      ? (opts.settings ?? null)
+      : createSettingsStore({
+          leg: opts.storeLeg,
+          key: opts.key,
+          term,
+          live: isLive,
+          ...(opts.floor === undefined ? {} : { floor: opts.floor }),
+          revoked: (why) => new StoreRevoked(why),
+        });
+  const settings: TermSettings | null =
+    settingsStore === null ? null : createTermSettings({ store: settingsStore, term, log });
+  // Set when a read or an unconfirmed write left the record undecided: the tick tries again.
+  let settingsRetry = false;
+  let settingsLoading = false;
+  const loadSettings = (): void => {
+    if (settings === null || settingsLoading || !live) return;
+    settingsLoading = true;
+    settings.load().then(
+      () => {
+        settingsLoading = false;
+        settingsRetry = false;
+      },
+      (err: unknown) => {
+        settingsLoading = false;
+        if (err instanceof StoreRevoked) {
+          fail(err);
+          return;
+        }
+        // Once per outage. The text is the store adapter's own (a frame type and a refusal code), never a record's.
+        if (!settingsRetry) log.warn(`scheduler: term ${term} could not load its settings, retrying: ${String(err)}`);
+        settingsRetry = true;
+      },
+    );
+  };
   const scheduler = new Scheduler({
     store: watched(
       fencedStore(opts.floor === undefined ? store : flooredStore(store, opts.floor), term, isLive),
@@ -483,6 +533,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     // timeout whatever it finds, so a relay that answers nothing holds no term.
     await relay.refreshFleetQuota();
     if (!live) return;
+    // Beside takeover, never ahead of it: push is optional, the queue is not.
+    loadSettings();
     // The relay still names this daemon leader, so a takeover that failed is
     // retried rather than left as a term that holds the role and runs nothing.
     for (;;) {
@@ -516,6 +568,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       // its stamp, and no `store-changed` will say so: re-read it on the timer, one get each, and
       // not on every push's tick.
       for (const entry of scheduler.unreadable()) if (entry.reason === "created_ahead") changed.add(entry.id);
+      if (settingsRetry) loadSettings();
       tick();
     }, intervalMs);
     // Only after takeover's load: the poller reads the held tasks and writes through the term's fenced store.

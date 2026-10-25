@@ -60,6 +60,41 @@ describe("version floor", () => {
     expect(floor.pause()).toBe(1);
   });
 
+  test("the settings slot only rises, from reads and from the leader's own writes", () => {
+    const floor = VersionFloor.memory();
+    expect(floor.settings()).toBe(0);
+    expect(floor.sawSettings(2)).toBe(true);
+    expect(floor.sawSettings(2)).toBe(false);
+    expect(floor.sawSettings(1)).toBe(false);
+    expect(floor.wroteSettings(1)).toBe(false);
+    expect(floor.settings()).toBe(2);
+    expect(floor.wroteSettings(3)).toBe(true);
+    expect(floor.settings()).toBe(3);
+  });
+
+  test("the settings slot survives a restart and leaves v and the task floors as an older daemon reads them", async () => {
+    const path = fresh();
+    const floor = await VersionFloor.open(path);
+    floor.sawTask("t-1", 5);
+    await floor.save();
+    // Never led: no settings key at all, so the file is the one an older build wrote.
+    const before = JSON.parse(await readFile(path, "utf8"));
+    expect(Object.keys(before).toSorted()).toEqual(["pause", "tasks", "v"]);
+
+    floor.wroteSettings(4);
+    await floor.save();
+    const after = JSON.parse(await readFile(path, "utf8"));
+    expect(after).toMatchObject({ v: 1, pause: 0, tasks: before.tasks, settings: 4 });
+    expect((await VersionFloor.open(path)).settings()).toBe(4);
+
+    // A file written before the slot existed reads as 0.
+    const old = fresh();
+    await writeFile(old, '{"v":1,"pause":2,"tasks":[]}\n');
+    const reopened = await VersionFloor.open(old);
+    expect(reopened.pause()).toBe(2);
+    expect(reopened.settings()).toBe(0);
+  });
+
   test("forgets a key unseen past the tombstone window, and the least recently seen past FLOOR_MAX", () => {
     const clock = { now: 1_000 };
     const floor = VersionFloor.memory(() => clock.now);
