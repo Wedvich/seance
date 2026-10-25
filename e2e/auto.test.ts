@@ -583,6 +583,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(stored?.spec.pin).toEqual({ deviceId: second.deviceId });
       expect(stored?.assignment?.deviceId).toBe(second.deviceId);
       window = stored?.assignment?.window ?? null;
+      // The pin decided it: the suite's own machine lost for nothing else.
+      const ours = stored?.decision?.candidates.filter((c) => c.deviceId === stack.deviceId) ?? [];
+      expect(ours.length).toBeGreaterThan(0);
+      for (const candidate of ours) expect(candidate.rejected).toEqual([{ code: "pin_mismatch", field: "deviceId" }]);
       expect(describeVerdict(queued.verdict, queued.relay.machines, {}, Date.now(), null).body).toContain(
         "Pinned to PickBox",
       );
@@ -618,8 +622,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       app.store.pickMachine(full.deviceId);
       await app.store.spawn();
       const decided = await app.waitForApp(
-        (state) => state.verdict?.kind === "queued" && state.verdict.task.decision !== undefined,
-        "the leader's decision on the task",
+        // A decision made before FullBox's status counted as fresh lists it `status_stale`: wait for the quota one.
+        (state) =>
+          state.verdict?.kind === "queued" &&
+          (state.verdict.task.decision?.candidates ?? []).some(
+            (c) => c.deviceId === full.deviceId && c.rejected.some((r) => r.code === "quota_over_line"),
+          ),
+        "the leader's decision on the task, with FullBox over its line",
       );
       if (decided.verdict?.kind !== "queued") throw new Error("no queued verdict");
       const { task } = decided.verdict;
