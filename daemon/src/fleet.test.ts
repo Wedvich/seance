@@ -311,6 +311,16 @@ describe("brokerFleet", () => {
     }
   });
 
+  test("a fleet answer too large to send fails the lease instead of falling back to machines", async () => {
+    const double = await startBrokerDouble((_raw, id) => brokerFail(id, "reply_too_large", "the answer ran past the cap"));
+    try {
+      expect(await rejection(brokerFleet({ path: double.path }).open())).toMatchObject({ code: "reply_too_large" });
+      expect(double.frames.map(actionOf)).toEqual(["fleet"]);
+    } finally {
+      await double.stop();
+    }
+  });
+
   test("a fleet answer that is not readable is bad_reply, not a guess", async () => {
     const double = await startBrokerDouble((_raw, id) => brokerOk(id, { machines: "none" }));
     try {
@@ -401,8 +411,11 @@ describe("the brokered scheduler leg's failures", () => {
   });
 
   test("a request_failed reason this build does not know is dropped, the uncertain class, never refused", async () => {
-    // A newer daemon's reason: the parser drops it, which is the shape of a reasonless failure.
-    const failures = await thrown((id) => brokerFail(id, "request_failed", "a reason from the future"));
+    // A newer daemon's reason, on the wire as a string no `FailureReason` holds: `Object.assign` is how the
+    // double sends it past the typed constructor. The parser drops it, the shape of a reasonless failure.
+    const failures = await thrown((id) =>
+      Object.assign(brokerFail(id, "request_failed", "a reason from the future"), { reason: "from_the_future" }),
+    );
     expect(failures.map((failure) => failure.reason)).toEqual(["dropped", "dropped"]);
     expect(failures[0]?.message).toBe("a reason from the future");
   });

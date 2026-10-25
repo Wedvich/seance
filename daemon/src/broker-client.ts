@@ -149,11 +149,9 @@ export async function brokerFleetState(
   try {
     data = await call(frame, brokerDeadlineMs(null), opts);
   } catch (err) {
-    // `reply_too_large` falls back for the same reason `daemon_closed` does: `fleet` changes nothing, and `machines` is the smaller answer.
-    if (
-      err instanceof BrokerError &&
-      (err.code === "unsupported" || err.code === "daemon_closed" || err.code === "reply_too_large")
-    ) {
+    // `fleet` changes nothing, so a daemon that predates it or hung up mid-restart is asked for `machines` instead.
+    // Not `reply_too_large`: the fleet answer is the registry plus a few bytes, so `machines` would be too large as well.
+    if (err instanceof BrokerError && (err.code === "unsupported" || err.code === "daemon_closed")) {
       return { machines: await brokerMachines(opts), scheduler: null };
     }
     throw err;
