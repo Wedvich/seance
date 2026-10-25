@@ -30,6 +30,8 @@ export function openDeepLink(store: Store, link: DeepLink): void {
   }
   store.focusTask(link.taskId);
   store.openQueue();
+  // The default listing is the newest tasks: one outside it (an older alert's) is read by name and merged in.
+  void store.refreshQueue([link.taskId]);
 }
 
 /** Opens what a launch URL's query names; an unreadable one opens nothing. */

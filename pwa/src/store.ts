@@ -500,6 +500,7 @@ export class Store {
       form: { ...form, auto: true, after: [{ task: taskId, after: "opened" }] },
       queue: false,
       queueNotice: null,
+      focusedTask: null,
       verdict: null,
     });
     if (open > 0) history.go(-open);
@@ -700,7 +701,8 @@ export class Store {
     }
     // Opened over a verdict, never under one, so it closes first.
     if (this.#state.queue) {
-      this.#patch({ queue: false, queueNotice: null });
+      // A notification's focus never listed (the task was pruned) must not scroll some later visit.
+      this.#patch({ queue: false, queueNotice: null, focusedTask: null });
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });

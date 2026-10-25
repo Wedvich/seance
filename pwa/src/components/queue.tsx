@@ -27,7 +27,11 @@ export function QueueScreen(props: {
   discarding: boolean;
   /** A notification's task: scrolled to and marked once its row is listed. */
   focusedTask: string | null;
-  /** The focus was acted on, or the screen closed: the store forgets it. */
+  /**
+   * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
+   * closure each render would make an unmount effect run on every re-render and drop a focus whose row
+   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`).
+   */
   onFocused: () => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
@@ -61,9 +65,6 @@ export function QueueScreen(props: {
     const timer = setTimeout(() => setMarked(null), MARK_MS);
     return () => clearTimeout(timer);
   }, [marked]);
-
-  // Leaving with the task never listed (pruned since) must not scroll some later visit.
-  useEffect(() => onFocused, [onFocused]);
 
   useEffect(() => {
     if (armed === null) return;

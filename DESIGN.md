@@ -4710,9 +4710,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
     reads the query on launch and the message on a running app (`parseDeepLink`: the id must
     pass `isTaskId`, anything else opens nothing), strips the query from the URL with
     `replaceState` keeping the entry's state (so a reload does not reopen the link and the
-    layer history is not clobbered), and opens the Queue with the task `focusedTask`: the
-    Queue screen scrolls to that row once it is listed, marks it for three seconds (a steady
-    ring under reduced motion, not a fade) and clears the focus.
+    layer history is not clobbered), and opens the Queue with the task `focusedTask`, asking
+    for it by name too (`refreshQueue([id])`: the default listing is the newest tasks, and an
+    older alert's task is merged in by that read). The Queue screen scrolls to that row once it
+    is listed, marks it for three seconds (a steady ring under reduced motion, not a fade) and
+    clears the focus. The focus is the store's state, cleared only by that act or by the screen
+    closing (`#closeTopLayer`, `followUp`): never by the component's own unmount, since a
+    callback that is a new closure each render would run an unmount effect on every re-render
+    and drop the focus before its row is listed. Residual: in the desktop layout the Queue is a
+    column that never closes, so a focus whose task is never listed (pruned since) stays until
+    something lists that id.
 - **Sessions are fanned out, not polled.** The header total spans every online
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
