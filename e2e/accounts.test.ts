@@ -38,8 +38,8 @@ async function reply(
   return parseStoreReply(await raw.waitForRe<{ re: string }>(frame.id, 10_000));
 }
 
-async function rawPut(raw: Client, key: string, expect: number, env: Envelope): Promise<StoreReplyFrame | null> {
-  return reply(raw, { t: "store-put", id: crypto.randomUUID(), key, expect, env });
+async function rawPut(raw: Client, key: string, held: number, env: Envelope): Promise<StoreReplyFrame | null> {
+  return reply(raw, { t: "store-put", id: crypto.randomUUID(), key, expect: held, env });
 }
 
 async function rawGet(raw: Client, key: string): Promise<{ version: number; env: Envelope } | null> {
