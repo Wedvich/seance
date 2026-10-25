@@ -1166,17 +1166,17 @@ describe("leader push", () => {
 
   test("a refused push-subscribe is audited under the code its reply carries", async () => {
     const lost = async (code: "version_conflict" | "store_full"): Promise<SettingsWrite> => ({ ok: false, code });
-    const cases: readonly { readonly code: string; readonly wrap: (base: SettingsStore) => SettingsStore }[] = [
-      { code: "internal_error", wrap: (base) => ({ ...base, put: () => lost("store_full") }) },
-      { code: "conflict", wrap: (base) => ({ ...base, put: () => lost("version_conflict") }) },
+    const cases: readonly { readonly code: string; readonly wrap: (inner: SettingsStore) => SettingsStore }[] = [
+      { code: "internal_error", wrap: (inner) => ({ ...inner, put: () => lost("store_full") }) },
+      { code: "conflict", wrap: (inner) => ({ ...inner, put: () => lost("version_conflict") }) },
       {
         // A conflict whose re-read finds the record gone: the holder gives up on it.
         code: "settings_unavailable",
-        wrap: (base) => {
+        wrap: (inner) => {
           let reads = 0;
           return {
             put: () => lost("version_conflict"),
-            get: () => (reads++ === 0 ? base.get() : Promise.resolve(null)),
+            get: () => (reads++ === 0 ? inner.get() : Promise.resolve(null)),
           };
         },
       },

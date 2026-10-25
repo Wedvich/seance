@@ -270,7 +270,7 @@ describe("a queued send", () => {
     const live = stub();
     gone.respondWith(410);
     const release = gone.hold();
-    const [a, b, c] = await Promise.all(["a", "b", "c"].map((id) => subscription(id)));
+    const [a, b, c] = [await subscription("a"), await subscription("b"), await subscription("c")];
     const { sender, settings, store } = await rig([a, b, c], (id) => (id === "a" ? gone : live), { maxInFlight: 1 });
     sender.send(alert);
     await gone.waitForRequests(1);

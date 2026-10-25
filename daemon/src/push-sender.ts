@@ -160,7 +160,8 @@ export function createPushSender(o: PushSenderOpts): PushSender {
 
   /** Starts waiting sends while a slot is free, skipping any whose subscription has left the record. */
   function pump(): void {
-    while (!stopped && inFlight < maxInFlight) {
+    for (;;) {
+      if (stopped || inFlight >= maxInFlight) return;
       const next = waiting.shift();
       if (next === undefined) return;
       const target = resolve(next.stored);
