@@ -42,6 +42,8 @@ import {
   type PushAlert,
   type PushSubscribeReply,
   type PushSubscribeRequest,
+  type PushUnsubscribeReply,
+  type PushUnsubscribeRequest,
   type QuotaReading,
   type SettingsRecord,
   type DiskAlerted,
@@ -1204,6 +1206,22 @@ export function parsePushSubscribeRequest(value: unknown): PushSubscribeRequest 
 }
 
 export function parsePushSubscribeReply(value: unknown): PushSubscribeReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  const endpoint = isRecord(value) ? pushEndpoint(value["endpoint"]) : null;
+  return endpoint === null ? null : { endpoint };
+}
+
+/**
+ * `push-unsubscribe`, at the leader: a fresh `{ endpoint }`, held to `pushEndpoint` as a
+ * subscription's is. The record holds no endpoint that fails it, so nothing removable is
+ * refused, and the normalized form is the one the record stores.
+ */
+export function parsePushUnsubscribeRequest(value: unknown): PushUnsubscribeRequest | null {
+  const endpoint = isRecord(value) ? pushEndpoint(value["endpoint"]) : null;
+  return endpoint === null ? null : { endpoint };
+}
+
+export function parsePushUnsubscribeReply(value: unknown): PushUnsubscribeReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const endpoint = isRecord(value) ? pushEndpoint(value["endpoint"]) : null;
   return endpoint === null ? null : { endpoint };

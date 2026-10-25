@@ -690,6 +690,7 @@ export const SCHEDULER_OPS = [
   "resume",
   "discard",
   "push-subscribe",
+  "push-unsubscribe",
 ] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
@@ -715,6 +716,7 @@ export const OP_TIMEOUT_MS = {
   resume: 10_000,
   discard: 10_000,
   "push-subscribe": 10_000,
+  "push-unsubscribe": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -2305,8 +2307,8 @@ export const SCHEDULER_ERROR_CODES = [
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
   /**
-   * `cancel`, `mark-done`, `pause`, `resume`: the record changed under the
-   * request (a lost store race); ask again. `discard`: the unreadable record is
+   * `cancel`, `mark-done`, `pause`, `resume`, `push-subscribe`, `push-unsubscribe`: the
+   * record changed under the request (a lost store race); ask again. `discard`: the unreadable record is
    * at another version than the one asked for — re-read the queue first.
    */
   "conflict",
@@ -2315,7 +2317,7 @@ export const SCHEDULER_ERROR_CODES = [
   /** `push-subscribe` (M4): the settings record holds `PUSH_MAX_SUBSCRIPTIONS` already. */
   "subscriptions_full",
   /**
-   * `push-subscribe`: this term holds no usable settings record (another PSK, a newer
+   * `push-subscribe`, `push-unsubscribe`: this term holds no usable settings record (another PSK, a newer
    * build's shape, a version below the floor), so push is off for it. Not a retry: the
    * term will not write over a record it cannot read.
    */
@@ -2494,6 +2496,26 @@ export interface PushSubscribeResponse {
 }
 
 export type PushSubscribeReply = PushSubscribeResponse | SchedulerError;
+
+/**
+ * `op: "push-unsubscribe"` (M4), app → leader, sealed `from: "app"`: drop this
+ * endpoint from the settings record, freeing its slot. The leader parses it with
+ * `parsePushUnsubscribeRequest`, which holds the endpoint to `pushEndpoint` as
+ * push-subscribe's does; refusals are `invalid_request` (also what a leader that
+ * predates the op answers), `conflict`, `not_ready` and `settings_unavailable`.
+ */
+export const PUSH_UNSUBSCRIBE_OP = "push-unsubscribe";
+
+export interface PushUnsubscribeRequest {
+  readonly endpoint: string;
+}
+
+/** `push-unsubscribe` → the endpoint, no longer held; one the record never held answers the same. */
+export interface PushUnsubscribeResponse {
+  readonly endpoint: string;
+}
+
+export type PushUnsubscribeReply = PushUnsubscribeResponse | SchedulerError;
 
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;

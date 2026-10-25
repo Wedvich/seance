@@ -9,6 +9,7 @@ import {
   OP_TIMEOUT_MS,
   QUOTA_KEY,
   PUSH_SUBSCRIBE_OP,
+  PUSH_UNSUBSCRIBE_OP,
   SCHEDULER_ID,
   SETTINGS_KEY,
   STORE_CREATE_MAX_CT_LENGTH,
@@ -35,6 +36,8 @@ import {
   type PauseRequest,
   type PushSubscribeReply,
   type PushSubscribeRequest,
+  type PushUnsubscribeReply,
+  type PushUnsubscribeRequest,
   type QueueChanged,
   type QueueReply,
   type QueueRequest,
@@ -70,6 +73,7 @@ import {
   parseMetricsReply,
   parsePauseReply,
   parsePushSubscribeReply,
+  parsePushUnsubscribeReply,
   parseQueueChanged,
   parseQueueReply,
   parseRescanResponse,
@@ -1573,6 +1577,14 @@ export class RelayClient {
    */
   pushSubscribe(subscription: PushSubscribeRequest): Promise<PushSubscribeReply | null> {
     return this.#schedule(PUSH_SUBSCRIBE_OP, subscription, parsePushSubscribeReply);
+  }
+
+  /**
+   * Asks the leader to drop this endpoint from the settings record, freeing its slot; one it
+   * does not hold answers the same. A leader that predates the op answers `invalid_request`.
+   */
+  pushUnsubscribe(request: PushUnsubscribeRequest): Promise<PushUnsubscribeReply | null> {
+    return this.#schedule(PUSH_UNSUBSCRIBE_OP, request, parsePushUnsubscribeReply);
   }
 
   /**
