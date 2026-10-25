@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import type { RequestOp, Task } from "@seance/shared";
+import { RequestFailure, type RequestOp, type Task } from "@seance/shared";
 import { LazyRelay } from "../src/app-relay.ts";
 import { createBroker, type Broker } from "../src/broker.ts";
 import { brokerFleet, relayFleet, selectFleet, type Fleet } from "../src/fleet.ts";
@@ -41,7 +41,12 @@ const REMOTE = machine({
 });
 const ASLEEP = machine({ deviceId: "device-3", name: "Sleeper", connected: false });
 
+let failNextDespawn = false;
 function respond(op: RequestOp): unknown {
+  if (op === "despawn" && failNextDespawn) {
+    failNextDespawn = false;
+    return new RequestFailure("timeout", "despawn timed out after 90000ms");
+  }
   if (op === "queue") return { tasks: [QUEUED], at: 6_000 };
   if (op === "cancel") return { task: { ...QUEUED, state: "cancelled" } };
   if (op === "sessions")
@@ -154,6 +159,15 @@ describe("the MCP tools, direct and brokered", () => {
       const [a, b] = [await direct(name, args), await brokered(name, args)];
       expect(b).toBe(a);
     }
+    // A timeout must read as "may have landed" on both request paths, in the same words.
+    const despawn = { machine: "Linux Box", id: "%3", force: true };
+    failNextDespawn = true;
+    const directTimeout = await direct("despawn_session", despawn);
+    failNextDespawn = true;
+    const brokeredTimeout = await brokered("despawn_session", despawn);
+    expect(brokeredTimeout).toBe(directTimeout);
+    expect(brokeredTimeout).toContain("may have landed anyway");
+
     // Two relay doubles, one per transport, created in call order (direct goes
     // first): the target saw the same requests, `client: "mcp"` included,
     // whichever process sealed them.
