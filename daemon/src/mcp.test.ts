@@ -1939,36 +1939,62 @@ describe("get_queue", () => {
   });
 
   test("shows what holds dispatch, and which tasks are escalated, waiting on someone, or marked done by hand", async () => {
-    const fake = leaderRelay([
-      {
-        tasks: [
-          task({ id: "t-1", state: "needs-input", escalated: true, needsInputSince: 4_500 }),
-          task({ id: "t-2", state: "done", doneBy: "manual" }),
-          task({ id: "t-3", state: "done", doneBy: "session" }),
-        ],
-        holds: [
-          { until: "resume", at: 5_000 },
-          { account: "work", until: "reset", at: 5_500, resumeAt: 9_000 },
-        ],
-        at: 6_000,
-      },
-    ]);
+    const [mac, linux] = autoMachines();
+    // One person on two orgs: one email, one account half, so each label carries its org.
+    const machines = [
+      machine({ ...mac, exclaves: [{ ...exclave("default"), accountId: "org-c:acct-2", email: "me@pengefix.no" }] }),
+      machine({ ...linux, exclaves: [{ ...exclave("work"), accountId: "org-b:acct-2", email: "me@pengefix.no" }] }),
+    ];
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "needs-input", escalated: true, needsInputSince: 4_500 }),
+            task({ id: "t-2", state: "done", doneBy: "manual" }),
+            task({ id: "t-3", state: "done", doneBy: "session" }),
+            task({
+              id: "t-4",
+              state: "ready",
+              spec: { repo: ORIGIN, mode: "worktree", pin: { account: "org-c:acct-2" } },
+            }),
+          ],
+          holds: [
+            { until: "resume", at: 5_000 },
+            { account: "org-b:acct-2", until: "reset", at: 5_500, resumeAt: 9_000 },
+            { account: "org-z:0123456789ab", until: "resume", at: 5_600 },
+          ],
+          at: 6_000,
+        },
+      ],
+      machines,
+    );
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const parsed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
     expect(parsed.holds).toEqual([
       { until: "resume", since: new Date(5_000).toISOString() },
       {
-        account: "work",
+        account: "me@pengefix.no (org org-b)",
+        accountId: "org-b:acct-2",
         until: "reset",
         since: new Date(5_500).toISOString(),
         resumeAt: new Date(9_000).toISOString(),
       },
+      // No machine reports it: a short id, as a pin's.
+      {
+        account: "acct 01234567",
+        accountId: "org-z:0123456789ab",
+        until: "resume",
+        since: new Date(5_600).toISOString(),
+      },
     ]);
-    const [stuck, manual, finished] = parsed.tasks;
+    const [stuck, manual, finished, pinned] = parsed.tasks;
     expect(stuck).toMatchObject({ escalated: true, needsInputSince: new Date(4_500).toISOString() });
     expect(manual.doneBy).toBe("manual");
     expect(finished.doneBy).toBe("session");
+    expect(pinned.pin).toEqual({ account: "me@pengefix.no (org org-c)", accountId: "org-c:acct-2" });
+    // A label never spends an account listing: the PWA shares that budget.
+    expect(fake.accountLists).toBe(0);
     lazy.stop();
   });
 

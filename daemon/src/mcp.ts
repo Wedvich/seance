@@ -3,8 +3,10 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
-  accountName,
+  accountNameIn,
   DEP_AFTER,
+  knownAccounts,
+  type KnownAccount,
   failureReasonText,
   isTransportError,
   reasonText,
@@ -387,13 +389,12 @@ function machineName(task: Task, machines: readonly Machine[], deviceId: string)
   );
 }
 
-/** The email some registry entry reports for an account, display only; no account listing is spent on a label. */
-function accountEmail(machines: readonly Machine[], accountId: string): string | undefined {
-  for (const machine of machines) {
-    const email = machine.exclaves?.find((x) => x.accountId === accountId && x.email !== undefined)?.email;
-    if (email !== undefined) return email;
-  }
-  return undefined;
+/**
+ * An account by the email some registry entry reports, else its short id, beside its id. No alias:
+ * that would spend an `account:` listing, whose budget the PWA shares, on a label.
+ */
+function describeAccount(known: readonly KnownAccount[], accountId: string): Record<string, string> {
+  return { account: accountNameIn(known, accountId), accountId };
 }
 
 /** A machine by deviceId, named where this view knows it. */
@@ -403,14 +404,16 @@ function describeDevice(task: Task, machines: readonly Machine[], deviceId: stri
 }
 
 /** A task's pin: its machine named where this view knows it, its account by email or short id beside the id. */
-function describePin(task: Task, machines: readonly Machine[]): Record<string, string> | null {
+function describePin(
+  task: Task,
+  machines: readonly Machine[],
+  known: readonly KnownAccount[],
+): Record<string, string> | null {
   const { pin } = task.spec;
   if (pin === undefined) return null;
   return {
     ...(pin.deviceId === undefined ? {} : describeDevice(task, machines, pin.deviceId)),
-    ...(pin.account === undefined
-      ? {}
-      : { account: accountName(pin.account, accountEmail(machines, pin.account)), accountId: pin.account }),
+    ...(pin.account === undefined ? {} : describeAccount(known, pin.account)),
   };
 }
 
@@ -433,9 +436,9 @@ function failureMessage(failure: NonNullable<Task["failure"]>): string {
   return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
-function describeHold(hold: PauseHold): Record<string, unknown> {
+function describeHold(hold: PauseHold, known: readonly KnownAccount[]): Record<string, unknown> {
   return {
-    ...(hold.account === undefined ? {} : { account: hold.account }),
+    ...(hold.account === undefined ? {} : describeAccount(known, hold.account)),
     until: hold.until,
     since: new Date(hold.at).toISOString(),
     ...(hold.resumeAt === undefined ? {} : { resumeAt: new Date(hold.resumeAt).toISOString() }),
@@ -588,9 +591,13 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
-function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
+function describeTask(
+  task: Task,
+  machines: readonly Machine[],
+  known: readonly KnownAccount[],
+): Record<string, unknown> {
   const placement = placementOf(task, machines);
-  const pin = describePin(task, machines);
+  const pin = describePin(task, machines, known);
   const { spec } = task;
   return {
     id: task.id,
@@ -761,7 +768,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by email where a machine reports it, plus its accountId), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by email where a machine reports it, else a short id, plus its accountId; an email or short id two accounts share gains the org's short id), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -776,8 +783,9 @@ export function buildMcpServer(
         if (reply === null)
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
-        const holds = (reply.holds ?? []).map(describeHold);
+        const known = knownAccounts(lease.machines);
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, known));
+        const holds = (reply.holds ?? []).map((hold) => describeHold(hold, known));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
   );

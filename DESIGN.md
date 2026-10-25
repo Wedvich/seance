@@ -5065,7 +5065,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     bucket is per socket and shared in effect with the PWA. So `AccountCache` (`daemon/src/account-cache.ts`)
     lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
     reopen, and only an account pin asks. `get_queue` and `list_machines` spend no listing: they
-    label an account by the email a registry entry reports, else a short id. A refused or lost
+    label an account by the email a registry entry reports, else a short id (org-tagged as the PWA's
+    where two read the same), never an alias — one would show only while a pin's listing happened
+    to be cached, so a label would flip between calls. `get_queue` names a pin's account and an
+    account pause hold's alike, label beside `accountId`. A refused or lost
     listing is not cached and says aliases are unavailable right now, asking for an email or id —
     never that the account is unknown.
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
