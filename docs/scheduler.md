@@ -131,8 +131,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
   base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
   starts from a stale `origin/<b>`, and how the worktree gets made.
-- **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` included (typed,
-  not in `SCHEDULER_OPS` yet). `enqueue` stays a `store-put`, never a leader op.
+- **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` and
+  `push-unsubscribe` included. `enqueue` stays a `store-put`, never a leader op.
 
 ## Daemon changes
 
@@ -402,7 +402,6 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
-| 1     | Push unsubscribe (new)                                             | Web Push (built)                                                       | S                        |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -529,28 +528,6 @@ of M4 has landed.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
 
-- **Push unsubscribe (new, 2026-10-25).** A subscription leaves `settings:main` only when its
-  push service answers 404/410, and the PWA's Notifications card can turn push on but not off:
-  nobody can stop pushes to one device, and a retired one holds one of the
-  `PUSH_MAX_SUBSCRIPTIONS` slots until its push service happens to report it gone.
-  _Decided:_
-  - A `push-unsubscribe { endpoint }` scheduler op, app → leader, in `SCHEDULER_OPS` (10 s).
-    Sealed `from: "app"`, parsed into a fresh value by its own parser
-    (`parsePushUnsubscribeRequest`, the endpoint held to `pushEndpoint` like push-subscribe's:
-    the record holds nothing else, and an over-long or malformed value is `invalid_request`),
-    under the shared `schedulerGuard`. The leader removes that endpoint with one
-    compare-and-set `update` of the term's settings holder; one it does not hold answers the
-    same with no write. Refusals as push-subscribe's (`not_ready`, `settings_unavailable`,
-    `conflict`, `internal_error`). Audited `op=push-unsubscribe id=<id> ok`, never the endpoint.
-  - _Threat model:_ a PSK holder could already replace every subscription by writing them;
-    the op adds removal of one endpoint it names, which needs the endpoint (the subscription's
-    secret) to matter. A token holder without the PSK cannot send it. No relay change.
-  - PWA: "Turn off" on the card unsubscribes the browser first (what stops pushes there), then
-    sends the op (what frees the slot). A failed op, or a leader that predates it
-    (`invalid_request`), leaves the browser off and says the slot frees once the push service
-    reports it gone. The page remembers the person turned it off, so the silent re-sync after
-    a reload does not subscribe it again; Enable clears that.
-    Exit: a turned-off browser gets no push and its slot is free (daemon, PWA, e2e).
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.
