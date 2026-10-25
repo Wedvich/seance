@@ -4853,10 +4853,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   machine list: the blob carries every name to every app, and descriptions would grow it per
   skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads any `/name`
   token in the prompt), so the list stays a plain union. It
-  completes the token ending at the caret (2026-10-20; first token only before): a `/` at the start
-  or after whitespace, no whitespace or second `/` up to the caret, and the caret at the token's
-  end with no selection — so `… /sh` mid-prompt opens it, a slash in a word, URL or path
-  (`and/or`, `https://a/b`, `/tmp/x`) never does. The caret is read from the field's `input`, `keyup`,
+  completes the token ending at the caret (2026-10-20; first token only before), by the one
+  `/name` rule routing reads too (`shared/src/skill-token.ts`, 2026-10-25; whitespace only before):
+  a `/` at the start, after whitespace or after an opening wrapper (`` ` " ' ( [ ``, the one
+  character before the `/` alone deciding, so `x(/sh` counts), no whitespace or second `/` up to
+  the caret, and the caret at the token's end, followed by whitespace or the end, with no
+  selection — so `… /sh` or `` `/sh `` mid-prompt opens it, a slash in a word, URL or path
+  (`and/or`, `https://a/b`, `/tmp/x`) never does. The token starts at the `/`, so a wrapper stays
+  in place through a pick; a caret before a closing wrapper (`` `/sh|` ``) does not open, since no
+  space fits there and the pick would leave the token open. Highlighting marks a known name by the
+  same rule, closing wrappers and trailing punctuation left plain, as routing trims them. The caret is read from the field's `input`, `keyup`,
   `click`, `pointerup`, `select` and `selectionchange` events; text written from elsewhere counts as caret-at-end, where
   the browser puts it. Matching is prefix first then substring, and picking splices `/name ` in
   place of the token (reusing a space already there) with the caret after it. It sits inline under

@@ -8,6 +8,8 @@ import {
   liveStatus,
   newestQuotaByAccount,
   sameCreditMonth,
+  SKILL_TOKEN,
+  trimSkillName,
   type Candidate,
   type Decision,
   type ExclaveInfo,
@@ -282,23 +284,15 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * `/name` tokens: the PWA picker's rule, widened for wrapping — a `/` at the
- * start, after whitespace or after an opening wrapper (`` ` " ' ( [ ``), the name running to the
- * next whitespace with no second `/` (`and/or`, `https://a/b`, `/tmp/x` are none).
- * Closing wrappers and trailing sentence punctuation are not part of the name
- * (a token ending in `:` cannot be a `plugin:name`, but `:` stays inside one).
- */
-const SKILL_TOKEN = /(?<![^\s`"'([])\/([^\s/]+)(?=\s|$)/gu;
-
-/**
  * The names a task may mean (DESIGN.md, Scheduler, "Skills filter"): declared,
  * else every `/name` token of the prompt in order — any one is actionable, as
  * the seed carries the prompt after a preamble, so none is claude's first token.
  */
 function skillCandidates(task: Task): readonly string[] {
   if (task.spec.skill !== undefined) return [task.spec.skill];
+  // `/name` tokens by the rule the PWA picker completes (shared/src/skill-token.ts).
   return [...(task.spec.prompt ?? "").matchAll(SKILL_TOKEN)]
-    .map((m) => (m[1] ?? "").replace(/[.,;!?:`"')\]]+$/u, ""))
+    .map((m) => trimSkillName(m[1] ?? ""))
     .filter((name) => isSkillName(name));
 }
 
