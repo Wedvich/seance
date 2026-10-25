@@ -408,6 +408,7 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
+| 2     | Spawn defaults to the scheduler, in three PRs                      | account pins (PR #303); keyless `auto` for MCP                         | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -760,13 +761,41 @@ of M4 has landed.
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
 
+- **Spawn defaults to the scheduler** (owner, 2026-10-25). `auto` stops being a special
+  machine value: every spawn is a task, and a machine or an account is a pin on it. One path
+  means the scheduler's caps, quota projection and reservations see every session, not only
+  the ones queued through `auto`, and the three clients stop carrying two behaviours each.
+  - CLI: `seanced spawn <repo>` enqueues (today's `--auto`); `--machine <name|here>`,
+    `--account <alias|email|id>` and `--not <machine|here>` pin and exclude, as built in PR #303.
+    `--now` is today's relay-free direct spawn on this machine, kept for a leaderless fleet, a
+    keyless box and SSH debugging; it takes no pin flags. `--auto` stays accepted as a no-op.
+  - PWA: two pickers, **Machine** and **Account**, each defaulting to `auto`. Choosing one
+    pins that field; nothing in the PWA spawns directly any more.
+  - MCP: `spawn_session`'s `machine` becomes optional and is a pin, beside `account` and
+    `avoid`; `machine: "auto"` stays accepted as "no machine pin".
+  - _Decided:_ every scheduler limit applies to a pinned task — the in-flight caps, the 90%
+    quota line, the disk floor. A pin only narrows where a task may go; a pinned task waits
+    with the reason shown, as an unpinned one does.
+  - _Decided:_ the direct path survives only as the CLI's `--now`. The daemon keeps answering
+    an app's `spawn` op, so an older PWA or MCP keeps working through the rollout.
+  - **Keyless `auto` (below) lands first** (owner, 2026-10-25, lifting #16's deferral): a
+    keyless `seanced mcp` reaches the relay only through the fleet broker, which has no
+    enqueue action, so moving MCP onto the scheduler before it takes spawning away from
+    every keyless box.
+  - In three PRs: (1) CLI and MCP on the new model; (2) the PWA's two pickers; (3) a task's
+    pin and `avoid` on its queue card. Exit: a plain `seanced spawn` and a PWA spawn with both
+    pickers on `auto` land as tasks (e2e); a PWA spawn with a machine picked lands there as a
+    pinned task, and waits with its reason when that machine is full (e2e); `seanced spawn
+    --now` still works with the relay unreachable (daemon).
+
 - **Keyless `auto`** — MCP's `auto` and `seanced spawn --auto` on a box that reads the key
   itself are built (DESIGN.md "MCP server", "CLI `auto`"). What remains:
   - Keyless `seanced mcp` and `seanced spawn --auto`. They reach the relay only through
     the fleet broker, whose actions are fixed; today both refuse ("needs this machine's
     own key"). An enqueue there is a new broker action, which is a threat-model change
     (DESIGN.md "Fleet broker"); without it, a keyless box gets no `auto`.
-  - _Decided (#16):_ defer the broker action.
+  - _Decided (#16):_ defer the broker action. Lifted 2026-10-25: it is the prerequisite of
+    "Spawn defaults to the scheduler" (above), and is built next.
   - Exit: keyless `seanced mcp`'s `auto` queues a task through the broker (refused today).
 
   Raycast `auto` attaches the same way as the CLI's.
