@@ -1675,9 +1675,9 @@ describe("pinning a task", () => {
     const client = pinning();
     Object.defineProperty(client, "accountsNamed", { value: true });
     client.accountStoreKey = async () => "account:k-w";
-    client.getAccountRecord = async (key) => ({ ok: true, key, version: 0, entry: null });
-    client.putAccountAlias = async (accountId, name, expect) => {
-      const record = accountRecord(accountId, name, expect + 1);
+    client.getAccountRecord = async (recordKey) => ({ ok: true, key: recordKey, version: 0, entry: null });
+    client.putAccountAlias = async (accountId, name, version) => {
+      const record = accountRecord(accountId, name, version + 1);
       if (record === null) throw new Error("bad record");
       return { ok: true, key: "account:k-w", record };
     };
