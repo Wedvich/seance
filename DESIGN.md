@@ -2740,7 +2740,8 @@ daemons never read one. `seanced spawn --auto` reads them for one thing only: to
 account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seanced mcp` reads them
 for that and to name accounts in `list_machines` (each exclave's `account`, plus `alias` where
 one is set) and `get_queue` (pins and holds), from one cached listing per socket ("Account
-listings" below). Raycast reads none. Every reader that cannot list — a keyless
+listings" below). The Raycast extension lists them once per open and names the selected machine's
+accounts under its picker (_Raycast extension_, "Scope is spawn"). Every reader that cannot list — a keyless
 `seanced mcp` going through the broker, an install without the account key, a refused or lost
 listing — shows email or short id instead, never an error.
 
@@ -5860,6 +5861,18 @@ latency budget — one hotkey to a running session.
   what keeps this surface a form rather than a second app. Rejected: a
   `Detail`/`List` view of running sessions (duplicates the PWA at a fraction of
   the fidelity, and the phone is where you actually watch a session).
+  One read beside them (2026-10-25): an "Accounts" line under the machine picker
+  names the selected machine's signed-in accounts by the shared rule (alias,
+  else email, else short id; `raycast/src/lib/accounts.ts`). The aliases come
+  from one `account:` listing per open, made once the socket is open and the
+  registry settled, and only when some machine reports an account — the list
+  bucket is shared with every app — never again on a push, a re-dial or a
+  `store-changed`, since the form lives seconds. `loadKey` derives the account
+  key from the same PSK beside the AES key (`importAccountKey`, as the daemon's
+  `importAppKeys`; `credentials.test.ts` asserts both find one account at one
+  store key). A refused, lost or failed listing leaves the names on email or
+  short id. The line reads the live registry only: the cached projection keeps
+  no exclaves, so it appears once the socket's registry lands.
 - **Reach is every paired machine, through the relay.** Rejected: local-only
   (talking to the daemon on this box directly). It would need no PSK and no
   socket, but "spawn on the machine I am sitting at" is the one case where a

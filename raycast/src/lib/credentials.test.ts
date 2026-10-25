@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
+import { accountStoreKey } from "@seance/shared";
+import { importAppKeys } from "../../../daemon/src/app-relay.ts";
 import { configSkeleton, loadPsk, type Config } from "../../../daemon/src/config.ts";
 import { PSK_SERVICE as DAEMON_PSK_SERVICE } from "../../../daemon/src/keychain.ts";
 import { configDir as daemonConfigDir, configPath as daemonConfigPath } from "../../../daemon/src/paths.ts";
@@ -134,6 +136,15 @@ describe("drift guard: PSK precedence agrees with loadPsk", () => {
     );
     expect(asked).toEqual([DAEMON_PSK_SERVICE]);
   });
+});
+
+test("drift guard: the account key is the daemon's, so both find one account's record at one store key", async () => {
+  const ours = await loadKey(sources());
+  const daemons = await importAppKeys(PSK);
+  if (daemons.accountKey === undefined) throw new Error("the daemon derived no account key");
+  const accountId = "org-a:acct-1";
+  expect(await accountStoreKey(ours.accountKey, accountId)).toBe(await accountStoreKey(daemons.accountKey, accountId));
+  expect(ours.accountKey.extractable).toBe(false);
 });
 
 describe("loadKey", () => {

@@ -1,6 +1,8 @@
 import {
   RelayClient,
+  type AccountListing,
   type RelayState,
+  type StoreRefusal,
   type RescanResponse,
   type SpawnClient,
   type SpawnRequest,
@@ -16,12 +18,16 @@ export interface RelayHandle {
   readonly subscribe: (listener: () => void) => () => void;
   readonly spawn: (deviceId: string, request: Omit<SpawnRequest, "client">) => Promise<SpawnResponse>;
   readonly rescan: (deviceId: string) => Promise<RescanResponse>;
+  /** Every `account:` record, as `RelayClient.listAccounts`: rejects before `open`. */
+  readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
   readonly stop: () => void;
 }
 
 /**
  * A third app-role client, exactly as `seanced mcp` is: same `/app?t=<token>`
  * upgrade, same envelope crypto, same correlation. No relay or daemon change.
+ * Beyond `spawn` and `rescan` it makes one read: the `account:` listing that
+ * names accounts by their aliases (lib/accounts.ts).
  *
  * No `createSocket` override: `RelayClient`'s default `new WebSocket(url)` is
  * enough once `installNodeGlobals()` has put one on the global object, which it
@@ -34,6 +40,7 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
     url: credentials.relayUrl,
     token: credentials.bearerToken,
     key: credentials.key,
+    accountKey: credentials.accountKey,
     // Raycast surfaces console output only in the dev-mode terminal, and a
     // released extension has nowhere to put it — so the wire log is dropped by
     // default rather than shouted into a void.
@@ -59,6 +66,7 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
       if (parsed === null) throw new Error("the daemon's reply was not readable by this build");
       return parsed;
     },
+    listAccounts: () => client.listAccounts(),
     stop: () => client.stop(),
   };
 }

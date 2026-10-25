@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appRelayUrl, importPsk } from "@seance/shared";
+import { appRelayUrl, importAccountKey, importPsk } from "@seance/shared";
 
 /**
  * Generic-password service name for the PSK in the macOS login keychain. Must
@@ -37,6 +37,8 @@ export interface Credentials {
   readonly bearerToken: string;
   /** Non-extractable, because `importPsk` imports it that way. */
   readonly key: CryptoKey;
+  /** The HMAC key account records are read under, derived from the same PSK as the daemon's `importAppKeys`. */
+  readonly accountKey: CryptoKey;
 }
 
 /**
@@ -167,5 +169,6 @@ export async function loadKey(overrides: Partial<CredentialSources> = {}): Promi
     );
   }
 
-  return { relayUrl: appRelayUrl(relayUrl), bearerToken, key: await importPsk(psk) };
+  const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
+  return { relayUrl: appRelayUrl(relayUrl), bearerToken, key, accountKey };
 }
