@@ -1,9 +1,8 @@
 import {
-  APP_ID,
   CAPABILITIES,
+  ENVELOPE_MAX_CT_LENGTH,
   importPsk,
   ReplayGuard,
-  seal,
   STATUS_INTERVAL_MS,
   type Envelope,
   type MachineInfo,
@@ -30,6 +29,7 @@ import { createHandler, createLocalOps, type HandlerContext } from "./handlers.t
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
+import { sealMachineInfo } from "./machine-info.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
@@ -231,6 +231,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // keyed by the blob, so two overlapping registers each commit their own.
   let registered: Registered = { scan: 0, exclaves: exclaveScan };
   const candidates = new WeakMap<Envelope, Registered>();
+  let lastSizeReport: string | null = null;
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
@@ -243,16 +244,18 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus, CAPABILITIES.reportedDone],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
-    const sealed = await seal(
-      key,
-      { to: APP_ID, from: state.deviceId },
-      {
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        op: "machine-info",
-        payload: info,
-      },
-    );
+    const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);
+    // Once per size-deciding content: `scannedAt`/`lastUpdate` change every rescan without changing the
+    // size, and a line after each hourly rescan and reconnect would say nothing new.
+    const content = JSON.stringify({ repos: info.repos, exclaves: info.exclaves });
+    if (content !== lastSizeReport) {
+      lastSizeReport = content;
+      if (droppedSkills) log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
+      if (oversized)
+        log.error(
+          `register blob over ${ENVELOPE_MAX_CT_LENGTH} chars with nothing left to drop — the relay will refuse it`,
+        );
+    }
     candidates.set(sealed, candidate);
     return sealed;
   };

@@ -1,8 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import { isSkillName, REPO_MAX_SKILLS, type RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
-import { git } from "./exec.ts";
+import { exec, git } from "./exec.ts";
 import { canonical, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
 const SCAN_CONCURRENCY = 16;
@@ -118,6 +118,78 @@ export async function readOriginUrl(commonDir: string): Promise<string | null> {
   return null;
 }
 
+/** Bounds what a hostile tree can make the scan read: output kept, and so records parsed. */
+const SKILLS_LS_TREE_MAX_BYTES = 256 * 1024;
+/** Skill dirs carried into the second read; well above `REPO_MAX_SKILLS` so a few non-skills don't crowd names out. */
+const SKILL_DIRS_MAX = 64;
+
+type TreeEntry = readonly [mode: string, type: string, path: string];
+
+/** One `ls-tree` over the origin ref; null on any git failure. */
+async function lsTree(repoPath: string, ref: string, paths: readonly string[]): Promise<readonly TreeEntry[] | null> {
+  const result = await exec(["git", "ls-tree", "-z", ref, "--", ...paths], {
+    cwd: repoPath,
+    timeoutMs: 5_000,
+    maxOutputBytes: SKILLS_LS_TREE_MAX_BYTES,
+    // A `--filter=tree:0` clone lazily fetches a missing tree over the network, which breaks the scan's
+    // local-only contract; its fetch child also holds stderr past the timeout kill, so kill the group.
+    // Env, not `--no-lazy-fetch`: older git rejects the flag. LITERAL_PATHSPECS: a skill name passes
+    // `isSkillName` yet may start with `:(...)` pathspec magic.
+    env: { GIT_NO_LAZY_FETCH: "1", GIT_LITERAL_PATHSPECS: "1" },
+    killGroup: true,
+  });
+  if (result.exitCode !== 0) return null;
+  // The last piece is empty when the output is whole and a cut record when it was truncated.
+  const out: TreeEntry[] = [];
+  for (const record of result.stdout.split("\0").slice(0, -1)) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, type] = record.slice(0, tab).split(" ");
+    if (mode === undefined || type === undefined) continue;
+    out.push([mode, type, record.slice(tab + 1)]);
+  }
+  return out;
+}
+
+/**
+ * A clone's project skills, read from `origin/<default>` as last fetched — the
+ * ref a worktree spawn branches from (`prepareWorktree`), so a skill on a
+ * feature branch or uncommitted is not advertised, and one only on origin is.
+ * Two non-recursive `ls-tree`s, costing per skill dir rather than per file (a
+ * recursive listing lets one big skill push later ones past the output cap):
+ * the dir names under `.claude/skills/`, then each one's `SKILL.md`. Only a
+ * directory holding a regular-blob `SKILL.md` counts: a symlink entry is skipped
+ * because resolving it needs the target's blob, one more process per entry. Any
+ * git failure (no ref, no dir, timeout) reads as no skills — never costs the
+ * clone its entry.
+ */
+async function readProjectSkills(repoPath: string, defaultBranch: string | null): Promise<readonly string[]> {
+  if (defaultBranch === null) return [];
+  const ref = `refs/remotes/origin/${defaultBranch}`;
+  const dirs = await lsTree(repoPath, ref, [".claude/skills/"]);
+  if (dirs === null) return [];
+  const names = dirs
+    .filter(([mode, type]) => type === "tree" && mode === "040000")
+    .map(([, , path]) => basename(path))
+    .filter((name) => !name.startsWith(".") && isSkillName(name))
+    .toSorted()
+    .slice(0, SKILL_DIRS_MAX);
+  if (names.length === 0) return [];
+  const files = await lsTree(
+    repoPath,
+    ref,
+    names.map((name) => `.claude/skills/${name}/SKILL.md`),
+  );
+  if (files === null) return [];
+  const found = new Set<string>();
+  for (const [mode, type, path] of files) {
+    if (type !== "blob" || !mode.startsWith("100")) continue;
+    const name = path.split("/")[2];
+    if (name !== undefined) found.add(name);
+  }
+  return [...found].toSorted().slice(0, REPO_MAX_SKILLS);
+}
+
 async function listDirs(parent: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(parent, { withFileTypes: true });
@@ -208,7 +280,8 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
  * previous scan when already resolved — default branches practically never
  * change — and is read from local refs only for new (or still-null) repos.
  * `origin` is re-read every scan: one file, no process, and a remote does get
- * repointed. Basename when there is none — a key, so never absent.
+ * repointed. Basename when there is none — a key, so never absent. Project
+ * skills are re-read every scan too, so adding or removing one re-registers.
  */
 export async function scanRepos(
   roots: readonly string[],
@@ -225,12 +298,15 @@ export async function scanRepos(
       cached ?? readDefaultBranch(path),
       commonDir === null ? null : readOriginUrl(commonDir),
     ]);
+    const skills = await readProjectSkills(path, defaultBranch);
     const origin = url === null ? null : normalizeOrigin(url);
     return {
       name: names.get(path) ?? path,
       path,
       defaultBranch,
       origin: origin ?? basename(path),
+      // A reader drops a longer list whole, so the first names by sort order go rather than none.
+      ...(skills.length === 0 ? {} : { skills: skills.slice(0, REPO_MAX_SKILLS) }),
     };
   });
   return entries.toSorted((a, b) => a.name.localeCompare(b.name));

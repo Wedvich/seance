@@ -43,6 +43,17 @@ describe("skillIndex", () => {
     expect(index).toEqual(["ship"]);
   });
 
+  test("project skills from any machine's clones join the union", () => {
+    const withClones: Machine = {
+      ...machine("dev", [exclave("default", ["ship"])]),
+      repos: [
+        { name: "app", path: "/r/app", defaultBranch: "main", skills: ["deploy", "ship"] },
+        { name: "bare", path: "/r/bare", defaultBranch: null },
+      ],
+    };
+    expect(skillIndex([withClones, machine("old")])).toEqual(["deploy", "ship"]);
+  });
+
   test("no machine reports skills: an empty union", () => {
     expect(skillIndex([])).toEqual([]);
     expect(skillIndex([machine("a", [exclave("default", [])])])).toEqual([]);

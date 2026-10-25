@@ -227,7 +227,7 @@ export function parseRepoEntry(value: unknown): RepoEntry | null {
 /**
  * Lenient, unlike the clone's own fields: a clone that fails nulls the whole
  * register blob, so a list this build cannot read costs the clone's project
- * skills — read as unknown, which routes — never the machine.
+ * skills — read as none, which the filter rejects when the name is known — never the machine.
  */
 function parseRepoSkills(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value) || value.length > REPO_MAX_SKILLS || !value.every(isSkillName)) return undefined;
@@ -236,7 +236,7 @@ function parseRepoSkills(value: unknown): readonly string[] | undefined {
 
 /**
  * A skill name as a declaration or an inventory may carry it: what a directory
- * entry the scan lists (no `/`, no leading `.`) and a prompt's first token (no
+ * entry the scan lists (no `/`, no leading `.`) and a prompt's `/name` token (no
  * whitespace) can both be, under `SKILL_NAME_MAX_LENGTH`. `ExclaveInfo.skills`
  * stays a plain string list: tightening it would cost a machine its exclaves
  * over one odd directory name.

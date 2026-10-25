@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll } from "bun:test";
-import { addWorktree, makeClone, makeSeparateGitDirClone } from "../test/fixtures.ts";
+import { REPO_MAX_SKILLS } from "@seance/shared";
+import { addWorktree, makeClone, makeGitFixture, makeSeparateGitDirClone } from "../test/fixtures.ts";
+import { exec } from "./exec.ts";
 import { normalizeOrigin, originQuery, readDefaultBranch, readOriginUrl, repoSetsEqual, scanRepos } from "./scan.ts";
 
 const cleanups: string[] = [];
@@ -152,6 +154,124 @@ describe("scanRepos", () => {
 
   test("missing root scans to empty, not an error", async () => {
     expect(await scanRepos(["/nonexistent/seance-test-root"])).toEqual([]);
+  });
+
+  describe("project skills", () => {
+    /** A fixture clone whose `origin/main` is advanced by committing in the clone and moving the ref, as a fetch would. */
+    async function skillClone(): Promise<{
+      readonly root: string;
+      readonly repo: string;
+      readonly commit: (files: Readonly<Record<string, string | null>>) => Promise<void>;
+      readonly publish: () => Promise<void>;
+    }> {
+      const base = await makeRoot();
+      const { root, repoPath: repo } = await makeGitFixture(base);
+      const run = async (...args: string[]): Promise<void> => {
+        const result = await exec(["git", ...args], { cwd: repo });
+        if (result.exitCode !== 0) throw new Error(result.stderr);
+      };
+      const commit = async (files: Readonly<Record<string, string | null>>): Promise<void> => {
+        for (const [rel, content] of Object.entries(files)) {
+          if (content === null) {
+            await rm(join(repo, rel), { recursive: true, force: true });
+            continue;
+          }
+          await mkdir(dirname(join(repo, rel)), { recursive: true });
+          await writeFile(join(repo, rel), content);
+        }
+        await run("add", "-A");
+        await run("commit", "-q", "-m", "skills");
+      };
+      const publish = (): Promise<void> => run("update-ref", "refs/remotes/origin/main", "HEAD");
+      return { root, repo, commit, publish };
+    }
+    const skill = (name: string): Record<string, string> => ({ [`.claude/skills/${name}/SKILL.md`]: "" });
+
+    test("read from origin/<default>: sorted, and a new or removed skill changes the set", async () => {
+      const { root, commit, publish } = await skillClone();
+      await commit({ ...skill("ship"), ...skill("deploy"), ".claude/skills/stray/notes.md": "" });
+      await publish();
+      const first = await scanRepos([root]);
+      expect(first[0]?.skills).toEqual(["deploy", "ship"]);
+
+      await commit(skill("plan"));
+      await publish();
+      const second = await scanRepos([root], first);
+      expect(second[0]?.skills).toEqual(["deploy", "plan", "ship"]);
+      expect(repoSetsEqual(first, second)).toBe(false);
+
+      await commit({ ".claude/skills/plan": null });
+      await publish();
+      const third = await scanRepos([root], second);
+      expect(third[0]?.skills).toEqual(["deploy", "ship"]);
+      expect(repoSetsEqual(second, third)).toBe(false);
+    });
+
+    test("a clone whose origin default branch has no skills has no skills property", async () => {
+      const { root } = await skillClone();
+      const [entry] = await scanRepos([root]);
+      expect(entry).not.toHaveProperty("skills");
+    });
+
+    test("a skill only on a feature branch, committed past origin, or uncommitted is not advertised", async () => {
+      const { root, repo, commit } = await skillClone();
+      await commit(skill("local-only")); // main moved past origin/main, not published
+      const checkout = await exec(["git", "checkout", "-q", "-b", "feature"], { cwd: repo });
+      expect(checkout.exitCode).toBe(0);
+      await commit(skill("on-feature"));
+      await mkdir(join(repo, ".claude", "skills", "dirty"), { recursive: true });
+      await writeFile(join(repo, ".claude", "skills", "dirty", "SKILL.md"), "");
+      const [entry] = await scanRepos([root]);
+      expect(entry).not.toHaveProperty("skills");
+    });
+
+    test("names failing isSkillName are dropped beside a good one, not the whole list", async () => {
+      const { root, commit, publish } = await skillClone();
+      await commit({ ...skill("good"), ...skill("has space"), ...skill("x".repeat(70)), ...skill(".hidden") });
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual(["good"]);
+    });
+
+    test("a symlinked SKILL.md is skipped, and an unresolvable origin ref reads as no skills", async () => {
+      const { root, repo, commit, publish } = await skillClone();
+      await mkdir(join(repo, ".claude", "skills", "linked"), { recursive: true });
+      await symlink("../../../README.md", join(repo, ".claude", "skills", "linked", "SKILL.md"));
+      await commit(skill("real"));
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual(["real"]);
+
+      const bare = await makeRoot();
+      await makeRepo(bare, "alpha", "main"); // a `.git` dir holding no repo: ls-tree fails
+      expect((await scanRepos([bare]))[0]).not.toHaveProperty("skills");
+    });
+
+    test("a skill dir with many files does not drop skills sorted after it", async () => {
+      const { root, commit, publish } = await skillClone();
+      const bulk = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`.claude/skills/aaa/refs/f${i}.md`, ""]));
+      await commit({ ...skill("aaa"), ...bulk, ...skill("ship") });
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual(["aaa", "ship"]);
+    });
+
+    test("a name with pathspec-looking characters is matched literally", async () => {
+      const { root, commit, publish } = await skillClone();
+      await commit({ ...skill("a:b"), ...skill("x[1]"), ...skill(":(glob)y"), ...skill("xa") });
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual([":(glob)y", "a:b", "x[1]", "xa"]);
+    });
+
+    test("past REPO_MAX_SKILLS the first by sort order are kept, never sent whole", async () => {
+      const { root, commit, publish } = await skillClone();
+      const names = Array.from({ length: REPO_MAX_SKILLS + 2 }, (_, i) => `s${String(i).padStart(2, "0")}`);
+      await commit(Object.assign({}, ...names.map(skill)));
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual(names.slice(0, REPO_MAX_SKILLS));
+    });
   });
 });
 

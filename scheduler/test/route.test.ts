@@ -181,6 +181,215 @@ describe("filter", () => {
     expect(codes(only(decide([revoked])))).toEqual(["auth_missing"]);
   });
 
+  describe("skill_absent — only a name the inventory knows restricts", () => {
+    /** Machine `a`: exclave `main` with `ship`, `alt` without, each holding a clone. */
+    function skilled(): Machine {
+      return machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] }), exclave("alt", "org:b")],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+    }
+
+    function reasonsBy(decision: Decision): Record<string, string[]> {
+      return Object.fromEntries(decision.candidates.map((c) => [c.exclave ?? "", codes(c)]));
+    }
+
+    test("a declared skill restricts to the exclave that has it", () => {
+      const decision = decide([skilled()], { task: task({ spec: spec({ skill: "ship" }) }) });
+      expect(decision.chosen?.exclave).toBe("main");
+      expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    });
+
+    test("a prompt's /name is the declaration; declared wins over it", () => {
+      const prompted = decide([skilled()], { task: task({ spec: spec({ prompt: "/ship the fix" }) }) });
+      expect(reasonsBy(prompted)).toEqual({ main: [], alt: ["skill_absent"] });
+      const declared = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] }), exclave("alt", "org:b", { skills: ["plan"] })],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+      const both = decide([declared], { task: task({ spec: spec({ skill: "plan", prompt: "/ship it" }) }) });
+      expect(reasonsBy(both)).toEqual({ main: ["skill_absent"], alt: [] });
+    });
+
+    test("a /name token anywhere restricts: after whitespace, trailing punctuation stripped", () => {
+      for (const prompt of [
+        "please /ship this",
+        "/ship, then tag",
+        " /ship",
+        "(see /ship)",
+        "/ship\nmore",
+        "a\n/ship.",
+        "/ship: release 1.2",
+        "run `/ship`",
+        '"/ship"',
+        "(/ship)",
+        "[/ship]",
+        "'/ship'",
+      ]) {
+        expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
+          main: [],
+          alt: ["skill_absent"],
+        });
+      }
+      const decision = decide([skilled()], { task: task({ spec: spec({ prompt: "/ship, then tag" }) }) });
+      expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    });
+
+    test("not tokens: a bare slash, a path, and/or, a URL, a second slash, or no slash restricts nothing", () => {
+      for (const prompt of [
+        "/",
+        "/\n",
+        "/tmp/x is broken",
+        "and/or ship",
+        "https://a/ship",
+        "/ship/x",
+        "ship",
+        "/...",
+      ]) {
+        expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
+          main: [],
+          alt: [],
+        });
+      }
+    });
+
+    test("a plugin:name token keeps its colon mid-token", () => {
+      const plugin = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["plug:ship"] }), exclave("alt", "org:b")],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+      const decision = decide([plugin], { task: task({ spec: spec({ prompt: "run /plug:ship now" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("every known token is required; skill_absent names the first one missing in prompt order", () => {
+      const fleet = machine("a", {
+        exclaves: [
+          exclave("a", "org:a", { skills: ["ship"] }),
+          exclave("b", "org:b", { skills: ["ship"] }),
+          exclave("c", "org:c"),
+        ],
+        repos: [
+          { ...clone("app-a", "a"), skills: ["deploy"] },
+          clone("app-b", "b"),
+          { ...clone("app-c", "c"), skills: ["deploy"] },
+        ],
+        status: status({ quota: [obs(0), obs(1), obs(2)] }),
+      });
+      const decision = decide([fleet], { task: task({ spec: spec({ prompt: "/ship then /deploy" }) }) });
+      expect(byExclave(decision, "a")?.rejected).toEqual([]);
+      expect(byExclave(decision, "b")?.rejected).toEqual([{ code: "skill_absent", skill: "deploy" }]);
+      expect(byExclave(decision, "c")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    });
+
+    test("the clone with every required skill is chosen over the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] })],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const decision = decide([project], { task: task({ spec: spec({ prompt: "/ship then /deploy" }) }) });
+      expect(decision.chosen?.clone).toBe("app-2");
+    });
+
+    test("an earlier unknown token does not mask a later known one", () => {
+      const decision = decide([skilled()], { task: task({ spec: spec({ prompt: "/tmp then /review then /ship" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("a declared skill the inventory does not know passes, and does not fall back to the prompt", () => {
+      const decision = decide([skilled()], { task: task({ spec: spec({ skill: "nope", prompt: "/ship it" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: [] });
+    });
+
+    test("an unknown name passes everywhere: a built-in, a plugin's, a typo", () => {
+      for (const prompt of ["/review", "/plugin:ship", "/shp"]) {
+        expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
+          main: [],
+          alt: [],
+        });
+      }
+    });
+
+    test("an offline machine's inventory still makes the name known", () => {
+      const holder = machine("b", { connected: false, exclaves: [exclave("main", "org:b", { skills: ["ship"] })] });
+      const decision = decide([machine("a"), holder], { task: task({ spec: spec({ prompt: "/ship" }) }) });
+      expect(decision.chosen).toBeNull();
+      expect(codes(decision.candidates.find((c) => c.deviceId === "a") ?? only(decision))).toEqual(["skill_absent"]);
+    });
+
+    test("a project skill passes the clone that has it, on any exclave, and is known through it", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a"), exclave("alt", "org:b")],
+        repos: [{ ...clone("app", "main"), skills: ["deploy"] }, clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+      const decision = decide([project], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("with a project skill, the clone that has it is the candidate's clone, not the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a")],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const withSkill = decide([project], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(withSkill.chosen?.clone).toBe("app-2");
+      const without = decide([project], { task: task({ spec: spec({ prompt: "do it" }) }) });
+      expect(without.chosen?.clone).toBe("app");
+    });
+
+    test("an exclave's own skill leaves the clone choice at the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] })],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["ship"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      expect(decide([project], { task: task({ spec: spec({ skill: "ship" }) }) }).chosen?.clone).toBe("app");
+    });
+
+    test("mixed versions: a clone without skills is rejected beside a newer clone that advertises the project skill", () => {
+      const older = machine("old", {
+        exclaves: [exclave("main", "org:o")],
+        repos: [clone("app", "main")], // a daemon predating RepoEntry.skills
+        status: status({ quota: [obs(0)] }),
+      });
+      const newer = machine("new", {
+        exclaves: [exclave("main", "org:n")],
+        repos: [{ ...clone("app", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const decision = decide([older, newer], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(decision.chosen?.deviceId).toBe("new");
+      expect(codes(decision.candidates.find((c) => c.deviceId === "old") ?? only(decision))).toEqual(["skill_absent"]);
+    });
+
+    test("another repo's project skill is not in this task's inventory", () => {
+      const other = machine("b", {
+        repos: [{ ...clone("lib", "main", "github.com/acme/lib"), skills: ["deploy"] }],
+      });
+      const decision = decide([machine("a"), other], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(decision.chosen?.deviceId).toBe("a");
+      expect(codes(decision.candidates.find((c) => c.deviceId === "a") ?? only(decision))).toEqual([]);
+    });
+
+    test("an exclave without the repo's clone records both reasons", () => {
+      const bare = machine("a", { repos: [], exclaves: [exclave("main", "org:a")] });
+      const decision = decide([bare, machine("b", { exclaves: [exclave("main", "org:b", { skills: ["ship"] })] })], {
+        task: task({ spec: spec({ skill: "ship" }) }),
+      });
+      expect(decision.chosen?.deviceId).toBe("b");
+      expect(codes(decision.candidates.find((c) => c.deviceId === "a") ?? only(decision))).toEqual([
+        "repo_absent",
+        "skill_absent",
+      ]);
+    });
+  });
+
   describe("quota_unknown — never scored as 0%", () => {
     test("an account no status carries is filtered, even where 0% would have won", () => {
       const unobserved = machine("idle", { status: status({ cpu: 0, mem: 0 }) });
