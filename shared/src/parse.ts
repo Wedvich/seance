@@ -1135,6 +1135,11 @@ function isBase64UrlBytes(value: unknown, bytes: number): value is string {
   return /^[A-Za-z0-9_-]+$/u.test(value.slice(0, unpadded)) && /^=*$/u.test(value.slice(unpadded));
 }
 
+/** `isBase64UrlBytes` without the padding form: what `generateVapidKeys` writes, so a padded VAPID key is not ours. */
+function isUnpaddedBase64UrlBytes(value: unknown, bytes: number): value is string {
+  return isBase64UrlBytes(value, bytes) && !value.includes("=");
+}
+
 /**
  * A push endpoint a leader may send to: `https:` (`httpsUrl`), on the default
  * port, on a `PUSH_SERVICE_HOSTS` host — for a `*.` entry any subdomain, never
@@ -1235,7 +1240,10 @@ const VAPID_PRIVATE_BYTES = 32;
 function parseVapidKeys(value: unknown): VapidKeys | null {
   if (!isRecord(value)) return null;
   const { publicKey, privateKey } = value;
-  if (!isBase64UrlBytes(publicKey, VAPID_PUBLIC_BYTES) || !isBase64UrlBytes(privateKey, VAPID_PRIVATE_BYTES)) {
+  if (
+    !isUnpaddedBase64UrlBytes(publicKey, VAPID_PUBLIC_BYTES) ||
+    !isUnpaddedBase64UrlBytes(privateKey, VAPID_PRIVATE_BYTES)
+  ) {
     return null;
   }
   return { publicKey, privateKey };
@@ -1245,6 +1253,10 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  * The opened body of the settings record. Strict, as the pause record is: the
  * leader writes it back whole, so a part dropped here — the VAPID key above
  * all, which every subscription is bound to — would be lost on the next write.
+ * Subscriptions alone are read leniently: one that fails `parseWebPushSubscription`
+ * (a host a later build no longer allows) is dropped and goes with the leader's next
+ * write, rather than making the whole record — the VAPID key, the Linear key, every
+ * other browser — unreadable. The cap and one-per-endpoint still refuse the record.
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
@@ -1255,9 +1267,9 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   let subscribed: readonly WebPushSubscription[] | undefined;
   if (subscriptions !== undefined) {
     if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
-    const parsed = parseList(subscriptions, parseWebPushSubscription);
+    const parsed = subscriptions.flatMap((candidate) => parseWebPushSubscription(candidate) ?? []);
     // One subscription per endpoint, as `parseFleetQuotaRecord` has one entry per account.
-    if (parsed === null || new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
+    if (new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
     subscribed = parsed;
   }
   return {

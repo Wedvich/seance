@@ -1483,13 +1483,37 @@ describe("M4 shapes", () => {
       { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(31) } },
       { ...settings, linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH + 1) },
       { ...settings, linearKey: "" },
-      { ...settings, subscriptions: [subscription, { ...subscription, endpoint: "https://example.com/x" }] },
       { ...settings, subscriptions: many },
+      { ...settings, vapid: { publicKey: b64url(65, true), privateKey: b64url(32) } },
+      { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(32, true) } },
       { ...settings, subscriptions: [subscription, { ...subscription }] },
       { ...settings, version: 0 },
     ]) {
       expect(parseSettingsRecord(bad)).toBeNull();
     }
+  });
+
+  test("a subscription the parser no longer accepts is dropped, and the rest of the record reads", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    const vapid = { publicKey: b64url(65), privateKey: b64url(32) };
+    const offList = { ...subscription, endpoint: "https://push.example.com/x" };
+    const dropped = [offList, { ...subscription, keys: { ...subscription.keys, auth: b64url(17) } }, "junk", null];
+    const read = parseSettingsRecord({
+      version: 2,
+      vapid,
+      linearKey: "k",
+      subscriptions: [offList, subscription, ...dropped.slice(1)],
+    });
+    expect(read).toEqual({ version: 2, vapid, linearKey: "k", subscriptions: [subscription] });
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: dropped })?.subscriptions).toEqual([]);
+    // The cap counts what is stored, so a record of dropped entries past it is still refused.
+    const past = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, () => offList);
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: past })).toBeNull();
+    // A subscription that parses but repeats an endpoint is not a host problem and still refuses.
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: [subscription, { ...subscription }] })).toBeNull();
   });
 
   test("a settings record with every field at its bound seals under the store's cap", async () => {

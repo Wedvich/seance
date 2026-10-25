@@ -2159,7 +2159,9 @@ export interface WebPushSubscription {
  * The push services a leader may send to (decided #10): an allowlist rather than
  * any public https host, so a forged subscription cannot aim the leader at an
  * arbitrary URL. `*.` names any subdomain, never the bare host. A new browser
- * vendor is one entry.
+ * vendor is one entry. Removing one drops its subscriptions from the record at the
+ * leader's next write (`parseSettingsRecord` skips them on read); it never makes
+ * the record unreadable.
  */
 export const PUSH_SERVICE_HOSTS = [
   "fcm.googleapis.com",
