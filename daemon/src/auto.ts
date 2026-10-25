@@ -495,7 +495,7 @@ export async function enqueueAuto(
   id?: string,
 ): Promise<AutoEnqueued> {
   const task = queuedTask({ ...request, client: surface satisfies SpawnClient }, Date.now(), id);
-  const audited = enqueueAudit(audit, surface);
+  const audited = enqueueAudit(audit, surface, surface);
   const followUp = FOLLOW_UP[surface];
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;

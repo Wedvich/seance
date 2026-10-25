@@ -2,12 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RequestFailure, type Plain, type RequestOp, type SessionsResponse } from "@seance/shared";
+import { RequestFailure, type Plain, type RequestOp, type SessionsResponse, type Task } from "@seance/shared";
 import { LazyRelay } from "../src/app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest } from "../src/broker-client.ts";
 import { brokerFail, brokerFrameId, type BrokerReply } from "../src/broker-protocol.ts";
 import { createBroker, type Broker } from "../src/broker.ts";
-import { mcpFleetChecks } from "../src/fleet.ts";
+import { brokerFleet, mcpFleetChecks } from "../src/fleet.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import { fakeRelay, machine } from "./fake-app-relay.ts";
@@ -161,6 +161,39 @@ describe("the fleet broker on the local op socket", () => {
     expect(JSON.parse(forged.trim())).toMatchObject({ re: "x", ok: false, code: "op_not_allowed" });
     const sealing = await raw(`${JSON.stringify({ v: 1, kind: "broker", id: "y", action: "seal", payload: "x" })}\n`);
     expect(JSON.parse(sealing.trim())).toMatchObject({ re: "y", ok: false, code: "unsupported" });
+  });
+
+  test("a scheduler enqueue round-trips over the real socket: no leader needed, and a leaderless queue keeps its reason", async () => {
+    const lease = await brokerFleet({ path: sockPath }).open();
+    const scheduler = lease.scheduler;
+    if (scheduler === null) throw new Error("expected a scheduler leg");
+    expect(scheduler.availability()).toEqual({ kind: "none" });
+    const task: Task = {
+      id: "11111111-2222-4333-8444-555555555555",
+      state: "queued",
+      createdAt: 1,
+      spec: { repo: "github.com/m/seance", mode: "worktree", client: "mcp" },
+    };
+    expect(await scheduler.enqueue(task)).toEqual({ ok: true, landedEarlier: false });
+    expect(await scheduler.accounts()).toEqual([]);
+    expect(await rejection(scheduler.queue())).toMatchObject({ reason: "no_leader" });
+    expect(await rejection(scheduler.cancel(task.id))).toBeInstanceOf(RequestFailure);
+    expect(audit.join("\n")).toContain(`action=scheduler op="enqueue" task="${task.id}" claimed_client="mcp"`);
+  });
+
+  test("a scheduler frame past the frame cap is dropped before anything parses it", async () => {
+    const huge = JSON.stringify({
+      v: 1,
+      kind: "broker",
+      id: "big",
+      action: "scheduler",
+      schedulerOp: "enqueue",
+      taskId: "11111111-2222-4333-8444-555555555555",
+      spec: { repo: "github.com/m/seance", mode: "worktree", client: "mcp", prompt: "x".repeat(1_200_000) },
+    });
+    const before = audit.length;
+    expect(await rawSilence(`${huge}\n`, 500)).toBe("");
+    expect(audit.length).toBe(before);
   });
 
   test("a broker frame with no id is dropped, like any malformed frame", async () => {
