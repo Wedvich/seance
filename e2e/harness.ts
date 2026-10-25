@@ -1,5 +1,6 @@
 import {
   DAEMON_ROLES,
+  importAccountKey,
   importPsk,
   parseStoreReply,
   STORE_TIMEOUT_MS,
@@ -143,6 +144,8 @@ export interface Stack {
   readonly fixture: GitFixture;
   readonly stub: ClaudeStub;
   readonly appKey: CryptoKey;
+  /** What a PWA derives from the same PSK to name `account:` keys; opt in per app (`startApp`). */
+  readonly accountKey: CryptoKey;
   readonly deviceId: string;
   daemon: DaemonHandle;
   /**
@@ -243,6 +246,7 @@ export async function startStack(
     throw error;
   };
   const appKey = await importPsk(PSK).catch(failed);
+  const accountKey = await importAccountKey(PSK).catch(failed);
 
   const config: Config = {
     name: "TestMac",
@@ -340,6 +344,7 @@ export async function startStack(
     fixture,
     stub,
     appKey,
+    accountKey,
     deviceId,
     daemon,
     queue: (): QueueStore =>
@@ -433,11 +438,18 @@ export function startApp(
   stack: Stack,
   form: Partial<PersistedForm> = {},
   pending: PendingSpawn | null = null,
+  /**
+   * `accounts`: with the PWA's account key, so it lists `account:` on open. Opt-in
+   * because the relay's list bucket is shared by every app: a listing per app in
+   * suites that never name an account would only spend it.
+   */
+  opts: { readonly accounts?: boolean } = {},
 ): AppHandle {
   const client = new RelayClient({
     url: `${wsUrl(stack.relay, "/app")}`,
     token: TOKEN,
     key: stack.appKey,
+    ...(opts.accounts === true ? { accountKey: stack.accountKey } : {}),
     timeouts: { sessions: 4_000, rescan: 5_000, spawn: 15_000 },
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
   });
