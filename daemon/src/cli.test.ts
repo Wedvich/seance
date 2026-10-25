@@ -64,6 +64,25 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--nope"])).toThrow("usage:");
     expect(() => parseSpawnArgs([])).toThrow("usage:");
     expect(() => parseSpawnArgs(["--here"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--auto"])).toThrow("usage:");
+  });
+
+  test("--auto anywhere combines with every other flag; the prompt still joins from bare words", () => {
+    expect(parseSpawnArgs(["--auto", "seance", "--here", "-t", "My Task", "fix", "it"])).toEqual({
+      repo: "seance",
+      here: true,
+      title: "My Task",
+      prompt: "fix it",
+      auto: true,
+    });
+    expect(parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toEqual({
+      repo: "seance",
+      here: false,
+      prompt: "do it",
+      auto: true,
+    });
+    // `-p` takes the next word as given, so a prompt that reads like the flag stays a prompt.
+    expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
   });
 });
 

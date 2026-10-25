@@ -382,6 +382,8 @@ seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
+seanced spawn --auto seance -p "fix the flaky spawn test"
+#   task 3f2a…: queued — the scheduler picks the machine; needs this shell's PSK and the relay
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
@@ -394,6 +396,11 @@ seanced help                  # every command
 a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 `parent/base` when two collide). Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
+
+`--auto` queues the spawn for the scheduler instead of running it here, as the app's and
+MCP's `auto` do: `<repo>` is then a clone name or origin from any machine in the fleet,
+and the task waits in the relay's queue until a leader places it. It is the one form that
+needs the relay and a PSK this shell can read; the app's queue shows where it lands.
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),

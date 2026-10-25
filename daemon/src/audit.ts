@@ -8,6 +8,7 @@ import {
   quote,
   type DespawnRequest,
   type FailureReason,
+  type SpawnClient,
   type SpawnRequest,
   type UpdateOutcome,
 } from "@seance/shared";
@@ -297,20 +298,28 @@ export function admitAudit(
   };
 }
 
-/** How an MCP enqueue ended: stored, refused by the relay with a code, or unanswered after every try. */
+/** How an enqueue ended: stored, refused by the relay with a code, or unanswered after every try. */
 export type EnqueueOutcome =
   | { readonly kind: "queued"; readonly landedEarlier: boolean }
   | { readonly kind: "refused"; readonly code: string }
   | { readonly kind: "unanswered" };
 
 /**
- * `seanced mcp` enqueuing on `auto` with the key itself (`relayFleet`): a store
- * write that reaches no daemon, so this line, under its own origin, is the
- * enqueuing box's only record of it; the leader's `op=admit` is the other end.
- * Never the prompt.
+ * Who enqueued, as both the line's origin and its client: `seanced mcp`, or
+ * `seanced spawn --auto` typed at this machine — the CLI's own origin, since
+ * `audit enqueue` already tells the act apart from its `audit spawn`.
+ */
+export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
+
+/**
+ * An app-role process on this box enqueuing on `auto` with the key itself
+ * (`relayFleet`): a store write that reaches no daemon, so this line, under its
+ * surface's origin, is the enqueuing box's only record of it; the leader's
+ * `op=admit` is the other end. Never the prompt.
  */
 export function enqueueAudit(
   sink: AuditSink,
+  surface: EnqueueSurface,
 ): (task: { readonly id: string; readonly createdAt: number }, outcome: EnqueueOutcome) => Promise<void> {
   return async (task, outcome) => {
     const how =
@@ -320,7 +329,9 @@ export function enqueueAudit(
           ? // The relay's word, so quoted: a line it shaped could otherwise read as more fields.
             `refused code=${quote(outcome.code)}`
           : "unanswered";
-    await sink(`audit enqueue origin=mcp client=mcp task=${quote(task.id)} createdAt=${task.createdAt} ${how}`);
+    await sink(
+      `audit enqueue origin=${surface} client=${surface} task=${quote(task.id)} createdAt=${task.createdAt} ${how}`,
+    );
   };
 }
 

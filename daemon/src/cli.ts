@@ -10,6 +10,7 @@ import {
 } from "@seance/shared";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
+import { cmdSpawnAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -103,14 +104,17 @@ export interface SpawnCliArgs {
   readonly here: boolean;
   readonly title?: string;
   readonly prompt?: string;
+  /** Queue it for the scheduler instead (`cli-auto.ts`); present only when given. */
+  readonly auto?: true;
 }
 
-const SPAWN_USAGE = "usage: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>]";
+const SPAWN_USAGE = "usage: seanced spawn [--auto] <repo> [--here] [-t <title>] [[-p] <task>]";
 
 /** Mirrors /spawn: -p is optional, bare words join into the prompt. Exported for tests. */
 export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
+  let auto = false;
   let title: string | undefined;
   const promptParts: string[] = [];
   let expect: "title" | "prompt" | null = null;
@@ -123,6 +127,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       expect = null;
     } else if (arg === "--here") {
       here = true;
+    } else if (arg === "--auto") {
+      auto = true;
     } else if (arg === "-t") {
       expect = "title";
     } else if (arg === "-p") {
@@ -142,6 +148,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     here,
     ...(title !== undefined ? { title } : {}),
     ...(prompt !== "" ? { prompt } : {}),
+    ...(auto ? { auto } : {}),
   };
 }
 
@@ -152,6 +159,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
  */
 export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const args = parseSpawnArgs(argv);
+  // The one form that dials the relay; everything below stays relay-free.
+  if (args.auto === true) return cmdSpawnAuto(args);
   const config = await loadConfig();
   const state = await loadOrInitState();
   // Tagged either way, so the spawn pre-trusts the repo in its own exclave's config.

@@ -407,7 +407,7 @@ of M4 has landed.
 | 1     | Skills filter                                                      | —                                                                      | S; M with project skills |
 | 1     | Account records                                                    | store rules v2                                                         | M                        |
 | 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
-| 1     | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
+| 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
@@ -797,24 +797,16 @@ of M4 has landed.
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
 
-- **CLI `auto`, and keyless MCP `auto`** — MCP's `auto` on a box that reads the key itself
-  exists already (DESIGN.md "MCP server"). Its `enqueueAuto` is module-private in
-  `daemon/src/mcp.ts`, so it is split out before a second caller. What remains:
-  - `seanced spawn --auto` (spelling open), enqueueing through the store as the PWA does:
-    seal the task, `store-put` it at `expect: 0`, so it queues with no leader up; the
-    verdict is "queued" plus the task id, and `get_sessions` finds the session by
-    `taskId` once it runs. `seanced spawn` is relay-free today: it drives local tmux and
-    audits `origin=cli`. `--auto` is the one form that needs the relay and the PSK (an
-    app-role leg, as `seanced mcp` has), and a direct spawn stays relay-free.
-  - Keyless `seanced mcp`. It reaches the relay only through the fleet broker, whose
-    actions are fixed; today its `auto` is refused ("needs this machine's own key"). An
-    enqueue there is a new broker action, which is a threat-model change (DESIGN.md
-    "Fleet broker"); without it, keyless MCP gets no `auto`.
-  - _Decided (#16):_ ship CLI `--auto` on boxes with the key; defer the broker action.
+- **Keyless `auto`** — MCP's `auto` and `seanced spawn --auto` on a box that reads the key
+  itself are built (DESIGN.md "MCP server", "CLI `auto`"). What remains:
+  - Keyless `seanced mcp` and `seanced spawn --auto`. They reach the relay only through
+    the fleet broker, whose actions are fixed; today both refuse ("needs this machine's
+    own key"). An enqueue there is a new broker action, which is a threat-model change
+    (DESIGN.md "Fleet broker"); without it, a keyless box gets no `auto`.
+  - _Decided (#16):_ defer the broker action.
+  - Exit: keyless `seanced mcp`'s `auto` queues a task through the broker (refused today).
 
-  Raycast attaches the same way. Exit: a CLI `auto` spawn lands as a task with no leader
-  up and runs once one leads (e2e); `seanced spawn` without `--auto` still works with the
-  relay unreachable (daemon).
+  Raycast `auto` attaches the same way as the CLI's.
 
 ## Settled defaults (interview, 2026-10-15)
 
