@@ -780,10 +780,11 @@ export interface RepoEntry {
   readonly origin?: string;
   /**
    * Project skills: entries under `<clone>/.claude/skills/` holding a
-   * `SKILL.md`, which belong to this clone, not to an exclave (M4, Skills). At
-   * most `REPO_MAX_SKILLS`, each an `isSkillName`. Absent from older daemons
-   * and unknown, never empty, when absent: a reader treats a project-only
-   * skill as one the inventory does not know.
+   * `SKILL.md`, which belong to this clone, not to an exclave (DESIGN.md,
+   * Scheduler, "Skills filter"). At most `REPO_MAX_SKILLS`, each an
+   * `isSkillName`; the scan cuts a longer list to its first names. Absent when
+   * the clone has none, from older daemons, and when the writer dropped them
+   * to fit the blob: the filter reads every absent list as none.
    */
   readonly skills?: readonly string[];
 }
@@ -794,7 +795,8 @@ export interface RepoEntry {
  * the blob: every clone rides the register blob (~12 KiB for 60 repos), and 16
  * names of ~20 characters add ~350 B a clone, but 60 clones at every bound
  * (~1 KiB each) would pass `ENVELOPE_MAX_CT_LENGTH`. So the writer checks the
- * sealed blob and drops project skills, which are optional, before anything else.
+ * sealed blob and drops project skills, which are optional, before anything
+ * else (`sealMachineInfo` in `daemon/src/machine-info.ts`).
  */
 export const REPO_MAX_SKILLS = 16;
 
@@ -1560,10 +1562,10 @@ export type TaskState = (typeof TASK_STATES)[number];
 export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "title" | "model" | "effort" | "plan"> {
   readonly repo: string;
   /**
-   * A skill the task needs (M4, Skills; decided #19), by `isSkillName`: routing
-   * restricts to clones and exclaves that have it, when the fleet's inventory
-   * knows the name at all. Absent, a prompt starting `/name` is read as the
-   * declaration. An older leader's `parseTaskSpec` rebuilds the spec without it,
+   * A skill the task needs (decided #19), by `isSkillName`: routing restricts
+   * to clones and exclaves that have it, when the fleet's inventory knows the
+   * name at all (DESIGN.md, Scheduler, "Skills filter"). Absent, a prompt
+   * starting `/name` is read as the declaration. An older leader's `parseTaskSpec` rebuilds the spec without it,
    * and every write that leader makes (reserve, place, settle) seals that spec
    * back, so the field is lost from the record, not just ignored while it leads.
    * The authoring item must not write it until leaders are upgraded.
