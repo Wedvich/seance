@@ -3,6 +3,7 @@ import {
   AEAD_TAG_BYTES,
   attachmentHash,
   fromBase64,
+  fromBase64Url,
   importPsk,
   mintAttachmentId,
   open,
@@ -12,6 +13,7 @@ import {
   seal,
   sealAttachment,
   toBase64,
+  toBase64Url,
 } from "./crypto.ts";
 import {
   ATTACHMENT_HASH_PATTERN,
@@ -39,6 +41,18 @@ describe("base64", () => {
   test("roundtrips arbitrary bytes", () => {
     const bytes = new Uint8Array([0, 1, 127, 128, 255, 42]);
     expect(fromBase64(toBase64(bytes))).toEqual(bytes);
+  });
+});
+
+describe("base64url", () => {
+  test("is unpadded and url-safe, and reads back padded or unpadded", () => {
+    // 0xfb 0xff 0xfe is "+//+" in standard base64; two bytes leave padding.
+    const bytes = new Uint8Array([0xfb, 0xff, 0xfe, 0xfa]);
+    const encoded = toBase64Url(bytes);
+    expect(encoded).toBe("-__--g");
+    expect(fromBase64Url(encoded)).toEqual(bytes);
+    expect(fromBase64Url(`${encoded}==`)).toEqual(bytes);
+    expect(fromBase64Url("")).toEqual(new Uint8Array());
   });
 });
 

@@ -344,12 +344,15 @@ export const MAX_TASKS = 128;
 
 /**
  * Records across every prefix: the per-prefix caps sum to 202 of it, and the
- * rest is room for a prefix M4 has yet to name (push subscriptions). 10 MiB at most.
+ * rest is room for a prefix not yet named. 10 MiB at most.
  */
 export const MAX_RECORDS = 256;
 
 /** The one key under `queue:`. */
 export const PAUSE_KEY = "queue:pause";
+
+/** The one key the leader writes under `settings:`: one `SettingsRecord` holds every setting. */
+export const SETTINGS_KEY = "settings:main";
 
 /** The one key under `quota:`. */
 export const QUOTA_KEY = "quota:fleet";
@@ -387,9 +390,10 @@ export const STORE_PREFIXES = {
     cap: 1,
   },
   /**
-   * `settings:<name>` → leader-held singletons (the VAPID keypair, the Linear
-   * key). Written only by a leader op, never by an app (owner decision #9), so
-   * fenced as `queue:` is. Eight: a handful of singletons with room to spare.
+   * `settings:<name>` → leader-held singletons. The leader uses one, `SETTINGS_KEY`
+   * (the VAPID keypair, the Linear key and the push subscriptions are one
+   * `SettingsRecord`); the cap leaves room for a split. Written only by the
+   * leader, never by an app (owner decision #9), so fenced as `queue:` is.
    */
   settings: {
     prefix: "settings:",
@@ -643,7 +647,7 @@ export interface StoreChangedFrame {
  * shared/src/account-record.ts), `quota` (`FleetQuotaRecord`, sealed to `"app"` by
  * each daemon's fleet quota writer, `daemon/src/fleet-quota.ts`, and opened only
  * through `openFleetQuotaRecord`) and `settings` (`SettingsRecord`, sealed to
- * SCHEDULER_ID by the leader; shape only, no writer so far).
+ * SCHEDULER_ID by the leader's settings adapter, `daemon/src/settings-store.ts`).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",

@@ -56,6 +56,12 @@ interface TaskFloor {
 interface FloorFile {
   readonly v: typeof FLOOR_VERSION;
   readonly pause: number;
+  /**
+   * The highest version seen at `settings:main`; 0 when absent. Added without
+   * a new `v`: an older daemon reads a bumped `v` as corrupt and starts its
+   * task floors afresh, but ignores a key it does not know (`parseFloor`).
+   */
+  readonly settings?: number;
   /** `[taskId, version, at, mark?]`. */
   readonly tasks: readonly (readonly [string, number, number, Mark?])[];
 }
@@ -77,7 +83,9 @@ function parseFloor(raw: unknown): FloorFile | null {
     if (mark !== undefined && mark !== "deleting" && mark !== "gone") return null;
     tasks.push(mark === undefined ? [id, version, at] : [id, version, at, mark]);
   }
-  return { v: FLOOR_VERSION, pause: raw["pause"], tasks };
+  const settings = raw["settings"];
+  if (settings !== undefined && !isVersion(settings)) return null;
+  return { v: FLOOR_VERSION, pause: raw["pause"], tasks, ...(settings === undefined ? {} : { settings }) };
 }
 
 export class VersionFloor {
@@ -86,6 +94,7 @@ export class VersionFloor {
   /** Insertion order is sighting order: a key seen again moves to the end. */
   readonly #tasks = new Map<string, TaskFloor>();
   #pause: number;
+  #settings: number;
   #writing: Promise<void> = Promise.resolve();
   #queued = false;
 
@@ -93,6 +102,7 @@ export class VersionFloor {
     this.#path = path;
     this.#now = now;
     this.#pause = file?.pause ?? 0;
+    this.#settings = file?.settings ?? 0;
     const ordered = (file?.tasks ?? []).toSorted((a, b) => a[2] - b[2]);
     for (const [id, version, at, mark] of ordered) {
       this.#tasks.set(id, { version, at, savedAt: at, ...(mark === undefined ? {} : { mark }) });
@@ -204,6 +214,28 @@ export class VersionFloor {
     this.#pause = version;
   }
 
+  /** The lowest version `settings:main` may have; 0 before any was seen. */
+  settings(): number {
+    return this.#settings;
+  }
+
+  /** A read found the settings record at `version`, at or above the floor. True when that raised it. */
+  sawSettings(version: number): boolean {
+    if (version <= this.#settings) return false;
+    this.#settings = version;
+    return true;
+  }
+
+  /**
+   * This leader's settings write landed at `version` — raised, never set, unlike
+   * `wrotePause`: no settings write is a way back from a rolled-back record
+   * (the leader never overwrites one it cannot read or that regressed), so a
+   * lower floor would only weaken the rollback check.
+   */
+  wroteSettings(version: number): boolean {
+    return this.sawSettings(version);
+  }
+
   /**
    * Writes the floor as it stands, behind any write in flight, coalesced:
    * concurrent callers share one write. Never rejects — a floor that could not
@@ -227,7 +259,13 @@ export class VersionFloor {
         ? ([id, floor.version, floor.at] as const)
         : ([id, floor.version, floor.at, floor.mark] as const);
     });
-    const file: FloorFile = { v: FLOOR_VERSION, pause: this.#pause, tasks };
+    // Left out at 0, so the file is byte-identical for a daemon that never led.
+    const file: FloorFile = {
+      v: FLOOR_VERSION,
+      pause: this.#pause,
+      tasks,
+      ...(this.#settings === 0 ? {} : { settings: this.#settings }),
+    };
     try {
       await writeDurable(path, `${JSON.stringify(file)}\n`, FLOOR_MODE);
     } catch (err) {
