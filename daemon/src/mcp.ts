@@ -256,7 +256,7 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   if (err instanceof FleetUnreachable) return `${err.message} Only this machine is listed.`;
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
-    ? `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay); get_sessions and despawn_session still work here, but spawn_session queues through the relay, so nothing can be spawned until it is back (a shell here can still run \`seanced spawn --now\`)`
+    ? `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay); get_sessions and despawn_session still work here, but spawn_session queues through the relay, so nothing can be spawned until it is back`
     : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seanced status\`)`;
 }
 
