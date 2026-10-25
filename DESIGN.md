@@ -5521,12 +5521,15 @@ app-role relay client with the key it imported at start.
   older peer ignores the target), so the retry and wording code is shared. A `request_failed`
   reason the peer does not know reads as `dropped`, the uncertain class, since a write may have
   gone out. A failure the daemon itself caused keeps its own message (`target: "daemon"`) rather
-  than the fixed "lost the relay connection" line: `daemon_closed`, `daemon_timeout` and
-  `stopped_in_flight` are retried with the same id as `dropped`, while `bad_reply` and
-  `internal_error` are final for an enqueue — a retry meets the same fault — but still worded as
-  possibly queued, with the task id, once a send may have happened. `fleet` falling back to
-  `machines` also covers `reply_too_large`: `fleet` is side-effect free, and `machines` is the
-  smaller answer.
+  than the fixed "lost the relay connection" line: Every code that may follow a send is
+  uncertain and retried with the same id as `dropped`, except `bad_reply` and `internal_error`,
+  which are final for an enqueue — a retry meets the same fault — but still worded as possibly
+  queued, with the task id, once a send may have happened. The broker can mint `internal_error`
+  before any relay send (an audit sink failure, a crash catch), and the peer still reports it as
+  "may have queued" without retrying; that errs cautious and is accepted. `fleet` falls back to
+  `machines` on `unsupported` and `daemon_closed`, since `fleet` is side-effect free; not on
+  `reply_too_large`, where `machines` is nearly as large and the fallback would only mislead
+  toward "update your daemon".
 - **Threat-model delta.** For the same-uid process on a credential-delivered box, new: it can
   create `task:` records sealed `from: "app"` and bounded as above; read the fleet queue,
   including other clients' titles and prompt previews; cancel any task; read account records
