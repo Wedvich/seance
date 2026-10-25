@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { importAccountKey, importPsk, sealAtRest, toBase64 } from "./crypto.ts";
 import {
+  accountName,
+  accountNameIn,
   accountRecord,
   accountStoreKey,
+  knownAccounts,
   openAccountListing,
   openAccountRecord,
   sealAccountRecord,
 } from "./account-record.ts";
 import { isStoreKey } from "./parse.ts";
-import { APP_ID, AT_REST_OPS, SCHEDULER_ID, type AccountRecord, type StoreRecord } from "./types.ts";
+import { APP_ID, AT_REST_OPS, SCHEDULER_ID, type AccountRecord, type ExclaveInfo, type StoreRecord } from "./types.ts";
 
 const psk = toBase64(new Uint8Array(32).fill(5));
 const key = await importPsk(psk);
@@ -110,5 +113,54 @@ describe("openAccountListing", () => {
     const listing = await openAccountListing(key, accountKey, [good, good, foreign]);
     expect(listing.accounts).toEqual([]);
     expect(listing.unreadable.map((u) => u.reason)).toEqual(["key_mismatch", "key_mismatch", "key_mismatch"]);
+  });
+});
+
+describe("account labels", () => {
+  const exclave = (accountId: string | null, email?: string): ExclaveInfo => ({
+    id: "default",
+    accountId,
+    ...(email === undefined ? {} : { email }),
+    extraUsageEnabled: null,
+    authOk: accountId !== null,
+    skills: [],
+  });
+  const PERSONAL = "1a2b3c4d-personal:acct-0123456789";
+  const TEAM = "9f8e7d6c-team:acct-0123456789";
+  const OTHER = "1a2b3c4d-personal:acct-ffffffff";
+  const machines = [
+    { exclaves: [exclave(PERSONAL, "me@example.com"), exclave(null)] },
+    { exclaves: [exclave(TEAM)] },
+    { exclaves: [exclave(TEAM, "me@example.com"), exclave(OTHER, "you@example.com")] },
+    {},
+  ];
+
+  test("knownAccounts lists each signed-in account once, with the email some exclave reports", () => {
+    expect(knownAccounts(machines)).toEqual([
+      { accountId: PERSONAL, email: "me@example.com" },
+      { accountId: TEAM, email: "me@example.com" },
+      { accountId: OTHER, email: "you@example.com" },
+    ]);
+  });
+
+  test("an email two known accounts share gains each one's org; a unique email or an alias reads as itself", () => {
+    const known = knownAccounts(machines);
+    expect(accountNameIn(known, PERSONAL)).toBe("me@example.com (org 1a2b3c4d)");
+    expect(accountNameIn(known, TEAM)).toBe("me@example.com (org 9f8e7d6c)");
+    expect(accountNameIn(known, OTHER)).toBe("you@example.com");
+    expect(accountNameIn(known, TEAM, "work")).toBe("work");
+    // Without the other org in view there is nothing to tell apart.
+    expect(accountName(PERSONAL, "me@example.com", undefined, known.slice(0, 1))).toBe("me@example.com");
+  });
+
+  test("a short id two known accounts share gains the org too, and an id the registry lacks is labelled against it", () => {
+    const known = [
+      { accountId: PERSONAL, email: undefined },
+      { accountId: TEAM, email: undefined },
+    ];
+    expect(accountNameIn(known, PERSONAL)).toBe("acct acct-012 (org 1a2b3c4d)");
+    expect(accountNameIn(known, "elsewhere:acct-0123456789")).toBe("acct acct-012 (org elsewher)");
+    expect(accountNameIn(known, OTHER)).toBe("acct acct-fff");
+    expect(accountName("work", undefined)).toBe("acct work");
   });
 });
