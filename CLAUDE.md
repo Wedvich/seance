@@ -189,7 +189,9 @@ green:
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
-  carries one. Don't let changes drift from them.
+  carries one, and the settings record (`settings:main`) is written only by the leader, held to
+  the version floor, never regenerated nor written over when it cannot be read or has regressed,
+  and never logged nor put in `queue`, MCP or `status`. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op

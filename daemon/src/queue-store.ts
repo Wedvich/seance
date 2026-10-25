@@ -16,21 +16,14 @@ import {
   openTaskRecord,
   parsePauseRecord,
   PAUSE_KEY,
-  RequestFailure,
   sealAtRest,
   sealTaskRecord,
   SCHEDULER_ID,
-  STORE_CREATE_MAX_CT_LENGTH,
-  STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
   taskKey,
-  type Envelope,
   type PauseHold,
-  type StoreDeleteFrame,
-  type StorePutFrame,
-  type StoreReplyFrame,
-  type StoreRequestFrame,
 } from "@seance/shared";
+import { storeIo, withinCap, type StoreLeg } from "./store-frames.ts";
 import type { VersionFloor } from "./version-floor.ts";
 
 /**
@@ -48,11 +41,7 @@ import type { VersionFloor } from "./version-floor.ts";
  * No line is logged per op, and no body, key, `env` or `ct` is ever logged.
  */
 
-/** What the adapter sends on: the daemon's relay client (`RelayClient.store`). */
-export interface StoreLeg {
-  /** Null is a reply this build cannot read; rejects `RequestFailure` when nothing answered. */
-  store(frame: StoreRequestFrame): Promise<StoreReplyFrame | null>;
-}
+export type { StoreLeg };
 
 export interface QueueStoreOpts {
   readonly leg: StoreLeg;
@@ -62,52 +51,10 @@ export interface QueueStoreOpts {
   readonly now: () => number;
 }
 
-/** Codes the port can carry as they stand. Any other refusal is the request itself being wrong. */
-const PASSED_THROUGH = ["version_conflict", "too_large", "rate_limited", "store_full"] as const;
-
-function isPassedThrough(code: string): code is (typeof PASSED_THROUGH)[number] {
-  return PASSED_THROUGH.some((passed) => passed === code);
-}
-
 const TASK_PREFIX_LENGTH = STORE_PREFIXES.task.prefix.length;
 
-function withinCap(env: Envelope, expect: number): boolean {
-  return env.ct.length <= (expect === 0 ? STORE_CREATE_MAX_CT_LENGTH : STORE_MAX_CT_LENGTH);
-}
-
 export function createQueueStore(o: QueueStoreOpts): QueueStore {
-  /**
-   * A read that cannot be answered rejects: a short list read as the whole
-   * queue would be tasks the new leader never runs, and the takeover that
-   * fails is retried.
-   */
-  const read = async (frame: StoreRequestFrame): Promise<StoreReplyFrame> => {
-    const reply = await o.leg.store(frame);
-    if (reply === null) throw new Error(`${frame.t}: the reply was unreadable`);
-    if (reply.t === "store-refused") throw new Error(`${frame.t}: the relay refused it (${reply.code})`);
-    return reply;
-  };
-
-  /** The port's answer to a write: the relay's reply mapped, or the term's end thrown. */
-  const write = async (frame: StorePutFrame | StoreDeleteFrame, version: number): Promise<StoreWrite> => {
-    let reply: StoreReplyFrame | null;
-    try {
-      reply = await o.leg.store(frame);
-    } catch (err) {
-      if (!(err instanceof RequestFailure)) throw err;
-      // Nothing was sent: the socket the term belongs to is gone, so the term is over.
-      if (err.reason === "disconnected") throw new StoreRevoked(`no socket to send ${frame.t} on`);
-      // Sent, then no answer: it may have committed.
-      return { ok: false, code: "indeterminate" };
-    }
-    if (reply === null) return { ok: false, code: "indeterminate" };
-    if (reply.t === "store-written") {
-      return reply.version === version ? { ok: true, version } : { ok: false, code: "indeterminate" };
-    }
-    if (reply.t !== "store-refused") return { ok: false, code: "indeterminate" };
-    if (reply.code === "not_leader") throw new StoreRevoked(`the relay refused ${frame.t} as not_leader`);
-    return { ok: false, code: isPassedThrough(reply.code) ? reply.code : "refused" };
-  };
+  const { read, write } = storeIo(o.leg, (why) => new StoreRevoked(why));
 
   return {
     async list(): Promise<readonly StoreEntry[]> {

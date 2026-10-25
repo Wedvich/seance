@@ -1,4 +1,4 @@
-import { fromBase64, toBase64 } from "./crypto.ts";
+import { fromBase64, toBase64, toBase64Url } from "./crypto.ts";
 
 /**
  * A machine's identity is a signing keypair, and its deviceId is the hash of
@@ -52,7 +52,7 @@ export function generateIdentitySeed(): Uint8Array<ArrayBuffer> {
  */
 export async function deviceIdOf(publicKey: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", publicKey));
-  return toBase64(digest).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+  return toBase64Url(digest);
 }
 
 export async function identityFromSeed(seed: Uint8Array<ArrayBuffer>): Promise<Identity> {

@@ -112,9 +112,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   | `quota:fleet`     | any registered daemon          | any registered daemon (CAS)          | never       | no          | 1   | M4    |
 
   Only `task:` tombstones. App-writable records exist for state a person edits from any client
-  with no leader up — an account's alias first. Push subscriptions still need a prefix of their
-  own, decided with Settings and Web Push, within the 54 records the caps leave of
-  `MAX_RECORDS`.
+  with no leader up — an account's alias first. Push subscriptions need no prefix of their own:
+  they live in the leader's one settings record, `settings:main`.
 
 - **Version binding** — the reader's rules (`bindTaskRecord`) are DESIGN.md _Scheduler_, "Task
   records and the app's store leg". They close rollback against a token holder, not the relay
@@ -194,10 +193,8 @@ dependents; a PR-less end with a clean or unknown exit is still `done` by `sessi
 
 **Secrets (M4).** The first draft gave a fixed box a Linear key, a VAPID key and a Proxmox
 token. Under a moving leader there is no Proxmox token at all (M4 #17: the LXC daemons read
-only their own container); the VAPID keypair and Linear key live in the store (`settings`),
-opened by whichever daemon leads — the PSK is already the only trust boundary, so sealing them
-under it adds no second one. The leader alone writes `settings`, and every PSK holder can read
-it (Settings and Web Push, below, #9). Linear polling is optional from day one, since the leader's forge read and daemon-local merge detection are the
+only their own container); the VAPID keypair and Linear key live in the store
+(`settings:main`; DESIGN.md, _Scheduler_, "Settings record"). Linear polling is optional from day one, since the leader's forge read and daemon-local merge detection are the
 primary done signals.
 
 ## Milestones
@@ -643,17 +640,12 @@ of M4 has landed.
   nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the Machines
   screen shows the fill level, but only a push reaches someone not looking at it). The `onAlert` seam exists,
   hard-wired to a log line (`startTerm` in `daemon/src/leader.ts`); a workbox service worker
-  exists. Missing: the prefixes, `push-subscribe`, VAPID and RFC 8291 encryption, a push
+  exists. Built: the settings record and the VAPID keypair (DESIGN.md, _Scheduler_,
+  "Settings record"). Missing: `push-subscribe`, RFC 8291 encryption, a push
   handler, the new alert kinds and a persisted de-dupe. Push endpoints can take seconds, so never
   await a send in the pass (as `#launch` does for spawns), and read subscriptions once per term,
   not per alert.
-  - _Decided (#9), who writes `settings`:_ a leader op, not an app-writable prefix — an app sends
-    the value sealed `from: "app"`, and only the leader writes the record.
-    - Every PSK holder, the PWA included, can open the Linear token and VAPID key; DESIGN.md's
-      threat model records it rather than adding a second key, since the PSK is already the one
-      trust boundary. The Linear key is scoped as narrowly as Linear allows.
-    - Apply the review's version floor (S1) to it.
-    - Never put it in logs, `queue`, MCP or `status`.
+  - _Decided (#9), who writes `settings`:_ recorded in DESIGN.md (_Scheduler_, "Settings record").
   - _Decided (#10), Web Push egress from a dev machine:_
     - An allowlist of push-service hosts: `fcm.googleapis.com`,
       `updates.push.services.mozilla.com`, `web.push.apple.com` and `*.notify.windows.com` —
