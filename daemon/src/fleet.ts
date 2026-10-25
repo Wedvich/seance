@@ -1,4 +1,5 @@
 import type {
+  AccountRecord,
   ErrorResponse,
   Machine,
   QueueReply,
@@ -8,7 +9,8 @@ import type {
   TaskCreated,
   TaskReply,
 } from "@seance/shared";
-import type { LazyRelay } from "./app-relay.ts";
+import { AccountCache } from "./account-cache.ts";
+import type { AppRelay, LazyRelay } from "./app-relay.ts";
 import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
 import type { BrokerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
@@ -42,6 +44,8 @@ export interface SchedulerLeg {
   readonly availability: () => SchedulerAvailability;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
+  /** The readable account records, cached per socket (`AccountCache`); null when a listing was refused or lost. */
+  readonly accounts: () => Promise<readonly AccountRecord[] | null>;
 }
 
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
@@ -65,6 +69,15 @@ export interface Fleet {
 }
 
 export function relayFleet(relay: LazyRelay): Fleet {
+  // Per client: an idle hang-up drops the client, and the next one lists afresh.
+  const caches = new WeakMap<AppRelay, AccountCache>();
+  const cacheOf = (client: AppRelay): AccountCache => {
+    const held = caches.get(client);
+    if (held !== undefined) return held;
+    const cache = new AccountCache(client);
+    caches.set(client, cache);
+    return cache;
+  };
   return {
     open: async (): Promise<FleetLease> => {
       const client = await relay.acquire();
@@ -77,6 +90,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           availability: () => client.getState().scheduler,
           queue: () => client.queue(),
           cancel: (taskId) => client.cancel(taskId),
+          accounts: () => cacheOf(client).read(),
         },
         release: (): void => relay.release(),
       };
@@ -241,14 +255,14 @@ export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts 
  */
 const KEY_RETRY_MS = 60_000;
 
-export interface SelectFleetOpts {
+export interface SelectFleetOpts<K> {
   /**
    * This process's own key, or null when nothing it can read holds one — the
    * typed signal for "use the daemon", never inferred from an error's text. A
    * key that exists but is unusable throws, and that error is the answer.
    */
-  readonly key: () => Promise<CryptoKey | null>;
-  readonly direct: (key: CryptoKey) => Fleet;
+  readonly key: () => Promise<K | null>;
+  readonly direct: (key: K) => Fleet;
   readonly broker: Fleet;
   readonly keyRetryMs?: number;
   readonly now?: () => number;
@@ -261,12 +275,12 @@ export interface SelectFleetOpts {
  * never retried through the daemon, since a spawn that may have landed must not
  * be fired twice.
  */
-export function selectFleet(opts: SelectFleetOpts): Fleet {
+export function selectFleet<K>(opts: SelectFleetOpts<K>): Fleet {
   const now = opts.now ?? Date.now;
   const retryMs = opts.keyRetryMs ?? KEY_RETRY_MS;
   let direct: Fleet | null = null;
   let keylessUntil = 0;
-  let resolving: Promise<CryptoKey | null> | null = null;
+  let resolving: Promise<K | null> | null = null;
 
   const resolveKey = async (): Promise<void> => {
     if (direct !== null || now() < keylessUntil) return;

@@ -13,6 +13,7 @@ import {
   storeErrorText,
   taskFailureText,
   withReportInstruction,
+  type AccountRecord,
   type Decision,
   type ExclaveInfo,
   type Machine,
@@ -26,7 +27,7 @@ import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import type { AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
-import { resolveOrigin } from "./auto.ts";
+import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } from "./auto.ts";
 import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import type { reportDone } from "./report-done.ts";
@@ -37,8 +38,6 @@ import {
   mcpBunPath,
   mcpScriptCheck,
   mcpScriptPath,
-  resolveMachine,
-  resolvePin,
   type LocalMachine,
 } from "./mcp.ts";
 
@@ -218,9 +217,10 @@ describe("mcp tools", () => {
     lazy.stop();
   });
 
-  test("list_machines lists each machine's exclave ids, and none for a machine that reports none", async () => {
+  test("list_machines lists each machine's exclaves with the account signed in there, and none for a machine that reports none", async () => {
+    const signedOut: ExclaveInfo = { ...exclave("spare"), accountId: null };
     const machines = [
-      machine({ exclaves: [exclave("default"), exclave("work")] }),
+      machine({ exclaves: [exclave("default"), { ...exclave("work"), email: "me@pengefix.no" }, signedOut] }),
       machine({ deviceId: "device-2", name: "Old Box" }),
     ];
     const lazy = new LazyRelay({ create: () => fakeRelay(machines) });
@@ -228,7 +228,11 @@ describe("mcp tools", () => {
     const [updated, old]: Record<string, unknown>[] = JSON.parse(
       toolText(await client.callTool({ name: "list_machines", arguments: {} })),
     );
-    expect(updated?.exclaves).toEqual(["default", "work"]);
+    expect(updated?.exclaves).toEqual([
+      { id: "default", accountId: "org:default" },
+      { id: "work", accountId: "org:work", email: "me@pengefix.no" },
+      { id: "spare" },
+    ]);
     expect(old).not.toHaveProperty("exclaves");
     lazy.stop();
   });
@@ -1243,17 +1247,35 @@ function exclave(id: string): ExclaveInfo {
   return { id, accountId: `org:${id}`, extraUsageEnabled: false, authOk: true, skills: [] };
 }
 
+/** One person in two orgs: the same email, two accounts — the case an email cannot pick between. */
+const PERSONAL = "org-a:me";
+const EMPLOYER = "org-b:me";
+const EMAIL = "me@pengefix.no";
+
+function signedIn(id: string, accountId: string): ExclaveInfo {
+  return { ...exclave(id), accountId, email: EMAIL };
+}
+
+const ALIASES: readonly AccountRecord[] = [
+  { accountId: PERSONAL, alias: "personal", version: 1 },
+  { accountId: EMPLOYER, alias: "employer", version: 1 },
+  // A record for an account no machine reports: aliasable, never pinnable.
+  { accountId: "org-c:gone", alias: "old", version: 1 },
+];
+
 /**
- * Thad holds both orgs' clones, one per exclave; WSL and Mac each call theirs
- * plain `pengefix-hq` — for different repos, so the bare name is ambiguous
- * across the fleet though each machine's own list is not.
+ * Thad holds both orgs' clones, one per exclave and account; WSL and Mac each
+ * call theirs plain `pengefix-hq` — for different repos, so the bare name is
+ * ambiguous across the fleet though each machine's own list is not. Thad leads
+ * where a test needs a leader that routes on accounts (`pinRelay`).
  */
 function pinMachines(): Machine[] {
   return [
     machine({
       deviceId: "device-thad",
       name: "Thad",
-      exclaves: [exclave("default"), exclave("work")],
+      exclaves: [signedIn("default", PERSONAL), signedIn("work", EMPLOYER)],
+      capabilities: [CAPABILITIES.pinAccount],
       repos: [
         { name: "pengefix/pengefix-hq", path: "/t/a", defaultBranch: "main", exclave: "default", origin: HQ },
         { name: "pengefix2/pengefix-hq", path: "/t/b", defaultBranch: "main", exclave: "work", origin: HQ2 },
@@ -1262,65 +1284,136 @@ function pinMachines(): Machine[] {
     machine({
       deviceId: "device-wsl",
       name: "WSL",
-      exclaves: [exclave("default")],
+      exclaves: [signedIn("default", PERSONAL)],
       repos: [{ name: "pengefix-hq", path: "/w", defaultBranch: "main", exclave: "default", origin: HQ }],
     }),
     machine({
       deviceId: "device-mac",
       name: "Mac",
-      exclaves: [exclave("default")],
+      exclaves: [signedIn("default", EMPLOYER)],
       repos: [{ name: "pengefix-hq", path: "/m", defaultBranch: "main", exclave: "default", origin: HQ2 }],
     }),
   ];
 }
 
-describe("resolvePin", () => {
-  test("a machine name resolves to its deviceId in any case, and a deviceId passes as itself", () => {
-    for (const ref of ["thad", "Thad", "device-thad"]) {
-      const resolved = resolvePin(pinMachines(), { machine: ref, exclave: "work" });
-      if ("error" in resolved) throw new Error(resolved.error);
-      expect(resolved.pin).toEqual({ deviceId: "device-thad", exclave: "work" });
-      // Only the pinned exclave's clones are left to read a repo name against.
-      expect(resolved.machines.map((m) => m.repos.map((r) => r.name))).toEqual([["pengefix2/pengefix-hq"]]);
-    }
-  });
+/** A leader that routes on accounts, with the aliases listed. */
+function pinRelay(): FakeRelay {
+  const fake = leaderRelay([], pinMachines());
+  fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+  fake.accounts = ALIASES;
+  return fake;
+}
 
-  test("an unknown machine lists the known ones; a name two machines share lists their deviceIds", () => {
-    expect(resolvePin(pinMachines(), { machine: "nope" })).toEqual({
-      error: 'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
-    });
-    const twins = [...pinMachines(), machine({ deviceId: "device-wsl2", name: "wsl", exclaves: [exclave("default")] })];
-    const resolved = resolvePin(twins, { machine: "WSL" });
-    if (!("error" in resolved)) throw new Error("expected an error");
-    expect(resolved.error).toContain('"WSL" names more than one machine');
-    expect(resolved.error).toContain("WSL (device-wsl), wsl (device-wsl2)");
-  });
-
-  test("an exclave the pinned machine does not report is refused with its exclaves; a machine reporting none is refused", () => {
-    expect(resolvePin(pinMachines(), { machine: "WSL", exclave: "work" })).toEqual({
-      error: 'pin.exclave "work" is not an exclave of WSL (device-wsl) — its exclaves: default',
-    });
-    const old = [machine({ deviceId: "device-old", name: "Old" })];
-    for (const input of [{ machine: "Old" }, { machine: "Old", exclave: "work" }]) {
-      expect(resolvePin(old, input)).toEqual({
-        error:
-          "pin.machine: Old (device-old) reports no exclaves, so auto cannot place there — its daemon needs `seanced update`",
-      });
-    }
-  });
-
-  test("an exclave alone must be on some machine that reports exclaves, and scopes every machine to it", () => {
-    const resolved = resolvePin(pinMachines(), { exclave: "work" });
+describe("resolvePlacement", () => {
+  const listed = (records: readonly AccountRecord[] | null = ALIASES) => {
+    const calls = { n: 0 };
+    return {
+      calls,
+      accounts: async (): Promise<readonly AccountRecord[] | null> => {
+        calls.n += 1;
+        return records;
+      },
+    };
+  };
+  const placed = async (input: PlacementInput, records?: readonly AccountRecord[] | null) => {
+    const resolved = await resolvePlacement(pinMachines(), listed(records).accounts, input);
     if ("error" in resolved) throw new Error(resolved.error);
-    expect(resolved.pin).toEqual({ exclave: "work" });
-    expect(resolved.machines.flatMap((m) => m.repos.map((r) => r.name))).toEqual(["pengefix2/pengefix-hq"]);
-    expect(resolvePin(pinMachines(), { exclave: "home" })).toEqual({
-      error: 'pin.exclave "home" is on no machine — the fleet\'s exclaves: default, work',
+    return resolved;
+  };
+  const refused = async (input: PlacementInput, records?: readonly AccountRecord[] | null): Promise<string> => {
+    const resolved = await resolvePlacement(pinMachines(), listed(records).accounts, input);
+    if (!("error" in resolved)) throw new Error("expected an error");
+    return resolved.error;
+  };
+
+  test("a machine name resolves to its deviceId in any case, and the account cuts its clones to that account's", async () => {
+    for (const ref of ["thad", "Thad", "device-thad"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      const resolved = await placed({ machine: ref, account: "employer" });
+      expect(resolved.fields).toEqual({ pin: { deviceId: "device-thad", account: EMPLOYER } });
+      expect(resolved.machines.map((m) => m.repos.map((r) => r.name))).toEqual([["pengefix2/pengefix-hq"]]);
+      expect(resolved.scope).toBe(`auto pinned to Thad, account ${EMPLOYER}`);
+    }
+  });
+
+  test("an account by alias, by id, or by an email only it reports; the email never reaches the spec", async () => {
+    for (const input of ["employer", "EMPLOYER", EMPLOYER]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      const resolved = await placed({ account: input });
+      expect(resolved.fields).toEqual({ pin: { account: EMPLOYER } });
+      // Every machine, each cut to its clones where the account is signed in.
+      expect(resolved.machines.flatMap((m) => m.repos.map((r) => r.path))).toEqual(["/t/b", "/m"]);
+      expect(resolved.echo).toBe(`pinned to account ${EMPLOYER} (${EMAIL})`);
+      expect(JSON.stringify(resolved.fields)).not.toContain(EMAIL);
+    }
+    const solo = [machine({ deviceId: "device-x", name: "X", exclaves: [{ ...exclave("default"), email: "x@a.no" }] })];
+    const byEmail = await resolvePlacement(solo, listed().accounts, { account: "X@A.no" });
+    expect(byEmail).toMatchObject({ fields: { pin: { account: "org:default" } } });
+  });
+
+  test("an email two orgs share is refused with each full accountId and where it is signed in", async () => {
+    const error = await refused({ account: EMAIL });
+    expect(error).toContain(`pin.account: "${EMAIL}" is the email of more than one account — give its id`);
+    expect(error).toContain(`${PERSONAL} (alias "personal", ${EMAIL}, on Thad/default, WSL/default)`);
+    expect(error).toContain(`${EMPLOYER} (alias "employer", ${EMAIL}, on Thad/work, Mac/default)`);
+  });
+
+  test("an unknown account lists the fleet's; one no machine reports, or not the pinned one, is refused", async () => {
+    expect(await refused({ account: "nobody" })).toContain(
+      `pin.account: no account "nobody" — the fleet's accounts: ${PERSONAL}`,
+    );
+    expect(await refused({ account: "old" })).toContain(
+      'org-c:gone (alias "old", signed in nowhere), which no machine reports signed in',
+    );
+    expect(await refused({ machine: "WSL", account: "employer" })).toContain(
+      `is signed in on no exclave of WSL (device-wsl)`,
+    );
+  });
+
+  test("a failed listing says aliases are unavailable and asks for an email or id, which still resolve", async () => {
+    const error = await refused({ account: "employer" }, null);
+    expect(error).toContain("aliases are unavailable right now");
+    expect(error).toContain("give the account's email or id");
+    expect(error).not.toContain("no account");
+    expect((await placed({ account: EMPLOYER }, null)).fields).toEqual({ pin: { account: EMPLOYER } });
+  });
+
+  test("avoid stores deviceIds once each; naming the pinned machine or an unknown one is refused, avoiding all others is not", async () => {
+    const resolved = await placed({ avoid: ["wsl", "device-wsl", "Mac"] });
+    expect(resolved.fields).toEqual({ avoid: ["device-wsl", "device-mac"] });
+    // avoid narrows no repo scope: the task waits rather than reading a name elsewhere.
+    expect(resolved.scope).toBe("auto");
+    expect(await refused({ machine: "Thad", avoid: ["thad"] })).toContain(
+      "avoid names Thad (device-thad), the machine the task is pinned to",
+    );
+    expect(await refused({ avoid: ["nope"] })).toContain('avoid: no machine named "nope"');
+    expect((await placed({ machine: "Thad", avoid: ["WSL", "Mac"] })).fields).toEqual({
+      pin: { deviceId: "device-thad" },
+      avoid: ["device-wsl", "device-mac"],
     });
-    // Nothing reports exclaves: no clone carries one, so nothing could be placed.
-    expect(resolvePin(autoMachines(), { exclave: "home" })).toMatchObject({
-      error: expect.stringContaining("no machine reports exclaves"),
+  });
+
+  test("only an account pin lists accounts", async () => {
+    const { calls, accounts } = listed();
+    await resolvePlacement(pinMachines(), accounts, { machine: "Thad", avoid: ["WSL"] });
+    await resolvePlacement(pinMachines(), accounts, {});
+    expect(calls.n).toBe(0);
+    await resolvePlacement(pinMachines(), accounts, { account: "personal" });
+    expect(calls.n).toBe(1);
+  });
+
+  test("a machine reporting no exclaves, or an unknown or shared name, is refused", async () => {
+    const old = [machine({ deviceId: "device-old", name: "Old" })];
+    expect(await resolvePlacement(old, listed().accounts, { machine: "Old" })).toEqual({
+      error:
+        "pin.machine: Old (device-old) reports no exclaves, so auto cannot place there — its daemon needs `seanced update`",
     });
+    expect(await refused({ machine: "nope" })).toBe(
+      'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
+    );
+    const twins = [...pinMachines(), machine({ deviceId: "device-wsl2", name: "wsl", exclaves: [exclave("default")] })];
+    const shared = await resolvePlacement(twins, listed().accounts, { machine: "WSL" });
+    expect(shared).toMatchObject({ error: expect.stringContaining("WSL (device-wsl), wsl (device-wsl2)") });
   });
 });
 
@@ -1331,6 +1424,7 @@ describe("spawn_session on auto, pinned", () => {
     expect(unpinned.error).toBe(true);
     expect(unpinned.text).toContain('"pengefix-hq" names clones of more than one repo');
 
+    // A machine pin needs no capability and spends no account listing.
     const fake = leaderRelay([], pinMachines());
     const { error } = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "wsl" } });
     expect(error).toBe(false);
@@ -1345,39 +1439,41 @@ describe("spawn_session on auto, pinned", () => {
     const mac = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "device-mac" } });
     expect(mac.error).toBe(false);
     expect(fake.creates[1]?.spec).toMatchObject({ repo: HQ2, pin: { deviceId: "device-mac" } });
+    expect(fake.accountLists).toBe(0);
   });
 
-  test("an exclave narrows the names further, and an origin works wherever its clone is", async () => {
-    const fake = leaderRelay([], pinMachines());
-    const work = await callAuto(fake, { repo: "pengefix2/pengefix-hq", pin: { machine: "Thad", exclave: "work" } });
+  test("an account pin stores only the accountId, narrows the names to its clones, and names the account in the answer", async () => {
+    const fake = pinRelay();
+    const work = await callAuto(fake, { repo: "pengefix2/pengefix-hq", pin: { machine: "Thad", account: "employer" } });
     expect(work.error).toBe(false);
-    expect(fake.creates[0]?.spec).toMatchObject({ repo: HQ2, pin: { deviceId: "device-thad", exclave: "work" } });
+    expect(work.text).toContain(`pinned to account ${EMPLOYER} (${EMAIL})`);
+    expect(fake.creates[0]?.spec).toMatchObject({ repo: HQ2, pin: { deviceId: "device-thad", account: EMPLOYER } });
+    expect(JSON.stringify(fake.creates[0])).not.toContain(EMAIL);
+    expect(JSON.stringify(fake.creates[0])).not.toContain("employer");
+    expect(work.audited.join("\n")).not.toContain(EMAIL);
 
     const elsewhere = await callAuto(fake, {
       repo: "pengefix2/pengefix-hq",
-      pin: { machine: "Thad", exclave: "default" },
+      pin: { machine: "Thad", account: "personal" },
     });
     expect(elsewhere.error).toBe(true);
     expect(elsewhere.text).toContain(
-      `no repo "pengefix2/pengefix-hq" for auto pinned to Thad/default — known origins: ${HQ}`,
+      `no repo "pengefix2/pengefix-hq" for auto pinned to Thad, account ${PERSONAL} — known origins: ${HQ}`,
     );
-    // Another machine's clone name is not read on the pinned one.
-    const other = await callAuto(fake, { repo: "pengefix-hq", pin: { machine: "Thad" } });
-    expect(other.error).toBe(true);
-    expect(other.text).toContain('no repo "pengefix-hq" for auto pinned to Thad');
 
-    const origin = await callAuto(fake, { repo: `https://${HQ}.git`, pin: { exclave: "default" } });
+    const origin = await callAuto(fake, { repo: `https://${HQ}.git`, pin: { account: PERSONAL } });
     expect(origin.error).toBe(false);
-    expect(fake.creates[1]?.spec).toMatchObject({ repo: HQ, pin: { exclave: "default" } });
+    expect(fake.creates[1]?.spec).toMatchObject({ repo: HQ, pin: { account: PERSONAL } });
     expect(fake.creates).toHaveLength(2);
   });
 
-  test("an unknown machine or exclave is refused with the choices, and nothing is stored", async () => {
-    const fake = leaderRelay([], pinMachines());
+  test("an unknown or ambiguous machine or account is refused with the choices, and nothing is stored", async () => {
+    const fake = pinRelay();
     const cases: [Record<string, unknown>, string][] = [
       [{ machine: "nope" }, 'pin.machine: no machine named "nope"'],
-      [{ machine: "WSL", exclave: "work" }, "its exclaves: default"],
-      [{ exclave: "home" }, "the fleet's exclaves: default, work"],
+      [{ account: EMAIL }, `${PERSONAL} (alias "personal"`],
+      [{ machine: "WSL", account: "employer" }, "is signed in on no exclave of WSL (device-wsl)"],
+      [{ account: "nobody" }, "the fleet's accounts:"],
     ];
     for (const [pin, text] of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one call each
@@ -1388,61 +1484,122 @@ describe("spawn_session on auto, pinned", () => {
     expect(fake.creates).toEqual([]);
   });
 
-  test("an empty pin, an empty machine and an exclave past its bound are refused before the relay is dialled", async () => {
-    const fake = leaderRelay([], pinMachines());
+  test("a refused account listing says aliases are unavailable, never that the account is unknown", async () => {
+    const fake = pinRelay();
+    fake.accounts = { ok: false, code: "rate_limited" };
+    const alias = await callAuto(fake, { repo: HQ, pin: { account: "personal" } });
+    expect(alias.error).toBe(true);
+    expect(alias.text).toContain("aliases are unavailable right now");
+    expect(alias.text).toContain("give the account's email or id");
+    const byId = await callAuto(fake, { repo: HQ, pin: { account: PERSONAL } });
+    expect(byId.error).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("pin.account and avoid are written only to a leader that advertises pinAccount", async () => {
+    for (const extra of [{ pin: { account: "personal" } }, { avoid: ["WSL"] }]) {
+      const old = leaderRelay([], pinMachines());
+      old.accounts = ALIASES;
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const refused = await callAuto(old, { repo: HQ, ...extra });
+      expect(refused.error).toBe(true);
+      expect(refused.text).toContain("leader does not route on pin.account / avoid yet");
+      expect(old.creates).toEqual([]);
+      expect(old.accountLists).toBe(0);
+
+      const none = pinRelay();
+      none.setState({ scheduler: { kind: "none" } });
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const unknown = await callAuto(none, { repo: HQ, ...extra });
+      expect(unknown.error).toBe(true);
+      expect(unknown.text).toContain("no verified scheduler is leading");
+      expect(none.creates).toEqual([]);
+
+      const current = pinRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      expect((await callAuto(current, { repo: HQ, ...extra })).error).toBe(false);
+      expect(current.creates).toHaveLength(1);
+    }
+  });
+
+  test("avoid is stored as deviceIds; naming the pinned machine is refused", async () => {
+    const fake = pinRelay();
+    const ok = await callAuto(fake, { repo: HQ, avoid: ["wsl", "device-mac"] });
+    expect(ok.error).toBe(false);
+    expect(fake.creates[0]?.spec).toMatchObject({ repo: HQ, avoid: ["device-wsl", "device-mac"] });
+    expect(fake.creates[0]?.spec.pin).toBeUndefined();
+    expect(fake.accountLists).toBe(0);
+    const contradiction = await callAuto(fake, { repo: HQ, pin: { machine: "Thad" }, avoid: ["Thad"] });
+    expect(contradiction.error).toBe(true);
+    expect(contradiction.text).toContain("the machine the task is pinned to");
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("an empty pin, an empty machine or account, and too many avoided machines are refused before the relay is dialled", async () => {
+    const fake = pinRelay();
     const cases: [Record<string, unknown>, string][] = [
-      [{}, "pin names neither a machine nor an exclave"],
-      [{ machine: "" }, "pin.machine is empty"],
-      [{ machine: "m".repeat(65) }, "pin.machine is 65 characters; at most 64"],
-      [{ exclave: "" }, "pin.exclave is empty"],
-      [{ exclave: "x".repeat(65) }, "pin.exclave is 65 characters; at most 64"],
+      [{ pin: {} }, "pin names neither a machine nor an account"],
+      [{ pin: { machine: "" } }, "pin.machine is empty"],
+      [{ pin: { machine: "m".repeat(65) } }, "pin.machine is 65 characters; at most 64"],
+      [{ pin: { account: " " } }, "pin.account is empty"],
+      [{ avoid: [""] }, "avoid names an empty machine"],
+      [{ avoid: ["a", "b", "c", "d", "e"] }, "avoid names 5 machines; a task avoids at most 4"],
     ];
-    for (const [pin, text] of cases) {
+    for (const [extra, text] of cases) {
       // oxlint-disable-next-line no-await-in-loop -- one call each
-      const answer = await callAuto(fake, { repo: HQ, pin });
+      const answer = await callAuto(fake, { repo: HQ, ...extra });
       expect(answer.error).toBe(true);
       expect(answer.text).toContain(`auto refused: ${text}`);
     }
     expect(fake.started).toBe(0);
   });
 
-  test("a named machine refuses a pin: the session starts there now", async () => {
-    const local = fakeLocal();
-    const fake = leaderRelay();
-    const { text, error } = await callTool(
-      fake,
-      "spawn_session",
-      { machine: "device-1", repo: "seance", pin: { machine: "device-1" } },
-      local,
-    );
-    expect(error).toBe(true);
-    expect(text).toContain('after, until, linear and pin apply to machine "auto" only');
-    expect(local.requests).toEqual([]);
-    expect(fake.creates).toEqual([]);
+  test("a named machine refuses a pin or avoid: the session starts there now", async () => {
+    for (const extra of [{ pin: { machine: "device-1" } }, { avoid: ["device-2"] }]) {
+      const local = fakeLocal();
+      const fake = leaderRelay();
+      // oxlint-disable-next-line no-await-in-loop -- one fake each
+      const { text, error } = await callTool(
+        fake,
+        "spawn_session",
+        { machine: "device-1", repo: "seance", ...extra },
+        local,
+      );
+      expect(error).toBe(true);
+      expect(text).toContain('after, until, linear, pin and avoid apply to machine "auto" only');
+      expect(local.requests).toEqual([]);
+      expect(fake.creates).toEqual([]);
+    }
   });
 
-  test("queue_batch pins each member on its own, and one bad pin refuses the batch before the first create", async () => {
-    const fake = leaderRelay([], pinMachines());
+  test("queue_batch places each member on its own, and one bad pin refuses the batch before the first create", async () => {
+    const fake = pinRelay();
     const ok = await callTool(fake, "queue_batch", {
       strategy: "auto",
       tasks: [
         { repo: "pengefix-hq", prompt: "a", pin: { machine: "WSL" } },
-        { repo: "pengefix2/pengefix-hq", prompt: "b", pin: { exclave: "work" } },
-        { repo: HQ, prompt: "c" },
+        { repo: "pengefix2/pengefix-hq", prompt: "b", pin: { account: "employer" } },
+        { repo: HQ, prompt: "c", avoid: ["Mac"] },
+        { repo: HQ, prompt: "d", pin: { account: "personal" } },
       ],
     });
     expect(ok.error).toBe(false);
-    expect(fake.creates.map((t) => [t.spec.repo, t.spec.pin])).toEqual([
-      [HQ, { deviceId: "device-wsl" }],
-      [HQ2, { exclave: "work" }],
-      [HQ, undefined],
+    expect(fake.creates.map((t) => [t.spec.repo, t.spec.pin, t.spec.avoid])).toEqual([
+      [HQ, { deviceId: "device-wsl" }, undefined],
+      [HQ2, { account: EMPLOYER }, undefined],
+      [HQ, undefined, ["device-mac"]],
+      [HQ, { account: PERSONAL }, undefined],
     ]);
+    expect(ok.text).toContain(`task 2: pinned to account ${EMPLOYER} (${EMAIL})`);
+    expect(ok.text).toContain(`task 4: pinned to account ${PERSONAL} (${EMAIL})`);
+    // Two account members, one listing: the cache holds it for the batch.
+    expect(fake.accountLists).toBe(1);
 
     for (const [pin, text] of [
       [{ machine: "nope" }, 'task 2: pin.machine: no machine named "nope"'],
-      [{}, "task 2: pin names neither a machine nor an exclave"],
+      [{}, "task 2: pin names neither a machine nor an account"],
     ] as const) {
-      const refused = leaderRelay([], pinMachines());
+      const refused = pinRelay();
       // oxlint-disable-next-line no-await-in-loop -- one fake each
       const answer = await callTool(refused, "queue_batch", {
         strategy: "auto",
@@ -1624,45 +1781,64 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
-  test("shows a task's pin, naming its machine where the fleet knows it", async () => {
-    const pinned = (id: string, pin: NonNullable<Task["spec"]["pin"]>) =>
-      task({ id, state: "ready", spec: { repo: ORIGIN, mode: "worktree", pin } });
-    const fake = leaderRelay([
-      {
-        tasks: [
-          pinned("t-1", { deviceId: "device-2", exclave: "work" }),
-          pinned("t-2", { deviceId: "device-gone" }),
-          pinned("t-3", { exclave: "default" }),
-          task({ id: "t-4", state: "ready" }),
-          // Off the registry, but the decision's candidates still name it.
-          {
-            ...pinned("t-5", { deviceId: "device-lost" }),
-            decision: {
-              ...decision,
-              candidates: [
-                {
-                  deviceId: "device-lost",
-                  machine: "Lost Box",
-                  exclave: "default",
-                  rejected: [{ code: "auth_missing" }],
-                },
-              ],
+  test("shows a task's pin and avoided machines, naming each machine where the fleet knows it and an account by email", async () => {
+    const pinned = (id: string, pin: NonNullable<Task["spec"]["pin"]>, avoid?: readonly string[]) =>
+      task({
+        id,
+        state: "ready",
+        spec: { repo: ORIGIN, mode: "worktree", pin, ...(avoid === undefined ? {} : { avoid }) },
+      });
+    const [mac, linux] = autoMachines();
+    const machines = [
+      mac ?? machine(),
+      machine({
+        ...linux,
+        exclaves: [{ ...exclave("work"), accountId: "org-b:acct-2", email: "me@pengefix.no" }],
+      }),
+    ];
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            pinned("t-1", { deviceId: "device-2", account: "org-b:acct-2" }, ["device-1", "device-gone"]),
+            pinned("t-2", { deviceId: "device-gone" }),
+            pinned("t-3", { account: "org-z:0123456789ab" }),
+            task({ id: "t-4", state: "ready" }),
+            // Off the registry, but the decision's candidates still name it.
+            {
+              ...pinned("t-5", { deviceId: "device-lost" }),
+              decision: {
+                ...decision,
+                candidates: [
+                  {
+                    deviceId: "device-lost",
+                    machine: "Lost Box",
+                    exclave: "default",
+                    rejected: [{ code: "auth_missing" }],
+                  },
+                ],
+              },
             },
-          },
-        ],
-        at: 6_000,
-      },
-    ]);
+          ],
+          at: 6_000,
+        },
+      ],
+      machines,
+    );
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
     expect(tasks.map((t: { pin?: unknown }) => t.pin)).toEqual([
-      { machine: "Linux Box", deviceId: "device-2", exclave: "work" },
+      { machine: "Linux Box", deviceId: "device-2", account: "me@pengefix.no", accountId: "org-b:acct-2" },
       { deviceId: "device-gone" },
-      { exclave: "default" },
+      // No machine reports it: a short id, never a listing spent on a label.
+      { account: "acct 01234567", accountId: "org-z:0123456789ab" },
       undefined,
       { machine: "Lost Box", deviceId: "device-lost" },
     ]);
+    expect(tasks[0].avoid).toEqual([{ machine: "MacBook Pro", deviceId: "device-1" }, { deviceId: "device-gone" }]);
+    expect(tasks[1]).not.toHaveProperty("avoid");
+    expect(fake.accountLists).toBe(0);
     lazy.stop();
   });
 

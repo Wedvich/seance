@@ -18,6 +18,8 @@ const relay: AppRelay = {
   createTask: unused,
   queue: unused,
   cancel: unused,
+  listAccounts: unused,
+  onStoreChanged: () => () => {},
 };
 
 function fleetOver(sessions: () => Promise<SessionsResponse>, sessionsTimeoutMs?: number) {
