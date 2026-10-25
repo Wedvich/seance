@@ -72,10 +72,11 @@ export interface PushFailure {
 export type PushOutcome = { readonly kind: "enabled" } | { readonly kind: "denied" } | PushFailure;
 
 /**
- * A turn-off: this browser no longer gets pushes. `note` says the leader still holds its slot
- * (it could not be told, or predates the op), which goes once the push service reports it gone.
+ * A turn-off: this browser no longer gets pushes. `note` settles once the leader answered: a
+ * line when it still holds the slot (it could not be told, or predates the op), which goes once
+ * the push service reports it gone, else null. It may settle after the outcome, and never rejects.
  */
-export type PushOffOutcome = { readonly kind: "disabled"; readonly note: string | null } | PushFailure;
+export type PushOffOutcome = { readonly kind: "disabled"; readonly note: Promise<string | null> } | PushFailure;
 
 /** What the card learns before any click. */
 export type PushInspection =
@@ -283,15 +284,54 @@ export async function resyncPush(client: PushClient, env: PushEnv): Promise<Push
   });
 }
 
-/** The leader's answer to `push-unsubscribe` as the card's note: null when it dropped the endpoint. */
-async function freeSlot(client: PushClient, endpoint: string): Promise<string | null> {
+export interface RetryTuning {
+  /** Attempts in all, the first included. */
+  readonly maxAttempts?: number;
+  /** The wait after a retryable failure, doubled per failure. */
+  readonly backoffMs?: number;
+  readonly setTimer?: (run: () => void, ms: number) => () => void;
+}
+
+function realTimer(run: () => void, ms: number): () => void {
+  const timer = setTimeout(run, ms);
+  return () => clearTimeout(timer);
+}
+
+const FREE_SLOT_ATTEMPTS = 4;
+const FREE_SLOT_BACKOFF_MS = 1_000;
+
+/**
+ * The leader's answer to `push-unsubscribe` as the card's note: null when it dropped the endpoint.
+ * A refusal that may change (`not_ready`, `conflict`) is asked again after a doubling backoff, so
+ * the slot frees now rather than at the push service's next 404/410; a timeout is not, since the
+ * op may have landed. Stops once the browser is no longer marked turned off: Enable ran, and a
+ * push service that reissued the same endpoint would have the new subscription dropped. Never rejects.
+ */
+async function freeSlot(
+  client: PushClient,
+  env: PushEnv,
+  endpoint: string,
+  tuning: RetryTuning,
+): Promise<string | null> {
+  const maxAttempts = tuning.maxAttempts ?? FREE_SLOT_ATTEMPTS;
+  const backoffMs = tuning.backoffMs ?? FREE_SLOT_BACKOFF_MS;
+  const setTimer = tuning.setTimer ?? realTimer;
   try {
-    const reply = await client.pushUnsubscribe({ endpoint });
-    if (reply === null) return SLOT_UNREADABLE;
-    // An echo of another endpoint is not an answer about this one.
-    if (!("ok" in reply)) return reply.endpoint === endpoint ? null : SLOT_UNREADABLE;
-    // The endpoint passed `pushEndpoint` here, so `invalid_request` can only be a leader that predates the op.
-    return reply.code === "invalid_request" ? SLOT_KEPT_OLDER : SLOT_KEPT;
+    for (let attempt = 1; ; attempt += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each retry follows the last answer
+      const reply = await client.pushUnsubscribe({ endpoint });
+      if (reply === null) return SLOT_UNREADABLE;
+      // An echo of another endpoint is not an answer about this one.
+      if (!("ok" in reply)) return reply.endpoint === endpoint ? null : SLOT_UNREADABLE;
+      // The endpoint passed `pushEndpoint` here, so `invalid_request` can only be a leader that predates the op.
+      if (reply.code === "invalid_request") return SLOT_KEPT_OLDER;
+      if (REFUSALS[reply.code]?.retryable !== true || attempt >= maxAttempts) return SLOT_KEPT;
+      // oxlint-disable-next-line no-await-in-loop -- the backoff between attempts
+      await new Promise<void>((resolve) => {
+        setTimer(resolve, backoffMs * 2 ** (attempt - 1));
+      });
+      if (!env.optedOut()) return SLOT_KEPT;
+    }
   } catch {
     return SLOT_KEPT;
   }
@@ -301,11 +341,13 @@ async function freeSlot(client: PushClient, endpoint: string): Promise<string | 
  * The card's Turn off: unsubscribe this browser, then ask the leader to drop its endpoint.
  * The local unsubscribe goes first because it is what stops pushes here and needs no leader;
  * the op only frees the slot, and an endpoint it could not remove is pruned at the push
- * service's next 404/410. Marks the browser turned off before anything can fail, so a re-sync in
- * flight or on the next load does not subscribe it again, and puts the mark back when the
- * turn-off failed with nothing changed. Never rejects.
+ * service's next 404/410. So once the local unsubscribe worked the outcome is `disabled` at once
+ * and the op's answer arrives as `note`; only a browser that kept its subscription waits for the
+ * op, since then the leader dropping the endpoint is what turns it off. Marks the browser turned
+ * off before anything can fail, so a re-sync in flight or on the next load does not subscribe it
+ * again, and puts the mark back when the turn-off failed with nothing changed. Never rejects.
  */
-export async function disablePush(client: PushClient, env: PushEnv): Promise<PushOffOutcome> {
+export async function disablePush(client: PushClient, env: PushEnv, tuning: RetryTuning = {}): Promise<PushOffOutcome> {
   const wasOptedOut = env.optedOut();
   env.setOptedOut(true);
   // The browser still pushes, so the person has not opted out of the re-sync.
@@ -319,7 +361,7 @@ export async function disablePush(client: PushClient, env: PushEnv): Promise<Pus
   } catch (err) {
     return unchanged(err instanceof PushTimeout ? WORKER_NOT_READY : NOT_UNSUBSCRIBED);
   }
-  if (existing === null) return { kind: "disabled", note: null };
+  if (existing === null) return { kind: "disabled", note: Promise.resolve(null) };
   const endpoint = pushEndpoint(existing.endpoint);
   let unsubscribed: boolean;
   try {
@@ -328,9 +370,13 @@ export async function disablePush(client: PushClient, env: PushEnv): Promise<Pus
     unsubscribed = false;
   }
   // Off the allowlist, no record can hold it: there is no slot to free.
-  const note = endpoint === null ? null : await freeSlot(client, endpoint);
+  if (endpoint === null) {
+    return unsubscribed ? { kind: "disabled", note: Promise.resolve(null) } : unchanged(NOT_UNSUBSCRIBED);
+  }
+  const note = freeSlot(client, env, endpoint, tuning);
+  if (unsubscribed) return { kind: "disabled", note };
   // A browser that kept its subscription is still off once the leader dropped the endpoint: nothing sends to it.
-  if (unsubscribed || (endpoint !== null && note === null)) return { kind: "disabled", note };
+  if ((await note) === null) return { kind: "disabled", note };
   return unchanged(NOT_UNSUBSCRIBED);
 }
 
@@ -338,14 +384,6 @@ export async function disablePush(client: PushClient, env: PushEnv): Promise<Pus
 export interface ResyncSource {
   readonly ready: () => boolean;
   readonly subscribe: (listener: () => void) => () => void;
-}
-
-export interface ResyncTuning {
-  /** Attempts in all, the first included. */
-  readonly maxAttempts?: number;
-  /** The wait after a retryable failure, doubled per failure. */
-  readonly backoffMs?: number;
-  readonly setTimer?: (run: () => void, ms: number) => () => void;
 }
 
 const RESYNC_ATTEMPTS = 5;
@@ -361,16 +399,11 @@ const RESYNC_BACKOFF_MS = 5_000;
 export function watchResync(
   source: ResyncSource,
   run: () => Promise<PushOutcome | null>,
-  tuning: ResyncTuning = {},
+  tuning: RetryTuning = {},
 ): () => void {
   const maxAttempts = tuning.maxAttempts ?? RESYNC_ATTEMPTS;
   const backoffMs = tuning.backoffMs ?? RESYNC_BACKOFF_MS;
-  const setTimer =
-    tuning.setTimer ??
-    ((fn, ms) => {
-      const timer = setTimeout(fn, ms);
-      return () => clearTimeout(timer);
-    });
+  const setTimer = tuning.setTimer ?? realTimer;
   let attempts = 0;
   let running = false;
   let finished = false;

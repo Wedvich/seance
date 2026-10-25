@@ -18,6 +18,7 @@ import {
   withTimeout,
   type PushClient,
   type PushEnv,
+  type PushFailure,
   type PushInspection,
   type PushOffOutcome,
   type PushOutcome,
@@ -76,6 +77,10 @@ function harness(opts: {
   /** What the existing subscription's `unsubscribe()` answers. */
   local?: boolean | Error;
   unsubscribeReply?: PushUnsubscribeReply | null | Error;
+  /** One `push-unsubscribe` answer per call, the last repeating; wins over `unsubscribeReply`. */
+  unsubscribeReplies?: readonly (PushUnsubscribeReply | null | Error)[];
+  /** `push-unsubscribe` answers only once this settles. */
+  unsubscribeGate?: Promise<void>;
   optedOut?: boolean;
 }): { client: PushClient; env: PushEnv; calls: Calls } {
   const calls: Calls = {
@@ -108,11 +113,19 @@ function harness(opts: {
       calls.sent.push(sub);
       return reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
     },
-    pushUnsubscribe: ({ endpoint }) => {
+    pushUnsubscribe: async ({ endpoint }) => {
       calls.order.push("send-unsubscribe");
       calls.unsubscribeSent.push(endpoint);
-      const answer = opts.unsubscribeReply === undefined ? { endpoint } : opts.unsubscribeReply;
-      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+      const replies = opts.unsubscribeReplies;
+      const answer =
+        replies === undefined
+          ? opts.unsubscribeReply === undefined
+            ? { endpoint }
+            : opts.unsubscribeReply
+          : replies[Math.min(calls.unsubscribeSent.length, replies.length) - 1];
+      await opts.unsubscribeGate;
+      if (answer instanceof Error) throw answer;
+      return answer ?? null;
     },
   };
   const requested = opts.requested ?? "granted";
@@ -145,6 +158,32 @@ function harness(opts: {
     },
   };
   return { client, env, calls };
+}
+
+/** A turn-off's outcome with its note settled, to compare whole. */
+async function settled(
+  outcome: Promise<PushOffOutcome>,
+): Promise<{ readonly kind: "disabled"; readonly note: string | null } | PushFailure> {
+  const off = await outcome;
+  return off.kind === "disabled" ? { kind: "disabled", note: await off.note } : off;
+}
+
+/** A clock the test reads: every backoff asked for, run at once. */
+function instantTimer(): { readonly waits: number[]; readonly setTimer: (run: () => void, ms: number) => () => void } {
+  const waits: number[] = [];
+  return {
+    waits,
+    setTimer: (run, ms) => {
+      waits.push(ms);
+      queueMicrotask(run);
+      return () => {};
+    },
+  };
+}
+
+/** A settled turn-off's note, or its failure's line. */
+function messageOrNote(outcome: Awaited<ReturnType<typeof settled>>): string {
+  return outcome.kind === "failed" ? outcome.message : (outcome.note ?? "");
 }
 
 /** The messages a failed outcome carries, for the cases that only differ in their line. */
@@ -387,7 +426,7 @@ describe("disablePush", () => {
   test("unsubscribes this browser first, then asks the leader to drop the normalized endpoint", async () => {
     const raw = "https://FCM.googleapis.com/fcm/send/abc";
     const { client, env, calls } = harness({ existing: { endpoint: raw, key: PUBLIC_KEY } });
-    expect(await disablePush(client, env)).toEqual({ kind: "disabled", note: null });
+    expect(await settled(disablePush(client, env))).toEqual({ kind: "disabled", note: null });
     expect(calls.order).toEqual(["manager", "get", "unsubscribe", "send-unsubscribe"]);
     expect(calls.unsubscribeSent).toEqual([ENDPOINT]);
     expect(calls.optedOut).toEqual([true]);
@@ -399,11 +438,11 @@ describe("disablePush", () => {
   test("a leader that predates the op, or one that cannot be told, leaves the browser off and says the slot stays", async () => {
     const offWith = async (unsubscribeReply: PushUnsubscribeReply | null | Error) => {
       const { client, env, calls } = harness({ existing: { endpoint: ENDPOINT, key: PUBLIC_KEY }, unsubscribeReply });
-      const outcome = await disablePush(client, env);
+      const outcome = await disablePush(client, env, { setTimer: instantTimer().setTimer });
       expect(calls.unsubscribed).toEqual([ENDPOINT]);
       expect(calls.optedOut).toEqual([true]);
       if (outcome.kind !== "disabled") throw new Error(`expected disabled, got ${outcome.kind}`);
-      return outcome.note ?? "";
+      return (await outcome.note) ?? "";
     };
     const older = await offWith({ ok: false, code: "invalid_request", message: "raw" });
     expect(older).toContain("older version");
@@ -428,9 +467,9 @@ describe("disablePush", () => {
 
   test("with no subscription, or one off the allowlist, there is nothing for the leader to free", async () => {
     const none = harness({});
-    expect(await disablePush(none.client, none.env)).toEqual({ kind: "disabled", note: null });
+    expect(await settled(disablePush(none.client, none.env))).toEqual({ kind: "disabled", note: null });
     const foreign = harness({ existing: { endpoint: "https://push.example.com/x", key: PUBLIC_KEY } });
-    expect(await disablePush(foreign.client, foreign.env)).toEqual({ kind: "disabled", note: null });
+    expect(await settled(disablePush(foreign.client, foreign.env))).toEqual({ kind: "disabled", note: null });
     expect(foreign.calls.unsubscribed).toEqual(["https://push.example.com/x"]);
     for (const { calls } of [none, foreign]) {
       expect(calls.unsubscribeSent).toEqual([]);
@@ -440,7 +479,10 @@ describe("disablePush", () => {
 
   test("a browser that cannot unsubscribe is still off once the leader dropped it, and a failure only when neither worked", async () => {
     const leaderDropped = harness({ existing: { endpoint: ENDPOINT, key: PUBLIC_KEY }, local: false });
-    expect(await disablePush(leaderDropped.client, leaderDropped.env)).toEqual({ kind: "disabled", note: null });
+    expect(await settled(disablePush(leaderDropped.client, leaderDropped.env))).toEqual({
+      kind: "disabled",
+      note: null,
+    });
 
     const neither = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
@@ -470,12 +512,110 @@ describe("disablePush", () => {
     expect(already.env.optedOut()).toBe(true);
   });
 
+  test("is off as soon as this browser unsubscribed, before the leader answers", async () => {
+    // A leader that never answers: the op's timeout must not hold the card on "Turning off…".
+    const { client, env, calls } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeGate: Promise.withResolvers<void>().promise,
+    });
+    const outcome = await disablePush(client, env);
+    expect(outcome.kind).toBe("disabled");
+    expect(calls.unsubscribed).toEqual([ENDPOINT]);
+    expect(calls.unsubscribeSent).toEqual([ENDPOINT]);
+    expect(env.optedOut()).toBe(true);
+  });
+
+  test("the note arrives once the leader answers, after the outcome already said off", async () => {
+    const gate = Promise.withResolvers<void>();
+    const { client, env } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeReply: { ok: false, code: "invalid_request", message: "raw" },
+      unsubscribeGate: gate.promise,
+    });
+    const outcome = await disablePush(client, env);
+    if (outcome.kind !== "disabled") throw new Error(`expected disabled, got ${outcome.kind}`);
+    let note: string | null | undefined;
+    void outcome.note.then((line) => {
+      note = line;
+    });
+    await Promise.resolve();
+    expect(note).toBeUndefined();
+    gate.resolve();
+    expect(await outcome.note).toContain("older version");
+    expect(note).toContain("older version");
+  });
+
+  test("a leader still starting, or a write that lost a race, is asked again after a doubling backoff", async () => {
+    const notReady: PushUnsubscribeReply = { ok: false, code: "not_ready", message: "raw" };
+    const freed = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeReplies: [notReady, { endpoint: ENDPOINT }],
+    });
+    const clock = instantTimer();
+    expect(await settled(disablePush(freed.client, freed.env, { setTimer: clock.setTimer }))).toEqual({
+      kind: "disabled",
+      note: null,
+    });
+    expect(freed.calls.unsubscribeSent).toEqual([ENDPOINT, ENDPOINT]);
+    expect(clock.waits).toEqual([1_000]);
+
+    // The bound holds: four attempts, then the slot stays until the push service reports it gone.
+    const racing = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeReply: { ok: false, code: "conflict", message: "raw" },
+    });
+    const racingClock = instantTimer();
+    const off = await settled(disablePush(racing.client, racing.env, { setTimer: racingClock.setTimer }));
+    expect(messageOrNote(off)).toContain("Couldn't tell the scheduler leader");
+    expect(racing.calls.unsubscribeSent).toHaveLength(4);
+    expect(racingClock.waits).toEqual([1_000, 2_000, 4_000]);
+  });
+
+  test("an older leader, unreadable settings or a timeout are not asked again", async () => {
+    for (const reply of [
+      { ok: false, code: "invalid_request", message: "raw" },
+      { ok: false, code: "settings_unavailable", message: "raw" },
+      new RequestFailure("timeout", "no answer"),
+    ] as const) {
+      const { client, env, calls } = harness({
+        existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+        unsubscribeReply: reply,
+      });
+      const clock = instantTimer();
+      // oxlint-disable-next-line no-await-in-loop -- one harness per case
+      await settled(disablePush(client, env, { setTimer: clock.setTimer }));
+      expect(calls.unsubscribeSent).toEqual([ENDPOINT]);
+      expect(clock.waits).toEqual([]);
+    }
+  });
+
+  test("a retry waiting while the person turns it on again is not sent", async () => {
+    const { client, env, calls } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeReplies: [{ ok: false, code: "not_ready", message: "raw" }, { endpoint: ENDPOINT }],
+    });
+    const fire = Promise.withResolvers<() => void>();
+    const outcome = await disablePush(client, env, {
+      setTimer: (run) => {
+        fire.resolve(run);
+        return () => {};
+      },
+    });
+    if (outcome.kind !== "disabled") throw new Error(`expected disabled, got ${outcome.kind}`);
+    const run = await fire.promise;
+    // Enable cleared the turn-off; a push service may hand the new subscription the same endpoint.
+    expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
+    run();
+    expect(await outcome.note).toContain("Couldn't tell the scheduler leader");
+    expect(calls.unsubscribeSent).toEqual([ENDPOINT]);
+  });
+
   test("off, inspected and enabled again on one browser: it subscribes anew and the re-sync is back", async () => {
     const { client, env, calls } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
       settings: { publicKey: PUBLIC_KEY, subscribed: true },
     });
-    expect(await disablePush(client, env)).toEqual({ kind: "disabled", note: null });
+    expect(await settled(disablePush(client, env))).toEqual({ kind: "disabled", note: null });
     const inspection = await inspectPush(client, env);
     if (inspection.kind !== "off") throw new Error(`expected off, got ${inspection.kind}`);
     expect(calls.subscribed).toEqual([]);

@@ -171,6 +171,13 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const prepared = useRef<PushPrepared | null>(null);
   // What the last turn-off left behind: the leader still holding this browser's slot. Cleared by the next click or retry.
   const [note, setNote] = useState<string | null>(null);
+  // The note lands after the card shows off, so a later click must outrank it: each clear starts a new generation.
+  const noteGeneration = useRef(0);
+  const clearNote = (): number => {
+    noteGeneration.current += 1;
+    setNote(null);
+    return noteGeneration.current;
+  };
   const checking = view.kind === "checking";
   // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
   useEffect(() => {
@@ -191,17 +198,18 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const enable = (): void => {
     const ready = prepared.current;
     prepared.current = null;
-    setNote(null);
+    clearNote();
     setView({ kind: "working" });
     // `enablePush` never rejects; the catch is for a throw it did not foresee, so the card cannot stick on "Setting up…".
     enablePush(push, browserPushEnv, ready)
       .catch((): PushOutcome => ({ kind: "failed", message: "Couldn't set up notifications.", retryable: false }))
       .then((outcome) => setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome)));
   };
-  // Re-inspected after, so a later Enable has what it needs ready for the gesture.
+  // Re-inspected after, so a later Enable has what it needs ready for the gesture. Not after the note: the
+  // browser holds no subscription by then (or the op already answered), so the leader's answer changes nothing it reads.
   const disable = (): void => {
     prepared.current = null;
-    setNote(null);
+    const generation = clearNote();
     setView({ kind: "stopping" });
     disablePush(push, browserPushEnv)
       .catch((): PushOffOutcome => ({ kind: "failed", message: "Couldn't turn notifications off.", retryable: false }))
@@ -210,7 +218,9 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
           setView({ kind: "failed", message: outcome.message, retry: "disable" });
           return;
         }
-        setNote(outcome.note);
+        void outcome.note.then((line) => {
+          if (noteGeneration.current === generation) setNote(line);
+        });
         // The turn-off worked, so a failing read is still "off": Enable prepares after the prompt when it has nothing ready.
         void inspectPush(push, browserPushEnv).then((result) => {
           prepared.current = result.kind === "off" ? result.prepared : null;
@@ -220,7 +230,7 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   };
   const retry = (): void => {
     if (view.kind !== "failed") return;
-    setNote(null);
+    clearNote();
     if (view.retry === "inspect") setView({ kind: "checking" });
     else if (view.retry === "disable") disable();
     else enable();
