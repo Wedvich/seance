@@ -201,7 +201,7 @@ describe("filter", () => {
       expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
     });
 
-    test("a prompt's leading /name is the declaration; declared wins over it", () => {
+    test("a prompt's /name is the declaration; declared wins over it", () => {
       const prompted = decide([skilled()], { task: task({ spec: spec({ prompt: "/ship the fix" }) }) });
       expect(reasonsBy(prompted)).toEqual({ main: [], alt: ["skill_absent"] });
       const declared = machine("a", {
@@ -213,13 +213,50 @@ describe("filter", () => {
       expect(reasonsBy(both)).toEqual({ main: ["skill_absent"], alt: [] });
     });
 
-    test("only the leading token counts: mid-prompt, a path, or no slash restricts nothing", () => {
-      for (const prompt of ["please /ship it", " /ship", "/ship/x", "/tmp/x is broken", "ship"]) {
+    test("a /name token anywhere restricts: after whitespace, trailing punctuation stripped", () => {
+      for (const prompt of [
+        "please /ship this",
+        "/ship, then tag",
+        " /ship",
+        "(see /ship)",
+        "/ship\nmore",
+        "a\n/ship.",
+      ]) {
+        expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
+          main: [],
+          alt: ["skill_absent"],
+        });
+      }
+      const decision = decide([skilled()], { task: task({ spec: spec({ prompt: "/ship, then tag" }) }) });
+      expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    });
+
+    test("not tokens: a bare slash, a path, and/or, a URL, a second slash, or no slash restricts nothing", () => {
+      for (const prompt of [
+        "/",
+        "/\n",
+        "/tmp/x is broken",
+        "and/or ship",
+        "https://a/ship",
+        "/ship/x",
+        "ship",
+        "/...",
+      ]) {
         expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
           main: [],
           alt: [],
         });
       }
+    });
+
+    test("an earlier unknown token does not mask a later known one", () => {
+      const decision = decide([skilled()], { task: task({ spec: spec({ prompt: "/tmp then /review then /ship" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("a declared skill the inventory does not know passes, and does not fall back to the prompt", () => {
+      const decision = decide([skilled()], { task: task({ spec: spec({ skill: "nope", prompt: "/ship it" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: [] });
     });
 
     test("an unknown name passes everywhere: a built-in, a plugin's, a typo", () => {
@@ -246,6 +283,43 @@ describe("filter", () => {
       });
       const decision = decide([project], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
       expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("with a project skill, the clone that has it is the candidate's clone, not the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a")],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const withSkill = decide([project], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(withSkill.chosen?.clone).toBe("app-2");
+      const without = decide([project], { task: task({ spec: spec({ prompt: "do it" }) }) });
+      expect(without.chosen?.clone).toBe("app");
+    });
+
+    test("an exclave's own skill leaves the clone choice at the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] })],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["ship"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      expect(decide([project], { task: task({ spec: spec({ skill: "ship" }) }) }).chosen?.clone).toBe("app");
+    });
+
+    test("mixed versions: a clone without skills is rejected beside a newer clone that advertises the project skill", () => {
+      const older = machine("old", {
+        exclaves: [exclave("main", "org:o")],
+        repos: [clone("app", "main")], // a daemon predating RepoEntry.skills
+        status: status({ quota: [obs(0)] }),
+      });
+      const newer = machine("new", {
+        exclaves: [exclave("main", "org:n")],
+        repos: [{ ...clone("app", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const decision = decide([older, newer], { task: task({ spec: spec({ prompt: "/deploy" }) }) });
+      expect(decision.chosen?.deviceId).toBe("new");
+      expect(codes(decision.candidates.find((c) => c.deviceId === "old") ?? only(decision))).toEqual(["skill_absent"]);
     });
 
     test("another repo's project skill is not in this task's inventory", () => {

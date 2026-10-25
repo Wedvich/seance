@@ -129,11 +129,18 @@ export function route(input: RouteInput): Decision {
 /** One (machine, exclave): rejected with every reason that applies, else scored. */
 function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], exclave: ExclaveInfo): Candidate {
   const { task, config, inFlight } = pass;
-  const clone = machine.repos.find((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
+  const { skill } = pass;
+  const clones = machine.repos.filter((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
+  // An exclave's skill serves any clone, so only a skill the exclave lacks picks among clones: the first one that has it.
+  const skillClone =
+    skill === null || exclave.skills.includes(skill)
+      ? undefined
+      : clones.find((r) => r.skills?.includes(skill) === true);
+  const clone = skillClone ?? clones[0];
   const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
   if (clone === undefined) rejected.push({ code: "repo_absent" });
-  if (pass.skill !== null && !exclave.skills.includes(pass.skill) && clone?.skills?.includes(pass.skill) !== true) {
-    rejected.push({ code: "skill_absent", skill: pass.skill });
+  if (skill !== null && !exclave.skills.includes(skill) && clone?.skills?.includes(skill) !== true) {
+    rejected.push({ code: "skill_absent", skill });
   }
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
   const seat = seatOf(config, exclave.seatTier);
@@ -273,32 +280,41 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * The skill a task needs (DESIGN.md, Scheduler, "Skills filter"): declared, else
- * the prompt's leading `/name` — Claude Code invokes a slash command only as
- * the prompt's first token, so one later in the text is a mention.
+ * `/name` tokens as the PWA picker reads them: a `/` at the start or after
+ * whitespace, the name running to the next whitespace with no second `/`
+ * (`and/or`, `https://a/b`, `/tmp/x` are none). Trailing sentence punctuation
+ * is not part of the name, but `:` stays (`plugin:name`).
  */
-function taskSkill(task: Task): string | undefined {
-  if (task.spec.skill !== undefined) return task.spec.skill;
-  const token = /^\/(\S+)/u.exec(task.spec.prompt ?? "")?.[1];
-  return isSkillName(token) ? token : undefined;
+const SKILL_TOKEN = /(?<!\S)\/([^\s/]+)(?=\s|$)/gu;
+
+/**
+ * The names a task may mean (DESIGN.md, Scheduler, "Skills filter"): declared,
+ * else every `/name` token of the prompt in order — any one is actionable, as
+ * the seed carries the prompt after a preamble, so none is claude's first token.
+ */
+function skillCandidates(task: Task): readonly string[] {
+  if (task.spec.skill !== undefined) return [task.spec.skill];
+  return [...(task.spec.prompt ?? "").matchAll(SKILL_TOKEN)]
+    .map((m) => (m[1] ?? "").replace(/[.,;!?)]+$/u, ""))
+    .filter((name) => isSkillName(name));
 }
 
 /**
- * Only a name the inventory knows restricts; an unknown one (a built-in, a
- * plugin's, a typo) passes. The inventory is every exclave's skills, offline
- * machines included as the autocomplete counts them, plus the project skills
- * of this task's repo only: one in another repo cannot be what `/name` means
- * here, and counting it would hold back a same-named command.
+ * The task's skill is the first candidate the inventory knows; unknown ones (a
+ * built-in, a plugin's, a typo) pass, and so does a task with only those. The
+ * inventory is every exclave's skills, offline machines included as the
+ * autocomplete counts them, plus the project skills of this task's repo only:
+ * one in another repo cannot be what `/name` means here, and counting it would
+ * hold back a same-named command.
  */
 function knownSkill(task: Task, machines: readonly Machine[]): string | null {
-  const skill = taskSkill(task);
-  if (skill === undefined) return null;
-  const known = machines.some(
-    (m) =>
-      m.exclaves?.some((x) => x.skills.includes(skill)) === true ||
-      m.repos.some((r) => r.origin === task.spec.repo && r.skills?.includes(skill) === true),
-  );
-  return known ? skill : null;
+  const known = (skill: string): boolean =>
+    machines.some(
+      (m) =>
+        m.exclaves?.some((x) => x.skills.includes(skill)) === true ||
+        m.repos.some((r) => r.origin === task.spec.repo && r.skills?.includes(skill) === true),
+    );
+  return skillCandidates(task).find(known) ?? null;
 }
 
 function pinFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
