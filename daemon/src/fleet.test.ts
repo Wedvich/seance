@@ -546,7 +546,7 @@ describe("enqueueAuto through the brokered leg", () => {
         expect(enqueues(double.frames)).toHaveLength(1);
         expect(outcome.ok).toBe(false);
         expect(outcome.text).toBe(
-          `auto failed: ${words} — task ${String(only?.["taskId"])} may have queued; check get_queue before retrying`,
+          `spawn failed: ${words} — task ${String(only?.["taskId"])} may have queued; check get_queue before retrying`,
         );
         expect(audited).toEqual([expect.stringMatching(/^audit enqueue origin=mcp client=mcp .* unanswered$/u)]);
       } finally {

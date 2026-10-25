@@ -210,6 +210,36 @@ describe("filter", () => {
       expect(decision.candidates.every((c) => c.rejected.some((r) => r.code === "avoided"))).toBe(true);
     });
 
+    test("a machine pin never lifts a limit: the pinned machine keeps its disk, quota and cap reasons, and the others only pin_mismatch", () => {
+      const pinned = task({ spec: spec({ pin: { deviceId: "a" } }) });
+      const cases: [string, Machine, Partial<SchedulerConfig>, Task[], string][] = [
+        ["disk_low", machine("a", { status: status({ free: 1023, quota: [obs(0)] }) }), {}, [], "disk_low"],
+        [
+          "quota_over_line",
+          machine("a", { status: status({ quota: [obs(0, { h: 95 })] }) }),
+          {},
+          [],
+          "quota_over_line",
+        ],
+        ["cap_reached", machine("a"), { globalMax: 1 }, [held("x", "b")], "cap_reached"],
+      ];
+      for (const [, held_a, config, tasks, code] of cases) {
+        const decision = decide([held_a, machine("b")], { task: pinned, tasks, config });
+        const reasons = reasonsOf(decision);
+        const onA = decision.candidates.find((c) => c.deviceId === "a");
+        expect(onA === undefined ? [] : codes(onA)).toContain(code);
+        expect(reasons["b/main"]).toEqual(
+          code === "cap_reached"
+            ? [
+                { code: "cap_reached", inFlight: 1, max: 1 },
+                { code: "pin_mismatch", field: "deviceId" },
+              ]
+            : [{ code: "pin_mismatch", field: "deviceId" }],
+        );
+        expect(decision.chosen).toBeNull();
+      }
+    });
+
     test("unrestricted, the same fleet is judged with no restriction reason at all", () => {
       const decision = decide(fleet());
       expect(decision.candidates.every((c) => c.rejected.length === 0)).toBe(true);

@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AT_REST_OPS,
   openAtRest,
@@ -409,7 +413,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(atRest).not.toContain("pin@e2e.test");
 
       const outcome = await spawnAuto(
-        { repo: "myrepo", here: false, prompt: "keep off the leader", auto: true, not: [stack.deviceId] },
+        { repo: "myrepo", here: false, prompt: "keep off the leader", not: [stack.deviceId] },
         built.fleet,
         () => {},
       );
@@ -435,10 +439,10 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 90_000);
 
-  // `seanced spawn --auto` in a shell with no key: `autoFleet` finds none and takes the
+  // `seanced spawn` in a shell with no key: `autoFleet` finds none and takes the
   // broker. The alias is another client's write, resolved by the CLI from the broker's
   // accounts read, so the stored record carries the accountId and the CLI's client.
-  test("a keyless CLI auto spawn resolves an account alias through the broker and records the pin", async () => {
+  test("a keyless CLI spawn resolves an account alias through the broker and records the pin", async () => {
     const other = { organizationUuid: "e2e-org-c", accountUuid: "keyless", emailAddress: "keyless@e2e.test" };
     const otherId = `${other.organizationUuid}:${other.accountUuid}`;
     const second = await stack.startSecondDaemon({
@@ -474,7 +478,6 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
           repo: "myrepo",
           here: false,
           prompt: "keyless by alias",
-          auto: true,
           account: "keyless-alias",
           not: [stack.deviceId],
         },
@@ -614,11 +617,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // docs/scheduler.md M4, CLI `auto`: `seanced spawn --auto` enqueues as an app
+  // docs/scheduler.md M4, CLI spawn: `seanced spawn` enqueues as an app
   // does, so it lands with no leader up and runs once one leads. Driven through
   // `autoFleet` (the config's PSK, its `/daemon` URL turned `/app`) and `spawnAuto`
   // over a real app socket — `cmdSpawnAuto` adds only the process exit.
-  test("a CLI auto spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
+  test("a CLI spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
     const app = startApp(stack, { auto: true });
     const built = await autoFleet(stack.config, { stores: [] });
     const enqueued: string[] = [];
@@ -637,7 +640,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
 
       const outcome = await spawnAuto(
-        { repo: "myrepo", here: true, title: "cli auto", prompt: "queued from a shell", auto: true },
+        { repo: "myrepo", here: true, title: "cli spawn", prompt: "queued from a shell" },
         built.fleet,
         (line) => {
           enqueued.push(line);
@@ -678,6 +681,65 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (window !== null) await killWindow(window);
       built.fleet.stop();
       app.stop();
+    }
+  }, 60_000);
+
+  // The spec's "a plain `seanced spawn` lands as a task": the real CLI, as a subprocess, with the
+  // suite's config (key included) and a state dir of its own, so its audit lines are its alone.
+  test("a plain seanced spawn from a shell lands as a task, recorded as the CLI's", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-e2e-cli-"));
+    const configDir = join(dir, "config");
+    const stateDir = join(dir, "state");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await Bun.write(join(configDir, "config.json"), JSON.stringify(stack.config));
+    const app = startApp(stack, { auto: true });
+    let id: string | undefined;
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the suite's daemon verified as leader, with its repos listed",
+      );
+      const main = fileURLToPath(new URL("../daemon/src/main.ts", import.meta.url));
+      const proc = Bun.spawn([process.execPath, main, "spawn", "myrepo", "-p", "plain from a shell"], {
+        env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+      id = /^task (\S+): queued/u.exec(stdout)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${stdout}`);
+      // A verified leader is up, so the leaderless advice (which names --now) has no business here.
+      expect(stdout).not.toContain("--now");
+      expect(stdout).not.toContain("No scheduler is leading");
+      const taskId = id;
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the plain spawn's task to run",
+        20_000,
+      );
+      const running = (await stack.queue().get(taskId))?.body;
+      expect(running?.spec.client).toBe("cli");
+      window = running?.assignment?.window ?? null;
+      if (window === null) throw new Error("no window on the running task");
+      expect(await listWindows()).toContain(window);
+      const log = await Bun.file(join(stateDir, "seanced.log")).text();
+      expect(log).toContain("audit enqueue origin=cli client=cli");
+      expect(log).not.toContain("audit spawn");
+      expect(log).not.toContain("plain from a shell");
+    } finally {
+      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window);
+      app.stop();
+      await rm(dir, { recursive: true, force: true });
     }
   }, 60_000);
 

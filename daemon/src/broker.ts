@@ -34,8 +34,8 @@ import { isDespawnRequest, isSpawnRequest } from "./handlers.ts";
 import { log } from "./log.ts";
 
 /**
- * The daemon side of the fleet broker: a keyless `seanced mcp` or `seanced spawn
- * --auto` on this box asks for the registry, for one of three ops on one other
+ * The daemon side of the fleet broker: a keyless `seanced mcp` or `seanced spawn`
+ * on this box asks for the registry, for one of three ops on one other
  * machine, or for the scheduler's enqueue, queue, cancel and account read, and
  * the daemon makes that app-role request itself with the key it already holds.
  *

@@ -695,15 +695,15 @@ describe("wire input cannot escape the repo set or the shell", () => {
   });
 });
 
-// docs/scheduler.md M4: `--auto` is the one CLI form that dials the relay, so a
-// direct `seanced spawn` must still work with the relay unreachable.
+// docs/scheduler.md M4: a plain `seanced spawn` queues through the relay, so
+// `seanced spawn --now` is the form that must still work with the relay unreachable.
 describe("seanced spawn (the CLI, as a subprocess)", () => {
-  test("a direct spawn never dials the relay, audited origin=cli", async () => {
+  test("spawn --now never dials the relay, audited origin=cli", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");
     await mkdir(configDir, { recursive: true });
     await mkdir(stateDir, { recursive: true });
-    // A relay that counts any request or upgrade: a direct spawn must never dial it.
+    // A relay that counts any request or upgrade: spawn --now must never dial it.
     let dialled = 0;
     const relay = Bun.serve({
       hostname: "127.0.0.1",
@@ -725,7 +725,7 @@ describe("seanced spawn (the CLI, as a subprocess)", () => {
       }),
     );
     const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
-    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "myrepo", "--here", "-t", "No Relay"], {
+    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "--now", "myrepo", "--here", "-t", "No Relay"], {
       env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir, HOME: home },
       stdout: "pipe",
       stderr: "pipe",

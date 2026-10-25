@@ -14,9 +14,11 @@ import { isSessionEventFrameKind } from "./session-events.ts";
 
 /**
  * The daemon's local op surface: semantic ops from another process on this box,
- * with no relay, no envelope and no PSK. It exists so `seanced mcp` can spawn on
- * the machine it runs on without a round trip to Cloudflare and back down the
- * daemon's own websocket.
+ * with no relay, no envelope and no PSK. It exists so `seanced mcp`'s
+ * `get_sessions` and `despawn_session` aimed at the machine it runs on skip a
+ * round trip to Cloudflare and back down the daemon's own websocket. (`spawn`
+ * stays on the allowlist only for a `seanced mcp` started before spawns became
+ * queued tasks; the current one never sends it.)
  *
  * Why this shape rather than handing the key out or letting a second process
  * drive tmux itself: a peer here can ask for three named ops and nothing else. It
@@ -388,10 +390,13 @@ export async function localSocketChecks(path: string = socketPath()): Promise<re
   }
   checks.push(
     (await localSocketReachable(path))
-      ? { level: "ok", message: `local op socket at ${path} — MCP spawns on this machine skip the relay` }
+      ? {
+          level: "ok",
+          message: `local op socket at ${path} — MCP get_sessions/despawn_session on this machine skip the relay`,
+        }
       : {
           level: "warn",
-          message: `no local op socket at ${path} — MCP spawns targeting this machine will fail until the daemon is running`,
+          message: `no local op socket at ${path} — MCP get_sessions/despawn_session targeting this machine will fail until the daemon is running`,
         },
   );
   return checks;

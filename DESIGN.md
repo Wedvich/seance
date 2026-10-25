@@ -684,7 +684,7 @@ nothing checked it. The last is the gap they leave.
   `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
   key itself: a store write the relay answers, which no daemon sees, so that process
   appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
-  M3 review S5). `seanced spawn --auto` writes the same line under `cli`
+  M3 review S5). `seanced spawn` writes the same line under `cli`
   (`origin=cli client=cli`): the surface is still someone at this machine's shell,
   and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
   covers spawn, despawn and queue (added 2026-10-25, M4). A process interrupted after a
@@ -1093,7 +1093,7 @@ there: the daemon's fleet broker (`daemon/src/broker.ts`), an app-role client ac
 `Plain`, and not on this wire. To the relay and the target it is one more app. The
 same broker is the sender of `task:` `store-put`s (an enqueue it sealed itself, `expect: 0`),
 of `queue` and `cancel` to the scheduler, and of the `account:` list, all for a keyless
-`seanced mcp` or `seanced spawn --auto` ("Fleet broker").
+`seanced mcp` or `seanced spawn` ("Fleet broker").
 
 A fourth is the scheduler leader, which dispatches the same three ops to the machines it
 places on: sealed `from: "scheduler"` with its `term` on its app-role leg (`termFleet` in
@@ -2736,7 +2736,7 @@ A Claude account is named once, by any PSK holder, and every app client shows th
 is a sealed `account:<hmac>` record in the relay's store (rules v2); `shared/src/account-record.ts`
 is what a record is and who reads it how, `RelayClient.listAccounts` / `getAccountRecord` /
 `putAccountAlias` the app leg, and `pwa/src/account-store.ts` the PWA's side. The leader and the
-daemons never read one. `seanced spawn --auto` reads them for one thing only: to resolve an
+daemons never read one. `seanced spawn` reads them for one thing only: to resolve an
 account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seanced mcp` reads them
 for that and to name accounts in `list_machines` (each exclave's `account`, plus `alias` where
 one is set) and `get_queue` (pins and holds), from one cached listing per socket ("Account
@@ -2817,7 +2817,7 @@ error.
   (#22, still open); records sealed under an earlier PSK, which a rotation orphans as unopenable
   slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or
   place. The one exception, by owner decision: a person may name an account pin by its alias, which
-  `seanced mcp` and `seanced spawn --auto` resolve once, at submit time, to an `accountId` some
+  `seanced mcp` and `seanced spawn` resolve once, at submit time, to an `accountId` some
   sealed registry entry reports signed in; only that id is stored, the answer echoes it with the
   email, and an email or raw id skips the aliases. Its residuals: the relay can serve a stale
   alias record (replay at its version) or leave one out of a listing, so an alias can resolve to
@@ -3629,8 +3629,8 @@ for the lot with its own `gh`.
   of one tmux exec. And any same-uid process can rewrite the option, which is
   why the read revalidates it against the pattern; a session relabelling itself
   is the same residual the threat model accepts for the session-event path.
-  A direct `seanced spawn` sends no `SpawnRequest.taskId`: only the scheduler mints the
-  ids of the spawns it dispatches. `--auto` mints the queued task record's id in the CLI
+  A direct `seanced spawn --now` sends no `SpawnRequest.taskId`: only the scheduler mints the
+  ids of the spawns it dispatches. A queued `seanced spawn` mints the task record's id in the CLI
   process, as every app-role enqueue (the PWA, MCP) does.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
@@ -4965,22 +4965,29 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   whose `fleet` action carries the daemon's scheduler view (2026-10-25), so no mark means no
   verified leader, or that this machine's daemon could not say (older, or restarting); still a bare array, so the field is
   per entry rather than a wrapper), `get_sessions { machine }`,
-  `spawn_session { machine, repo, prompt?, title?, mode?, model?, effort?, plan? }`
+  `spawn_session { machine?, repo, prompt?, title?, mode?, model?, effort?, plan?, … }`
   and `despawn_session { machine, id, force? }` (added 2026-10-09, see
-  "Despawn") mapping 1:1 onto the `sessions`/`spawn`/`despawn` ops with the existing
-  `OP_TIMEOUT_MS`. `machine` is the config `name` resolved against the live
-  registry; ambiguity or a miss returns candidates, `deviceId` is the
-  exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
-  agent, trivial to add. Self-targeting short-circuits to the local op socket
-  below rather than looping through the relay: uniformity is not worth an
+  "Despawn"). `get_sessions` and `despawn_session` map 1:1 onto the `sessions`/`despawn` ops
+  with the existing `OP_TIMEOUT_MS`; `spawn_session` is a scheduler enqueue and never sends a
+  `spawn` op (2026-10-25, M4: spawning from MCP always goes through the scheduler, a machine
+  being a pin on the task; direct survives only as the CLI's `--now`). `machine` is the config
+  `name` resolved against the live registry; ambiguity or a miss returns candidates, `deviceId`
+  is the exact-match escape hatch. No `rescan` tool in v1 — rarely useful from an
+  agent, trivial to add. Self-targeting `get_sessions` and `despawn_session` short-circuit to the
+  local op socket below rather than looping through the relay: uniformity is not worth an
   internet round trip to reach the machine the server is running on. Rejected:
   routing it through the relay like any other target, which is simpler to
-  describe and pays Cloudflare's latency for a process on the same box. The
-  local repo pre-check re-reads `state.json` per call and is advisory only: the
-  daemon still resolves the repo authoritatively, an MCP process outlives many
-  rescans, and an empty set means the first scan has not landed — so it denies
-  nothing then rather than rejecting every repo until a restart.
-- **`machine: "auto"` and `get_queue`** (added 2026-10-17). `auto` enqueues: it builds a `queued` task from the request (`queuedTask`) and `createTask`s it
+  describe and pays Cloudflare's latency for a process on the same box. A spawn for this
+  machine gets no such shortcut: it is a queued task, so it needs the key or the broker.
+- **`spawn_session` enqueues, and `get_queue`** (added 2026-10-17 as `machine: "auto"`; every spawn
+  since 2026-10-25, M4). `machine` is an optional pin: absent or `"auto"` (any case) pins nothing,
+  anything else is resolved like `pin.machine` and stored as `pin.deviceId`; giving both a machine
+  and `pin.machine` is refused, and errors from the top-level field name `machine`, not
+  `pin.machine`. `after`, `until`, `linear`, `pin` and `avoid` are accepted beside a named machine.
+  A pin to an offline machine queues, and the answer says the task waits for it. Every scheduler
+  limit still applies to a pinned task (_Decided_): `placementFilter` adds the pin reasons beside the
+  cap, disk and quota checks, so a pin never lifts a limit — it waits for a slot where it is pinned.
+  The answer is always the queued line, never a session. The enqueue: it builds a `queued` task from the request (`queuedTask`) and `createTask`s it
   through the same app client (reached via `FleetLease.scheduler`), up to three tries a second
   apart that re-send the same task, so a lost reply is never a second task. It answers at once
   with the task id and "queued" — it no longer holds the call to follow the task, since a task
@@ -5007,8 +5014,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   (2026-10-18): `too_large` means the cancel ran (the task may still have
   finished first, so MCP points at `get_queue`), and `internal_error` shows the leader's message
   on one line, pointing at `get_queue` when it does not say whether the cancel landed. `"auto"` is matched
-  in any case before the local short circuit, so a machine named "auto" is reached by
-  `deviceId`. **`repo` on auto** is the `TaskRequest`'s origin, but an agent holds clone
+  in any case, so a machine named "auto" is pinned by its `deviceId`. **`repo` on a spawn** is the `TaskRequest`'s origin, but an agent holds clone
   names from `list_machines`, so either is accepted: an origin exactly, or a clone name
   whose clones across the fleet all share one origin. A name behind two origins is an
   error listing each origin with its machines, never a guess — a guess runs the task in
@@ -5020,14 +5026,13 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   taking it over; a placed session is ordinary; ordering is what `after` and `queue_batch` say. **Keyless
   boxes go through the broker** (2026-10-25, M4): a keyless `seanced mcp` asks the daemon for
   `fleet` and the `scheduler` ops ("Fleet broker"), and `brokerFleet` leases carry a scheduler leg
-  built on them. Only a daemon that predates those actions leaves the leg `null`, and `auto` then
-  says so (the daemon "predates brokered auto") rather than falling back. On the keyed path the enqueue
+  built on them. Only a daemon that predates those actions leaves the leg `null`, and the spawn then
+  says so (the daemon "predates brokered auto") rather than falling back; no direct spawn remains to fall back to. On the keyed path the enqueue
   is a `store-put` through the app client, as the PWA's is.
 - **Authoring: `after`, `until`, `linear`, `queue_batch` and `report_task_done`** (2026-10-23, M4 #21).
-  `spawn_session` with machine `auto` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
+  `spawn_session` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
   `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
-  (`{issue}`, trimmed as the PWA's field is; a blank one is refused); any of them off `auto` is refused, since a direct spawn has
-  nothing to wait in — bar the defaults (`until: "merged"`, an empty `after`), which change nothing. **`queue_batch
+  (`{issue}`, trimmed as the PWA's field is; a blank one is refused), with or without a named machine. **`queue_batch
   { strategy, max?, tasks }`** puts up to 16 members as one batch (`sequential`, `parallel` with
   `max`, or `auto`): ids are minted first so a member's `after` can name an earlier one by `ref`
   (a later or unknown `ref`, two edges naming both fields or neither, and a ref used twice are refused in a
@@ -5051,9 +5056,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
-- **`pin` and `avoid` on auto** (2026-10-23; accounts and `avoid` 2026-10-25, M4). `spawn_session`
-  with machine `auto`, each `queue_batch` member and `seanced spawn --auto` (`--machine`,
-  `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
+- **`pin` and `avoid` on a spawn** (2026-10-23; accounts and `avoid` 2026-10-25, M4). `spawn_session`
+  (its `machine` field, or `pin.machine`), each `queue_batch` member (`pin.machine`) and `seanced spawn`
+  (`--machine`, `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
   machines to avoid, stored as `TaskSpec.pin { deviceId?, account? }` and `TaskSpec.avoid` (at most
   `TASK_SPEC_LIMITS.avoid`, 4: with a 128-character account and ten candidates a record at that
   bound still seals under `STORE_MAX_CT_LENGTH`). The leader routes on them in `placementFilter`
@@ -5079,7 +5084,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     ambiguous or absent across the fleet works as the pinned scope lists it; `avoid` narrows no
     scope. Malformed input (no field in a pin, an empty one, a machine past
     `TASK_SPEC_LIMITS.placement`, too many avoided machines) is refused before the relay is
-    dialled, and a named machine refuses `pin` and `avoid` with the other auto-only fields.
+    dialled. A machine pin is _Decided_ to leave every limit in force (the in-flight caps, the quota
+    line, the disk floor, `scheduler/test/route.test.ts`), and a pin to an offline machine queues with
+    "is offline (last seen …); the task waits for it" in the answer, joined to the account line by `; `.
   - **Account listings.** An alias needs the account records. The relay's `account:` list floor
     is two-level (`relay/src/store.ts`): four lists a minute per socket, and a DO-wide bucket of
     `LIST_BURST` (16) refilling one per `LIST_REFILL_MS` (8 s), shared by every socket, the
@@ -5190,7 +5197,9 @@ daemons update machine-by-machine behind fast-moving clients, so a daemon must
 never reject a spawn over a client name minted after it was built, and the
 field is display-only, so validation would buy nothing.
 
-An `auto` spawn is not an MCP spawn at its target: the leader dispatches with its own
+Since 2026-10-25 (M4) a current MCP process never sends a relay `spawn`: `spawn_session` is an enqueue, so
+`client="mcp"` on an `audit spawn` line now comes only from a `seanced mcp` started before that update, which
+keeps working through the paths below until its Claude session restarts. A queued spawn is not an MCP spawn at its target: the leader dispatches with its own
 `client` (`client="scheduler"`, audited `origin=relay` at another machine and
 `origin=leader` on its own). The session is the scheduler's, which is what its audit line
 says. That an agent asked for it is in that agent's transcript, in the MCP box's own
@@ -5210,9 +5219,10 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
   (friction in the wrong place; the approving human is at the Claude session,
   not the config file), a read-only server (defers the point of the thing).
 - No new key at rest, but a new _process_ holding the imported PSK — on a
-  machine that already runs one (the daemon). Only when an op is aimed at
-  another machine, though: the key is resolved on first _remote_ use, so a
-  session that only ever spawns locally never imports it.
+  machine that already runs one (the daemon). Only on first use that needs
+  the fleet, though: a session that only lists or ends sessions on this machine
+  never imports it, while every spawn (a queued task, even one pinned to this
+  box) needs the key or the broker.
 - The group address stays out of reach: the MCP server seals only to specific
   `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
 - **A delivered credential never leaves the daemon process.** `exec.ts` strips
@@ -5230,38 +5240,53 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
 
-### CLI `auto` (`daemon/src/cli-auto.ts`) — added 2026-10-25, scheduler M4
+### CLI spawn (`daemon/src/cli-auto.ts`) — queued by default 2026-10-25, scheduler M4
 
-`seanced spawn --auto [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
+`seanced spawn [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...
 <repo> [--here] [-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
-MCP's `auto` (`cli-auto.ts` is only the CLI's wiring): the clone name resolves to its
+MCP's `spawn_session` (`cli-auto.ts` is only the CLI's wiring; its name is historical): the clone name resolves to its
 origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
 queues with no leader up, and the answer is `task <id>: queued`. The record's `client`
 is `"cli"`, and the box's own line is `audit enqueue origin=cli client=cli` (the audit
 paragraph in the threat model says why `cli`, not a new origin). The follow-up line
 names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
+`--now` is the direct path: today's relay-free spawn, here, right away, audited
+`audit spawn origin=cli`, needing no relay, key, leader or daemon.
 
-- _Spelling:_ a flag, not MCP's `machine: "auto"` as a positional — `auto` is a
-  legal repo name, and `seanced spawn auto` would read as one.
+- _Spelling:_ queued is the default and `--now` the flag that changes behaviour. `--auto` is
+  accepted and does nothing (the old spelling of the default), and is refused beside `--now`.
 - _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
   `prompt`; the prompt is optional, as in MCP. Model, effort, plan and the
   authoring fields are not CLI flags at all, so v1 adds none. The placement flags came
   after (2026-10-25): `--machine`, `--account` and repeatable `--not`, resolved and gated
-  exactly as MCP's `pin` and `avoid` ("`pin` and `avoid` on auto" above), with `here` for
-  this box's own deviceId. Each needs `--auto` — a direct spawn runs here, now — and a
-  value; `--machine` and `--account` are given once.
-- _Key and relay:_ the one CLI form that dials the relay, as an app with this shell's
+  exactly as MCP's `pin` and `avoid` ("`pin` and `avoid` on a spawn" above), with `here` for
+  this box's own deviceId. Each takes a value; `--machine` and `--account` are given once.
+  `--now` runs on this machine and places nothing, so it refuses all three, and `--auto`.
+- _Key and relay:_ the queued form dials the relay as an app with this shell's
   own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
-  turns an unreachable relay into "not queued" rather than a hang. A direct
-  `seanced spawn` loads nothing of this and stays relay-free.
+  turns an unreachable relay into "not queued" rather than a hang. `--now` loads nothing
+  of this and stays relay-free.
 - _Keyless boxes:_ through the daemon's fleet broker, as `seanced mcp` is (2026-10-25): `autoFleet`
-  resolves no key and takes `brokerFleet`, so `--auto`, `--account` and `--not` work on a
+  resolves no key and takes `brokerFleet`, so a plain spawn, `--account` and `--not` work on a
   credential-delivered box. A daemon that predates the broker's scheduler actions is named as the
   cause ("predates brokered auto"). The daemon's own `audit enqueue origin=local-broker` line sits beside this
   surface's `origin=cli` one ("Fleet broker").
+- _When it does not queue:_ every failure that left nothing queued (the relay or the broker
+  unreachable, a daemon without the broker's scheduler actions) ends by naming `seanced spawn --now`,
+  which needs none of key, relay or daemon. A failure that may have queued the task ("may have
+  queued — check the app's queue") never names it: the task would run twice.
+- _No leader:_ the task still queues (M3) and the answer says it waits, and that
+  `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.
+  Only with no nominee at all: an unverified one may be a healthy leader whose lead-proof has not reached this
+  shell yet, so the answer says it waits and names no `--now`. MCP texts never name `--now`: a session with a shell
+  would run it as `origin=cli`, as if a person typed it.
+  The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
+- _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
+  a direct spawn is not bound by it. MCP has no such escape.
 
-_Threat-model delta._ One new path in: a user at this machine's shell holding the
-config and the PSK can now enqueue a task, where before they could spawn on any
+_Threat-model delta._ None new. `--now` is the old direct spawn, and `origin=cli` covers both lines
+(`audit spawn` and `audit enqueue`). The queued form is as before: a user at this machine's shell holding the
+config and the PSK can enqueue a task, where before they could spawn on any
 machine with the same two. Nothing they can reach widens — a queued task runs only
 through the leader's own gates — and no new key is at rest: the process imports the
 key this shell already reads, and a service-delivered credential is never read by it
@@ -5273,8 +5298,11 @@ the task.
 ## Local op socket (`daemon/src/local-socket.ts`) — designed 2026-08-29
 
 The daemon listens on a unix socket, and the MCP server sends `sessions` and
-`spawn` straight there when the target resolves to the box it runs on. No relay,
-no envelope, no PSK: a spawn on the machine you are sitting at never leaves it.
+`despawn` straight there when the target resolves to the box it runs on. No relay,
+no envelope, no PSK: listing and ending sessions on the machine you are sitting at never leaves it.
+(Until 2026-10-25, M4, `spawn` took this path too; `spawn_session` is now a scheduler
+enqueue, so `spawn` stays on the allowlist only for a `seanced mcp` started before that
+update, and for the app's own `spawn` op, which the daemon keeps answering.)
 The alternative is an internet round trip to Cloudflare and back down the
 daemon's own websocket, to reach a process a few hundred microseconds away.
 
@@ -5283,7 +5311,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 
 - **A socket into the daemon, not a second spawner.** The alternative was ~50
   lines: the MCP process calling `createBackend(config).spawn()` itself, exactly
-  as `seanced spawn` does. Rejected, because it makes a **second executor**. The
+  as `seanced spawn --now` does. Rejected, because it makes a **second executor**. The
   daemon cold-boots the tmux server when none is running, so whichever process
   spawns first decides that server's environment — and a pane's environment is
   the server's. Routing through the daemon keeps one executor, one repo set (its
@@ -5318,7 +5346,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   since it was loosened would not have tightened it yet.
 - **It grants no authority a same-uid process did not already have.** Such a
   process can read `config.json` (0600, same uid) and take the PSK outright, run
-  `seanced spawn`, or drive the tmux server directly. The socket is strictly
+  `seanced spawn --now`, or drive the tmux server directly. The socket is strictly
   less: three named ops, no way to address another machine, no way to reach the
   `"machines"` group address, and every request recorded. What it adds is that
   going through it is the _recorded_ way in — hence `origin=local`, and hence the
@@ -5341,8 +5369,8 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   a free-text prompt up, a refreshed session list down. A half-written frame has
   no newline, so the far end buffers it and answers nothing until the op times
   out: the symptom is a 90s timeout, never a parse error.
-- **Locality is decided from files, not from the socket.** The MCP server
-  compares the target against `config.name` and the `deviceId` in `state.json` —
+- **Locality is decided from files, not from the socket.** For `get_sessions` and `despawn_session`
+  the MCP server compares the target against `config.name` and the `deviceId` in `state.json` —
   a deviceId exactly, a name case-insensitively, the same precedence
   `resolveMachine` uses. Deciding this from disk rather than by probing means a
   local target whose daemon is down fails with "the daemon isn't running"
@@ -5350,10 +5378,11 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   needs `readState`, which — unlike `loadOrInitState` — never mints a `deviceId`
   and never logs, since `log.ts` writes to stdout and that is the MCP server's
   JSON-RPC channel.
-- **Local wins a name collision**, and `deviceId` remains the escape hatch to the
-  remote twin. `resolveMachine` refuses an ambiguous name; the short circuit
+- **Local wins a name collision** for `get_sessions` and `despawn_session`, and `deviceId` remains the
+  escape hatch to the remote twin. `resolveMachine` refuses an ambiguous name; the short circuit
   resolves it toward the box you are on, because that is the case the whole
-  feature exists for. Said in the tool description, so the model on the other end
+  feature exists for. A spawn has no short circuit, so a spawn's `machine` is `resolveMachine`'d like any pin
+  and a name two machines share is refused: use the deviceId. Said in the tool description, so the model on the other end
   knows.
 - **No fallback to the relay when the local path is unavailable.** A silent
   fallback would make the failure mode invisible, and the daemon being down means
@@ -5391,7 +5420,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   reload is `stop()` then start, sequentially, and `stop(true)` unlinks the path,
   so a config swap rebinds cleanly with no race.
 
-Non-goals: routing `seanced spawn` through the socket (it would collapse the
+Non-goals: routing `seanced spawn --now` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
 a `rescan` op; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
@@ -5448,8 +5477,9 @@ app-role relay client with the key it imported at start.
   else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
   broker, never copied from the peer, so the target audits the spawn as
   `origin=relay client="mcp"` exactly as a direct MCP spawn — and a same-uid process cannot
-  pass as the PWA. For a `scheduler` enqueue the peer's `mcp` or `cli` is kept in the record
-  (the daemon cannot tell `seanced mcp` from `seanced spawn --auto`, and a same-uid process
+  pass as the PWA. Since M4 (2026-10-25) a current `seanced mcp` never sends `request` `spawn`;
+  only a process started before that update does, until its Claude session restarts. For a `scheduler` enqueue the peer's `mcp` or `cli` is kept in the record
+  (the daemon cannot tell `seanced mcp` from `seanced spawn`, and a same-uid process
   can run either) and audited as `claimed_client`, never `client`: an unverified claim, and
   nothing else (`pwa`, `raycast` and `scheduler` are refused). Rejected: a crypto
   oracle (seal/open on request) — same-uid peers make it unpoliceable, and it is the
@@ -5516,8 +5546,8 @@ app-role relay client with the key it imported at start.
 
 ### The scheduler actions (2026-10-25, M4)
 
-`auto`, `queue_batch`, `get_queue` and `cancel_task` in a keyless `seanced mcp`, and
-`seanced spawn --auto`, run through `fleet` and `scheduler` frames. The decisions:
+`spawn_session`, `queue_batch`, `get_queue` and `cancel_task` in a keyless `seanced mcp`, and
+`seanced spawn`, run through `fleet` and `scheduler` frames. The decisions:
 
 - **The daemon seals, the peer never does.** The peer sends `{taskId, spec}`; the broker parses
   the spec, builds the task record itself and calls its own app-role client's `createTask`,
@@ -6172,7 +6202,7 @@ are tmux-rename's, except where they say mods.
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
-  its way out: `seanced spawn` now audits like the relay path, so the slash
+  its way out: `seanced spawn --now` audits like the relay path, so the slash
   command can become a thin wrapper over it and the duplication disappears.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.

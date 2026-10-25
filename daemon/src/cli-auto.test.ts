@@ -23,6 +23,7 @@ import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
 
 const ORIGIN = "github.com/m/seance";
+const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
 const LEADING = { kind: "ready", deviceId: "device-1", term: 3 } as const;
 
 function scheduledRelay(scheduler: SchedulerAvailability = LEADING): ReturnType<typeof fakeRelay> {
@@ -42,7 +43,7 @@ async function run(
   const audited: string[] = [];
   try {
     const outcome = await spawnAuto(
-      { repo: "seance", here: false, prompt: "fix it", auto: true, ...args },
+      { repo: "seance", here: false, prompt: "fix it", ...args },
       relayFleet(lazy),
       (line) => {
         audited.push(line);
@@ -89,7 +90,47 @@ describe("spawnAuto", () => {
     expect(ok).toBe(true);
     expect(fake.creates).toHaveLength(1);
     expect(text).toContain("No scheduler is leading right now");
+    // The one time --now is worth naming beside a queued task, with the double run it risks.
+    expect(text).toContain("`seanced spawn --now` now would start a second session");
   });
+
+  test("an unverified nominee is not a leaderless fleet: no --now advice, which would double-run on a healthy one", async () => {
+    const fake = scheduledRelay({ kind: "unverified", deviceId: "device-1", term: 3 });
+    const { ok, text } = await run(fake);
+    expect(ok).toBe(true);
+    expect(text).toContain("No scheduler is leading right now");
+    expect(text).not.toContain("--now");
+  });
+
+  test("a failure that may have queued the task never offers --now, which would run it twice", async () => {
+    const lost = scheduledRelay();
+    lost.onCreate = () => new RequestFailure("dropped", "the relay socket closed", "relay");
+    expect((await run(lost)).text).not.toContain("--now");
+    const hard = scheduledRelay();
+    let tries = 0;
+    hard.onCreate = () => {
+      tries += 1;
+      return tries === 1 ? new RequestFailure("timeout", "no reply", "relay") : new Error("boom");
+    };
+    const outcome = await run(hard);
+    expect(outcome.text).toContain("may have queued");
+    expect(outcome.text).not.toContain("--now");
+  }, 20_000);
+
+  test("a failure that provably queued nothing offers --now on the CLI only", async () => {
+    const unsent = scheduledRelay();
+    unsent.onCreate = () => new RequestFailure("disconnected", "no socket", "relay");
+    const notSent = await run(unsent);
+    expect(notSent.ok).toBe(false);
+    expect(notSent.text).toBe(`spawn: not queued — the relay was unreachable after 3 tries; try again. ${NOW_HINT}`);
+    expect(notSent.audited).toEqual([]);
+    const hard = scheduledRelay();
+    hard.onCreate = () => new Error("boom");
+    const failedFirst = await run(hard);
+    expect(failedFirst.ok).toBe(false);
+    expect(hard.creates).toHaveLength(1);
+    expect(failedFirst.text).toBe(`spawn failed: boom. ${NOW_HINT}`);
+  }, 10_000);
 
   test("a store refusal is worded and audited, and not retried", async () => {
     const fake = scheduledRelay();
@@ -97,7 +138,7 @@ describe("spawnAuto", () => {
     const { ok, text, audited } = await run(fake);
     expect(ok).toBe(false);
     expect(fake.creates).toHaveLength(1);
-    expect(text).toBe(`auto refused (store_full): ${storeErrorText("store_full")}`);
+    expect(text).toBe(`spawn refused (store_full): ${storeErrorText("store_full")}`);
     expect(audited).toEqual([
       expect.stringMatching(/^audit enqueue origin=cli client=cli .* refused code="store_full"$/u),
     ]);
@@ -109,7 +150,7 @@ describe("spawnAuto", () => {
     const { ok, text, audited } = await run(fake);
     expect(ok).toBe(false);
     expect(text).toBe(
-      `auto: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
+      `spawn: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
     );
     expect(audited).toEqual([
       `audit enqueue origin=cli client=cli task="${fake.creates[0]?.id}" createdAt=${fake.creates[0]?.createdAt} unanswered`,
@@ -127,7 +168,7 @@ describe("spawnAuto", () => {
     expect(ok).toBe(false);
     expect(fake.creates).toHaveLength(2);
     expect(text).toBe(
-      `auto failed: the socket exploded — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
+      `spawn failed: the socket exploded — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
     );
     expect(audited).toEqual([expect.stringMatching(/^audit enqueue origin=cli client=cli .* unanswered$/u)]);
   }, 10_000);
@@ -136,7 +177,7 @@ describe("spawnAuto", () => {
     const fake = scheduledRelay();
     const { ok, text, audited } = await run(fake, { repo: "nope" });
     expect(ok).toBe(false);
-    expect(text).toBe(`auto refused: no repo "nope" for auto — known origins: ${ORIGIN}`);
+    expect(text).toBe(`spawn refused: no repo "nope" for the fleet — known origins: ${ORIGIN}`);
     expect(fake.creates).toEqual([]);
     expect(audited).toEqual([]);
   });
@@ -145,7 +186,8 @@ describe("spawnAuto", () => {
     const fake = scheduledRelay();
     const { ok, text } = await run(fake, { prompt: "x".repeat(TASK_REQUEST_LIMITS.prompt + 1) });
     expect(ok).toBe(false);
-    expect(text).toStartWith("auto refused: the prompt is");
+    expect(text).toStartWith("spawn refused: the prompt is");
+    expect(text).toContain("pass --now to spawn here directly");
     expect(fake.started).toBe(0);
   });
 });
@@ -163,7 +205,7 @@ function config(overrides: Partial<Config>): Config {
 }
 
 describe("autoFleet", () => {
-  const KEYLESS_ARGS = { repo: "seance", here: false, prompt: "fix it", auto: true } as const;
+  const KEYLESS_ARGS = { repo: "seance", here: false, prompt: "fix it" } as const;
 
   test("a shell that can read no key asks the daemon, and with none running says so", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-cliauto-"));
@@ -183,19 +225,16 @@ describe("autoFleet", () => {
       );
       expect(outcome.ok).toBe(false);
       // The unreadable key first, then the broker's reason, then what still works.
-      expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
+      expect(outcome.text).toStartWith("spawn: not queued — this shell could not read the PSK");
       expect(outcome.text.indexOf("could not read the PSK")).toBeLessThan(outcome.text.indexOf("is seanced running?"));
-      // No daemon: a plain spawn goes through it too, so it is not promised to work.
-      expect(outcome.text).toEndWith(
-        "Ops on this machine go through that same daemon, so they fail too until it is running.",
-      );
-      expect(outcome.text).not.toContain("needs no key");
+      // --now needs neither the key nor the daemon, so it closes every keyless failure.
+      expect(outcome.text).toEndWith(NOW_HINT);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("a keyless shell whose daemon hangs up without answering does not promise a plain spawn works", async () => {
+  test("a keyless shell whose daemon hangs up without answering is pointed at --now", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-cliauto-"));
     const silent = Bun.listen<undefined>({
       unix: join(dir, "silent.sock"),
@@ -212,8 +251,7 @@ describe("autoFleet", () => {
         { keyless: built.keyless },
       );
       expect(outcome.ok).toBe(false);
-      expect(outcome.text).toEndWith("they may fail too — check `seanced status`.");
-      expect(outcome.text).not.toContain("needs no key");
+      expect(outcome.text).toEndWith(NOW_HINT);
     } finally {
       silent.stop(true);
       await rm(dir, { recursive: true, force: true });
@@ -235,13 +273,13 @@ describe("autoFleet", () => {
         { keyless: built.keyless },
       );
       expect(outcome.ok).toBe(false);
-      expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
+      expect(outcome.text).toStartWith("spawn: not queued — this shell could not read the PSK");
       expect(outcome.text).toContain("not service-delivered, so it does not broker");
       expect(outcome.text).toContain("this process has to read the PSK itself");
       expect(outcome.text).toContain("seanced doctor");
       expect(outcome.text).not.toContain("seanced mcp");
       expect(outcome.text).not.toContain("update");
-      expect(outcome.text).toEndWith("A spawn without --auto needs no key.");
+      expect(outcome.text).toEndWith(NOW_HINT);
     } finally {
       await double.stop();
     }
@@ -263,7 +301,7 @@ describe("autoFleet", () => {
         },
         { keyless: built.keyless },
       );
-      expect(outcome).toEqual({ ok: false, text: `--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}` });
+      expect(outcome).toEqual({ ok: false, text: `spawn unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}. ${NOW_HINT}` });
       const actions = double.frames.map((frame) =>
         typeof frame === "object" && frame !== null && "action" in frame ? frame.action : null,
       );
@@ -285,14 +323,13 @@ describe("autoFleet", () => {
     });
     const audited: string[] = [];
     try {
-      const outcome = await spawnAuto(
-        { repo: "seance", here: false, prompt: "fix it", auto: true },
-        built.fleet,
-        (line) => {
-          audited.push(line);
-        },
-      );
-      expect(outcome).toEqual({ ok: false, text: "auto: not queued — the relay did not answer within 300ms" });
+      const outcome = await spawnAuto({ repo: "seance", here: false, prompt: "fix it" }, built.fleet, (line) => {
+        audited.push(line);
+      });
+      expect(outcome).toEqual({
+        ok: false,
+        text: `spawn: not queued — the relay did not answer within 300ms. ${NOW_HINT}`,
+      });
     } finally {
       built.fleet.stop();
     }
@@ -353,10 +390,10 @@ describe("spawnAuto's placement flags", () => {
     const contradiction = await run(fake, { machine: "WSL", not: ["wsl"] });
     expect(contradiction.ok).toBe(false);
     expect(contradiction.text).toContain(
-      "auto refused: --not names WSL (device-other), the machine the task is pinned to",
+      "spawn refused: --not names WSL (device-other), the machine the task is pinned to",
     );
     const unknown = await run(fake, { machine: "nope" });
-    expect(unknown.text).toContain('auto refused: --machine: no machine named "nope"');
+    expect(unknown.text).toContain('spawn refused: --machine: no machine named "nope"');
     expect(fake.creates).toHaveLength(1);
   });
 
