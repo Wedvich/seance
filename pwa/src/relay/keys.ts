@@ -51,26 +51,39 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
   }
 }
 
-/** One transaction, resolved on `complete`: both keys land or neither does. */
-async function putAll(entries: readonly (readonly [string, CryptoKey])[]): Promise<void> {
+/** One transaction, resolved on `complete`: every change lands or none does. A null value deletes. */
+async function putAll(entries: readonly (readonly [string, CryptoKey | null])[]): Promise<void> {
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, "readwrite");
-      for (const [id, value] of entries) tx.objectStore(STORE).put(value, id);
       tx.addEventListener("complete", () => resolve());
       tx.addEventListener("error", () => reject(tx.error ?? new Error("key store write failed")));
       tx.addEventListener("abort", () => reject(tx.error ?? new Error("key store write aborted")));
+      try {
+        for (const [id, value] of entries) {
+          if (value === null) tx.objectStore(STORE).delete(id);
+          else tx.objectStore(STORE).put(value, id);
+        }
+      } catch (err) {
+        // A put that throws synchronously would otherwise leave the earlier ones to commit.
+        tx.abort();
+        reject(err);
+      }
     });
   } finally {
     db.close();
   }
 }
 
-/** Rejects if the base64 does not decode to 32 bytes. Cannot tell a wrong key from a right one. */
+/**
+ * Rejects if the base64 does not decode to 32 bytes. Cannot tell a wrong key from a right one.
+ * The base is an extra: when it cannot be made the PSK is still saved, and an earlier PSK's base
+ * is dropped with it, since an account key derived from that one would name nothing.
+ */
 export async function storePsk(pskBase64: string): Promise<CryptoKey> {
   const key = await importPsk(pskBase64);
-  const base = await importPskBase(pskBase64);
+  const base = await importPskBase(pskBase64).catch(() => null);
   await putAll([
     [PSK_ID, key],
     [PSK_BASE_ID, base],

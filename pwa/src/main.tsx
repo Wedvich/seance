@@ -39,7 +39,8 @@ if (key === null || token === null) {
 } else {
   dropLegacyHidden();
   // No base on an install saved before account records: it works, without aliases, until the PSK is re-entered.
-  const accountKey = base === null ? null : await deriveAccountKey(base);
+  // A derivation that throws degrades the same way: naming is an extra, and must not take the app down.
+  const accountKey = base === null ? null : await deriveAccountKey(base).catch(() => null);
   const client = new RelayClient({ url: readRelayUrl(), token, key, ...(accountKey === null ? {} : { accountKey }) });
   const store = new Store(client, readForm(), readPending());
 
