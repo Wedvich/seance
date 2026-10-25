@@ -42,17 +42,24 @@ export interface AutoFleetOpts {
   readonly broker?: BrokerCallOpts;
 }
 
-/** The direct app-role fleet over this shell's own key, or the daemon's broker when it has none. */
-export async function autoFleet(config: Config, opts: AutoFleetOpts = {}): Promise<{ readonly fleet: Fleet }> {
+/**
+ * The direct app-role fleet over this shell's own key, or the daemon's broker
+ * when it has none. `keyless` says which, so a failure can start from the key
+ * this shell could not read rather than from the broker's reason alone.
+ */
+export async function autoFleet(
+  config: Config,
+  opts: AutoFleetOpts = {},
+): Promise<{ readonly fleet: Fleet; readonly keyless: boolean }> {
   const resolved = await loadPsk(config, opts.stores);
-  if (resolved === null) return { fleet: brokerFleet(opts.broker) };
+  if (resolved === null) return { fleet: brokerFleet(opts.broker), keyless: true };
   const keys = await importAppKeys(resolved.psk);
   const relay = new LazyRelay({
     // The wire log is the client's per-frame chatter; the outcome line is this command's answer.
     create: () => appRelayClient(config, keys, () => {}),
     ...(opts.connectTimeoutMs === undefined ? {} : { connectTimeoutMs: opts.connectTimeoutMs }),
   });
-  return { fleet: relayFleet(relay) };
+  return { fleet: relayFleet(relay), keyless: false };
 }
 
 const failed = (text: string): AutoEnqueued => ({ ok: false, text });
@@ -98,6 +105,17 @@ async function hereResolved(
 export interface SpawnAutoOpts {
   /** What `here` resolves to; tests stand in for the state file. */
   readonly self?: () => Promise<string | null>;
+  /** This shell read no key, so the fleet is the daemon's broker (`autoFleet`). */
+  readonly keyless?: boolean;
+}
+
+/**
+ * The broker is this shell's only way to the relay when it read no key, so its
+ * failure is the end of the road for `--auto`: say that first, then why. A plain
+ * spawn is relay-free and works without a key.
+ */
+function keylessNotQueued(why: string): string {
+  return `auto: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. A spawn without --auto needs no key.`;
 }
 
 /**
@@ -129,7 +147,7 @@ export async function spawnAuto(
     lease = await fleet.open();
   } catch (err) {
     const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
-    return failed(`auto: not queued — ${why}`);
+    return failed(opts.keyless === true ? keylessNotQueued(why) : `auto: not queued — ${why}`);
   }
   try {
     if (lease.scheduler === null) return failed(`--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
@@ -156,7 +174,9 @@ export async function spawnAuto(
 export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  const outcome = await spawnAuto(args, built.fleet, cliSink).finally(() => built.fleet.stop());
+  const outcome = await spawnAuto(args, built.fleet, cliSink, { keyless: built.keyless }).finally(() =>
+    built.fleet.stop(),
+  );
   if (!outcome.ok) {
     console.error(outcome.text);
     process.exit(1);

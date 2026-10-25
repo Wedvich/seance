@@ -172,14 +172,49 @@ describe("autoFleet", () => {
         stores: [],
         broker: { path: join(dir, "absent.sock") },
       });
-      const outcome = await spawnAuto(KEYLESS_ARGS, built.fleet, () => {
-        throw new Error("nothing may be audited");
-      });
+      expect(built.keyless).toBe(true);
+      const outcome = await spawnAuto(
+        KEYLESS_ARGS,
+        built.fleet,
+        () => {
+          throw new Error("nothing may be audited");
+        },
+        { keyless: built.keyless },
+      );
       expect(outcome.ok).toBe(false);
-      expect(outcome.text).toStartWith("auto: not queued — ");
-      expect(outcome.text).toContain("is seanced running?");
+      // The unreadable key first, then the broker's reason, then what still works.
+      expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
+      expect(outcome.text.indexOf("could not read the PSK")).toBeLessThan(outcome.text.indexOf("is seanced running?"));
+      expect(outcome.text).toEndWith("A spawn without --auto needs no key.");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a keyless shell whose daemon does not broker is told to read the key itself, not about an MCP server", async () => {
+    const double = await startBrokerDouble((_raw, id) =>
+      brokerFail(id, "broker_disabled", "this daemon does not broker"),
+    );
+    try {
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+      const outcome = await spawnAuto(
+        KEYLESS_ARGS,
+        built.fleet,
+        () => {
+          throw new Error("nothing may be audited");
+        },
+        { keyless: built.keyless },
+      );
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
+      expect(outcome.text).toContain("not service-delivered, so it does not broker");
+      expect(outcome.text).toContain("this process has to read the PSK itself");
+      expect(outcome.text).toContain("seanced doctor");
+      expect(outcome.text).not.toContain("seanced mcp");
+      expect(outcome.text).not.toContain("update");
+      expect(outcome.text).toEndWith("A spawn without --auto needs no key.");
+    } finally {
+      await double.stop();
     }
   });
 
@@ -191,9 +226,14 @@ describe("autoFleet", () => {
     });
     try {
       const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
-      const outcome = await spawnAuto(KEYLESS_ARGS, built.fleet, () => {
-        throw new Error("nothing may be audited");
-      });
+      const outcome = await spawnAuto(
+        KEYLESS_ARGS,
+        built.fleet,
+        () => {
+          throw new Error("nothing may be audited");
+        },
+        { keyless: built.keyless },
+      );
       expect(outcome).toEqual({ ok: false, text: `--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}` });
       const actions = double.frames.map((frame) =>
         typeof frame === "object" && frame !== null && "action" in frame ? frame.action : null,
