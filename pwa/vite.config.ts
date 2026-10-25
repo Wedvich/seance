@@ -154,6 +154,10 @@ export default defineConfig(({ mode }) => {
           // the app's own "relay unreachable" state, not the browser error page.
           globPatterns: ["**/*.{js,css,html,woff2,png,txt}"],
           globIgnores: ["**/_headers"],
+          // Push handlers live in public/push-sw.js and join the generated worker here, not in a
+          // hand-written one (injectManifest): that keeps the precache manifest, skipWaiting and
+          // clientsClaim above exactly as the plugin generates them.
+          importScripts: ["/push-sw.js"],
         },
       }),
       securityHeaders(outDir, relay),
