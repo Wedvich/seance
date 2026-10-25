@@ -779,10 +779,11 @@ export interface RepoEntry {
    */
   readonly origin?: string;
   /**
-   * Project skills: entries under `<clone>/.claude/skills/` holding a
-   * `SKILL.md`, which belong to this clone, not to an exclave (DESIGN.md,
-   * Scheduler, "Skills filter"). At most `REPO_MAX_SKILLS`, each an
-   * `isSkillName`; the scan cuts a longer list to its first names. Absent when
+   * Project skills: `.claude/skills/<name>/SKILL.md` in the tree of
+   * `origin/<default>` as last fetched, which belong to this clone, not to an
+   * exclave (DESIGN.md, Scheduler, "Skills filter"). At most `REPO_MAX_SKILLS`,
+   * each an `isSkillName`; the scan drops other names and cuts a longer list to
+   * its first names. Absent when
    * the clone has none, from older daemons, and when the writer dropped them
    * to fit the blob: the filter reads every absent list as none.
    */
@@ -791,7 +792,7 @@ export interface RepoEntry {
 
 /**
  * Project skills one `RepoEntry` carries at most; a reader drops a longer list
- * as unknown rather than costing the clone. It bounds one clone's share, not
+ * as none (rejected when the name is known) rather than costing the clone. It bounds one clone's share, not
  * the blob: every clone rides the register blob (~12 KiB for 60 repos), and 16
  * names of ~20 characters add ~350 B a clone, but 60 clones at every bound
  * (~1 KiB each) would pass `ENVELOPE_MAX_CT_LENGTH`. So the writer checks the

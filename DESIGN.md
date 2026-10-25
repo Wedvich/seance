@@ -2124,10 +2124,14 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   full Fable week refused Opus work on an account with room. A task whose account's newest
   reading holds only other models' weeklies is `quota_unknown` (`unobserved`), never 0%.
 - **Skills filter** (2026-10-25, docs/scheduler.md M4 _Skills_, decided #19). A task's skill
-  is its declared `TaskRequest.skill`, else its prompt's leading `/name` token (the prompt's
-  first character is the `/`, the name runs to the first whitespace and must pass
-  `isSkillName`, so `/tmp/x` is no skill): Claude Code invokes a slash command only as the
-  prompt's first token, so the PWA picker's mid-prompt `/name` is a mention to routing. Only a
+  is its declared `TaskRequest.skill` (which wins outright), else the first `/name` token in
+  its prompt that the inventory knows. A token is the PWA picker's: a `/` at the prompt's start
+  or after whitespace, the name running to the next whitespace with no second `/` (so
+  `and/or`, `https://a/b` and `/tmp/x` are none), trailing `.,;!?)` stripped (not `:`, which
+  plugin names use), and passing `isSkillName`. Any token counts, not only a leading one: the
+  seed is `${preamble}\n\nTask: ${prompt}` (`daemon/src/spawn.ts`), so a `/name` is never
+  claude's first token and every one is equally actionable. An earlier unknown token (`/tmp
+  then /ship`) does not mask a later known one. Only a
   name the inventory knows restricts — every machine's `exclaves[].skills`, offline machines
   included as the picker counts them, plus the project skills (`RepoEntry.skills`) of clones
   of _this task's_ repo, since a project skill elsewhere cannot be what this repo's `/name`
@@ -2142,7 +2146,23 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   rejects a project skill a newer daemon's clone of the same repo advertises, until `seanced
   update` heals it; so does a machine whose register blob dropped its project skills to fit
   the envelope (Daemon, "Exclaves"). Rejected: treating absent as unknown per clone (it would
-  let an older daemon's clone take a task its checkout may not serve).
+  let an older daemon's clone take a task its checkout may not serve). A candidate's `clone`
+  is, where the exclave lacks the skill, the first clone of the repo that has it (an exclave's
+  skill serves any clone, so it leaves the choice at the first match).
+
+  Accepted costs, each rare or self-healing:
+  (a) the per-clone cap of 16 cuts by sort order, so clones of one repo on different
+  default-branch states can disagree about which names they advertise;
+  (b) offline and stale registry entries count toward the inventory, as the autocomplete
+  does, so a user skill only a retired machine lists holds `/name` tasks with `skill_absent`
+  until that entry goes;
+  (c) a user skill named like a built-in (`review`, `init`) makes that built-in restrict to
+  the exclaves having the skill;
+  (d) a task pinned to a machine or exclave that lacks a known skill waits, like
+  `repo_absent`, rather than failing;
+  (e) mixed versions: a daemon predating `RepoEntry.skills` reports none, so its clones are
+  rejected for a project-only skill a newer daemon advertises, until `seanced update`.
+
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
@@ -3549,7 +3569,9 @@ for the lot with its own `gh`.
   removing one re-registers like a new clone. Any git failure (no ref, no dir, timeout) reads
   as no skills and never costs the clone its entry. Linked worktrees are no clones. The register blob is sealed once and, past
   `ENVELOPE_MAX_CT_LENGTH`, sealed again without any clone's project skills, with a warn
-  line (`sealMachineInfo`), since the relay would drop the whole registration unseen.
+  line (`sealMachineInfo`), since the relay would drop the whole registration unseen; a
+  blob still over after that logs an error line saying the relay will refuse it. Both log
+  once per blob content, not per register.
 - **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
   2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
@@ -4642,8 +4664,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   from the register blobs the app already holds, offline machines included — so it needs no
   leader and works on a direct pick as on `auto`. Names only, no descriptions and no
   machine list: the blob carries every name to every app, and descriptions would grow it per
-  skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads only a
-  prompt's leading `/name`), so the list stays a plain union. It
+  skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads any `/name`
+  token in the prompt), so the list stays a plain union. It
   completes the token ending at the caret (2026-10-20; first token only before): a `/` at the start
   or after whitespace, no whitespace or second `/` up to the caret, and the caret at the token's
   end with no selection — so `… /sh` mid-prompt opens it, a slash in a word, URL or path
