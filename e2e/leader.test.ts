@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test, type Mock } from "bun:test";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
 } from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
+import { RelayClient as DaemonRelayClient } from "../daemon/src/relay-client.ts";
 import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { killWindow, listRegisteredWindows, listWindows, startApp, type SecondDaemon, type Stack } from "./harness.ts";
@@ -23,13 +24,17 @@ import { fixtureOrigin, q, startSuite, watchLeader, type Suite } from "./suite.t
 let suite: Suite | undefined;
 let base: string;
 let stack: Stack;
+/** Every store frame the in-process daemon sends, from before its first term: the settings record's history. */
+let daemonStore: Mock<DaemonRelayClient["store"]> | undefined;
 
 beforeAll(async () => {
+  daemonStore = spyOn(DaemonRelayClient.prototype, "store");
   suite = await startSuite("e2e-leader");
   ({ base, stack } = suite);
 });
 
 afterAll(async () => {
+  daemonStore?.mockRestore();
   // startSuite failing in beforeAll leaves suite unset, having torn down what it started.
   await suite?.dispose();
 });
@@ -429,7 +434,20 @@ describe("settings record: the leader's term creates it, and no later term repla
     }
   };
 
-  test("a term with no record creates one with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
+  /** The `expect` of each settings create or overwrite the daemon sent, in order. */
+  const settingsPuts = (): readonly number[] =>
+    (daemonStore?.mock.calls ?? []).flatMap(([frame]) =>
+      frame.t === "store-put" && frame.key === SETTINGS_KEY ? [frame.expect] : [],
+    );
+  /** Each settings read the daemon sent, as the promise of its answer. */
+  const settingsReads = (): readonly Promise<unknown>[] =>
+    (daemonStore?.mock.calls ?? []).flatMap(([frame], i) =>
+      frame.t === "store-get" && frame.key === SETTINGS_KEY
+        ? [Promise.resolve(daemonStore?.mock.results[i]?.value)]
+        : [],
+    );
+
+  test("the suite's first term created the record with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
     const lines: string[] = [];
     const out = spyOn(console, "log").mockImplementation((...args) => void lines.push(args.join(" ")));
     const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
@@ -440,6 +458,8 @@ describe("settings record: the leader's term creates it, and no later term repla
       // Created beside takeover, not before it.
       await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
       const created = await readSettings();
+      // The relay was fresh and this daemon's first term is the only writer: its one create is the record's.
+      expect(settingsPuts()).toEqual([0]);
       expect(created?.version).toBe(1);
       expect(created?.record.version).toBe(1);
       const publicKey = created?.record.vapid?.publicKey ?? "";
@@ -448,6 +468,7 @@ describe("settings record: the leader's term creates it, and no later term repla
 
       // A new term on the same relay: it reads the record, whose floor it already holds.
       const term = stack.daemon.leader.term();
+      const readsBefore = settingsReads().length;
       await stack.restartDaemon();
       await pollUntil(
         () => stack.daemon.leader.term() !== null && stack.daemon.leader.term() !== term,
@@ -455,8 +476,13 @@ describe("settings record: the leader's term creates it, and no later term repla
         10_000,
       );
       await stack.daemon.leader.settled();
+      // Positive first: the later term's read of the record has been answered, so the sleep below
+      // waits out a write that load would have made, not a load that never ran.
+      await pollUntil(() => settingsReads().length > readsBefore, "the later term to read the settings record", 10_000);
+      await Promise.allSettled(settingsReads());
       // A sleep is right before a negative assertion: a write that never happened cannot be polled.
-      await Bun.sleep(500);
+      await Bun.sleep(300);
+      expect(settingsPuts()).toEqual([0]);
       const again = await readSettings();
       expect(again?.version).toBe(1);
       expect(again?.record.vapid?.publicKey).toBe(publicKey);
