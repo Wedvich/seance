@@ -2,6 +2,7 @@ import type {
   DespawnRequest,
   DespawnResponse,
   ErrorResponse,
+  FleetQuotaEntry,
   Machine,
   PauseHold,
   RecordUnreadable,
@@ -164,6 +165,12 @@ export interface Fleet {
    * which; the library decides what each may be used for.
    */
   machines(): readonly Machine[];
+  /**
+   * The fleet quota record's entries as last read, folded with every status
+   * (`newestQuotaByAccount`), so an account keeps the reading of a machine that
+   * has left the registry. Absent reads as an empty record.
+   */
+  fleetQuota?(): readonly FleetQuotaEntry[];
   spawn(deviceId: string, request: TaskSpawnRequest): Promise<TaskSpawnReply>;
   sessions(deviceId: string): Promise<TaskSessionsReply>;
   despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse | ErrorResponse | NoAnswer>;

@@ -410,8 +410,12 @@ Séance's noise is cover for a real intruder.
    deletes are refused. The singleton prefixes take one key (`StorePrefixRule.key`:
    `queue:pause`, `quota:fleet`) and refuse any other `invalid_request`, so a holder
    cannot squat their only slot; what it can still do is overwrite the real key with
-   junk, which the next honest compare-and-set overwrite replaces (the readers skip
-   what does not open). Rotating the token stops more and clears none. Registry growth is bounded in the DO by a
+   junk, which an honest writer replaces (the readers skip what does not open): the
+   pause by the next resume, the quota record by the fleet quota writer once the junk
+   has stood unchanged for `FLEET_QUOTA_STALL_MS` (24 h awake; Scheduler, "Fleet quota
+   record" — why it waits). The residual: a holder that rewrites junk faster than that
+   keeps the record unread, and readers fall back to the statuses alone, as before
+   the record existed. Rotating the token stops more and clears none. Registry growth is bounded in the DO by a
    32-entry cap that turns away only _unknown_ ids — so a full registry locks
    out machines you have not added yet and never knocks a known one offline —
    plus a per-socket register rate limit, which bounds write rate as the entry
@@ -745,7 +749,10 @@ nothing checked it. The last is the gap they leave.
   for another or for a `task`. An `account` record is sealed to `"app"` and read only through
   `openAccountRecord` (`shared/src/account-record.ts`): its sealed version must be the relay's and
   its `accountId`, HMAC'd under the PSK-derived account key, its own key (_Scheduler_, "Account
-  records"); `quota` and `settings` have no writer so far.
+  records"); `settings` has no writer so far. `quota` is opened only through `openFleetQuotaRecord`
+  (`shared/src/fleet-quota.ts`): sealed `to: "app"`, its op, its parser, and its sealed
+  `version` the store's. Its `from` is not checked — any PSK holder may write it, and it
+  carries readings, never authority.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -1061,7 +1068,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                         | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state") | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
-| records `account` / `quota` / `settings` (at rest)                  | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `quota` and `settings` unwritten so far (fleet quota record, settings)                               | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `quota`, `settings`: `openAtRest` with its op, then `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:`, `quota:fleet` and `settings:` (_Scheduler_, "The store")                  |
+| record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                             | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
+| records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                          | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                           | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -1829,6 +1837,76 @@ enforces is what it can see: who is asking, the key, a version and a size.
   write in `#onStoreFrame`.** `RelayStore` holds only the storage handle and the tombstone age, so
   hibernation loses nothing.
 
+### Fleet quota record (`daemon/src/fleet-quota.ts`) — landed 2026-10-25, M4
+
+One record at `quota:fleet` of each account's newest reading, `{ accountId, observer, reading }`
+(`FleetQuotaRecord`, op `quota`, sealed `to: "app"` by the daemon that wrote it). Why: the kept
+status (M2) holds an account's quota only while some machine's own snapshot does, so a `forget`,
+a reinstall or a retired machine took the fleet's newest reading with it. One record, never one
+per account, since per-account writes would tell the relay when each account is in use.
+
+- **The writer.** Every daemon runs one, inside `startDaemon` only (it logs through `log.ts`,
+  which nothing `seanced mcp` reaches may call), on its own socket: `quota:` is not term-fenced,
+  so registration is the whole authority. Every `FLEET_QUOTA_INTERVAL_MS` (5 min) it takes its
+  newest raw reading per account from the last untrimmed sample (`newestReadings`: through the
+  register blob the sample indexes, only while the sample names that blob, a tie to the first
+  exclave) and, unless none is newer than the record it last saw, reads the record, folds them
+  in (`withObservations`, `shared/src/fleet-quota.ts`) and puts it at the version read — a create
+  at `expect: 0` only when the get answered none. Newer is a later `at`, or a stored entry stamped
+  past now by more than `QUOTA_CLOCK_SKEW_MS`, which would otherwise hold its account until the
+  clock that stamped it caught up. An entry is replaced whole, never merged: an entry under a newer
+  `at` carrying an older reading's windows would hide their age from `mergeQuota`'s freshness rule,
+  so readers merge raw candidates at read time instead. Each reading is bounded to the record's
+  parse before sealing (model names over 32 characters dropped, the 4 fullest scoped windows kept,
+  past 32 accounts the newest kept), only the parsed copy is sealed, and the sealed `ct` is held to
+  `STORE_CREATE_MAX_CT_LENGTH` at `expect: 0`, `STORE_MAX_CT_LENGTH` otherwise.
+- **The register gate.** It sends nothing until `RelayClient.registered`: connected, and this
+  socket's register frame has left. No ack is needed — the relay settles a pending register
+  before it answers any later frame on that socket — so a `forbidden` means the register failed
+  or the socket was superseded: the writer stops until the next register leaves, then owes one
+  retry. The first cycle since start waits for the status loop's first sample against the
+  current register blob (at register the snapshot still names the previous blob, at boot none, so
+  it holds no readings yet), and so does the retry after a `forbidden` — a register may have
+  changed the scan, and a retry against the stale snapshot would find nothing and be lost. A
+  register never runs a cycle itself, so a reconnect loop never loops writes.
+- **Refusals and bounds.** `version_conflict` re-reads and retries, at most 3 times a cycle;
+  `rate_limited`, `invalid_request` (a relay older than store rules v2) and any other code wait
+  for the next interval, each code warned once. An owed read (the first, or the retry after a
+  `forbidden`) is spent by one attempt that got any answer, a refusal included, or timed out, so
+  a refusing relay is asked once per interval, not on every 30 s status sample. A local budget of 6 puts a minute holds whatever
+  runs, far under the relay's write floor. No line is logged per write, and never a key's `env`
+  or `ct`.
+- **An unreadable record — the one overwrite of a record its writer cannot read.** A record that
+  does not open (a PSK rotation, junk, a newer build's shape) is overwritten, at its version, only
+  once it has stood unchanged at one store version for `FLEET_QUOTA_STALL_MS` (24 h of awake
+  observation time, accumulated between this writer's consecutive sightings of that version, each
+  gap capped at twice the writer interval so a fleet asleep over a weekend gives a straggler its
+  window on waking; a different version, or a readable read, restarts it); while its version moves
+  the writer backs off and warns once ("probably a PSK or version mismatch"), and the overwrite
+  logs one line once it has landed. Time rather than reads: a count
+  would let register-triggered reads shorten the window, and an idle legitimate writer (no newer
+  reading for a while) would read as dead. Elsewhere no reader removes a record it cannot read on
+  its own (Threat model, item 3); `quota:` is the bounded exception because it has no deletes, so
+  a dead record would hold the slot for good. Waiting for it to stand still is what keeps a
+  straggler on the old PSK and the rest of the fleet from wiping each other's record every cycle.
+  Residuals: a straggler that stays idle for 24 h can still be overwritten (it rewrites on its
+  next newer reading, and the fleet's overwrite follows 24 h later); after a PSK rotation a dead
+  record holds the slot for up to 24 h, readers falling back to the statuses alone meanwhile; and
+  item 3's, a token holder rewriting junk faster than the window keeps the record unread.
+- **Readers.** Every reader opens it through `openFleetQuotaRecord`, then folds it with the
+  statuses in `newestQuotaByAccount` (`shared/src/quota.ts`): a record entry counts like a status
+  observation by its `observer`, newest wins, a tie to the status. The app-client reads it only
+  when built with `fleetQuotaRefreshMs` (`refreshFleetQuota`: on every open, then every interval);
+  no record or an unreadable one reads as empty, a read with no answer keeps the last copy. The
+  PWA polls, since the relay nudges apps for no `quota:` write; MCP and Raycast never read it.
+  The leader's leg polls too, and also re-reads on the `store-changed` the relay sends its daemon
+  socket for another daemon's write (a changed record reaches the tick through the client's
+  subscription, an unchanged one needs none); a takeover awaits one read (bounded by the store
+  timeout, whatever it finds) before the first pass, so an account only the record has seen is
+  not routed as unobserved. The trimmed-status unknown (_The library_, "Missing quota is unknown") is unchanged: an entry
+  from the trimmed machine is stamped at or before that status, so only another machine's newer
+  reading clears it, as before.
+
 ### The leader (`daemon/src/leader.ts`) — landed 2026-10-16, M2 item 3
 
 Three modules since M3's split (2026-10-17): `leader.ts` runs the term and is the daemon's
@@ -2088,14 +2166,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   yet. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
-  every status alike, through `newestQuotaByAccount` and `effectivePct` — the
+  every status alike, and from the fleet quota record (`Fleet.fleetQuota`, "Fleet quota
+  record" above), through `newestQuotaByAccount` and `effectivePct` — the
   library restates neither rule. An observation describes an account, not the machine that
   sent it, and carries its own `at`, so an account last used on a laptop that has since slept
   keeps that reading rather than an older one; no age cap beyond the reset rule
   (docs/scheduler.md, Settled defaults 7). An absent `free` is not `disk_low`: the floor guards a
   disk known to be full, and a host with no statfs answer would otherwise never get work.
-- **Missing quota is unknown, never 0%.** `quota_unknown` when no status carries the
-  account, when its newest observation has no window in it, or when a trimmed status
+- **Missing quota is unknown, never 0%.** `quota_unknown` when neither a status nor the
+  fleet quota record carries the account, when its newest observation has no window in it, or when a trimmed status
   (`isQuotaTrimmed`) from a host of the account does not carry it and nothing newer than
   that status does. A candidate rejected so has no score at all, rather than one
   computed at zero — the case where 0% would have won is in the suite.
@@ -4540,7 +4619,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   monthly figure is noise on a card about windows. Not charted: the series (`quota_credits_pct`) is kept
   daemon-side for when a chart wants it. Every machine counts, an asleep
   machine's included, from the status the relay kept, with "asleep" and its age on the
-  observed line. A window whose `resets_at` has passed shows 0% and
+  observed line. So does a machine no longer listed, through the fleet quota record
+  (Scheduler, "Fleet quota record") — but only while some listed machine still hosts an
+  exclave of that account, since `deriveAccounts` groups cards from the registry's exclaves and
+  an account no listed machine hosts has no card to show it on — which the client re-reads on open and every
+  `FLEET_QUOTA_INTERVAL_MS` — the relay nudges apps for no `quota:` write — and whose
+  reading is "on a machine no longer listed". A window whose `resets_at` has passed shows 0% and
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler

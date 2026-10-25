@@ -49,6 +49,7 @@ function state(
       skewed: 0,
       settling: false,
       registrySettled: true,
+      fleetQuota: [],
       scheduler: { kind: "ready", deviceId: "dev-a", term: 1 },
       ...relay,
     },

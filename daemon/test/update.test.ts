@@ -82,6 +82,7 @@ async function startTestDaemon(relay: TestRelay, name: string, selfUpdate: SelfU
   const daemon = await startDaemon({
     config,
     backend: inertBackend,
+    home: join(base, name, "home"),
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,

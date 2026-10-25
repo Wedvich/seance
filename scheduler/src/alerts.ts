@@ -1,4 +1,4 @@
-import { quote, type Machine } from "@seance/shared";
+import { quote, type FleetQuotaEntry, type Machine } from "@seance/shared";
 import { windowResetOf, type Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
@@ -76,7 +76,13 @@ export class SpillAlerts {
   }
 
   /** The alert a confirmed spawn under `decision` earns, if any — remembered, so its window earns no other. */
-  on(taskId: string, decision: Decision, machines: readonly Machine[], now: number): SchedulerAlert | null {
+  on(
+    taskId: string,
+    decision: Decision,
+    machines: readonly Machine[],
+    now: number,
+    fleetQuota: readonly FleetQuotaEntry[] = [],
+  ): SchedulerAlert | null {
     const { chosen } = decision;
     if (chosen === null) return null;
     const spill = decision.candidates.find(
@@ -88,7 +94,7 @@ export class SpillAlerts {
       ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
     if (accountId === undefined || accountId === null) return null;
     const key = `${accountId} ${spill.window}`;
-    const resetS = windowResetOf(accountId, machines, spill.window);
+    const resetS = windowResetOf(accountId, machines, spill.window, fleetQuota);
     const reset = resetS === undefined ? undefined : resetS * 1000;
     const alerted = this.#alerted.get(key);
     if (alerted !== undefined) {

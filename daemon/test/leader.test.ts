@@ -16,11 +16,13 @@ import {
   parseQueueReply,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
+  QUOTA_KEY,
   RelayClient,
   REPLAY_WINDOW_MS,
   RequestFailure,
   SCHEDULER_ID,
   seal,
+  sealFleetQuotaRecord,
   taskKey,
   toBase64,
   type Candidate,
@@ -111,6 +113,7 @@ function leaderOver(
   store: QueueStore = new MemoryQueueStore(),
   tickIntervalMs?: number,
   prStatus?: PrPollerOpts,
+  storeTimeoutMs?: number,
 ) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
@@ -135,6 +138,7 @@ function leaderOver(
         key,
         scheduler: { term, onEvent },
         pingIntervalMs: 4 * IDLE_MS,
+        ...(storeTimeoutMs === undefined ? {} : { storeTimeoutMs }),
         log: () => {},
         createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
       });
@@ -163,7 +167,7 @@ async function enqueueQueued(store: QueueStore, leader: Leader, id: string, fiel
  * `github.com/acme/app`, a fresh status with headroom — each blob sealed by
  * the machine it describes, as the leg's client requires.
  */
-async function routableEntry(deviceId: string): Promise<RegistryView> {
+async function routableEntry(deviceId: string, observed = true): Promise<RegistryView> {
   const info: MachineInfo = {
     name: deviceId,
     platform: "linux",
@@ -187,7 +191,7 @@ async function routableEntry(deviceId: string): Promise<RegistryView> {
     cpu: 10,
     mem: 10,
     free: 50_000,
-    quota: [{ x: 0, h: 10, d: 10, s: "session", at: nowS - 60 }],
+    ...(observed ? { quota: [{ x: 0, h: 10, d: 10, s: "session", at: nowS - 60 }] } : {}),
   };
   const sealed = (op: OpName, payload: unknown): Promise<Envelope> =>
     seal(key, { to: APP_ID, from: deviceId }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
@@ -1481,6 +1485,54 @@ describe("PR status", () => {
       const record = await store.get("pr1");
       expect(record?.version).toBe(written);
       expect(record?.body).toMatchObject({ state: "awaiting-merge", pr: { state: "open" } });
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
+
+describe("fleet quota record", () => {
+  /** `org:b`'s reading, seen by a machine the registry no longer lists. */
+  async function plantQuota(relay: TestRelay, version: number, h: number): Promise<void> {
+    const at = Math.floor(Date.now() / 1000) - 30;
+    const accounts = [{ accountId: "org:b", observer: "gone", reading: { h, d: 10, s: "session", at } }] as const;
+    relay.plantRecord(QUOTA_KEY, version, await sealFleetQuotaRecord(key, "gone", { version, accounts }));
+  }
+
+  test("takeover reads it first: an account only the record has seen is observed from the first pass", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.setRegistry([await routableEntry("b", false)]);
+    await plantQuota(relay, 1, 20);
+    const { leader, legs, replies } = leaderOver(relay);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      expect(legs[0]?.getState().fleetQuota).toHaveLength(1);
+      leader.deliver(await appRequest("route-preview", { repo: "github.com/acme/app", mode: "worktree" }));
+      expect((await replies.next()).response.payload).toMatchObject({
+        decision: { candidates: [{ deviceId: "b", quota: { observer: "gone" } }] },
+      });
+
+      // Another daemon's write: the relay nudges the leader, which re-reads on its leg.
+      await plantQuota(relay, 2, 70);
+      leader.onStoreChanged(QUOTA_KEY, 2);
+      await pollUntil(() => legs[0]?.getState().fleetQuota[0]?.reading.h === 70, "the re-read record");
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a read that gets no answer still lets takeover finish, past the store timeout", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.setRegistry([await routableEntry("b", false)]);
+    relay.holdStoreReplies = true;
+    const { leader, legs } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, 100);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      expect(legs[0]?.getState().fleetQuota).toEqual([]);
     } finally {
       leader.stop();
       relay.stop();

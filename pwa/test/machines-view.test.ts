@@ -122,6 +122,15 @@ describe("deriveMachines", () => {
     expect(accounts[0]?.historyFrom).toBe("b");
   });
 
+  test("a reading only the fleet quota record holds shows bars, observed on a machine no longer listed", () => {
+    const unobserved = machine({ status: { at: S, scan: 1 } });
+    const fleet = [{ accountId: ACCOUNT, observer: "retired", reading: { h: 40, s: "cache", at: S - 120 } }] as const;
+    const { accounts } = deriveMachines([unobserved], NOW, NO_LEADER, {}, fleet);
+    expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([40]);
+    expect(accounts[0]?.observed).toBe("cache · 2m ago on a machine no longer listed");
+    expect(deriveMachines([unobserved], NOW, NO_LEADER).accounts[0]?.observed).toStartWith("No quota seen yet");
+  });
+
   test("an account is named by the email any of its exclaves reports, else its short id", () => {
     const first = machine({
       deviceId: "a",

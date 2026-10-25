@@ -3,6 +3,7 @@ import {
   DECISION_MAX_CANDIDATES,
   quote,
   type BranchState,
+  type FleetQuotaEntry,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
@@ -242,7 +243,9 @@ export class Scheduler {
       hold = { ...(account === undefined ? {} : { account }), until: "resume", at: now };
     } else {
       const resumeAt =
-        account === undefined ? null : accountResetAt(account, this.#fleet.machines(), this.tasks(), now, this.#config);
+        account === undefined
+          ? null
+          : accountResetAt(account, this.#fleet.machines(), this.tasks(), now, this.#config, this.#fleetQuota());
       if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
       hold = { account, until: "reset", at: now, resumeAt };
     }
@@ -396,8 +399,13 @@ export class Scheduler {
         now: this.#now(),
         config: this.#config,
         holds: this.#pause.holds,
+        fleetQuota: this.#fleetQuota(),
       }),
     );
+  }
+
+  #fleetQuota(): readonly FleetQuotaEntry[] {
+    return this.#fleet.fleetQuota?.() ?? [];
   }
 
   /** Coalesces: a tick asked for while one runs runs once more after it, never alongside. */
@@ -659,6 +667,7 @@ export class Scheduler {
           now,
           config: this.#config,
           holds: this.#pause.holds,
+          fleetQuota: this.#fleetQuota(),
         }),
       );
       this.#decisions.set(task.id, decision);
@@ -784,7 +793,7 @@ export class Scheduler {
     await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
     // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
     if (!reply.ok) return;
-    const spill = this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now());
+    const spill = this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota());
     if (spill !== null) this.#alert(spill);
   }
 

@@ -1,5 +1,12 @@
 import { readFile, stat as statFile } from "node:fs/promises";
-import { isRecord, METRIC_NAMES, type QuotaObservation, type ScopedWindow, type SessionEntry } from "@seance/shared";
+import {
+  isRecord,
+  METRIC_NAMES,
+  QUOTA_CLOCK_SKEW_MS,
+  type QuotaObservation,
+  type ScopedWindow,
+  type SessionEntry,
+} from "@seance/shared";
 import { exclaveOf, type ExclaveScan } from "./exclaves.ts";
 import type { Sample } from "./metrics-store.ts";
 import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from "./telemetry.ts";
@@ -59,12 +66,7 @@ export const MIN_CPU_WINDOW_MS = 5_000;
  */
 const MIN_COUNTED_SHARE = 0.5;
 
-/**
- * How far past now a cached `fetchedAtMs` may sit. Readers take the newest
- * observation per account, so one far-future stamp would pin that account's
- * quota until the clock caught up.
- */
-export const QUOTA_CLOCK_SKEW_MS = 60_000;
+export { QUOTA_CLOCK_SKEW_MS };
 
 // Order is the snapshot's field order and the store's sample order.
 export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [

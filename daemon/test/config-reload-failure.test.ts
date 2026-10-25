@@ -89,6 +89,7 @@ async function startSupervised(path: string, extra: Partial<SuperviseOpts> = {})
   trigger = makeConfigTrigger();
   const handle = await startSupervisor({
     configPath: path,
+    home: join(base, "home"),
     watch: trigger.watch,
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,

@@ -7,6 +7,7 @@ export * from "./relay-url.ts";
 export * from "./app-client.ts";
 export * from "./status-reader.ts";
 export * from "./quota.ts";
+export * from "./fleet-quota.ts";
 export * from "./task-phase.ts";
 export * from "./scheduler-text.ts";
 export * from "./task-record.ts";

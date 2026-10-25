@@ -276,6 +276,8 @@ export async function startStack(
       pingIntervalMs: 60_000,
       pongTimeoutMs: 1_000,
       baseBackoffMs: 20,
+      // Written once per boot — the quota fixture never moves, so later cycles skip — and soon after it.
+      fleetQuota: { intervalMs: 500 },
       // A failed takeover still retries promptly: only the regular tick waits the hour.
       ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
     });

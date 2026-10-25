@@ -4,6 +4,7 @@ import {
   liveStatus,
   newestQuotaByAccount,
   type ExclaveInfo,
+  type FleetQuotaEntry,
   type Machine,
   type QuotaObservation,
 } from "./index.ts";
@@ -167,6 +168,51 @@ describe("newestQuotaByAccount", () => {
       { deviceId: "old", status: { at: S, scan: 1, quota: [{ x: 0, h: 99, s: "cache", at: S }] } },
     ]);
     expect(newest.size).toBe(0);
+  });
+});
+
+describe("newestQuotaByAccount with the fleet quota record", () => {
+  const entry = (observer: string, reading: FleetQuotaEntry["reading"]): FleetQuotaEntry => ({
+    accountId: "org:acct",
+    observer,
+    reading,
+  });
+
+  test("a record entry newer than every status wins, its observer standing in as the machine", () => {
+    const newest = newestQuotaByAccount(
+      [host("tower", [exclave("main", "org:acct")], [{ x: 0, h: 10, s: "cache", at: S - 600 }])],
+      [entry("retired", { h: 70, s: "cache", at: S - 60 })],
+    );
+    expect(newest.get("org:acct")).toEqual({ observation: { h: 70, s: "cache", at: S - 60 }, deviceId: "retired" });
+  });
+
+  test("a status newer than the record wins, and a tie goes to the status", () => {
+    const status: QuotaObservation = { x: 0, h: 40, s: "cache", at: S - 60 };
+    const machines = [host("tower", [exclave("main", "org:acct")], [status])];
+    expect(newestQuotaByAccount(machines, [entry("old", { h: 90, s: "cache", at: S - 600 })]).get("org:acct")).toEqual({
+      observation: status,
+      deviceId: "tower",
+    });
+    expect(newestQuotaByAccount(machines, [entry("twin", { h: 90, s: "cache", at: S - 60 })]).get("org:acct")).toEqual({
+      observation: status,
+      deviceId: "tower",
+    });
+  });
+
+  test("an account only the record holds is known — a forgotten machine's reading survives it", () => {
+    const newest = newestQuotaByAccount([], [entry("forgotten", { d: 33, s: "cache", at: S })]);
+    expect(newest.get("org:acct")?.deviceId).toBe("forgotten");
+  });
+
+  test("windows merge across the record and statuses under the newest's stamp", () => {
+    const newest = newestQuotaByAccount(
+      [host("tower", [exclave("main", "org:acct")], [{ x: 0, h: 10, hr: S + 3600, s: "cache", at: S - 600 }])],
+      [entry("laptop", { d: 50, dr: S + 86_400, s: "cache", at: S - 60 })],
+    );
+    expect(newest.get("org:acct")).toEqual({
+      observation: { d: 50, dr: S + 86_400, h: 10, hr: S + 3600, s: "cache", at: S - 60 },
+      deviceId: "laptop",
+    });
   });
 });
 

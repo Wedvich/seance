@@ -65,6 +65,7 @@ export function fakeRelay(
     skewed: 0,
     settling: false,
     registrySettled: status === "open",
+    fleetQuota: [],
     scheduler: { kind: "none" },
   };
   const listeners = new Set<() => void>();

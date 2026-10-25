@@ -401,6 +401,24 @@ describe("filter", () => {
       expect(idle?.score).toBeUndefined();
     });
 
+    test("the fleet quota record informs an account no status carries — its observer may have left the registry", () => {
+      const unobserved = machine("idle", { status: status({ cpu: 0, mem: 0 }) });
+      const reading = { h: 30, d: 20, s: "cache" as const, at: NOW_S - 120 };
+      const fleetQuota = [{ accountId: "org:idle", observer: "retired", reading }];
+      const decision = route({
+        task: task(),
+        machines: [unobserved],
+        tasks: [],
+        now: NOW,
+        config: DEFAULT_CONFIG,
+        fleetQuota,
+      });
+      const candidate = only(decision);
+      expect(candidate.rejected).toEqual([]);
+      expect(candidate.quota).toEqual({ observedAt: NOW_S - 120, observer: "retired", source: "cache" });
+      expect(decision.chosen?.deviceId).toBe("idle");
+    });
+
     test("an observation with no window in it is no reading", () => {
       const empty = machine("a", { status: status({ quota: [{ x: 0, s: "cache", at: NOW_S }] }) });
       expect(only(decide([empty])).rejected).toEqual([{ code: "quota_unknown", why: "unobserved" }]);

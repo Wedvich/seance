@@ -224,12 +224,15 @@ export function appRelayClient(
   key: CryptoKey,
   log: (line: string) => void,
   scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler; readonly guard?: ReplayGuard },
+  /** `RelayClient`'s option of that name; only the leader's leg folds quota, so only it reads the record. */
+  fleetQuotaRefreshMs?: number,
 ): RelayClient {
   return new RelayClient({
     url: appRelayUrl(config.relayUrl),
     token: config.bearerToken,
     key,
     log,
+    ...(fleetQuotaRefreshMs === undefined ? {} : { fleetQuotaRefreshMs }),
     // Bun dialing workerd needs this or frames die with close code 1002.
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
     ...(scheduler === undefined ? {} : { scheduler }),

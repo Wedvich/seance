@@ -106,7 +106,13 @@ export function App(props: { store: Store }): JSX.Element {
   );
   const machines = (onDismiss?: () => void): JSX.Element => (
     <MachinesScreen
-      view={deriveMachines(state.relay.machines, now, state.relay.scheduler, state.accounts.aliases)}
+      view={deriveMachines(
+        state.relay.machines,
+        now,
+        state.relay.scheduler,
+        state.accounts.aliases,
+        state.relay.fleetQuota,
+      )}
       relayLine={view.relayLine}
       relayState={view.relayState}
       settled={state.relay.registrySettled}

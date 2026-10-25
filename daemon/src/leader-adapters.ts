@@ -141,6 +141,7 @@ export function termFleet(o: TermFleetOpts): Fleet {
   const ended = unreachable("the scheduler term has ended");
   return {
     machines: () => o.relay.getState().machines,
+    fleetQuota: () => o.relay.getState().fleetQuota,
     spawn: async (deviceId, request) => {
       if (!o.live()) return ended;
       if (deviceId === o.selfDeviceId) return o.local.spawn(request);

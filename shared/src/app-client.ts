@@ -6,6 +6,7 @@ import {
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
   OP_TIMEOUT_MS,
+  QUOTA_KEY,
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
@@ -21,6 +22,7 @@ import {
   type Envelope,
   type ErrorResponse,
   type ExclaveInfo,
+  type FleetQuotaEntry,
   type MachineInfo,
   type MachineStatus,
   type MetricsReply,
@@ -73,6 +75,7 @@ import {
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
 import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
+import { openFleetQuotaRecord } from "./fleet-quota.ts";
 import { openTaskListing, openTaskRecord, sealTaskRecord, taskKey, type UnreadableRecord } from "./task-record.ts";
 import {
   accountRecord,
@@ -315,6 +318,13 @@ export interface RelayState {
   readonly registrySettled: boolean;
   /** From the last registry push, checked against the entries that opened. */
   readonly scheduler: SchedulerAvailability;
+  /**
+   * The fleet quota record's entries (DESIGN.md, Scheduler, "Fleet quota
+   * record"), for `newestQuotaByAccount` beside the statuses. Read only by a
+   * client built with `fleetQuotaRefreshMs`; empty otherwise, and empty while
+   * the store holds no record or one this build cannot read.
+   */
+  readonly fleetQuota: readonly FleetQuotaEntry[];
 }
 
 const BACKOFF_BASE_MS = 500;
@@ -351,6 +361,7 @@ const INITIAL_STATE: RelayState = {
   skewed: 0,
   settling: true,
   registrySettled: false,
+  fleetQuota: [],
   scheduler: NO_SCHEDULER,
 };
 
@@ -365,6 +376,8 @@ interface StorePending {
   readonly socket: WebSocket;
   readonly settle: (result: { ok: true; reply: StoreReplyFrame | null } | { ok: false; error: RequestFailure }) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  /** A fleet quota read: its send and successful answer leave no wire line (failures still do). */
+  readonly quiet: boolean;
 }
 
 const UNDELIVERABLE_MESSAGES = {
@@ -612,6 +625,11 @@ export class RelayClient {
   #registrySettleTimer: ReturnType<typeof setTimeout> | null = null;
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
+  #fleetQuotaTimer: ReturnType<typeof setInterval> | null = null;
+  /** The store version `fleetQuota` was read at, so an unchanged record keeps its array (and its subscribers quiet). */
+  #fleetQuotaVersion = 0;
+  /** The newest store version any answer showed (a record's, readable or not): reads can finish out of order. */
+  #fleetQuotaStoreVersion = 0;
   /** When the current socket last delivered anything — pong or frame. Uplink evidence for timeout blame. */
   #lastFrameAt = 0;
   #stopped = false;
@@ -623,6 +641,7 @@ export class RelayClient {
   readonly #registrySettleMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
+  readonly #fleetQuotaRefreshMs: number | null;
   readonly #log: (line: string) => void;
   /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
   readonly #term: number | null;
@@ -648,6 +667,13 @@ export class RelayClient {
     /** Overrides for the shared heartbeat cadence; tests use them to avoid real 30s beats. */
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
+    /**
+     * Read the fleet quota record (`refreshFleetQuota`) on every open and then
+     * this often while the socket stays up (`FLEET_QUOTA_INTERVAL_MS` in
+     * production). Off by default: a client that folds no quota — MCP, Raycast,
+     * one per Claude session — must not spend the store's reads.
+     */
+    readonly fleetQuotaRefreshMs?: number;
     /** Wire-log sink. Defaults to stdout; a consumer whose stdout is spoken for (the MCP server's JSON-RPC) passes its own. */
     readonly log?: (line: string) => void;
     /**
@@ -680,6 +706,7 @@ export class RelayClient {
     this.#registrySettleMs = opts.registrySettleMs ?? REGISTRY_SETTLE_MS;
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
+    this.#fleetQuotaRefreshMs = opts.fleetQuotaRefreshMs ?? null;
     this.#log = opts.log ?? ((line) => console.log(line));
     this.#term = opts.scheduler?.term ?? null;
     this.#onEvent = opts.scheduler?.onEvent ?? null;
@@ -915,6 +942,9 @@ export class RelayClient {
     url.searchParams.set(TOKEN_PARAM, this.#token);
     const socket = this.#createSocket(url.href);
     this.#socket = socket;
+    // A relay store reset restarts `quota:` versions; answers from the old socket are already dropped.
+    this.#fleetQuotaStoreVersion = 0;
+    this.#fleetQuotaVersion = -1;
     this.#patchDown(this.#attempt === 0 ? "connecting" : "retrying");
 
     socket.addEventListener("open", () => {
@@ -923,6 +953,7 @@ export class RelayClient {
       this.#startHeartbeat(socket);
       this.#patch({ status: "open", rejection: null, settling: false, registrySettled: false });
       this.#armRegistrySettle(socket);
+      this.#startFleetQuota(socket);
     });
     socket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
@@ -1022,11 +1053,61 @@ export class RelayClient {
     }, this.#pingIntervalMs);
   }
 
+  /** Every timer bound to the current socket: the heartbeat's, and the record poll's. */
   #teardownHeartbeat(): void {
     if (this.#pingTimer !== null) clearInterval(this.#pingTimer);
     if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
+    if (this.#fleetQuotaTimer !== null) clearInterval(this.#fleetQuotaTimer);
     this.#pingTimer = null;
     this.#pongDeadline = null;
+    this.#fleetQuotaTimer = null;
+  }
+
+  /** Polled, not pushed: the relay nudges apps only for `account:`, never `quota:`. */
+  #startFleetQuota(socket: WebSocket): void {
+    const every = this.#fleetQuotaRefreshMs;
+    if (every === null) return;
+    if (this.#fleetQuotaTimer !== null) clearInterval(this.#fleetQuotaTimer);
+    this.#fleetQuotaTimer = setInterval(() => {
+      if (this.#socket === socket) void this.refreshFleetQuota();
+    }, every);
+    void this.refreshFleetQuota();
+  }
+
+  /**
+   * Re-reads the fleet quota record through its one open path
+   * (`openFleetQuotaRecord`). No record, or one this build cannot read, is an
+   * empty record; a read that got no answer keeps the last one. Resolves
+   * either way, within the store timeout, so a caller may await it before
+   * acting on the result (the leader's takeover). Logs one wire line per
+   * unreadable answer, never its `env` or `ct`.
+   */
+  async refreshFleetQuota(): Promise<void> {
+    const socket = this.#socket;
+    let next: { readonly version: number; readonly accounts: readonly FleetQuotaEntry[] } | null = null;
+    let storeVersion = 0;
+    try {
+      const reply = await this.#store({ t: "store-get", id: crypto.randomUUID(), key: QUOTA_KEY });
+      if (reply?.t === "store-record") {
+        const stored = reply.record;
+        storeVersion = stored?.version ?? 0;
+        const opened = stored === null ? null : await openFleetQuotaRecord(this.#key, stored);
+        if (typeof opened === "string") this.#wireLog("skipped", `key=${QUOTA_KEY} reason=${opened}`);
+        next = opened === null || typeof opened === "string" ? { version: 0, accounts: [] } : opened;
+      } else if (reply?.t !== "store-refused") {
+        this.#storeKindMismatch(reply);
+      }
+    } catch (err) {
+      if (!(err instanceof RequestFailure)) throw err;
+    }
+    if (next === null || this.#socket !== socket) return;
+    // Versions only grow on `quota:` and nothing deletes: an older answer is a read that lost the race.
+    if (storeVersion < this.#fleetQuotaStoreVersion) return;
+    this.#fleetQuotaStoreVersion = storeVersion;
+    const unchanged =
+      next.version === this.#fleetQuotaVersion && (next.version !== 0 || this.#state.fleetQuota.length === 0);
+    this.#fleetQuotaVersion = next.version;
+    if (!unchanged) this.#patch({ fleetQuota: next.accounts });
   }
 
   async #onFrame(text: string, socket: WebSocket): Promise<void> {
@@ -1091,10 +1172,12 @@ export class RelayClient {
       this.#wireLog("dropped", `re=${quote(re)} reason=store-stale`);
       return;
     }
-    this.#wireLog(
-      "recv",
-      `re=${quote(re)} t=${reply?.t ?? "unreadable"} pending=${pending === undefined ? "no" : "yes"}`,
-    );
+    if (!(pending?.quiet === true && reply?.t === "store-record")) {
+      this.#wireLog(
+        "recv",
+        `re=${quote(re)} t=${reply?.t ?? "unreadable"} pending=${pending === undefined ? "no" : "yes"}`,
+      );
+    }
     pending?.settle({ ok: true, reply });
   }
 
@@ -1519,6 +1602,9 @@ export class RelayClient {
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay", "relay"));
     }
+    // A quota read every interval would leave a local record of when other
+    // machines' accounts are active; its failures (timeout, skipped) still log.
+    const quiet = frame.t === "store-get" && frame.key === QUOTA_KEY;
     return new Promise<StoreReplyFrame | null>((resolve, reject) => {
       const limit = this.#storeTimeoutMs ?? (frame.t === "store-list" ? STORE_LIST_TIMEOUT_MS : STORE_TIMEOUT_MS);
       const timer = setTimeout(() => {
@@ -1529,6 +1615,7 @@ export class RelayClient {
       this.#storePending.set(frame.id, {
         socket,
         timer,
+        quiet,
         settle: (result) => {
           clearTimeout(timer);
           this.#storePending.delete(frame.id);
@@ -1545,6 +1632,7 @@ export class RelayClient {
         reject(new RequestFailure("disconnected", `${frame.t} could not be sent: ${String(err)}`, "relay"));
         return;
       }
+      if (quiet) return;
       this.#wireLog("send", `id=${quote(frame.id)} t=${frame.t}`);
     });
   }
