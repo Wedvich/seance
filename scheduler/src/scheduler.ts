@@ -1,6 +1,7 @@
 import {
   CAPABILITIES,
   DECISION_MAX_CANDIDATES,
+  parseSpillStamp,
   quote,
   type BranchState,
   type FleetQuotaEntry,
@@ -223,7 +224,8 @@ export class Scheduler {
     this.#decisions.clear();
     for (const entry of stored) this.#keep(entry);
     // Windows an earlier term alerted, so this one does not alert an ongoing spill once more.
-    for (const { task } of this.#held.values()) if (task.spillAlert !== undefined) this.#spills.seed(task.spillAlert);
+    for (const { task } of this.#held.values())
+      if (task.spillAlert !== undefined) this.#spills.seed(task.spillAlert, this.#now());
     await this.#pause.load();
   }
 
@@ -1112,9 +1114,12 @@ export class Scheduler {
 /**
  * `task` carrying the spill stamp of the dispatch `at` made, while it is still that dispatch's: still
  * reserved under it, or placed on its machine (a session event got there before the reply). Null for a
- * task that has moved on (cancelled, re-dispatched elsewhere) and for one already stamped.
+ * task that has moved on (cancelled, re-dispatched elsewhere), for one already stamped, and for a stamp
+ * the record's reader would refuse (an over-long account id or label): that would void the whole task, so
+ * the window goes unstamped, which costs a later term one repeat.
  */
 function stamped(task: Task, at: Reservation, stamp: SpillStamp): Task | null {
+  if (parseSpillStamp(stamp) === null) return null;
   const mine = holds(task, at) || (PLACED.includes(task.state) && task.assignment?.deviceId === at.deviceId);
   const held = task.spillAlert;
   if (!mine || (held?.accountId === stamp.accountId && held.window === stamp.window && held.reset === stamp.reset)) {

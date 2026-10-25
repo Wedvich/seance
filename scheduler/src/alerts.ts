@@ -1,5 +1,5 @@
 import { quote, type FleetQuotaEntry, type Machine, type SpillStamp } from "@seance/shared";
-import { windowResetOf, type Decision } from "./route.ts";
+import { SPAN_MS, windowResetOf, type Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
 /**
@@ -86,12 +86,12 @@ export function escalation(task: Task, now: number, afterMs: number): Task | nul
 export class SpillAlerts {
   readonly #resetGraceMs: number;
   /**
-   * `account window` → the reset (ms) of the window a spill was last alerted
-   * for, 0 when that reading carried none. Seeded at takeover from the stamps
-   * dispatches left on their records (`seed`), so a new leader does not alert an
-   * ongoing window once more.
+   * `account window` -> the window a spill was last alerted for: its reset (ms), 0
+   * when that reading carried none, and when it alerted. Seeded at takeover from
+   * the stamps dispatches left on their records (`seed`), so a new leader does not
+   * alert an ongoing window once more.
    */
-  readonly #alerted = new Map<string, number>();
+  readonly #alerted = new Map<string, { readonly reset: number; readonly at: number }>();
 
   constructor(resetGraceMs: number) {
     this.#resetGraceMs = resetGraceMs;
@@ -99,12 +99,29 @@ export class SpillAlerts {
 
   /**
    * Learns a window a previous term alerted: the later reset per key wins, and a
-   * reset of 0 (none read) never replaces one that was.
+   * reset of 0 (none read) never replaces one that was. A stamp that cannot
+   * describe a window running at `now` is dropped, so the window that is alerts
+   * once more rather than being taken for the old one: its reset passed beyond
+   * the grace, or, with no reset to say, it is older than the window is long.
    */
-  seed(stamp: SpillStamp): void {
+  seed(stamp: SpillStamp, now: number): void {
+    if (this.#stale(stamp.window, stamp.reset, stamp.at, now)) return;
     const key = `${stamp.accountId} ${stamp.window}`;
-    const alerted = this.#alerted.get(key);
-    if (alerted === undefined || stamp.reset > alerted) this.#alerted.set(key, stamp.reset);
+    const held = this.#alerted.get(key);
+    if (held === undefined || stamp.reset > held.reset || (stamp.reset === held.reset && stamp.at > held.at)) {
+      this.#alerted.set(key, { reset: stamp.reset, at: stamp.at });
+    }
+  }
+
+  /**
+   * Whether an alert for `window` with this reset, made at `at`, no longer says
+   * anything about the window running at `now`. The length is the label's: a
+   * per-model weekly is `7d <model>`; a label that is neither is held to the
+   * shorter, so a doubt costs one repeat, never a missed window.
+   */
+  #stale(window: string, reset: number, at: number, now: number): boolean {
+    if (reset > 0) return reset + this.#resetGraceMs < now;
+    return now - at > (window.startsWith("7d") ? SPAN_MS["7d"] : SPAN_MS["5h"]);
   }
 
   /**
@@ -132,18 +149,21 @@ export class SpillAlerts {
     const key = `${accountId} ${spill.window}`;
     const resetS = windowResetOf(accountId, machines, spill.window, fleetQuota);
     const reset = resetS === undefined ? undefined : resetS * 1000;
-    const alerted = this.#alerted.get(key);
+    const held = this.#alerted.get(key);
+    // An alert with no reset that old is of a window long gone: this one is new.
+    const gone = held !== undefined && held.reset === 0 && this.#stale(spill.window, 0, held.at, now);
+    const alerted = gone ? undefined : held?.reset;
     if (alerted !== undefined) {
       if (reset === undefined) return null;
       // An alert stamped with no reset learns it, without alerting again.
       if (alerted === 0) {
-        this.#alerted.set(key, reset);
+        this.#alerted.set(key, { reset, at: now });
         return null;
       }
       const newWindow = reset - alerted > this.#resetGraceMs || (alerted <= now && reset > now);
       if (!newWindow) return null;
     }
-    this.#alerted.set(key, reset ?? 0);
+    this.#alerted.set(key, { reset: reset ?? 0, at: now });
     const pct = Math.round(spill.projectedPct);
     return {
       alert: {
@@ -154,7 +174,7 @@ export class SpillAlerts {
         projectedPct: spill.projectedPct,
         message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
       },
-      stamp: { accountId, window: spill.window, reset: reset ?? 0 },
+      stamp: { accountId, window: spill.window, reset: reset ?? 0, at: now },
     };
   }
 }

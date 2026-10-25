@@ -475,7 +475,7 @@ describe("credits spill", () => {
     // Only the dispatch that alerted carries the stamp; the window is what the next leader needs.
     const stamps = [first, second].map(async (t) => (await stored(store, t.id)).body.spillAlert);
     expect((await Promise.all(stamps)).filter((s) => s !== undefined)).toEqual([
-      { accountId: "org:a", window: "5h", reset: (NOW_S + 3600) * 1000 },
+      { accountId: "org:a", window: "5h", reset: (NOW_S + 3600) * 1000, at: NOW },
     ]);
 
     const next = make();
@@ -508,6 +508,7 @@ describe("credits spill", () => {
       accountId: "org:a",
       window: "5h",
       reset: (NOW_S + 3600) * 1000,
+      at: NOW,
     });
 
     fleet.scripts.delete("a");
@@ -540,6 +541,62 @@ describe("credits spill", () => {
     await enqueue(store, next, spec());
     await pass(next, fleet, clock.now);
     expect(alerts).toHaveLength(2);
+  });
+
+  describe("a stamp a later term reads", () => {
+    const HOUR = 60 * MINUTE;
+    /** `spilling`, its quota reading `at` seconds, so an advanced clock does not age it past use. */
+    const fresh = (hr: number | undefined, clock: { now: number }): ReturnType<typeof machine> =>
+      machine("a", {
+        exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
+        status: status({ quota: [obs(0, { h: 95, ...(hr === undefined ? {} : { hr }), at: clock.now / 1000 - 60 })] }),
+      });
+
+    /** A first term alerts a spill whose reading carries `hr`, then `later` ms pass and a second term reads the record. */
+    async function laterTerm(hr: number | undefined, later: number, then: number | undefined) {
+      const env = setup(new FakeFleet([fresh(hr, { now: NOW })]), undefined, WIDE);
+      await enqueue(env.store, env.scheduler, spec());
+      await pass(env.scheduler, env.fleet, env.clock.now);
+      expect(env.alerts).toHaveLength(1);
+      env.clock.now = NOW + later;
+      env.fleet.fleet = [fresh(then, env.clock)];
+      const next = env.make();
+      await next.takeover();
+      await enqueue(env.store, next, spec());
+      await pass(next, env.fleet, env.clock.now);
+      return env.alerts;
+    }
+
+    test("one with no reset, within its window's length, still holds the window: no repeat", async () => {
+      expect(await laterTerm(undefined, HOUR, undefined)).toHaveLength(1);
+      expect(await laterTerm(undefined, 4 * HOUR, NOW_S + 9 * 3600)).toHaveLength(1);
+    });
+
+    test("one with no reset, older than its window is long, is dropped: the window running now alerts", async () => {
+      expect(await laterTerm(undefined, 6 * HOUR, undefined)).toHaveLength(2);
+      // The same reading, with the reset it has since learned: still a window nobody was told of.
+      expect(await laterTerm(undefined, 6 * HOUR, (NOW + 6 * HOUR) / 1000 + 3600)).toHaveLength(2);
+    });
+
+    test("one whose reset passed beyond the grace is dropped; one still within it holds", async () => {
+      const reset = NOW_S + 3600;
+      expect(await laterTerm(reset, 2 * HOUR, undefined)).toHaveLength(2);
+      expect(await laterTerm(reset, HOUR + 5 * MINUTE, undefined)).toHaveLength(1);
+    });
+  });
+
+  test("a stamp the reader would refuse is not written: the record stays readable, and the alert still fires", async () => {
+    const long = machine("a", {
+      exclaves: [exclave("main", "x".repeat(200), { extraUsageEnabled: true })],
+      status: status({ quota: [obs(0, { h: 95, hr: NOW_S + 3600 })] }),
+    });
+    const { alerts, clock, errors, fleet, scheduler, store } = setup(new FakeFleet([long]), undefined, WIDE);
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(errors).toEqual([]);
+    expect(alerts).toHaveLength(1);
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    expect((await stored(store, task.id)).body.spillAlert).toBeUndefined();
   });
 
   test("a dispatch under the line alerts nothing", async () => {

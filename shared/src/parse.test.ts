@@ -913,7 +913,7 @@ describe("store", () => {
     needsInputSince: 1_760_000_000_000,
     escalated: true,
     inputAlerted: true,
-    spillAlert: { accountId: "a".repeat(128), window: "ø".repeat(64), reset: 1_760_000_000_000 },
+    spillAlert: { accountId: "a".repeat(128), window: "ø".repeat(64), reset: 1_760_000_000_000, at: 1_760_000_000_000 },
     endedAt: 1_760_000_000_000,
     leftRunning: true,
   };
@@ -952,14 +952,16 @@ describe("store", () => {
       ...created,
       state: "needs-input",
       inputAlerted: true,
-      spillAlert: { accountId: "org:acct", window: "7d", reset: 0 },
+      spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: 1_760_000_000_000 },
     };
     expect(parseTask(stamped)).toEqual(stamped);
     for (const bad of [
       { ...stamped, inputAlerted: false },
-      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d" } },
-      { ...stamped, spillAlert: { accountId: "", window: "7d", reset: 0 } },
-      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: -1 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", at: 1 } },
+      { ...stamped, spillAlert: { accountId: "", window: "7d", reset: 0, at: 1 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: -1, at: 1 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: -1 } },
       { ...stamped, spillAlert: "7d" },
     ]) {
       expect(parseTask(bad)).toBeNull();

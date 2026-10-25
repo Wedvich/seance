@@ -2477,13 +2477,23 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
   never is one. An `onAlert` that throws goes to `onError`, never into the pass.
   The de-dupe is `SpillAlerts` (`alerts.ts`), persisted: the alert's window is stamped on the
-  task as `spillAlert` (`{accountId, window, reset}`, reset in ms, 0 when unknown) by a write of
-  its own after the reservation's verdict, and a takeover seeds `SpillAlerts` from every held
-  task's stamp, so a new leader does not alert an ongoing spill again. The stamp is its own
+  task as `spillAlert` (`{accountId, window, reset, at}`, `reset` and `at` in ms, `reset` 0 when
+  unknown, `at` when it alerted) by a write of its own after the reservation's verdict, and a
+  takeover seeds `SpillAlerts` from every held task's stamp, so a new leader does not alert an
+  ongoing spill again. A stamp that cannot describe a window running now is dropped at the seed
+  instead: its reset passed by more than `resetGraceMs`, or, with no reset, its `at` is older than
+  the window is long (5 h for `5h`, 7 d for `7d` and a per-model `7d <model>`; any other label is
+  held to 5 h). Without that, a stamp left from days back would take the window running now for
+  the one already told of. The same age rule applies to a reset-less alert held in memory when a
+  later reading names a reset. The stamp is its own
   `#update`, not part of the verdict mutator: a session event can move the task between the
   spawn's reply and the verdict, which would discard a combined mutator and lose the stamp with
-  it; the stamp applies to a task still placed on the machine it was alerted for, and a refused
-  stamp write costs one repeated alert after a leader change, never a missed one.
+  it; the stamp applies to a task still placed on the machine it was alerted for. It is written
+  only if `parseSpillStamp`, the reader's own parser, accepts it (an account id or label past its
+  bound would otherwise void the whole task record): the alert still fires, and the window goes
+  unstamped. A refused or skipped stamp write costs one repeated alert after a leader change, never
+  a missed one. **Residual:** the stamp lives on a task, so pruning the stamped task (and its
+  tombstone aging out) loses it; the next leader may alert that window once more.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory

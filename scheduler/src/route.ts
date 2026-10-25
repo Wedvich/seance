@@ -51,7 +51,7 @@ export interface RouteInput {
   readonly fleetQuota?: readonly FleetQuotaEntry[];
 }
 
-const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
+export const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
 /** The convex cost is unbounded at 100%; this keeps an over-full account finite and still worst. */
 const MAX_UTILISATION = 0.99;
 

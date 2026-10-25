@@ -947,13 +947,16 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
   };
 }
 
-/** The window a spill alert fired for, built field by field. `reset` is ms, 0 when the reading had none. */
-function parseSpillStamp(value: unknown): SpillStamp | null {
+/**
+ * The window a spill alert fired for, built field by field. `reset` is ms, 0 when the reading had none.
+ * Exported so the writer stamps only what this reads back: a stamp it refused would void the task record.
+ */
+export function parseSpillStamp(value: unknown): SpillStamp | null {
   if (!isRecord(value)) return null;
-  const { accountId, window, reset } = value;
+  const { accountId, window, reset, at } = value;
   if (!isAccountId(accountId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) return null;
-  if (!isFiniteNumber(reset) || reset < 0) return null;
-  return { accountId, window, reset };
+  if (!isFiniteNumber(reset) || reset < 0 || !isFiniteNumber(at) || at < 0) return null;
+  return { accountId, window, reset, at };
 }
 
 /** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */

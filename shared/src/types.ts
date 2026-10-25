@@ -1911,11 +1911,16 @@ export const PR_STATUS_REFRESH_MS = 5 * 60_000;
 /** A reading older than this is shown as stale (the PWA); twice the refresh, so one missed poll does not grey it. */
 export const PR_STATUS_STALE_MS = 10 * 60_000;
 
-/** The quota window a spill alert fired for (`Task.spillAlert`); `reset` is ms, 0 when the reading carried none. */
+/**
+ * The quota window a spill alert fired for (`Task.spillAlert`); `reset` is ms, 0 when the reading carried
+ * none. `at` is when it alerted (ms, the leader's clock): with no reset it is all that tells a later term
+ * the stamp is too old to describe the window now running.
+ */
 export interface SpillStamp {
   readonly accountId: string;
   readonly window: string;
   readonly reset: number;
+  readonly at: number;
 }
 
 export interface Task {
