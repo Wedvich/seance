@@ -58,8 +58,12 @@ export interface SchedulerLeg {
   readonly availability: () => SchedulerAvailability;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
-  /** The readable account records, cached per socket (`AccountCache`); null when a listing was refused or lost. */
-  readonly accounts: () => Promise<readonly AccountRecord[] | null>;
+  /**
+   * The readable account records, cached per socket (`AccountCache`); null when a listing was
+   * refused or lost. `label` is a display read: it honours the cache's hold on a null answer,
+   * where a pin's resolution asks again. Through the broker a label read is always null.
+   */
+  readonly accounts: (options?: { readonly label?: boolean }) => Promise<readonly AccountRecord[] | null>;
 }
 
 /** One tool call's view of the fleet: the registry it resolves names against, and the way to send. */
@@ -99,7 +103,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           availability: () => client.getState().scheduler,
           queue: () => client.queue(),
           cancel: (taskId) => client.cancel(taskId),
-          accounts: () => cacheOf(client).read(),
+          accounts: (options) => cacheOf(client).read({ hold: options?.label === true }),
         },
         release: (): void => relay.release(),
       };
@@ -175,7 +179,10 @@ export function brokerScheduler(availability: SchedulerAvailability, opts: Broke
       send({ schedulerOp: "queue" }, (data) => (data === null ? null : (parseQueueReply(data) ?? undefined))),
     cancel: (taskId) =>
       send({ schedulerOp: "cancel", taskId }, (data) => (data === null ? null : (parseTaskReply(data) ?? undefined))),
-    accounts: async () => {
+    accounts: async (options) => {
+      // Labels never ask the broker: its `accounts` frame cannot say label from pin, so the daemon
+      // reads it as a pin (no hold), and each call is a `local-broker` audit line (DESIGN.md "Fleet broker").
+      if (options?.label === true) return null;
       try {
         const data = await brokerSchedulerCall({ schedulerOp: "accounts" }, opts);
         if (!Array.isArray(data)) return null;

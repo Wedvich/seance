@@ -15,6 +15,14 @@ import {
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RelayState, SpawnRequest, SpawnResponse } from "@seance/shared";
+import {
+  accountLine,
+  NO_ALIASES,
+  readAliases,
+  shouldListAccounts,
+  type AccountAliases,
+  type ListingProgress,
+} from "./lib/accounts.ts";
 import { readLastUsed, readRegistry, writeLastUsed, writeRegistry, type Store } from "./lib/cache.ts";
 import { loadKey } from "./lib/credentials.ts";
 import { failureText } from "./lib/errors.ts";
@@ -128,6 +136,7 @@ export default function Command(): React.JSX.Element {
   const [relay, setRelay] = useState<RelayState | null>(null);
   const [values, setValues] = useState<FormValues>(() => initialValues([], null, defaultsRef.current));
   const [busy, setBusy] = useState<"spawn" | "rescan" | null>(null);
+  const [aliases, setAliases] = useState<AccountAliases>(NO_ALIASES);
 
   const handleRef = useRef<RelayHandle | null>(null);
   /** Reconciliation apologises at most once per invocation; later pushes adjust silently. */
@@ -180,7 +189,11 @@ export default function Command(): React.JSX.Element {
 
       let credentials;
       try {
-        credentials = await loadKey();
+        credentials = await loadKey(
+          environment.isDevelopment
+            ? { onAccountKeyError: (error) => console.error("account key derivation failed", error) }
+            : {},
+        );
       } catch (err) {
         if (!disposed) setFatal(err instanceof Error ? err.message : String(err));
         return;
@@ -192,6 +205,9 @@ export default function Command(): React.JSX.Element {
       // daemon, relay and PWA emit, so one grep spans every tier.
       const handle = connect(credentials, environment.isDevelopment ? (line) => console.log(line) : undefined);
       handleRef.current = handle;
+      // One answered `account:` listing per open, never per push: the relay's list bucket
+      // is shared with every app, the PWA included. One lost to a disconnect asks again.
+      let progress: ListingProgress = "none";
       const onChange = (): void => {
         const state = handle.getState();
         setRelay(state);
@@ -203,6 +219,13 @@ export default function Command(): React.JSX.Element {
         if (state.status !== "open" || !state.registrySettled) return;
         absorb(state.machines, true);
         void writeRegistry(store, state.machines, Date.now());
+        if (!shouldListAccounts(state, state.machines, progress)) return;
+        progress = "inflight";
+        // Names show by email until this lands, and stay that way if it fails.
+        void readAliases(handle.listAccounts).then((read) => {
+          progress = read.lost ? "lost" : "settled";
+          if (!disposed) setAliases(read.aliases);
+        });
       };
       const unsubscribe = handle.subscribe(onChange);
       onChange();
@@ -222,6 +245,8 @@ export default function Command(): React.JSX.Element {
 
   const connected = relay?.status === "open";
   const selected = machines.find((machine) => machine.deviceId === values.machineId) ?? null;
+  // From the live registry only: the cached projection keeps no exclaves.
+  const accounts = accountLine(relay?.machines ?? [], values.machineId, aliases);
 
   const start = async (): Promise<void> => {
     const check = checkSubmit(values, machines, connected);
@@ -377,6 +402,7 @@ export default function Command(): React.JSX.Element {
           />
         ))}
       </Form.Dropdown>
+      {accounts === null ? null : <Form.Description title="Accounts" text={accounts} />}
       <Form.Dropdown
         id="repo"
         title="Repository"

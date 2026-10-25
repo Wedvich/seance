@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { appRelayUrl, importPsk } from "@seance/shared";
+import { appRelayUrl, importAccountKey, importPsk } from "@seance/shared";
 
 /**
  * Generic-password service name for the PSK in the macOS login keychain. Must
@@ -29,6 +29,10 @@ export interface CredentialSources {
   readonly readKeychain: (service: string) => Promise<string | null>;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly home: () => string;
+  /** The account-key derivation; a seam so a failing one can be tested. Defaults to `importAccountKey`. */
+  readonly deriveAccountKey: (psk: string) => Promise<CryptoKey>;
+  /** Told why the account key is absent, so a lost alias is diagnosable; the caller decides where it goes. */
+  readonly onAccountKeyError?: (error: unknown) => void;
 }
 
 export interface Credentials {
@@ -37,6 +41,11 @@ export interface Credentials {
   readonly bearerToken: string;
   /** Non-extractable, because `importPsk` imports it that way. */
   readonly key: CryptoKey;
+  /**
+   * The HMAC key account records are read under, derived from the same PSK as the daemon's
+   * `importAppKeys`. Absent when the derivation failed: only aliases are lost, never the spawn.
+   */
+  readonly accountKey?: CryptoKey;
 }
 
 /**
@@ -103,6 +112,7 @@ const defaultSources: CredentialSources = {
   readKeychain: readKeychainPsk,
   env: process.env,
   home: homedir,
+  deriveAccountKey: importAccountKey,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,5 +177,16 @@ export async function loadKey(overrides: Partial<CredentialSources> = {}): Promi
     );
   }
 
-  return { relayUrl: appRelayUrl(relayUrl), bearerToken, key: await importPsk(psk) };
+  const key = await importPsk(psk);
+  // Aliases are a nicety: a derivation that throws must not take the spawn form down with it.
+  const accountKey = await sources.deriveAccountKey(psk).catch((error: unknown) => {
+    sources.onAccountKeyError?.(error);
+    return undefined;
+  });
+  return {
+    relayUrl: appRelayUrl(relayUrl),
+    bearerToken,
+    key,
+    ...(accountKey === undefined ? {} : { accountKey }),
+  };
 }

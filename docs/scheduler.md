@@ -690,7 +690,7 @@ of M4 has landed.
   what the key reveals are DESIGN.md _Scheduler_, "Account records". Exit, met in
   `e2e/accounts.test.ts`: an alias set in one client shows in another through `store-changed`, a
   record whose `accountId` does not hash to its key is ignored, and an old blob put back reads
-  unreadable rather than as the old name. `seanced mcp` and Raycast show no alias yet.
+  unreadable rather than as the old name. `seanced mcp` and Raycast show them too: DESIGN.md "Account listings" and the Raycast "Scope is spawn" note.
   - _Correction (R2), deleting an alias:_ the relay tombstoned every prefix apps could create
     into, and a standing tombstone refuses every put for 30 days. Account keys are a deterministic
     HMAC, so under those rules a token holder's delete would have blocked that alias for 30 days.

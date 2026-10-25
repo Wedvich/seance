@@ -94,7 +94,8 @@ function twinTag(accountId: string, twins: readonly KnownAccount[]): string {
  * first eight characters, longer where that would still collide. An alias is per
  * account and left alone, but `known` carries none, so an aliased account's
  * unaliased twin is tagged all the same: the label of one account then reads
- * alike in the PWA and in `seanced mcp`, which shows no alias.
+ * alike in every client, whether or not that client could read the aliases
+ * (a keyless `seanced mcp`, a refused listing).
  */
 export function accountName(
   accountId: string,

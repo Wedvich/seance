@@ -44,8 +44,16 @@ export interface FakeRelay extends AppRelay {
   /** What a create answers; an Error rejects, null is a reply this build cannot read. Defaults to stored. */
   onCreate: (task: Task) => Promise<TaskCreated | StoreRefusal | null> | TaskCreated | StoreRefusal | null | Error;
   setState: (next: Partial<RelayState>) => void;
-  /** The account records a listing answers with; an Error rejects, a refusal or null answers as such. */
-  accounts: readonly AccountRecord[] | StoreRefusal | null | Error;
+  /**
+   * The account records a listing answers with; an Error rejects, a refusal or null answers as such,
+   * a function answers (or never does) when it chooses.
+   */
+  accounts:
+    | readonly AccountRecord[]
+    | StoreRefusal
+    | null
+    | Error
+    | (() => Promise<AccountListing | StoreRefusal | null>);
   /** How many `listAccounts` calls reached the fake: the relay's list floor is what the cache saves. */
   accountLists: number;
   /** Delivers a `store-changed` nudge to every listener, as the relay does after another client's write. */
@@ -135,6 +143,7 @@ export function fakeRelay(
       fake.accountLists += 1;
       const { accounts } = fake;
       if (accounts instanceof Error) throw accounts;
+      if (typeof accounts === "function") return accounts();
       if (accounts === null || "ok" in accounts) return accounts;
       return {
         ok: true,

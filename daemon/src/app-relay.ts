@@ -237,8 +237,8 @@ export async function importAppKeys(psk: string): Promise<AppKeys> {
  * which in `seanced mcp` is the protocol channel. `scheduler` makes it the
  * leader's leg for one term (`leader.ts`), under a replay guard that outlives it.
  * `keys.accountKey` lets it read account records — what an `auto` client
- * resolves an account alias by, and what the broker reads for a keyless peer's;
- * the leader's leg never does.
+ * resolves an account alias by, `seanced mcp` names accounts by in `list_machines`
+ * and `get_queue`, and the broker reads for a keyless peer's; the leader's leg never does.
  */
 export function appRelayClient(
   config: Pick<Config, "relayUrl" | "bearerToken">,
