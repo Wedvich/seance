@@ -116,22 +116,97 @@ export async function whichIn(name: string, pathEnv: string): Promise<string | n
   return null;
 }
 
+/**
+ * Prefix that runs a command as the target user, supplementary groups included —
+ * a toolchain dir shared through a group is reachable to the unit too. Root's
+ * `access()` answers for root, so it can't say what the unit's user can search
+ * or exec; only a process holding that user's credentials can (ACLs included).
+ */
+export function asTargetArgv(user: TargetUser): readonly string[] {
+  return ["setpriv", `--reuid=${user.uid}`, `--regid=${user.gid}`, "--init-groups", "--"];
+}
+
+/** Answers by index, so no path byte has to survive the round trip; paths are arguments, never script text. */
+const REACHABLE_PROBE = 'i=0; for p do [ -x "$p" ] && echo "$i"; i=$((i+1)); done; exit 0';
+
+/** Which of `paths` the process `asUser` runs as can exec (a file) or search (a dir). */
+export async function reachableAs(asUser: readonly string[], paths: readonly string[]): Promise<ReadonlySet<string>> {
+  if (paths.length === 0) return new Set();
+  const result = await exec([...asUser, "/bin/sh", "-c", REACHABLE_PROBE, "sh", ...paths], { timeoutMs: 10_000 });
+  if (result.exitCode !== 0) {
+    throw new Error(`couldn't check PATH as the unit's user: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
+  }
+  return new Set(
+    result.stdout
+      .split("\n")
+      // Number("") is 0: the trailing newline's empty line must not vouch for paths[0].
+      .filter((line) => line !== "")
+      .map((line) => paths[Number(line)])
+      .filter((path) => path !== undefined),
+  );
+}
+
+export interface TargetPath {
+  readonly pathEnv: string;
+  /** Entries the unit's user can't search, which the unit would only carry as dead weight. */
+  readonly dropped: readonly string[];
+}
+
+/**
+ * The offered PATH minus what the unit's user can't reach. Under sudo a version
+ * manager's shim (mise, asdf) resolves the `env bun` shebang *for root* and
+ * prepends root's own install dir to PATH before seanced reads it — so the unit
+ * recorded `/root/…/bin/bun` and died 203/EXEC on its first start. Empty entries
+ * go too: they mean the cwd, which a unit has no useful one of.
+ */
+export async function reachablePath(offered: string, asUser: readonly string[]): Promise<TargetPath> {
+  const entries = offered.split(delimiter).filter((entry) => entry !== "");
+  const reachable = await reachableAs(asUser, entries);
+  return {
+    pathEnv: entries.filter((entry) => reachable.has(entry)).join(delimiter),
+    dropped: entries.filter((entry) => !reachable.has(entry)),
+  };
+}
+
 /** What the daemon needs on PATH once systemd starts it with no shell to inherit from. */
 export const UNIT_BINARIES = ["bun", "git", "tmux", "claude"] as const;
 
-export async function missingUnitBinaries(pathEnv: string): Promise<readonly string[]> {
+/**
+ * Resolved as root, confirmed as the unit's user: a binary root can exec, in a
+ * dir the user can search, may still lack the user's exec bit.
+ */
+export async function missingUnitBinaries(pathEnv: string, asUser: readonly string[]): Promise<readonly string[]> {
   const found = await Promise.all(UNIT_BINARIES.map(async (name) => [name, await whichIn(name, pathEnv)] as const));
-  return found.filter(([, path]) => path === null).map(([name]) => name);
+  const reachable = await reachableAs(
+    asUser,
+    found.flatMap(([, path]) => (path === null ? [] : [path])),
+  );
+  return found.filter(([, path]) => path === null || !reachable.has(path)).map(([name]) => name);
 }
 
 /**
  * The refusal that catches a plain `sudo`. secure_path holds no mise shim, no
  * ~/.local/bin and no toolchain dir, so the recorded PATH would resolve neither
- * bun nor tmux — and the unit would start and then fail every spawn.
+ * bun nor tmux — and the unit would start and then fail every spawn. With
+ * `dropped`, PATH was preserved but its binaries sat in dirs only root reaches:
+ * preserving it again changes nothing, naming the user's own dirs does.
  */
-export function missingBinariesMessage(missing: readonly string[], pathEnv: string): string {
+export function missingBinariesMessage(
+  missing: readonly string[],
+  pathEnv: string,
+  dropped: readonly string[] = [],
+): string {
+  const problem = `the PATH this would record resolves no ${missing.join(", ")} — that unit would start and then fail every spawn. `;
+  if (dropped.length > 0) {
+    return (
+      problem +
+      `It leaves out ${dropped.join(", ")}, which the unit's user can't reach — a version manager's shim (mise, ` +
+      "asdf) run under sudo resolves for root and puts root's own install dir first. Name your own with --path: " +
+      `\`${SUDO_SEANCED} install --system --path "<dir holding your bun>:$PATH"\` (recorded PATH was: ${pathEnv})`
+    );
+  }
   return (
-    `the PATH this would record resolves no ${missing.join(", ")} — that unit would start and then fail every spawn. ` +
+    problem +
     `sudo replaces PATH with secure_path; re-run as \`${SUDO_SEANCED} install --system\`, ` +
     `or, where sudoers refuses --preserve-env, \`sudo env PATH="$PATH" seanced install --system\` (recorded PATH was: ${pathEnv})`
   );

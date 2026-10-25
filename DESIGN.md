@@ -22,7 +22,10 @@ Control's session ID is only observable from inside the spawned `claude` process
 (`$CLAUDE_CODE_BRIDGE_SESSION_ID`, set once its own async connection to the Anthropic
 API completes), and the relay's blind request/response design has no channel to
 deliver a value that becomes known only after the spawn reply already went out.
-Handoff to the right session in the list is manual.
+Handoff to the right session in the list is manual. That still holds for the spawn
+verdict. Scheduler tasks got the late channel on 2026-10-23: session events carry
+the id once the bridge connects, and the Queue screen links a task's title to
+`https://claude.ai/code/<id>` (Session events, "The remote session id").
 
 ## Topology: blind relay, daemons dial out
 
@@ -4139,7 +4142,12 @@ relay state unnecessary).
   **`KillMode=process`**, without which the default control-group kill takes
   down a daemon-cold-booted tmux server and every Claude session in it — the
   one migration that must land before the first automated restart; the first
-  rollout wave is still a manual restart under the old unit. Both systemd
+  rollout wave is still a manual restart under the old unit. It also carries
+  **`OOMPolicy=continue`**: those same panes live in the unit's cgroup (unless a
+  systemd-built tmux with the user bus moves them into scopes of their own), and the
+  default `stop` turns a kernel OOM kill of any one of their processes into a
+  stop-and-restart of the daemon (seen on an LXC box at its memory limit). An
+  OOM-killed daemon still exits, so `Restart=` brings it back. Both systemd
   steps check their exit codes and a failure is reported as `restart_failed`:
   the `ok` is already persisted by then, so a silent failure would leave the
   machine serving old code while every later check reads `current` — stranded
@@ -4357,7 +4365,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`sameCreditMonth`): they fill only from a reading in the same UTC month, and routing
   and the card read last month's as unknown, never as spent.
   A Credits bar (percent of the cap like every row, "$42 of $50" in whole units where
-  a reset goes) shows only while one of the card's windows, per-model weeklies included, reads
+  a reset goes; yellow below the red threshold, never green: it is only on screen while a window is full) shows only while one of the card's windows, per-model weeklies included, reads
   100% after the reset floor — that is when use spills into credits, and until then the
   monthly figure is noise on a card about windows. Not charted: the series (`quota_credits_pct`) is kept
   daemon-side for when a chart wants it. Every machine counts, an asleep
@@ -4735,6 +4743,28 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
+- **`pin` on auto** (2026-10-23). `spawn_session` with machine `auto` and each `queue_batch` member
+  take `pin { machine?, exclave? }`, stored as `TaskSpec.pin` — the restriction the leader has
+  routed on since M2 (`pinFilter`: a candidate off the pin is `pin_mismatch`), so a pinned task
+  waits for a slot where it is pinned and never goes elsewhere. No capability gate: `parsePin` has
+  been in the task-record parser since the store's records themselves (M3 schema), so every leader
+  that can read the record keeps the pin. `machine` is a name or deviceId, resolved by
+  `resolveMachine` at submit time and stored as the deviceId only: an unknown name is refused
+  listing the machines, a shared one listing their deviceIds. `exclave` is checked against the
+  pinned machine's reported exclave ids, or with no machine against every machine's. A machine
+  reporting none is refused as a pin target (the leader never places on it, `exclaves_unknown`,
+  and its clones carry no exclave), naming `seanced update`; an exclave alone is refused likewise
+  while no machine reports any. A pin with neither field, an empty one, or a machine or exclave
+  past `TASK_SPEC_LIMITS.placement` is refused before the relay is dialled; a named machine refuses `pin`
+  with the other auto-only fields. **`repo` under a pin** is resolved by `resolveOrigin` against the
+  pin's scope only — the pinned machine (or every machine), its clones cut to the pinned exclave by
+  `RepoEntry.exclave`, as the leader's clone match is — so a name ambiguous or absent across the
+  fleet works as the pinned machine lists it, and an origin with no clone where the task is pinned
+  is refused rather than queued to wait forever. Unpinned resolution is unchanged. `list_machines`
+  lists each machine's exclave ids (`exclaves`, absent or empty on a machine reporting none; the
+  relay-unreachable local fallback entry omits it, since `auto` needs the relay anyway), and
+  `get_queue` shows a task's `pin`, its deviceId named by the registry (or the decision's
+  candidates) where known, so an agent learns pin targets without a refusal.
 - **Protocol implementation: the official TypeScript MCP SDK v2
   (`@modelcontextprotocol/server`) + zod v4** — the daemon's first runtime
   dependencies. Served via `serveStdio`, whose factory-per-connection model is
@@ -5059,7 +5089,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, pane?}`, routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?}`, routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -5221,6 +5251,25 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   `Scheduler.onSession` (done detection: a session that ends with a PR is `awaiting-merge`). The daemon also
   records the checked URL in the launch ledger (`EndedTasks.notePr`, for a task launched here
   only), where `progress` carries it to a leader that missed the event.
+- **The remote session id** (added 2026-10-23, threat-model change accepted by the owner).
+  Remote Control names each session `session_<base62>`, and claude.ai opens it at
+  `https://claude.ai/code/<id>`. Claude Code sets it as `$CLAUDE_CODE_BRIDGE_SESSION_ID` once
+  the bridge connects, and `$.process.run` inherits it, so `seanced session-event` adds it to
+  every frame as `remoteSession`, as it adds `pane`. The mod reads nothing new. An event raised
+  before the bridge connects has none, and a later one fills it in. It is the session's claim,
+  and a display-only one: it binds nothing and moves no state, and the task is still the pane's
+  `@seance-task`. It is kept only as `isRemoteSessionId` (`shared/src/parse.ts`) passes it, at
+  ingest, at the leader's `parseSessionEvent` and at `parseTask`: `session_` and base62 alone,
+  so no `/`, `?`, `#` or `..` reaches the PWA's URL, and the origin is the PWA's constant,
+  never the frame's. Anything else is dropped from the event, never echoed, and never costs the
+  event or the record, since a link is not worth the state it rides with. The leader writes it
+  through `sessionChange` (on `SessionSource`, so only where the event may move the task: its
+  own machine) onto `Task.remoteSession`, and only when it changed, since every event carries
+  it again. `advance` drops it on a return to `ready`, as it does the assignment. It skips the
+  launch ledger: a leader that missed it learns it from the session's next event. The residual
+  is the one above: a same-uid process on the task's machine can make the title link to
+  another claude.ai session the same account owns. Not covered: the spawn verdict (above,
+  "Out of scope for v1"), and sessions with no task, whose events go nowhere.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the
@@ -5718,7 +5767,14 @@ CSP items landed with the app (see the PWA section).
   and resolves the target from `SUDO_USER`, never from root's own
   environment, since `homedir()`, `stateDir()`, `PATH` and `Bun.which` all
   answer for the wrong user there and every one of those values is written
-  into a unit that outlives the install. Also rejected: keeping the runbook as
+  into a unit that outlives the install. A preserved PATH is not the user's
+  either: a mise or asdf shim running the `env bun` shebang under sudo prepends
+  root's install dir, and the unit recorded `/root/…/bun` and failed 203/EXEC
+  (2026-10-25). So PATH entries and the four resolved binaries are kept only
+  when a probe run _as the target user_ (`setpriv --init-groups`) can search or
+  exec them; root's `access()` answers yes to all of it. Rejected: dropping
+  entries under root's home by prefix, which misses every other dir only root
+  reaches and every group grant the user holds. Also rejected: keeping the runbook as
   printed instructions, which is what the docs already were.
   MCP on a credential-delivered box reaches that machine over the local op
   socket, and every other one through the daemon's fleet broker (docs/psk.md,

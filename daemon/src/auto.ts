@@ -41,11 +41,13 @@ const failed = (text: string): AutoEnqueued => ({ ok: false, text });
  * matched exactly, since it is a directory name — whose clones all share one
  * origin. Clone names are machine-local, so two unrelated repos can share one
  * — picking between them would run the task in the wrong repo, so that is an
- * error naming each.
+ * error naming each. A pinned task passes only the pin's machines and clones
+ * (`scope` names them), so a name is read as the pinned machine lists it.
  */
 export function resolveOrigin(
   machines: readonly Machine[],
   repo: string,
+  scope = "auto",
 ): { readonly origin: string } | { readonly error: string } {
   const origins = new Set<string>();
   /** origin → the machines whose clone of it is named `repo` */
@@ -78,7 +80,9 @@ export function resolveOrigin(
     unkeyed.length === 0
       ? ""
       : ` (${unkeyed.join(", ")} has a clone by that name, but its daemon reports no origin, so auto cannot route to it)`;
-  return { error: `no repo "${repo}" for auto${stale} — known origins: ${known === "" ? "(none reported)" : known}` };
+  return {
+    error: `no repo "${repo}" for ${scope}${stale} — known origins: ${known === "" ? "(none reported)" : known}`,
+  };
 }
 
 /**
@@ -93,8 +97,17 @@ function overBound(field: keyof typeof TASK_REQUEST_LIMITS, value: string | unde
   return `the ${field} is ${value.length} characters; auto takes at most ${limit}${fix}`;
 }
 
-/** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), never placement or lineage. */
-export type AutoSpec = TaskRequest & Pick<TaskSpec, "deps" | "batch" | "until" | "linear">;
+/** What an `auto` enqueue may carry beyond a request: the authoring fields (M4) and a pin, never lineage or base. */
+export type AutoSpec = TaskRequest & Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin">;
+
+/** A pinned exclave's own bound, checked before its name is looked up in the fleet. */
+export function pinExclaveError(exclave: string): string | null {
+  if (exclave === "") return "pin.exclave is empty";
+  if (exclave.length > TASK_SPEC_LIMITS.placement) {
+    return `pin.exclave is ${exclave.length} characters; at most ${TASK_SPEC_LIMITS.placement}`;
+  }
+  return null;
+}
 
 export function taskRequestError(request: TaskRequest): string | null {
   return (
@@ -114,7 +127,12 @@ export function taskRequestError(request: TaskRequest): string | null {
 export function specError(spec: AutoSpec): string | null {
   const request = taskRequestError(spec);
   if (request !== null) return request;
-  const { deps, linear } = spec;
+  const { deps, linear, pin } = spec;
+  if (pin !== undefined) {
+    if (pin.deviceId === undefined && pin.exclave === undefined) return "pin names neither a machine nor an exclave";
+    const exclave = pin.exclave === undefined ? null : pinExclaveError(pin.exclave);
+    if (exclave !== null) return exclave;
+  }
   if (deps !== undefined) {
     if (deps.length > TASK_SPEC_LIMITS.deps) {
       return `after lists ${deps.length} tasks; a task waits on at most ${TASK_SPEC_LIMITS.deps}`;

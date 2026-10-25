@@ -31,6 +31,7 @@ import {
   parseQueueRequest,
   parseRepoEntry,
   parseResumeRequest,
+  parseSessionEvent,
   parseStoreChanged,
   parseStoreReply,
   parsePrStatus,
@@ -523,6 +524,14 @@ describe("tasks and their records", () => {
     expect(parseTask({ ...task, merged: "yes" })).toBeNull();
   });
 
+  test("a remote session round-trips; one that could bend the claude.ai path is dropped, not the task", () => {
+    const remoteSession = "session_01TuECqfR7Twko9QJm98sWAw";
+    expect(parseTask({ ...task, remoteSession })).toEqual({ ...task, remoteSession });
+    for (const bad of ["session_01/../x", "session_01?x=1", "session_", "01TuECqf", "https://evil.test", 7]) {
+      expect(parseTask({ ...task, remoteSession: bad })).toEqual(task);
+    }
+  });
+
   test("a forge reading round-trips, with or without checks", () => {
     const at = 1_700_000_300_000;
     expect(parseTask({ ...task, pr: { state: "open", checks: "passing", at } })?.pr).toEqual({
@@ -800,6 +809,24 @@ describe("scheduler ops", () => {
 
   test("cancel's deadline clears the despawn it may wait on", () => {
     expect(OP_TIMEOUT_MS.cancel).toBeGreaterThan(OP_TIMEOUT_MS.despawn);
+  });
+});
+
+describe("parseSessionEvent", () => {
+  const event = {
+    session: "%3",
+    taskId: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+    exclave: "default",
+    state: "needs-input",
+    at: 1_700_000_000_000,
+  } as const;
+
+  test("a remote session round-trips; a malformed one is dropped and the state kept", () => {
+    const remoteSession = "session_01TuECqfR7Twko9QJm98sWAw";
+    expect(parseSessionEvent({ ...event, remoteSession })).toEqual({ ...event, remoteSession });
+    expect(parseSessionEvent({ ...event, remoteSession: "session_01#frag" })).toEqual(event);
+    // A PR URL is the event's own fate: it would otherwise become an href unchecked.
+    expect(parseSessionEvent({ ...event, prUrl: "javascript:alert(1)" })).toBeNull();
   });
 });
 

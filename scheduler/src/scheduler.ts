@@ -41,6 +41,7 @@ import {
   waitsForExit,
   type SessionSource,
 } from "./settle.ts";
+export { sourceOf } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
 
 export type { SessionSource } from "./settle.ts";

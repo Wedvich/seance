@@ -12,6 +12,27 @@ enabled. If `seanced install`'s preflight says so, run it once and re-run `insta
 sudo loginctl enable-linger <user>
 ```
 
+### Sessions under the user manager
+
+A tmux built with systemd support (Debian's is) moves each pane into a
+`tmux-spawn-*.scope` under the user manager whenever its server can reach the user bus
+(`XDG_RUNTIME_DIR`): always under a user unit, and under a system unit whenever a login
+shell rather than the daemon started the server. `systemctl --user list-units
+'tmux-spawn-*'` shows whether a box does it. Those panes — and, under a user unit, the
+daemon too — die with `user@<uid>.service`, and systemd runs the manager at
+`oom_score_adj` 100, which outranks any process under about a tenth of memory. On a box
+at its memory limit, where each claude is a small slice of it, the manager is the OOM
+killer's pick, and one kill ends every session. Take it out of line with a drop-in; it
+applies from the manager's next start, so set the running one by hand rather than
+restart it (that would end every session too):
+
+```sh
+sudo mkdir -p /etc/systemd/system/user@<uid>.service.d
+printf '[Service]\nOOMScoreAdjust=0\n' | sudo tee /etc/systemd/system/user@<uid>.service.d/oom.conf
+sudo systemctl daemon-reload
+echo 0 | sudo tee /proc/$(systemctl show -p MainPID --value user@<uid>.service)/oom_score_adj
+```
+
 ### System unit with a delivered credential (systemd ≥ 256)
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
@@ -35,6 +56,17 @@ needs it too) nor claude. `install --system` refuses rather than write a unit th
 starts and then fails every spawn. Where sudoers refuses `--preserve-env`, the
 `sudo env PATH="$PATH" seanced …` form gets the same result: sudo only has to find
 `env`, which `secure_path` holds, and `env` then finds seanced and bun on your PATH.
+
+A preserved PATH can still arrive holding root's paths. When a version manager's shim
+(mise, asdf) is first on it, the `env bun` shebang runs that shim as root, which resolves
+root's bun and prepends root's own install dir before seanced reads PATH — a unit
+recording it fails 203/EXEC, since the user can't reach `/root`. So the install keeps only
+the PATH entries the unit's user can search, and resolves bun, git, tmux and claude from
+what is left, checked by a probe run as that user (`setpriv`, supplementary groups
+included) rather than by root's `access()`, which says yes to everything. Its result
+names what it left out. Usually your own shim dir is still there and bun resolves to
+the shim; where it isn't, the refusal names `--path`, which takes your dirs explicitly:
+`--path "<dir holding your bun>:$PATH"`.
 
 What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
 rather than from root: home and uid/gid via `getent`, the state dir
@@ -77,8 +109,9 @@ What the user-unit flow still does that this doesn't:
   `doctor` reports the drift by comparing the installed unit against what this checkout
   would write. That replaces the manual `ExecStart=` re-check this section used to ask
   for.
-- Linger is irrelevant — system units outlive sessions by nature — and `doctor` says so
-  instead of probing user scope.
+- Linger is irrelevant to the daemon — system units outlive sessions by nature — and
+  `doctor` says so instead of probing user scope. The sessions it spawns can still
+  depend on the user manager: see "Sessions under the user manager" above.
 
 `seanced restart` works without root here, so `git pull && seanced restart` is the same
 update as on a user unit. It can't ask the system manager to restart the unit, so it

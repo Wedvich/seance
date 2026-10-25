@@ -3,6 +3,7 @@ import {
   REPLAY_WINDOW_MS,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  type SessionEvent,
   type SessionState,
   type TaskFailureCode,
   type TaskProgress,
@@ -31,11 +32,26 @@ type SessionsAnswer = Extract<TaskSessionsReply, { readonly ok: true }>;
 
 /**
  * Who reported a session event: the machine that sealed it (the envelope's
- * AAD-bound `from`) and the pane its daemon bound the event to.
+ * AAD-bound `from`) and the pane its daemon bound the event to, plus the
+ * session's own claim of its Remote Control id — display-only, written only
+ * where the event moves the task.
  */
 export interface SessionSource {
   readonly deviceId: string;
   readonly pane: string;
+  readonly remoteSession?: string;
+}
+
+/** `event`'s source as sealed by `deviceId`. */
+export function sourceOf(deviceId: string, event: SessionEvent): SessionSource {
+  const { session: pane, remoteSession } = event;
+  return { deviceId, pane, ...(remoteSession === undefined ? {} : { remoteSession }) };
+}
+
+/** The fields a session event writes besides its state: its PR URL and its remote session, each when it carried one. */
+function factsOf(from: SessionSource | undefined, prUrl: string | undefined): Partial<Task> {
+  const remoteSession = from?.remoteSession;
+  return { ...(prUrl === undefined ? {} : { prUrl }), ...(remoteSession === undefined ? {} : { remoteSession }) };
 }
 
 /** What a settle reads besides the task and the machine's answer. */
@@ -131,7 +147,7 @@ export function waitsForExit(
  */
 function reported(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Task | null {
   if (task.spec.until !== "reported" || from === undefined) return null;
-  const pr = prUrl === undefined ? {} : { prUrl };
+  const pr = factsOf(from, prUrl);
   if (task.state === "reserved") {
     const at = task.reservation;
     if (at === undefined || at.deviceId !== from.deviceId) return null;
@@ -166,7 +182,7 @@ export function sessionChange(
   awaitsExit = false,
 ): Task | null {
   if (state === "done") return reported(task, from, prUrl);
-  const pr = prUrl === undefined ? {} : { prUrl };
+  const pr = factsOf(from, prUrl);
   const deferred = waitsForExit(task, state, from, prUrl, awaitsExit);
   if (task.state === "reserved") {
     const at = task.reservation;
@@ -184,11 +200,13 @@ export function sessionChange(
   // An assignment with no pane (never confirmed, or a `task_running` verdict) takes the event's.
   const named = assignment !== undefined && assignment.pane === undefined && from !== undefined;
   const fields = { ...(named ? { assignment: { ...assignment, pane: from.pane } } : {}), ...pr };
-  if (deferred) return named ? { ...task, ...fields } : null;
+  // Only a new value is a write: every event carries the remote session again.
+  const newRemote = pr.remoteSession !== undefined && pr.remoteSession !== task.remoteSession;
+  if (deferred) return named || newRemote ? { ...task, ...fields } : null;
   if (state === "ended") return ended(task, undefined, fields);
   const to = liveState(state);
   if (task.state !== to) return advance(task, to, fields);
-  return prUrl === undefined || prUrl === task.prUrl ? null : { ...task, ...fields };
+  return (prUrl === undefined || prUrl === task.prUrl) && !newRemote ? null : { ...task, ...fields };
 }
 
 /**

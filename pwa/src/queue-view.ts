@@ -65,6 +65,8 @@ export interface QueueRow {
     /** The chip's accessible name: what following it does, then the same reading. */
     readonly accessibleName: string;
   } | null;
+  /** Its session's claude.ai page, which the title links to; null until its machine reported a Remote Control id. */
+  readonly session: string | null;
 }
 
 export interface QueueSection {
@@ -196,6 +198,14 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
   };
 }
 
+/**
+ * `remoteSession` passed `isRemoteSessionId` at parse (`session_` and base62 only), so it can
+ * name no other path, query or origin.
+ */
+function sessionOf(task: Task): string | null {
+  return task.remoteSession === undefined ? null : `https://claude.ai/code/${task.remoteSession}`;
+}
+
 function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
   const deps = task.spec.deps ?? [];
   const [first] = deps;
@@ -230,6 +240,7 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),
+    session: sessionOf(task),
   };
 }
 
