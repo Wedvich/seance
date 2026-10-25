@@ -2,7 +2,7 @@ import type { Machine } from "@seance/shared";
 
 /**
  * The `/` picker's logic (DESIGN.md, PWA): the sorted union of skill names
- * across every machine's `exclaves[].skills`, read from the register blobs the
+ * across every machine's `exclaves[].skills` and clones' `repos[].skills`, read from the register blobs the
  * app already holds, so it needs no leader. Pure, so the component stays a
  * thin view over it.
  */
@@ -17,8 +17,10 @@ const collator = new Intl.Collator();
 export function skillIndex(machines: readonly Machine[]): readonly string[] {
   const names = new Set<string>();
   for (const machine of machines) {
-    for (const exclave of machine.exclaves ?? []) {
-      for (const name of exclave.skills) {
+    // Project skills too: the routing filter honours a `/name` only some clone has, so it must complete.
+    const lists = [...(machine.exclaves ?? []).map((x) => x.skills), ...machine.repos.map((r) => r.skills ?? [])];
+    for (const list of lists) {
+      for (const name of list) {
         // Whitespace can't sit inside the `/name` token, so it could never be typed or completed.
         if (!/\s/u.test(name)) names.add(name);
       }
