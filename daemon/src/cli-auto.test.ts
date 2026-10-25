@@ -300,14 +300,13 @@ describe("autoFleet", () => {
     });
     const audited: string[] = [];
     try {
-      const outcome = await spawnAuto(
-        { repo: "seance", here: false, prompt: "fix it" },
-        built.fleet,
-        (line) => {
-          audited.push(line);
-        },
-      );
-      expect(outcome).toEqual({ ok: false, text: `spawn: not queued — the relay did not answer within 300ms. ${NOW_HINT}` });
+      const outcome = await spawnAuto({ repo: "seance", here: false, prompt: "fix it" }, built.fleet, (line) => {
+        audited.push(line);
+      });
+      expect(outcome).toEqual({
+        ok: false,
+        text: `spawn: not queued — the relay did not answer within 300ms. ${NOW_HINT}`,
+      });
     } finally {
       built.fleet.stop();
     }

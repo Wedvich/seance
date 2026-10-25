@@ -18,9 +18,7 @@ import {
   type Decision,
   type ExclaveInfo,
   type Machine,
-  type RepoEntry,
   type RequestOp,
-  type SpawnRequest,
   type Task,
   type TaskSpec,
 } from "@seance/shared";
@@ -286,80 +284,6 @@ describe("mcp tools", () => {
     expect(fake.requests[0]?.deviceId).toBe("device-1");
     lazy.stop();
   });
-
-  test("spawn_session tags the request as the mcp client and reports the window", async () => {
-    const fake = fakeRelay([machine()], () => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance", prompt: "do the thing" },
-    });
-    expect(result.isError).toBeFalsy();
-    expect(toolText(result)).toContain("spawned window task on MacBook Pro");
-    const request = fake.requests[0]?.payload as SpawnRequest;
-    expect(request.client).toBe("mcp");
-    expect(request.mode).toBe("worktree");
-    // Nobody asked for plan mode, so the field must not ride along and flip it on.
-    expect(request.plan).toBeUndefined();
-    lazy.stop();
-  });
-
-  test("spawn_session forwards plan mode when the caller asks for it", async () => {
-    const fake = fakeRelay([machine()], () => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance", prompt: "plan the thing", plan: true },
-    });
-    expect(result.isError).toBeFalsy();
-    const request = fake.requests[0]?.payload as SpawnRequest;
-    expect(request.plan).toBe(true);
-    lazy.stop();
-  });
-
-  test("spawn_session refuses an offline machine with its last-seen time", async () => {
-    const fake = fakeRelay([machine({ connected: false })]);
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("not connected");
-    expect(fake.requests).toHaveLength(0);
-    lazy.stop();
-  });
-
-  test("spawn_session answers an unknown repo with the machine's repo list, without a round trip", async () => {
-    const fake = fakeRelay([machine()]);
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "nope" },
-    });
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain('no repo named "nope"');
-    expect(toolText(result)).toContain("seance");
-    expect(fake.requests).toHaveLength(0);
-    lazy.stop();
-  });
-
-  test("a structured spawn failure surfaces its code and message", async () => {
-    const fake = fakeRelay([machine()], () => ({ ok: false, code: "claude_died", message: "pane died" }));
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("claude_died");
-    lazy.stop();
-  });
 });
 
 describe("isLocalRef", () => {
@@ -378,28 +302,6 @@ describe("isLocalRef", () => {
 });
 
 describe("the local short circuit", () => {
-  test("a self-targeted spawn goes to the daemon on this box and never dials the relay", async () => {
-    const fake = fakeRelay([machine()]);
-    const local = fakeLocal(() => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy, local);
-
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance", prompt: "do it" },
-    });
-
-    expect(toolText(result)).toContain("spawned window task on MacBook Pro");
-    expect(local.requests).toHaveLength(1);
-    expect(local.requests[0]?.op).toBe("spawn");
-    // Stamped for the audit trail on this path too — the daemon renders it as
-    // `origin=local client="mcp"`.
-    expect((local.requests[0]?.payload as SpawnRequest | undefined)?.client).toBe("mcp");
-    // The relay was never touched: no request, and no socket dialed.
-    expect(fake.requests).toHaveLength(0);
-    lazy.stop();
-  });
-
   test("a self-targeted get_sessions answers locally", async () => {
     const sessions = [{ window: "fix-bug", repo: "seance", path: "/repos/seance" }];
     const fake = fakeRelay([machine()]);
@@ -416,17 +318,12 @@ describe("the local short circuit", () => {
 
   test("a remote target still goes through the relay", async () => {
     const remote = machine({ deviceId: "device-2", name: "Linux Box" });
-    const fake = fakeRelay([machine(), remote], () => ({
-      ok: true,
-      window: "task",
-      path: "/repos/seance",
-      sessions: [],
-    }));
+    const fake = fakeRelay([machine(), remote], () => ({ sessions: [], at: 1 }));
     const local = fakeLocal();
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, local);
 
-    await client.callTool({ name: "spawn_session", arguments: { machine: "Linux Box", repo: "seance" } });
+    await client.callTool({ name: "get_sessions", arguments: { machine: "Linux Box" } });
     expect(fake.requests[0]?.deviceId).toBe("device-2");
     expect(local.requests).toHaveLength(0);
     lazy.stop();
@@ -434,23 +331,18 @@ describe("the local short circuit", () => {
 
   test("a remote machine sharing this one's name loses to local; its deviceId still reaches it", async () => {
     const twin = machine({ deviceId: "device-2", name: "MacBook Pro" });
-    const fake = fakeRelay([machine(), twin], () => ({
-      ok: true,
-      window: "task",
-      path: "/repos/seance",
-      sessions: [],
-    }));
-    const local = fakeLocal(() => ({ ok: true, window: "task", path: "/repos/seance", sessions: [] }));
+    const fake = fakeRelay([machine(), twin], () => ({ sessions: [], at: 1 }));
+    const local = fakeLocal(() => ({ sessions: [], at: 1 }));
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, local);
 
     // By name: local wins, where `resolveMachine` would have refused as ambiguous.
-    await client.callTool({ name: "spawn_session", arguments: { machine: "MacBook Pro", repo: "seance" } });
+    await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
     expect(local.requests).toHaveLength(1);
     expect(fake.requests).toHaveLength(0);
 
     // By deviceId: the escape hatch reaches the twin.
-    await client.callTool({ name: "spawn_session", arguments: { machine: "device-2", repo: "seance" } });
+    await client.callTool({ name: "get_sessions", arguments: { machine: "device-2" } });
     expect(local.requests).toHaveLength(1);
     expect(fake.requests[0]?.deviceId).toBe("device-2");
     lazy.stop();
@@ -464,77 +356,13 @@ describe("the local short circuit", () => {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, local);
 
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
+    const result = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
     expect(result.isError).toBe(true);
     // The remediation is attached here, not baked into the thrown message, so it
     // reads the same for a socket that closed mid-request as for one never there.
     expect(toolText(result)).toContain("no daemon listening at /run/seanced.sock (ENOENT)");
     expect(toolText(result)).toContain("is seanced running? try `seanced status`");
     expect(fake.requests).toHaveLength(0);
-    lazy.stop();
-  });
-
-  test("an unknown repo on the local machine answers with the candidates", async () => {
-    const local = fakeLocal();
-    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
-    const client = await connectedClient(lazy, local);
-
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "nope" },
-    });
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("its repos: seance");
-    expect(local.requests).toHaveLength(0);
-    lazy.stop();
-  });
-
-  test("a repo cloned after the MCP server started is spawnable without a restart", async () => {
-    // `seanced mcp` outlives many rescans, so the repo set is read per call. A
-    // snapshot taken at startup rejects this spawn with no way to recover short
-    // of restarting the process — `rescan` is deliberately not a local op.
-    let repos: RepoEntry[] = [{ name: "seance", path: "/repos/seance", defaultBranch: "main" }];
-    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/fresh", sessions: [] }), {
-      repos: () => Promise.resolve(repos),
-    });
-    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
-    const client = await connectedClient(lazy, local);
-
-    const before = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "fresh" },
-    });
-    expect(before.isError).toBe(true);
-    expect(local.requests).toHaveLength(0);
-
-    repos = [...repos, { name: "fresh", path: "/repos/fresh", defaultBranch: "main" }];
-    const after = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "fresh" },
-    });
-    expect(after.isError).toBeFalsy();
-    expect(local.requests).toHaveLength(1);
-    lazy.stop();
-  });
-
-  test("an empty repo set defers to the daemon rather than denying every spawn", async () => {
-    // What a process started before the daemon's first scan landed sees. Denying
-    // on it would reject every local repo until the MCP server was restarted.
-    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }), {
-      repos: () => Promise.resolve([]),
-    });
-    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
-    const client = await connectedClient(lazy, local);
-
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
-    expect(result.isError).toBeFalsy();
-    expect(local.requests).toHaveLength(1);
     lazy.stop();
   });
 
@@ -559,22 +387,6 @@ describe("the local short circuit", () => {
     }
   });
 
-  test("a spawn answered too_large may have run, and says to look before retrying", async () => {
-    const failure = { ok: false, code: "too_large", message: "reply would seal to 70000 chars, over 65536" };
-    const lazy = new LazyRelay({ create: () => fakeRelay([machine()]) });
-    const client = await connectedClient(
-      lazy,
-      fakeLocal(() => failure),
-    );
-    const result = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("check get_sessions");
-    lazy.stop();
-  });
-
   test("list_machines marks which entry is this box", async () => {
     const remote = machine({ deviceId: "device-2", name: "Linux Box" });
     const lazy = new LazyRelay({ create: () => fakeRelay([machine(), remote]) });
@@ -597,12 +409,12 @@ describe("the local short circuit", () => {
     const listed: { machines: Record<string, unknown>[]; note: string } = JSON.parse(toolText(result));
     expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: true })]);
     expect(listed.machines[0]).not.toHaveProperty("exclaves");
-    expect(listed.note).toContain("only local spawns will work");
+    expect(listed.note).toContain("get_sessions and despawn_session still work here");
     expect(listed.note).toContain("without its exclaves");
     lazy.stop();
   });
 
-  test("relay and daemon both down on the direct path: this machine is listed, but not as spawnable", async () => {
+  test("relay and daemon both down on the direct path: this machine is listed, but not as reachable", async () => {
     const lazy = new LazyRelay({ create: () => fakeRelay([], () => ({}), "rejected") });
     const client = await connectedClient(lazy, fakeLocal(undefined, { reachable: () => Promise.resolve(false) }));
     const listed = JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} }))) as {
@@ -611,8 +423,7 @@ describe("the local short circuit", () => {
     };
     expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: false })]);
     expect(listed.note).toContain("relay is unreachable");
-    expect(listed.note).toContain("nothing will spawn until seanced is running");
-    expect(listed.note).not.toContain("only local spawns will work");
+    expect(listed.note).toContain("no op on this machine works until seanced is running");
     lazy.stop();
   });
 
@@ -641,14 +452,20 @@ describe("the local short circuit", () => {
     });
     const client = await connectedClient(fleet, local);
 
-    const localResult = await client.callTool({
-      name: "spawn_session",
-      arguments: { machine: "MacBook Pro", repo: "seance" },
-    });
+    const localResult = await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
     expect(localResult.isError).toBe(true);
     expect(toolText(localResult)).toContain("is seanced running?");
     // Local work never even asks for a key.
     expect(lookups).toBe(0);
+
+    // A spawn always queues, so even for this machine it needs the fleet — and says why it has none.
+    const localSpawn = await client.callTool({
+      name: "spawn_session",
+      arguments: { machine: "MacBook Pro", repo: "seance" },
+    });
+    expect(localSpawn.isError).toBe(true);
+    expect(toolText(localSpawn)).toContain("no PSK");
+    expect(lookups).toBe(1);
 
     const remoteResult = await client.callTool({
       name: "spawn_session",
@@ -667,7 +484,6 @@ describe("the local short circuit", () => {
     expect(listed.machines).toEqual([expect.objectContaining({ local: true, connected: false })]);
     expect(listed.note).toContain("no daemon listening");
     expect(listed.note).toContain("fail too");
-    expect(listed.note).not.toContain("only local spawns will work");
     // The advice already names the fix; the note must not say it twice.
     expect(listed.note.split("seanced status").length).toBe(2);
   });
@@ -703,10 +519,10 @@ describe("the local short circuit", () => {
   });
 
   test("with no local machine at all, every target is remote", async () => {
-    const fake = fakeRelay([machine()], () => ({ ok: true, window: "t", path: "/p", sessions: [] }));
+    const fake = fakeRelay([machine()], () => ({ sessions: [], at: 1 }));
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, null);
-    await client.callTool({ name: "spawn_session", arguments: { machine: "MacBook Pro", repo: "seance" } });
+    await client.callTool({ name: "get_sessions", arguments: { machine: "MacBook Pro" } });
     expect(fake.requests[0]?.deviceId).toBe("device-1");
     lazy.stop();
   });
@@ -860,7 +676,7 @@ describe("resolveOrigin", () => {
     }
     const resolved = resolveOrigin(autoMachines(), "Seance");
     if (!("error" in resolved)) throw new Error("expected an error");
-    expect(resolved.error).toContain('no repo "Seance" for auto');
+    expect(resolved.error).toContain('no repo "Seance" for the fleet');
   });
 
   test("a listed origin with a port resolves as listed, not as scp host:path", () => {
@@ -897,7 +713,7 @@ describe("resolveOrigin", () => {
       machine({ deviceId: "device-3", name: "Old", repos: [{ name: "legacy", path: "/l", defaultBranch: "main" }] }),
     ];
     expect(resolveOrigin(machines, "nope")).toEqual({
-      error: `no repo "nope" for auto — known origins: ${ORIGIN}`,
+      error: `no repo "nope" for the fleet — known origins: ${ORIGIN}`,
     });
     const legacy = resolveOrigin(machines, "legacy");
     if (!("error" in legacy)) throw new Error("expected an error");
@@ -967,7 +783,7 @@ describe("spawn_session on auto", () => {
     expect(new Set(fake.creates.map((t) => t.id)).size).toBe(1);
     expect(audited).toEqual([expect.stringMatching(/ task="[^"]+" createdAt=\d+ unanswered$/u)]);
     expect(text).toBe(
-      `auto: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
+      `spawn: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
     );
   }, 10_000);
 
@@ -978,7 +794,7 @@ describe("spawn_session on auto", () => {
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(3);
     expect(text).toBe(
-      `auto: no answer from this machine's daemon after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
+      `spawn: no answer from this machine's daemon after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
     );
   }, 10_000);
 
@@ -988,7 +804,7 @@ describe("spawn_session on auto", () => {
     const { text, error, audited } = await callAuto(fake);
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(3);
-    expect(text).toBe("auto: not queued — the relay was unreachable after 3 tries; try again");
+    expect(text).toBe("spawn: not queued — the relay was unreachable after 3 tries; try again");
     // Nothing left this process, so nothing is recorded as enqueued.
     expect(audited).toEqual([]);
     expect(text).not.toContain("may have queued");
@@ -1000,7 +816,7 @@ describe("spawn_session on auto", () => {
     const { text, error, audited } = await callAuto(fake);
     expect(error).toBe(true);
     expect(fake.creates).toHaveLength(1);
-    expect(text).toBe(`auto refused (store_full): ${storeErrorText("store_full")}`);
+    expect(text).toBe(`spawn refused (store_full): ${storeErrorText("store_full")}`);
     expect(audited).toEqual([expect.stringMatching(/ refused code="store_full"$/u)]);
   });
 
@@ -1025,7 +841,7 @@ describe("spawn_session on auto", () => {
     const { text, error } = await callAuto(fake, { prompt });
     expect(error).toBe(true);
     expect(text).toBe(
-      `auto refused: the prompt is ${prompt.length} characters; auto takes at most ${TASK_REQUEST_LIMITS.prompt} — shorten it (the session can gather the rest with tools), or name a machine`,
+      `spawn refused: the prompt is ${prompt.length} characters; a queued spawn takes at most ${TASK_REQUEST_LIMITS.prompt} — shorten it (the session can gather the rest with tools)`,
     );
     expect(fake.started).toBe(0);
     expect(fake.creates).toEqual([]);
@@ -1076,9 +892,10 @@ describe("spawn_session on auto", () => {
         expect(result.isError).toBe(true);
         expect(toolText(result)).toContain(SCHEDULER_NEEDS_NEWER_DAEMON);
       }
+      // No direct spawn remains to name as an alternative.
       expect(
         toolText(await client.callTool({ name: "spawn_session", arguments: { machine: "auto", repo: "seance" } })),
-      ).toEndWith("— or name a machine instead (list_machines)");
+      ).not.toContain("name a machine");
       const listed = await client.callTool({ name: "list_machines", arguments: {} });
       expect(listed.isError).not.toBe(true);
       expect(toolText(listed)).toContain("Linux Box");
@@ -1090,16 +907,22 @@ describe("spawn_session on auto", () => {
     }
   });
 
-  test("auto beats a local machine named auto, which stays reachable by deviceId", async () => {
-    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }), { name: "Auto" });
-    const fake = leaderRelay();
+  test("machine auto is no pin even when a machine is named Auto; its deviceId pins it, and neither touches the local daemon", async () => {
+    const machines = autoMachines().map((m) =>
+      m.deviceId === "device-1" ? machine({ ...m, name: "Auto", exclaves: [exclave("default")] }) : m,
+    );
+    const local = fakeLocal(() => ({}), { name: "Auto" });
+    const fake = leaderRelay([], machines);
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, local);
     const placed = await client.callTool({ name: "spawn_session", arguments: { machine: "AUTO", repo: "seance" } });
     expect(toolText(placed)).toContain(`task ${fake.creates[0]?.id}: queued`);
+    expect(fake.creates[0]?.spec.pin).toBeUndefined();
+    const pinned = await client.callTool({ name: "spawn_session", arguments: { machine: "device-1", repo: "seance" } });
+    expect(toolText(pinned)).toContain(`task ${fake.creates[1]?.id}: queued`);
+    expect(fake.creates[1]?.spec.pin).toEqual({ deviceId: "device-1" });
     expect(local.requests).toEqual([]);
-    const direct = await client.callTool({ name: "spawn_session", arguments: { machine: "device-1", repo: "seance" } });
-    expect(toolText(direct)).toContain("spawned window w on Auto");
+    expect(fake.requests).toEqual([]);
     lazy.stop();
   });
 });
@@ -1164,37 +987,6 @@ describe("spawn_session on auto, authoring fields", () => {
     } satisfies TaskSpec);
   });
 
-  test("a named machine refuses them: it starts the session now, with nothing to wait for", async () => {
-    const local = fakeLocal();
-    const fake = leaderRelay();
-    for (const extra of [{ after: [{ task: PRED }] }, { until: "reported" }, { linear: { issue: "ENG-1" } }]) {
-      // oxlint-disable-next-line no-await-in-loop -- one call each
-      const { text, error } = await callTool(
-        fake,
-        "spawn_session",
-        { machine: "device-1", repo: "seance", ...extra },
-        local,
-      );
-      expect(error).toBe(true);
-      expect(text).toContain('apply to machine "auto" only');
-    }
-    expect(local.requests).toEqual([]);
-    expect(fake.creates).toEqual([]);
-  });
-
-  test("a named machine takes the defaults, which change nothing: until merged and an empty after", async () => {
-    const local = fakeLocal(() => ({ ok: true, window: "w", path: "/repos/seance", sessions: [] }));
-    const { text, error } = await callTool(
-      leaderRelay(),
-      "spawn_session",
-      { machine: "device-1", repo: "seance", until: "merged", after: [] },
-      local,
-    );
-    expect(text).not.toContain('apply to machine "auto" only');
-    expect(error).toBe(false);
-    expect(local.requests).toHaveLength(1);
-  });
-
   test("a Linear issue is trimmed as the PWA trims it, and a blank one is refused", async () => {
     const fake = leaderRelay();
     expect((await callAuto(fake, { linear: { issue: "  ENG-7 " } })).error).toBe(false);
@@ -1230,7 +1022,7 @@ describe("spawn_session on auto, authoring fields", () => {
     const prompt = "x".repeat(TASK_REQUEST_LIMITS.prompt - 5);
     const { text, error } = await callAuto(fake, { prompt, until: "reported" });
     expect(error).toBe(true);
-    expect(text).toContain("auto takes at most");
+    expect(text).toContain("a queued spawn takes at most");
     expect(text).toContain("the instruction to report is appended to the prompt and counts");
     expect(fake.creates).toEqual([]);
   });
@@ -1327,6 +1119,75 @@ function pinRelay(): FakeRelay {
   return fake;
 }
 
+/** The leader advertises done reports and routes on accounts, as a daemon of this build does. */
+function reportingPinRelay(machines: readonly Machine[] = pinMachines()): FakeRelay {
+  const withCaps = machines.map((m) =>
+    m.deviceId === "device-thad"
+      ? machine({ ...m, capabilities: [CAPABILITIES.pinAccount, CAPABILITIES.reportedDone] })
+      : m,
+  );
+  const fake = leaderRelay([], withCaps);
+  fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+  fake.accounts = ALIASES;
+  return fake;
+}
+
+describe("spawn_session with a machine", () => {
+  test("pins the task to the machine's deviceId, answers queued, and sends no spawn op", async () => {
+    const fake = leaderRelay([], pinMachines());
+    const { text, error } = await callAuto(fake, { machine: "wsl", repo: "pengefix-hq" });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toEqual({
+      repo: HQ,
+      mode: "worktree",
+      prompt: "fix it",
+      client: "mcp",
+      pin: { deviceId: "device-wsl" },
+    } satisfies TaskSpec);
+    expect(text).toStartWith(`task ${fake.creates[0]?.id}: queued`);
+    expect(text).not.toContain("spawned window");
+    expect(fake.requests).toEqual([]);
+  });
+
+  test("after, until reported and linear reach the record beside a named machine", async () => {
+    const fake = reportingPinRelay();
+    const { error } = await callAuto(fake, {
+      machine: "wsl",
+      repo: "pengefix-hq",
+      after: [{ task: PRED }],
+      until: "reported",
+      linear: { issue: "ENG-1" },
+    });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec).toMatchObject({
+      pin: { deviceId: "device-wsl" },
+      until: "reported",
+      deps: [{ task: PRED, after: "opened" }],
+      linear: { issue: "ENG-1" },
+    });
+  });
+
+  test("a pin to an offline machine queues, and the answer says the task waits for it", async () => {
+    const machines = pinMachines().map((m) => (m.deviceId === "device-wsl" ? machine({ ...m, connected: false }) : m));
+    const fake = leaderRelay([], machines);
+    const { text, error } = await callAuto(fake, { machine: "wsl", repo: "pengefix-hq" });
+    expect(error).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+    expect(text).toContain("WSL is offline (last seen");
+    expect(text).toContain("the task waits for it");
+  });
+
+  test("a local daemon named like the pinned machine is never asked to spawn", async () => {
+    const local = fakeLocal(() => ({}), { deviceId: "device-wsl", name: "WSL" });
+    const fake = leaderRelay([], pinMachines());
+    const { error } = await callTool(fake, "spawn_session", { machine: "wsl", repo: "pengefix-hq" }, local);
+    expect(error).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+    expect(local.requests).toEqual([]);
+    expect(fake.requests).toEqual([]);
+  });
+});
+
 describe("resolvePlacement", () => {
   const listed = (records: readonly AccountRecord[] | null = ALIASES) => {
     const calls = { n: 0 };
@@ -1355,8 +1216,20 @@ describe("resolvePlacement", () => {
       const resolved = await placed({ machine: ref, account: "employer" });
       expect(resolved.fields).toEqual({ pin: { deviceId: "device-thad", account: EMPLOYER } });
       expect(resolved.machines.map((m) => m.repos.map((r) => r.name))).toEqual([["pengefix2/pengefix-hq"]]);
-      expect(resolved.scope).toBe(`auto pinned to Thad, account ${EMPLOYER}`);
+      expect(resolved.scope).toBe(`a task pinned to Thad, account ${EMPLOYER}`);
     }
+  });
+
+  test("an offline pinned machine adds a waiting note, joined with the account line by a semicolon", async () => {
+    const machines = pinMachines().map((m) => (m.deviceId === "device-thad" ? machine({ ...m, connected: false }) : m));
+    const resolved = await resolvePlacement(machines, listed().accounts, { machine: "thad", account: "employer" });
+    if ("error" in resolved) throw new Error(resolved.error);
+    expect(resolved.echo).toBe(
+      `Thad is offline (last seen ${new Date(2_000).toISOString()}); the task waits for it; pinned to account ${EMPLOYER} (${EMAIL})`,
+    );
+    expect(resolved.echo).not.toContain("\n");
+    const online = await placed({ machine: "thad" });
+    expect(online.echo).toBeNull();
   });
 
   test("an account by alias, by id, or by an email only it reports; the email never reaches the spec", async () => {
@@ -1433,7 +1306,7 @@ describe("resolvePlacement", () => {
     const resolved = await placed({ avoid: ["wsl", "device-wsl", "Mac"] });
     expect(resolved.fields).toEqual({ avoid: ["device-wsl", "device-mac"] });
     // avoid narrows no repo scope: the task waits rather than reading a name elsewhere.
-    expect(resolved.scope).toBe("auto");
+    expect(resolved.scope).toBe("the fleet");
     expect(await refused({ machine: "Thad", avoid: ["thad"] })).toContain(
       "avoid names Thad (device-thad), the machine the task is pinned to",
     );
@@ -1457,7 +1330,7 @@ describe("resolvePlacement", () => {
     const old = [machine({ deviceId: "device-old", name: "Old" })];
     expect(await resolvePlacement(old, listed().accounts, { machine: "Old" })).toEqual({
       error:
-        "pin.machine: Old (device-old) reports no exclaves, so auto cannot place there — its daemon needs `seanced update`",
+        "pin.machine: Old (device-old) reports no exclaves, so the scheduler cannot place there — its daemon needs `seanced update`",
     });
     expect(await refused({ machine: "nope" })).toBe(
       'pin.machine: no machine named "nope" — known machines: Thad, WSL, Mac',
@@ -1509,7 +1382,7 @@ describe("spawn_session on auto, pinned", () => {
     });
     expect(elsewhere.error).toBe(true);
     expect(elsewhere.text).toContain(
-      `no repo "pengefix2/pengefix-hq" for auto pinned to Thad, account ${PERSONAL} — known origins: ${HQ}`,
+      `no repo "pengefix2/pengefix-hq" for a task pinned to Thad, account ${PERSONAL} — known origins: ${HQ}`,
     );
 
     const origin = await callAuto(fake, { repo: `https://${HQ}.git`, pin: { account: PERSONAL } });
@@ -1602,27 +1475,37 @@ describe("spawn_session on auto, pinned", () => {
       // oxlint-disable-next-line no-await-in-loop -- one call each
       const answer = await callAuto(fake, { repo: HQ, ...extra });
       expect(answer.error).toBe(true);
-      expect(answer.text).toContain(`auto refused: ${text}`);
+      expect(answer.text).toContain(`spawn refused: ${text}`);
     }
     expect(fake.started).toBe(0);
   });
 
-  test("a named machine refuses a pin or avoid: the session starts there now", async () => {
-    for (const extra of [{ pin: { machine: "device-1" } }, { avoid: ["device-2"] }]) {
-      const local = fakeLocal();
-      const fake = leaderRelay();
-      // oxlint-disable-next-line no-await-in-loop -- one fake each
-      const { text, error } = await callTool(
-        fake,
-        "spawn_session",
-        { machine: "device-1", repo: "seance", ...extra },
-        local,
-      );
-      expect(error).toBe(true);
-      expect(text).toContain('after, until, linear, pin and avoid apply to machine "auto" only');
-      expect(local.requests).toEqual([]);
-      expect(fake.creates).toEqual([]);
-    }
+  test("a machine beside pin.machine is refused as given twice; beside avoid or an account pin it queues", async () => {
+    const both = pinRelay();
+    const refused = await callAuto(both, { machine: "wsl", repo: "pengefix-hq", pin: { machine: "mac" } });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("give the machine once");
+    expect(both.started).toBe(0);
+    expect(both.creates).toEqual([]);
+
+    const avoided = await callAuto(pinRelay(), { machine: "wsl", repo: "pengefix-hq", avoid: ["mac"] });
+    expect(avoided.error).toBe(false);
+    const accounted = pinRelay();
+    const withAccount = await callAuto(accounted, {
+      machine: "Thad",
+      repo: "pengefix2/pengefix-hq",
+      pin: { account: "employer" },
+    });
+    expect(withAccount.error).toBe(false);
+    expect(accounted.creates[0]?.spec.pin).toEqual({ deviceId: "device-thad", account: EMPLOYER });
+  });
+
+  test("placement errors name machine, not pin.machine, when the top-level field was given", async () => {
+    const unknown = await callAuto(pinRelay(), { machine: "nope", repo: "pengefix-hq" });
+    expect(unknown.error).toBe(true);
+    expect(unknown.text).toStartWith("machine: ");
+    const exclaveless = await callAuto(leaderRelay(), { machine: "device-1", repo: "seance" });
+    expect(exclaveless.text).toStartWith("machine: MacBook Pro (device-1) reports no exclaves");
   });
 
   test("queue_batch places each member on its own, and one bad pin refuses the batch before the first create", async () => {
@@ -1759,7 +1642,7 @@ describe("queue_batch", () => {
       tasks: [member(), member({ repo: "nope" })],
     });
     expect(error).toBe(true);
-    expect(text).toContain('task 2: no repo "nope" for auto');
+    expect(text).toContain('task 2: no repo "nope" for the fleet');
     expect(fake.creates).toEqual([]);
   });
 

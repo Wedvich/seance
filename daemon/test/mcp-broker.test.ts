@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import { RequestFailure, type RequestOp, type Task } from "@seance/shared";
+import type { RequestOp, Task } from "@seance/shared";
 import { LazyRelay } from "../src/app-relay.ts";
 import { createBroker, type Broker } from "../src/broker.ts";
 import { brokerFleet, relayFleet, selectFleet, type Fleet } from "../src/fleet.ts";
@@ -17,7 +17,7 @@ import { fakeRelay, machine, type FakeRelay } from "./fake-app-relay.ts";
  * The MCP tools over both fleet transports, side by side: the direct path
  * (this process holds the key) and the broker (it holds none and asks the
  * daemon over the real op socket). Same calls, same relay double underneath —
- * the outputs and the requests the target sees must not tell them apart, `auto`'s
+ * the outputs and the requests the target sees must not tell them apart, a spawn's
  * enqueue, `get_queue` and `cancel_task` included.
  */
 
@@ -41,17 +41,11 @@ const REMOTE = machine({
 });
 const ASLEEP = machine({ deviceId: "device-3", name: "Sleeper", connected: false });
 
-let failNextSpawn = false;
 function respond(op: RequestOp): unknown {
   if (op === "queue") return { tasks: [QUEUED], at: 6_000 };
   if (op === "cancel") return { task: { ...QUEUED, state: "cancelled" } };
   if (op === "sessions")
     return { sessions: [{ id: "%3", window: "task", repo: "seance", path: "/repos/seance" }], at: 5 };
-  if (op === "spawn" && failNextSpawn) {
-    failNextSpawn = false;
-    return new RequestFailure("timeout", "spawn timed out after 90000ms");
-  }
-  if (op === "spawn") return { ok: true, window: "task", path: "/repos/seance", sessions: [] };
   return { ok: true, window: "task", outcome: "exited", sessions: [] };
 }
 
@@ -69,7 +63,9 @@ const local: LocalMachine = {
   request: <T>(op: RequestOp): Promise<T> => {
     localCalls.push(op);
     // The test names T; this stands in for the op socket's wire.
-    return Promise.resolve({ ok: true, window: "here", path: "/repos/seance", sessions: [] } as T);
+    const reply =
+      op === "sessions" ? { sessions: [{ id: "%1", window: "here", repo: "seance", path: "/p" }], at: 1 } : {};
+    return Promise.resolve(reply as T);
   },
   reachable: () => Promise.resolve(true),
 };
@@ -148,10 +144,9 @@ describe("the MCP tools, direct and brokered", () => {
     const script: [string, Record<string, unknown>][] = [
       ["list_machines", {}],
       ["get_sessions", { machine: "Linux Box" }],
-      ["spawn_session", { machine: "Linux Box", repo: "seance", prompt: "fix it", plan: true }],
       ["despawn_session", { machine: "device-2", id: "%3", force: true }],
-      ["spawn_session", { machine: "Sleeper", repo: "seance" }],
-      ["spawn_session", { machine: "Linux Box", repo: "nope" }],
+      // A spawn is a scheduler enqueue now; the refusal comes before anything is stored.
+      ["spawn_session", { machine: "nowhere", repo: "seance" }],
       ["get_sessions", { machine: "nowhere" }],
     ];
     for (const [name, args] of script) {
@@ -159,23 +154,13 @@ describe("the MCP tools, direct and brokered", () => {
       const [a, b] = [await direct(name, args), await brokered(name, args)];
       expect(b).toBe(a);
     }
-    // A timeout must read as "may have landed" on both paths, in the same words.
-    failNextSpawn = true;
-    const directTimeout = await direct("spawn_session", { machine: "Linux Box", repo: "seance" });
-    failNextSpawn = true;
-    const brokeredTimeout = await brokered("spawn_session", { machine: "Linux Box", repo: "seance" });
-    expect(brokeredTimeout).toBe(directTimeout);
-    expect(brokeredTimeout).toContain("may have landed anyway");
-
     // Two relay doubles, one per transport, created in call order (direct goes
     // first): the target saw the same requests, `client: "mcp"` included,
     // whichever process sealed them.
     const [directRelay, brokerRelay] = [relays[0], relays[1]];
     expect(brokerRelay?.requests).toEqual(directRelay?.requests ?? []);
-    expect(directRelay?.requests.find((entry) => entry.op === "spawn")?.payload).toMatchObject({
-      client: "mcp",
-      plan: true,
-    });
+    // No spawn op reaches the target: the tools never spawn directly.
+    expect(directRelay?.requests.some((entry) => entry.op === "spawn")).toBe(false);
   });
 
   test("the broker marks the same scheduler leader the direct path does, and shows the same exclaves", async () => {
@@ -231,6 +216,7 @@ describe("the MCP tools, direct and brokered", () => {
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "pinned", pin: { machine: "Linux Box" } }],
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "pinned", pin: { account: "me@x.no" } }],
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "avoiding", avoid: ["MacBook Pro"] }],
+        ["spawn_session", { machine: "Linux Box", repo: "seance", prompt: "named", plan: true }],
         [
           "queue_batch",
           {
@@ -259,7 +245,7 @@ describe("the MCP tools, direct and brokered", () => {
       const stored = (relay: FakeRelay | undefined): string[] =>
         (relay?.creates ?? []).map((created) => masked(JSON.stringify({ ...created, createdAt: 0 })));
       expect(stored(brokerRelays[0])).toEqual(stored(directRelays[0]));
-      expect(stored(directRelays[0])).toHaveLength(6);
+      expect(stored(directRelays[0])).toHaveLength(7);
       expect(brokerRelays[0]?.requests.map((sent) => [sent.op, sent.payload])).toEqual(
         directRelays[0]?.requests.map((sent) => [sent.op, sent.payload]) ?? [],
       );
@@ -268,7 +254,7 @@ describe("the MCP tools, direct and brokered", () => {
       expect(brokeredAudit.every((line) => line.startsWith("audit enqueue origin=mcp client=mcp "))).toBe(true);
       expect(
         brokerLines.filter((line) => line.startsWith("audit enqueue origin=local-broker claimed_client=mcp ")),
-      ).toHaveLength(6);
+      ).toHaveLength(7);
       expect([...brokerLines, ...brokeredAudit].join("\n")).not.toContain("fix it");
     } finally {
       leaderSocket.stop();
@@ -282,7 +268,7 @@ describe("the MCP tools, direct and brokered", () => {
     let brokerOpened = 0;
     const brokered = await connect(
       selectFleet({
-        key: () => Promise.reject(new Error("a local spawn must not look for a key")),
+        key: () => Promise.reject(new Error("a local op must not look for a key")),
         direct: () => {
           throw new Error("unreachable");
         },
@@ -296,10 +282,8 @@ describe("the MCP tools, direct and brokered", () => {
       }),
     );
     localCalls.length = 0;
-    expect(await brokered("spawn_session", { machine: "MacBook Pro", repo: "seance" })).toContain(
-      "spawned window here",
-    );
-    expect(localCalls).toEqual(["spawn"]);
+    expect(await brokered("get_sessions", { machine: "MacBook Pro" })).toContain('"window": "here"');
+    expect(localCalls).toEqual(["sessions"]);
     expect(brokerOpened).toBe(0);
   });
 
@@ -318,7 +302,7 @@ describe("the MCP tools, direct and brokered", () => {
     try {
       await brokered("list_machines");
       await brokered("get_sessions", { machine: "Linux Box" });
-      await brokered("spawn_session", { machine: "Linux Box", repo: "seance" });
+      await brokered("despawn_session", { machine: "Linux Box", id: "%3" });
       await brokered("spawn_session", { machine: "auto", repo: "seance", prompt: "no stdout please" });
       await brokered("get_queue");
       expect(write).not.toHaveBeenCalled();

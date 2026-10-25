@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { RelayClient, type SessionEntry } from "@seance/shared";
+import { RelayClient, type SessionEntry, type SpawnResponse } from "@seance/shared";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
@@ -24,7 +24,7 @@ afterAll(async () => {
 });
 
 describe("mcp ↔ relay ↔ daemon", () => {
-  test("the MCP tools list, spawn, see and despawn the session — over the real relay", async () => {
+  test("the MCP tools list, queue a pinned task, see and despawn its session — over the real relay", async () => {
     const lazy = new LazyRelay({
       create: () =>
         new RelayClient({
@@ -57,13 +57,31 @@ describe("mcp ↔ relay ↔ daemon", () => {
       // the machine's repo list carries the fixture — same race Store.spawn ducks.
       await pollUntil(async () => (await text("list_machines", {})).includes("myrepo"), "repo visible over MCP");
 
-      const spawned = await text("spawn_session", {
-        machine: "TestMac",
-        repo: "myrepo",
-        prompt: "haunt the relay",
-      });
-      window = "haunt-the-relay";
-      expect(spawned).toContain("spawned window haunt-the-relay on TestMac");
+      // The leader must be up for the task to run; the pin needs the machine's exclaves, which land
+      // with its first status, so ask until the answer is a queued task.
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      let spawned = "";
+      await pollUntil(
+        async () => {
+          spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
+          return spawned.startsWith("task ");
+        },
+        "the pinned spawn to queue",
+        20_000,
+      );
+      const id = /^task (\S+): queued/u.exec(spawned)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${spawned}`);
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the pinned task to run",
+        20_000,
+      );
+      const running = (await stack.queue().get(id))?.body;
+      expect(running?.spec.pin).toEqual({ deviceId: stack.deviceId });
+      expect(running?.spec.client).toBe("mcp");
+      window = running?.assignment?.window ?? null;
+      if (window === null) throw new Error("no window on the running task");
       expect(await listWindows()).toContain(window);
 
       const sessions: readonly SessionEntry[] = JSON.parse(await text("get_sessions", { machine: "TestMac" }));
@@ -83,7 +101,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
     }
   });
 
-  test("a self-targeted spawn goes over the local socket, with the relay unreachable throughout", async () => {
+  test("with the relay unreachable, the local sessions still answer over the local socket, and a spawn is refused rather than run directly", async () => {
     expect(stack.daemon.localSocket).not.toBeNull();
 
     // The daemon registers before its scan finishes; the local path reads the
@@ -101,7 +119,7 @@ describe("mcp ↔ relay ↔ daemon", () => {
     // the credential-delivered box, where the PSK cannot be resolved at all.
     const dead = new LazyRelay({
       create: () => {
-        throw new Error("the relay must not be touched by a local spawn");
+        throw new Error("the relay must not be touched by a local op");
       },
     });
     const client = new Client(
@@ -118,20 +136,18 @@ describe("mcp ↔ relay ↔ daemon", () => {
       return content.map((entry) => entry.text).join("\n");
     };
 
-    let window: string | null = null;
+    const windowsBefore = await listWindows();
     try {
-      const spawned = await text("spawn_session", {
-        machine: "TestMac",
-        repo: "myrepo",
-        prompt: "skip the relay",
-      });
-      window = "skip-the-relay";
-      expect(spawned).toContain("spawned window skip-the-relay on TestMac");
-      // A real window, from the same backend the relay path uses.
-      expect(await listWindows()).toContain(window);
+      const sessions = JSON.parse(await text("get_sessions", { machine: "TestMac" })) as SessionEntry[];
+      expect(Array.isArray(sessions)).toBe(true);
 
-      const sessions = await text("get_sessions", { machine: "TestMac" });
-      expect(JSON.parse(sessions).map((entry: SessionEntry) => entry.window)).toContain(window);
+      // A spawn always queues, so it needs the fleet — here it has none, and nothing runs directly.
+      const refused = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "TestMac", repo: "myrepo", prompt: "skip the relay" },
+      });
+      expect(refused.isError).toBe(true);
+      expect(await listWindows()).toEqual(windowsBefore);
 
       // And the fleet view still needs the relay, so it degrades to this box.
       const listed = JSON.parse(await text("list_machines", {})) as {
@@ -139,7 +155,6 @@ describe("mcp ↔ relay ↔ daemon", () => {
       };
       expect(listed.machines).toEqual([expect.objectContaining({ name: "TestMac", local: true })]);
     } finally {
-      if (window !== null) await killWindow(window);
       await client.close();
       dead.stop();
     }
@@ -147,9 +162,14 @@ describe("mcp ↔ relay ↔ daemon", () => {
 });
 
 describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", () => {
-  test("a process with no PSK lists, sees, spawns and despawns on another machine through its own daemon", async () => {
+  test("a process with no PSK lists, sees and despawns on another machine, and queues a pinned spawn, through its own daemon", async () => {
     // Machine B: a second real daemon, its own deviceId, on the same relay and tmux server.
-    const remote = await stack.startSecondDaemon({ name: "RemoteBox" });
+    // Signed in, so the scheduler can place a pinned task on it.
+    const account = { organizationUuid: "e2e-org-r", accountUuid: "remote", emailAddress: "remote@e2e.test" };
+    const remote = await stack.startSecondDaemon({
+      name: "RemoteBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account }],
+    });
     const remoteLog = remote.log;
 
     // Machine A is this suite's daemon; the MCP server below is the keyless
@@ -210,14 +230,21 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       expect(before.error).toBe(false);
       expect(Array.isArray(JSON.parse(before.text))).toBe(true);
 
-      const spawned = await call("spawn_session", {
-        machine: "RemoteBox",
-        repo: "myrepo",
-        mode: "here",
-        prompt: "broker the fleet",
-      });
+      // Stands in for a `seanced mcp` that predates spawns-as-tasks: the broker's `request` action still
+      // carries `spawn`, which is what keeps such a process working until its Claude session restarts.
+      const lease = await brokerFleet().open();
+      try {
+        const spawned = await lease.request<SpawnResponse>(remote.deviceId, "spawn", {
+          repo: "myrepo",
+          mode: "here",
+          prompt: "broker the fleet",
+          client: "mcp",
+        });
+        expect("ok" in spawned && spawned.ok).toBe(true);
+      } finally {
+        lease.release();
+      }
       window = "broker-the-fleet";
-      expect(spawned.text).toContain("spawned window broker-the-fleet on RemoteBox");
       await pollUntil(
         async () => (await listRegisteredWindows()).includes("broker-the-fleet"),
         "B's window to register",
@@ -244,6 +271,36 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       const bLog = await Bun.file(remoteLog).text();
       expect(bLog).toContain('audit spawn origin=relay client="mcp" repo="myrepo"');
       expect(bLog).not.toContain("broker the fleet");
+
+      // The current MCP's spawn is a task the broker enqueues, pinned to B: the leader (A) places it there.
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      let queued = { text: "", error: true };
+      await pollUntil(
+        async () => {
+          queued = await call("spawn_session", {
+            machine: "RemoteBox",
+            repo: "myrepo",
+            prompt: "pinned through broker",
+          });
+          return !queued.error;
+        },
+        "the keyless pinned spawn to queue",
+        20_000,
+      );
+      const taskId = /^task (\S+): queued/u.exec(queued.text)?.[1];
+      if (taskId === undefined) throw new Error(`no task id in: ${queued.text}`);
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the pinned task to run on the remote machine",
+        30_000,
+      );
+      const placed = (await stack.queue().get(taskId))?.body;
+      expect(placed?.spec.pin?.deviceId).toBe(remote.deviceId);
+      expect(placed?.spec.client).toBe("mcp");
+      expect(placed?.assignment?.deviceId).toBe(remote.deviceId);
+      const pinnedWindow = placed?.assignment?.window;
+      if (pinnedWindow !== undefined) await tmux(["kill-window", "-t", `${remote.tmuxSession}:${pinnedWindow}`]);
 
       // A stops mid-session: the error says so, and once it is back the same
       // MCP server recovers on its own — nothing here cached the broken path.
