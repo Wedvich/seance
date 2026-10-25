@@ -5089,11 +5089,15 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     Many sessions at once can empty the bucket, and the PWA's own listing is then refused.
     Bounded three ways. `AccountCache` (`daemon/src/account-cache.ts`)
     lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
-    reopen. A refused or lost listing is held as null for `NULL_HOLD_MS` (60 s, about seven
+    reopen. A listing short of a readable one — refused, unreadable, lost, or failing unexpectedly
+    (still rethrown) — is held as null for `NULL_HOLD_MS` (60 s, about seven
     refills) for label reads, and neither a reopen nor a `store-changed` ends that hold: a
-    flapping socket or an editing PWA would otherwise have every process list again at once. And a
+    flapping socket or an editing PWA would otherwise have every process list again at once. Only
+    the latest-started listing writes the hold, and a label read joins a listing already in flight
+    (a pin's) rather than answering null. And a
     label waits at most `ACCOUNT_LABEL_DEADLINE_MS` (1.5 s) for the listing, then answers
-    with emails; the listing keeps running and fills the cache for the next call, so a lost one
+    with emails; that bounds the call's latency, not the bucket's spend: the listing keeps running
+    and fills the cache for the next call, so a lost one
     no longer holds each tool call for `STORE_LIST_TIMEOUT_MS` (30 s). An account pin's
     resolution bypasses both: it needs the real answer, and is a person's one-off call.
     An account pin asks, and so do `list_machines` (when some machine reports an account)

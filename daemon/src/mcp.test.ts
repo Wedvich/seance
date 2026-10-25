@@ -268,29 +268,32 @@ describe("mcp tools", () => {
 
   test("list_machines falls back to the email or short id when the aliases cannot be read, and never fails", async () => {
     const stderr = spyOn(console, "error").mockImplementation(() => {});
-    const cases: [string, FakeRelay["accounts"]][] = [
-      ["refused", { ok: false, code: "rate_limited" }],
-      ["unreadable", null],
-      ["no account key", new RequestFailure("unsupported", "this install has no account key", "relay")],
-      ["a bug", new Error("boom")],
-    ];
-    for (const [label, accounts] of cases) {
-      const fake = fakeRelay([machine({ exclaves: [signedIn("default", PERSONAL), exclave("spare")] })]);
-      fake.accounts = accounts;
-      const lazy = new LazyRelay({ create: () => fake });
-      // oxlint-disable-next-line no-await-in-loop -- one client per failure
-      const result = await (await connectedClient(lazy)).callTool({ name: "list_machines", arguments: {} });
-      expect(result.isError, label).toBeFalsy();
-      const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
-      expect(listed?.exclaves, label).toEqual([
-        { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL },
-        { id: "spare", accountId: "org:spare", account: "acct spare" },
-      ]);
-      lazy.stop();
+    try {
+      const cases: [string, FakeRelay["accounts"]][] = [
+        ["refused", { ok: false, code: "rate_limited" }],
+        ["unreadable", null],
+        ["no account key", new RequestFailure("unsupported", "this install has no account key", "relay")],
+        ["a bug", new Error("boom")],
+      ];
+      for (const [label, accounts] of cases) {
+        const fake = fakeRelay([machine({ exclaves: [signedIn("default", PERSONAL), exclave("spare")] })]);
+        fake.accounts = accounts;
+        const lazy = new LazyRelay({ create: () => fake });
+        // oxlint-disable-next-line no-await-in-loop -- one client per failure
+        const result = await (await connectedClient(lazy)).callTool({ name: "list_machines", arguments: {} });
+        expect(result.isError, label).toBeFalsy();
+        const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
+        expect(listed?.exclaves, label).toEqual([
+          { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL },
+          { id: "spare", accountId: "org:spare", account: "acct spare" },
+        ]);
+        lazy.stop();
+      }
+      // Only the bug is worth a line, and it goes to stderr: stdout is the JSON-RPC channel.
+      expect(stderr).toHaveBeenCalledTimes(1);
+    } finally {
+      stderr.mockRestore();
     }
-    // Only the bug is worth a line, and it goes to stderr: stdout is the JSON-RPC channel.
-    expect(stderr).toHaveBeenCalledTimes(1);
-    stderr.mockRestore();
   });
 
   test("list_machines answers within the label deadline with email labels when the listing never answers", async () => {
@@ -1637,6 +1640,28 @@ describe("spawn_session on auto, pinned", () => {
       expect(answer.text).toContain(text);
     }
     expect(fake.creates).toEqual([]);
+  });
+
+  test("a pin bypasses the label hold: a refused listing held for labels still resolves the alias at once", async () => {
+    const fake = pinRelay();
+    fake.accounts = { ok: false, code: "rate_limited" };
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const listed = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(listed.isError).toBeFalsy();
+      expect(fake.accountLists).toBe(1);
+      fake.accounts = ALIASES;
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: HQ, prompt: "fix it", pin: { account: "personal" } },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(fake.accountLists).toBe(2);
+      expect(fake.creates[0]?.spec).toMatchObject({ pin: { account: PERSONAL } });
+    } finally {
+      lazy.stop();
+    }
   });
 
   test("a refused account listing says aliases are unavailable, never that the account is unknown", async () => {

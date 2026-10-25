@@ -189,7 +189,11 @@ export default function Command(): React.JSX.Element {
 
       let credentials;
       try {
-        credentials = await loadKey();
+        credentials = await loadKey(
+          environment.isDevelopment
+            ? { onAccountKeyError: (error) => console.error("account key derivation failed", error) }
+            : {},
+        );
       } catch (err) {
         if (!disposed) setFatal(err instanceof Error ? err.message : String(err));
         return;

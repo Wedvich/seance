@@ -150,8 +150,15 @@ test("drift guard: the account key is the daemon's, so both find one account's r
 
 describe("loadKey", () => {
   test("a failing account-key derivation leaves it absent and the spawn credentials intact", async () => {
-    const credentials = await loadKey(sources({ deriveAccountKey: () => Promise.reject(new Error("no HMAC here")) }));
+    const reported: unknown[] = [];
+    const credentials = await loadKey(
+      sources({
+        deriveAccountKey: () => Promise.reject(new Error("no HMAC here")),
+        onAccountKeyError: (error) => reported.push(error),
+      }),
+    );
     expect(credentials.accountKey).toBeUndefined();
+    expect(reported).toEqual([new Error("no HMAC here")]);
     expect(credentials.key.algorithm.name).toBe("AES-GCM");
     expect(credentials.bearerToken).toBe("token");
   });

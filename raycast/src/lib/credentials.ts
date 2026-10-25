@@ -31,6 +31,8 @@ export interface CredentialSources {
   readonly home: () => string;
   /** The account-key derivation; a seam so a failing one can be tested. Defaults to `importAccountKey`. */
   readonly deriveAccountKey: (psk: string) => Promise<CryptoKey>;
+  /** Told why the account key is absent, so a lost alias is diagnosable; the caller decides where it goes. */
+  readonly onAccountKeyError?: (error: unknown) => void;
 }
 
 export interface Credentials {
@@ -177,7 +179,10 @@ export async function loadKey(overrides: Partial<CredentialSources> = {}): Promi
 
   const key = await importPsk(psk);
   // Aliases are a nicety: a derivation that throws must not take the spawn form down with it.
-  const accountKey = await sources.deriveAccountKey(psk).catch(() => undefined);
+  const accountKey = await sources.deriveAccountKey(psk).catch((error: unknown) => {
+    sources.onAccountKeyError?.(error);
+    return undefined;
+  });
   return {
     relayUrl: appRelayUrl(relayUrl),
     bearerToken,

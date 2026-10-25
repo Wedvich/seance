@@ -32,6 +32,8 @@ export class AccountCache {
   #generation = 0;
   /** Label reads answer null without listing until this time; survives `#drop`, see `NULL_HOLD_MS`. */
   #nullUntil = 0;
+  /** Listings started; only the latest-started one writes `#nullUntil`, whatever its generation. */
+  #listSeq = 0;
   readonly #now: () => number;
 
   constructor(
@@ -59,13 +61,20 @@ export class AccountCache {
 
   read(options: { readonly bypassHold?: boolean } = {}): Promise<readonly AccountRecord[] | null> {
     if (this.#held !== null) return Promise.resolve(this.#held);
+    // Join a listing already in flight (a pin's bypass) before honouring the hold.
+    if (this.#pending !== null) return this.#pending;
     if (options.bypassHold !== true && this.#now() < this.#nullUntil) return Promise.resolve(null);
-    this.#pending ??= this.#list();
+    this.#pending = this.#list();
     return this.#pending;
   }
 
   async #list(): Promise<readonly AccountRecord[] | null> {
     const generation = this.#generation;
+    const seq = ++this.#listSeq;
+    const setHold = (records: readonly AccountRecord[] | null): void => {
+      if (seq !== this.#listSeq) return;
+      this.#nullUntil = records === null ? this.#now() + NULL_HOLD_MS : 0;
+    };
     let records: readonly AccountRecord[] | null = null;
     try {
       const listing = await this.#client.listAccounts();
@@ -73,11 +82,13 @@ export class AccountCache {
     } catch (err) {
       if (!(err instanceof RequestFailure)) {
         // A rejected promise left in `#pending` would poison every read of this generation.
+        // Held too: a deterministic bug would otherwise list on every call.
+        setHold(null);
         if (generation === this.#generation) this.#pending = null;
         throw err;
       }
     }
-    this.#nullUntil = records === null ? this.#now() + NULL_HOLD_MS : 0;
+    setHold(records);
     if (generation !== this.#generation) return records;
     this.#pending = null;
     this.#held = records;

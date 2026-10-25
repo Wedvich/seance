@@ -1,9 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { RequestFailure, type AccountRecord } from "@seance/shared";
+import { RequestFailure, type AccountListing, type AccountRecord, type StoreRefusal } from "@seance/shared";
 import { fakeRelay } from "../test/fake-app-relay.ts";
 import { AccountCache, NULL_HOLD_MS } from "./account-cache.ts";
 
 const RECORDS: readonly AccountRecord[] = [{ accountId: "org-a:me", alias: "personal", version: 1 }];
+
+type Answer = AccountListing | StoreRefusal | null;
+
+/** A listing the test answers when it chooses; each call to `next` is one more in-flight listing. */
+function deferred(): { listAccounts: () => Promise<Answer>; answers: ((answer: Answer) => void)[] } {
+  const answers: ((answer: Answer) => void)[] = [];
+  return {
+    answers,
+    listAccounts: () =>
+      new Promise<Answer>((resolve) => {
+        answers.push(resolve);
+      }),
+  };
+}
+
+const LISTING: AccountListing = {
+  ok: true,
+  accounts: RECORDS.map((record) => ({ key: `account:${record.accountId}`, record })),
+  unreadable: [],
+};
 
 function cached(): { relay: ReturnType<typeof fakeRelay>; cache: AccountCache; tick: (ms: number) => void } {
   const relay = fakeRelay([]);
@@ -93,8 +113,64 @@ describe("AccountCache", () => {
     const { relay, cache } = cached();
     relay.accounts = new Error("bug");
     await expect(cache.read()).rejects.toThrow("bug");
-    // The rejection is not kept: a later read lists again.
+    // The rejection is not kept: a bypassing read lists again.
     relay.accounts = RECORDS;
+    expect(await cache.read({ bypassHold: true })).toEqual(RECORDS);
+  });
+
+  test("a stale listing finishing last neither sets nor clears the hold", async () => {
+    const staleNull = cached();
+    const { answers, listAccounts } = deferred();
+    staleNull.relay.accounts = listAccounts;
+    const first = staleNull.cache.read();
+    staleNull.relay.storeChanged("account:x", 2);
+    const second = staleNull.cache.read();
+    answers[1]?.(LISTING);
+    expect(await second).toEqual(RECORDS);
+    answers[0]?.(null);
+    expect(await first).toBeNull();
+    // The stale null must not hold: drop the view and the next label read lists.
+    staleNull.relay.storeChanged("account:x", 3);
+    staleNull.relay.accounts = RECORDS;
+    expect(await staleNull.cache.read()).toEqual(RECORDS);
+
+    const staleOk = cached();
+    const { answers: resolvers, listAccounts: listStale } = deferred();
+    staleOk.relay.accounts = listStale;
+    const old = staleOk.cache.read();
+    staleOk.relay.storeChanged("account:x", 2);
+    const current = staleOk.cache.read();
+    resolvers[1]?.({ ok: false, code: "rate_limited" });
+    expect(await current).toBeNull();
+    resolvers[0]?.(LISTING);
+    await old;
+    // The stale success must not clear the current refusal's hold.
+    staleOk.relay.accounts = RECORDS;
+    expect(await staleOk.cache.read()).toBeNull();
+  });
+
+  test("a label read during a hold joins a listing already in flight", async () => {
+    const { relay, cache } = cached();
+    relay.accounts = { ok: false, code: "rate_limited" };
+    await cache.read();
+    const { answers, listAccounts } = deferred();
+    relay.accounts = listAccounts;
+    const pin = cache.read({ bypassHold: true });
+    const label = cache.read();
+    answers[0]?.(LISTING);
+    expect(await label).toEqual(RECORDS);
+    expect(await pin).toEqual(RECORDS);
+    expect(relay.accountLists).toBe(2);
+  });
+
+  test("an unexpected error is held too, so a deterministic bug does not list on every call", async () => {
+    const { relay, cache, tick } = cached();
+    relay.accounts = new Error("bug");
+    await expect(cache.read()).rejects.toThrow("bug");
+    relay.accounts = RECORDS;
+    expect(await cache.read()).toBeNull();
+    expect(relay.accountLists).toBe(1);
+    tick(NULL_HOLD_MS);
     expect(await cache.read()).toEqual(RECORDS);
   });
 });
