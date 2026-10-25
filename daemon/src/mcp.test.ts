@@ -26,6 +26,7 @@ import {
 } from "@seance/shared";
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
+import { pollUntil } from "../test/fixtures.ts";
 import { LazyRelay } from "./app-relay.ts";
 import type { AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
@@ -41,6 +42,7 @@ import {
   mcpBunPath,
   mcpScriptCheck,
   mcpScriptPath,
+  ACCOUNT_LABEL_DEADLINE_MS,
   type LocalMachine,
 } from "./mcp.ts";
 
@@ -265,6 +267,7 @@ describe("mcp tools", () => {
   });
 
   test("list_machines falls back to the email or short id when the aliases cannot be read, and never fails", async () => {
+    const stderr = spyOn(console, "error").mockImplementation(() => {});
     const cases: [string, FakeRelay["accounts"]][] = [
       ["refused", { ok: false, code: "rate_limited" }],
       ["unreadable", null],
@@ -285,6 +288,50 @@ describe("mcp tools", () => {
       ]);
       lazy.stop();
     }
+    // Only the bug is worth a line, and it goes to stderr: stdout is the JSON-RPC channel.
+    expect(stderr).toHaveBeenCalledTimes(1);
+    stderr.mockRestore();
+  });
+
+  test("list_machines answers within the label deadline with email labels when the listing never answers", async () => {
+    const fake = fakeRelay([machine({ exclaves: [signedIn("default", PERSONAL)] })]);
+    fake.accounts = () => new Promise(() => {});
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const started = Date.now();
+    const result = await client.callTool({ name: "list_machines", arguments: {} });
+    expect(Date.now() - started).toBeLessThan(ACCOUNT_LABEL_DEADLINE_MS + 1_000);
+    const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
+    expect(listed?.exclaves).toEqual([{ id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL }]);
+    lazy.stop();
+  });
+
+  test("concurrent list_machines calls share one listing, and the late answer reaches the next call", async () => {
+    const fake = fakeRelay([machine({ exclaves: [signedIn("default", PERSONAL)] })]);
+    let answer: (listing: Awaited<ReturnType<typeof fake.listAccounts>>) => void = () => {};
+    fake.accounts = () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const call = (): ReturnType<typeof client.callTool> => client.callTool({ name: "list_machines", arguments: {} });
+    const both = Promise.all([call(), call()]);
+    await pollUntil(() => fake.accountLists > 0, "the first listing to be sent");
+    await both;
+    expect(fake.accountLists).toBe(1);
+    // Past the deadline the listing was still running: its answer fills the cache.
+    answer({
+      ok: true,
+      accounts: [{ key: "account:x", record: { accountId: PERSONAL, alias: "personal", version: 1 } }],
+      unreadable: [],
+    });
+    await pollUntil(async () => {
+      const [listed]: { exclaves: { account: string }[] }[] = JSON.parse(toolText(await call()));
+      return listed?.exclaves[0]?.account === "personal";
+    }, "the late listing to name the account");
+    expect(fake.accountLists).toBe(1);
+    lazy.stop();
   });
 
   test("list_machines spends no listing when no machine reports an account", async () => {

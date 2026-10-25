@@ -40,7 +40,7 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
     url: credentials.relayUrl,
     token: credentials.bearerToken,
     key: credentials.key,
-    accountKey: credentials.accountKey,
+    ...(credentials.accountKey === undefined ? {} : { accountKey: credentials.accountKey }),
     // Raycast surfaces console output only in the dev-mode terminal, and a
     // released extension has nowhere to put it — so the wire log is dropped by
     // default rather than shouted into a void.

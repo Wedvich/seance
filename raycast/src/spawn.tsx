@@ -15,7 +15,14 @@ import {
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RelayState, SpawnRequest, SpawnResponse } from "@seance/shared";
-import { accountLine, NO_ALIASES, readAliases, reportsAccounts, type AccountAliases } from "./lib/accounts.ts";
+import {
+  accountLine,
+  NO_ALIASES,
+  readAliases,
+  shouldListAccounts,
+  type AccountAliases,
+  type ListingProgress,
+} from "./lib/accounts.ts";
 import { readLastUsed, readRegistry, writeLastUsed, writeRegistry, type Store } from "./lib/cache.ts";
 import { loadKey } from "./lib/credentials.ts";
 import { failureText } from "./lib/errors.ts";
@@ -194,9 +201,9 @@ export default function Command(): React.JSX.Element {
       // daemon, relay and PWA emit, so one grep spans every tier.
       const handle = connect(credentials, environment.isDevelopment ? (line) => console.log(line) : undefined);
       handleRef.current = handle;
-      // One `account:` listing per open, never per push or re-dial: the relay's
-      // list bucket is shared with every app, the PWA included.
-      let listed = false;
+      // One answered `account:` listing per open, never per push: the relay's list bucket
+      // is shared with every app, the PWA included. One lost to a disconnect asks again.
+      let progress: ListingProgress = "none";
       const onChange = (): void => {
         const state = handle.getState();
         setRelay(state);
@@ -208,11 +215,12 @@ export default function Command(): React.JSX.Element {
         if (state.status !== "open" || !state.registrySettled) return;
         absorb(state.machines, true);
         void writeRegistry(store, state.machines, Date.now());
-        if (listed || !reportsAccounts(state.machines)) return;
-        listed = true;
+        if (!shouldListAccounts(state, state.machines, progress)) return;
+        progress = "inflight";
         // Names show by email until this lands, and stay that way if it fails.
         void readAliases(handle.listAccounts).then((read) => {
-          if (!disposed) setAliases(read);
+          progress = read.lost ? "lost" : "settled";
+          if (!disposed) setAliases(read.aliases);
         });
       };
       const unsubscribe = handle.subscribe(onChange);

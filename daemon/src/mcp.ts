@@ -187,20 +187,39 @@ const nameOf = (names: AccountNames, accountId: string): string =>
   accountNameIn(names.known, accountId, names.aliases.get(accountId));
 
 /**
+ * How long a label waits for the listing. A lost one would otherwise hold the call for
+ * `STORE_LIST_TIMEOUT_MS` (30 s) on every call; an alias is not worth that. Not applied to a pin's
+ * resolution, which needs the real answer.
+ */
+export const ACCOUNT_LABEL_DEADLINE_MS = 1_500;
+
+/**
  * The aliases set on `accountIds`, from the lease's cached listing (`AccountCache`: once per
  * socket, as the PWA lists, since the `account:` list bucket is shared). None through the broker,
- * which has no key, and no listing spent when nothing needs a name. A refused, lost or failed
- * listing is no aliases: a label never fails a call.
+ * which has no key, and no listing spent when nothing needs a name. A refused, lost, failed or
+ * slow (past `ACCOUNT_LABEL_DEADLINE_MS`) listing is no aliases: a label never fails or stalls a call.
  */
 async function accountAliases(lease: FleetLease, accountIds: readonly string[]): Promise<ReadonlyMap<string, string>> {
   const aliases = new Map<string, string>();
   if (lease.scheduler === null || accountIds.length === 0) return aliases;
-  let records: Awaited<ReturnType<SchedulerLeg["accounts"]>>;
-  try {
-    records = await lease.scheduler.accounts();
-  } catch {
-    return aliases;
-  }
+  const { accounts } = lease.scheduler;
+  const listing = (async (): Promise<Awaited<ReturnType<SchedulerLeg["accounts"]>>> => {
+    try {
+      return await accounts({ label: true });
+    } catch (err) {
+      // A bug, not a lost listing: the label still never fails, but the cache rethrows it on
+      // purpose. stderr, never `log.ts`: stdout is the JSON-RPC channel.
+      if (!(err instanceof RequestFailure)) console.error("seanced mcp: account listing failed:", err);
+      return null;
+    }
+  })();
+  // The listing keeps running past the deadline and fills the cache for the next call.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ACCOUNT_LABEL_DEADLINE_MS);
+  });
+  const records = await Promise.race([listing, deadline]);
+  clearTimeout(timer);
   const wanted = new Set(accountIds);
   for (const record of records ?? []) {
     if (record.alias !== null && wanted.has(record.accountId)) aliases.set(record.accountId, record.alias);
@@ -536,7 +555,7 @@ const PIN_FIELD = z
       .string()
       .optional()
       .describe(
-        "A Claude account: its alias (as the PWA names it), its email, or its accountId (organization:account) — list_machines lists each exclave's accountId and email. Only an account some machine reports signed in is taken; the task stores its accountId, never the alias or email",
+        "A Claude account: its alias (as the PWA names it), its email, or its accountId (organization:account) — list_machines lists each exclave's accountId, email and alias (not its `account` label, which is no value to pass). Only an account some machine reports signed in is taken; the task stores its accountId, never the alias or email",
       ),
   })
   // Loose so a stale `exclave` key reaches `placementInput` and is refused, not stripped.
@@ -755,7 +774,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike), and `alias` where one is set — an auto task's pin.account takes the accountId, the email or the alias; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike) — a display name only, never a value for pin.account — and `alias` where one is set: an auto task's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       annotations: { readOnlyHint: true },
     },
     async () => {

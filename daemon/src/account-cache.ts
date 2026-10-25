@@ -2,15 +2,27 @@ import { RequestFailure, STORE_PREFIXES, type AccountRecord } from "@seance/shar
 import type { AppRelay } from "./app-relay.ts";
 
 /**
+ * The relay's bucket is DO-wide, not per socket: `LIST_BURST` (16) lists, refilling one per
+ * `LIST_REFILL_MS` (8 s) — relay/src/store.ts. Every `seanced mcp` process on every box lists on
+ * its first labelled call, so a refusal (empty bucket) or a loss says the bucket is spent or the
+ * relay is slow; asking again at once from each tool call spends what the PWA needs. 60 s is
+ * about 7 refills: by then asking is likely to succeed. Neither a reopen nor a `store-changed`
+ * ends the hold, or a flapping socket or an alias-editing PWA would have N processes list
+ * again at once; the price is a label that stays on the email for up to a minute. Auto's pin
+ * resolution passes `bypassHold`: it needs the real answer and is a person's one-off call.
+ */
+export const NULL_HOLD_MS = 60_000;
+
+/**
  * The account records an app-role daemon client resolves and shows aliases by, read once per
  * socket generation as the PWA's `AccountStore` reads them: every app shares
  * the relay's `account:` list bucket, and one socket may list four times a
  * minute, so a listing per tool call would spend what the PWA needs. Dropped on
  * a reopen (nudges sent while down are lost) and on a `store-changed` for an
  * `account:` key — relay plaintext, only a hint to list again. A refused or
- * lost listing is not kept, and reads as null: aliases unavailable right now.
- * Listed only when a caller asks: an account pin, or `seanced mcp` labelling an
- * account in `list_machines` or `get_queue`.
+ * lost listing reads as null (aliases unavailable right now) and is held as null
+ * for `NULL_HOLD_MS`, for label reads only. Listed only when a caller asks: an
+ * account pin, or `seanced mcp` labelling an account in `list_machines` or `get_queue`.
  */
 export class AccountCache {
   readonly #client: Pick<AppRelay, "listAccounts">;
@@ -18,17 +30,24 @@ export class AccountCache {
   #pending: Promise<readonly AccountRecord[] | null> | null = null;
   /** Bumped on every drop: a listing sent before one answers for a view since replaced. */
   #generation = 0;
+  /** Label reads answer null without listing until this time; survives `#drop`, see `NULL_HOLD_MS`. */
+  #nullUntil = 0;
+  readonly #now: () => number;
 
-  constructor(client: Pick<AppRelay, "listAccounts" | "onStoreChanged" | "subscribe" | "getState">) {
+  constructor(
+    client: Pick<AppRelay, "listAccounts" | "onStoreChanged" | "subscribe" | "getState">,
+    now: () => number = Date.now,
+  ) {
     this.#client = client;
+    this.#now = now;
     client.onStoreChanged((key) => {
       if (key.startsWith(STORE_PREFIXES.account.prefix)) this.#drop();
     });
     let open = client.getState().status === "open";
     client.subscribe(() => {
-      const now = client.getState().status === "open";
-      if (now && !open) this.#drop();
-      open = now;
+      const isOpen = client.getState().status === "open";
+      if (isOpen && !open) this.#drop();
+      open = isOpen;
     });
   }
 
@@ -38,8 +57,9 @@ export class AccountCache {
     this.#pending = null;
   }
 
-  read(): Promise<readonly AccountRecord[] | null> {
+  read(options: { readonly bypassHold?: boolean } = {}): Promise<readonly AccountRecord[] | null> {
     if (this.#held !== null) return Promise.resolve(this.#held);
+    if (options.bypassHold !== true && this.#now() < this.#nullUntil) return Promise.resolve(null);
     this.#pending ??= this.#list();
     return this.#pending;
   }
@@ -57,6 +77,7 @@ export class AccountCache {
         throw err;
       }
     }
+    this.#nullUntil = records === null ? this.#now() + NULL_HOLD_MS : 0;
     if (generation !== this.#generation) return records;
     this.#pending = null;
     this.#held = records;

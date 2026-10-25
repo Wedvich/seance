@@ -1,4 +1,11 @@
-import { accountNameIn, knownAccounts, type AccountListing, type ExclaveInfo, type StoreRefusal } from "@seance/shared";
+import {
+  accountNameIn,
+  knownAccounts,
+  RequestFailure,
+  type AccountListing,
+  type ExclaveInfo,
+  type StoreRefusal,
+} from "@seance/shared";
 
 /** accountId to alias, for the accounts that have one. Display only, never a key. */
 export type AccountAliases = ReadonlyMap<string, string>;
@@ -19,24 +26,54 @@ export function reportsAccounts(machines: readonly AccountMachine[]): boolean {
   return machines.some((machine) => machine.exclaves?.some((exclave) => exclave.accountId !== null) === true);
 }
 
+/** What one listing came to: the aliases it read, and whether the socket was lost under it. */
+export interface AliasRead {
+  readonly aliases: AccountAliases;
+  /** Dropped with the socket, not answered: the only outcome worth asking again for once it reopens. */
+  readonly lost: boolean;
+}
+
 /**
- * The aliases from one listing. Anything short of a readable listing — no
- * socket, a refusal, a reply this build cannot read, a throw — is no aliases:
+ * Where an open's listing stands. `settled` is an answer of any kind (aliases, a refusal, a reply
+ * this build cannot read, a timeout) and is never asked for again; `lost` is a socket dropped
+ * under it.
+ */
+export type ListingProgress = "none" | "inflight" | "settled" | "lost";
+
+/**
+ * Whether to send the open's `account:` listing now. The relay's list bucket is shared with every
+ * app, so: once the socket is open and its registry settled, only when some machine reports an
+ * account, and not again after any answer, only after one lost to a disconnect.
+ */
+export function shouldListAccounts(
+  state: { readonly status: string; readonly registrySettled: boolean },
+  machines: readonly AccountMachine[],
+  progress: ListingProgress,
+): boolean {
+  if (state.status !== "open" || !state.registrySettled) return false;
+  if (progress !== "none" && progress !== "lost") return false;
+  return reportsAccounts(machines);
+}
+
+/**
+ * The aliases from one listing. Anything short of a readable listing (no
+ * socket, a refusal, a reply this build cannot read, a throw) is no aliases:
  * names fall back to the email or short id, and the form never fails for it.
  */
-export async function readAliases(list: () => Promise<AccountListing | StoreRefusal | null>): Promise<AccountAliases> {
+export async function readAliases(list: () => Promise<AccountListing | StoreRefusal | null>): Promise<AliasRead> {
   let listing: AccountListing | StoreRefusal | null;
   try {
     listing = await list();
-  } catch {
-    return NO_ALIASES;
+  } catch (err) {
+    const lost = err instanceof RequestFailure && (err.reason === "disconnected" || err.reason === "dropped");
+    return { aliases: NO_ALIASES, lost };
   }
-  if (listing?.ok !== true) return NO_ALIASES;
+  if (listing?.ok !== true) return { aliases: NO_ALIASES, lost: false };
   const aliases = new Map<string, string>();
   for (const { record } of listing.accounts) {
     if (record.alias !== null) aliases.set(record.accountId, record.alias);
   }
-  return aliases;
+  return { aliases, lost: false };
 }
 
 /**

@@ -142,12 +142,20 @@ test("drift guard: the account key is the daemon's, so both find one account's r
   const ours = await loadKey(sources());
   const daemons = await importAppKeys(PSK);
   if (daemons.accountKey === undefined) throw new Error("the daemon derived no account key");
+  if (ours.accountKey === undefined) throw new Error("the extension derived no account key");
   const accountId = "org-a:acct-1";
   expect(await accountStoreKey(ours.accountKey, accountId)).toBe(await accountStoreKey(daemons.accountKey, accountId));
   expect(ours.accountKey.extractable).toBe(false);
 });
 
 describe("loadKey", () => {
+  test("a failing account-key derivation leaves it absent and the spawn credentials intact", async () => {
+    const credentials = await loadKey(sources({ deriveAccountKey: () => Promise.reject(new Error("no HMAC here")) }));
+    expect(credentials.accountKey).toBeUndefined();
+    expect(credentials.key.algorithm.name).toBe("AES-GCM");
+    expect(credentials.bearerToken).toBe("token");
+  });
+
   test("swaps the daemon relay path for the app path and imports a non-extractable key", async () => {
     const credentials = await loadKey(sources());
     expect(credentials.relayUrl).toBe("wss://relay.example.dev/app");

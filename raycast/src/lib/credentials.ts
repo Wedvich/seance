@@ -29,6 +29,8 @@ export interface CredentialSources {
   readonly readKeychain: (service: string) => Promise<string | null>;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly home: () => string;
+  /** The account-key derivation; a seam so a failing one can be tested. Defaults to `importAccountKey`. */
+  readonly deriveAccountKey: (psk: string) => Promise<CryptoKey>;
 }
 
 export interface Credentials {
@@ -37,8 +39,11 @@ export interface Credentials {
   readonly bearerToken: string;
   /** Non-extractable, because `importPsk` imports it that way. */
   readonly key: CryptoKey;
-  /** The HMAC key account records are read under, derived from the same PSK as the daemon's `importAppKeys`. */
-  readonly accountKey: CryptoKey;
+  /**
+   * The HMAC key account records are read under, derived from the same PSK as the daemon's
+   * `importAppKeys`. Absent when the derivation failed: only aliases are lost, never the spawn.
+   */
+  readonly accountKey?: CryptoKey;
 }
 
 /**
@@ -105,6 +110,7 @@ const defaultSources: CredentialSources = {
   readKeychain: readKeychainPsk,
   env: process.env,
   home: homedir,
+  deriveAccountKey: importAccountKey,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -169,6 +175,13 @@ export async function loadKey(overrides: Partial<CredentialSources> = {}): Promi
     );
   }
 
-  const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
-  return { relayUrl: appRelayUrl(relayUrl), bearerToken, key, accountKey };
+  const key = await importPsk(psk);
+  // Aliases are a nicety: a derivation that throws must not take the spawn form down with it.
+  const accountKey = await sources.deriveAccountKey(psk).catch(() => undefined);
+  return {
+    relayUrl: appRelayUrl(relayUrl),
+    bearerToken,
+    key,
+    ...(accountKey === undefined ? {} : { accountKey }),
+  };
 }

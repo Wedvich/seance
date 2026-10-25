@@ -5079,10 +5079,24 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     scope. Malformed input (no field in a pin, an empty one, a machine past
     `TASK_SPEC_LIMITS.placement`, too many avoided machines) is refused before the relay is
     dialled, and a named machine refuses `pin` and `avoid` with the other auto-only fields.
-  - **Account listings.** An alias needs the account records, and the relay's `account:` list
-    bucket is per socket and shared in effect with the PWA. So `AccountCache` (`daemon/src/account-cache.ts`)
+  - **Account listings.** An alias needs the account records. The relay's `account:` list floor
+    is two-level (`relay/src/store.ts`): four lists a minute per socket, and a DO-wide bucket of
+    `LIST_BURST` (16) refilling one per `LIST_REFILL_MS` (8 s), shared by every socket, the
+    PWA's included. The bucket is the binding one, and the cost is fleet-wide: every `seanced
+    mcp` process (one per Claude session; its relay socket idles out after `IDLE_MS`, 5 min, and
+    the next call dials a fresh one) lists on its first labelled call, and a PWA alias edit's
+    `store-changed` clears every process's cache, so each lists again on its next labelled call.
+    Many sessions at once can empty the bucket, and the PWA's own listing is then refused.
+    Bounded three ways. `AccountCache` (`daemon/src/account-cache.ts`)
     lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
-    reopen. An account pin asks, and so do `list_machines` (when some machine reports an account)
+    reopen. A refused or lost listing is held as null for `NULL_HOLD_MS` (60 s, about seven
+    refills) for label reads, and neither a reopen nor a `store-changed` ends that hold: a
+    flapping socket or an editing PWA would otherwise have every process list again at once. And a
+    label waits at most `ACCOUNT_LABEL_DEADLINE_MS` (1.5 s) for the listing, then answers
+    with emails; the listing keeps running and fills the cache for the next call, so a lost one
+    no longer holds each tool call for `STORE_LIST_TIMEOUT_MS` (30 s). An account pin's
+    resolution bypasses both: it needs the real answer, and is a person's one-off call.
+    An account pin asks, and so do `list_machines` (when some machine reports an account)
     and `get_queue` (when a pin or hold names one): both label an account as the PWA does — alias,
     else the email a registry entry reports, else a short id, org-tagged where two read the same
     — so a call spends at most the one listing its socket has not yet made. `list_machines` adds
@@ -5091,9 +5105,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     beside `accountId`. Superseded (2026-10-25): labels spending no listing at all, chosen so a
     label would not flip between calls with whether a pin's listing happened to be cached; with
     every label reading the one per-socket cache, a label flips only when a listing is refused or
-    lost, and then to the email. A refused or lost listing is not cached: a label falls back to the
-    email or short id for that call, and a pin says aliases are unavailable right now, asking for
-    an email or id — never that the account is unknown. Through the broker there is no key and no
+    lost, and then to the email. A refused or lost listing is held only as that short null: a
+    label falls back to the email or short id meanwhile, and a pin says aliases are unavailable
+    right now, asking for an email or id — never that the account is unknown. The `account` label
+    is a display name and no valid `pin.account` value (a pin takes `alias`, `email` or `accountId`);
+    the tool descriptions say so. Through the broker there is no key and no
     listing, and labels never carry an alias.
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
     `avoid` as nothing and place the task anywhere. Two guards, both required. At submit, a client
@@ -5866,9 +5882,13 @@ latency budget — one hotkey to a running session.
   else email, else short id; `raycast/src/lib/accounts.ts`). The aliases come
   from one `account:` listing per open, made once the socket is open and the
   registry settled, and only when some machine reports an account — the list
-  bucket is shared with every app — never again on a push, a re-dial or a
-  `store-changed`, since the form lives seconds. `loadKey` derives the account
-  key from the same PSK beside the AES key (`importAccountKey`, as the daemon's
+  bucket is shared with every app. Any answer (aliases, a refusal, a timeout) ends it for that
+  open: never again on a push or a `store-changed`, since the form lives seconds. Only a
+  listing lost to a disconnect (`disconnected` or `dropped`) is asked again, once the socket is
+  open and settled again (`shouldListAccounts`, `raycast/src/lib/accounts.ts`). The account key
+  is derived apart from the AES key: a derivation that throws leaves `Credentials.accountKey`
+  absent, so only aliases are lost and the spawn form still loads. `loadKey` derives the account
+  key from the same PSK (`importAccountKey`, as the daemon's
   `importAppKeys`; `credentials.test.ts` asserts both find one account at one
   store key). A refused, lost or failed listing leaves the names on email or
   short id. The line reads the live registry only: the cached projection keeps
