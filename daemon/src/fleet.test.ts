@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { importPsk, toBase64, type Machine } from "@seance/shared";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { importPsk, isRecord, RequestFailure, toBase64, type Machine, type Task } from "@seance/shared";
+import { startBrokerDouble } from "../test/broker-double.ts";
 import { machine } from "../test/fake-app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
-import { FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
+import { brokerFail, brokerOk, type BrokerReply } from "./broker-protocol.ts";
+import { brokerFleet, FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
 
 interface CountingFleet extends Fleet {
   opened: number;
@@ -207,5 +212,221 @@ describe("selectFleet", () => {
     });
     await Promise.all([fleet.open(), fleet.open(), fleet.open()]);
     expect(lookups).toBe(1);
+  });
+});
+
+const TASK: Task = {
+  id: "11111111-2222-4333-8444-555555555555",
+  state: "queued",
+  createdAt: 1,
+  spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "p", client: "mcp" },
+};
+const LEADER = { kind: "ready", deviceId: "device-1", term: 2 } as const;
+
+function actionOf(raw: unknown): unknown {
+  return isRecord(raw) ? raw["action"] : undefined;
+}
+
+/** A daemon that brokers the scheduler: `fleet` answers, and `reply` answers every scheduler frame. */
+async function schedulerDaemon(
+  reply: (id: string, raw: Record<string, unknown>) => BrokerReply | Promise<BrokerReply>,
+) {
+  return startBrokerDouble((raw, id) => {
+    if (actionOf(raw) === "fleet") return brokerOk(id, { machines: [machine()], scheduler: LEADER });
+    return isRecord(raw) ? reply(id, raw) : brokerFail(id, "invalid_request", "not a frame");
+  });
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (err) {
+    return err;
+  }
+  throw new Error("expected a rejection");
+}
+
+describe("brokerFleet", () => {
+  test("a lease opens on one fleet round trip: the registry and the scheduler the daemon sees", async () => {
+    const double = await schedulerDaemon((id) => brokerOk(id, { ok: true, landedEarlier: false }));
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      expect(lease.machines.map((entry) => entry.deviceId)).toEqual(["device-1"]);
+      expect(lease.scheduler?.availability()).toEqual(LEADER);
+      expect(double.frames.map(actionOf)).toEqual(["fleet"]);
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("an enqueue frame carries the id and the spec — not a sealed task, not createdAt", async () => {
+    const double = await schedulerDaemon((id) => brokerOk(id, { ok: true, landedEarlier: true }));
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      expect(await lease.scheduler?.enqueue(TASK)).toEqual({ ok: true, landedEarlier: true });
+      const sent = double.frames.at(-1);
+      expect(sent).toMatchObject({ action: "scheduler", schedulerOp: "enqueue", taskId: TASK.id, spec: TASK.spec });
+      expect(JSON.stringify(sent)).not.toContain("createdAt");
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("a daemon that predates the fleet action answers unsupported, and the lease falls back to machines with no scheduler", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      actionOf(raw) === "machines" ? brokerOk(id, [machine({ name: "Old" })]) : brokerFail(id, "unsupported", "no"),
+    );
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      expect(lease.machines.map((entry) => entry.name)).toEqual(["Old"]);
+      expect(lease.scheduler).toBeNull();
+      expect(double.frames.map(actionOf)).toEqual(["fleet", "machines"]);
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("a daemon that drops the unknown frame is probed with machines, whose hint names it as older than the broker", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-fleet-"));
+    const old = Bun.listen<undefined>({
+      unix: join(dir, "old.sock"),
+      socket: { data: (sock): void => void sock.end() },
+    });
+    try {
+      const err = await rejection(brokerFleet({ path: join(dir, "old.sock") }).open());
+      expect(err).toMatchObject({ code: "daemon_closed" });
+      expect(String(err)).toContain("older than the fleet broker");
+    } finally {
+      old.stop(true);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a fleet answer that is not readable is bad_reply, not a guess", async () => {
+    const double = await startBrokerDouble((_raw, id) => brokerOk(id, { machines: "none" }));
+    try {
+      expect(await rejection(brokerFleet({ path: double.path }).open())).toMatchObject({ code: "bad_reply" });
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("an availability kind this build does not know reads as no leader", async () => {
+    const double = await startBrokerDouble((_raw, id) =>
+      brokerOk(id, { machines: [machine()], scheduler: { kind: "elected", deviceId: "d", term: 1 } }),
+    );
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      expect(lease.scheduler?.availability()).toEqual({ kind: "none" });
+    } finally {
+      await double.stop();
+    }
+  });
+});
+
+describe("the brokered scheduler leg's failures", () => {
+  /** What an enqueue and a cancel each throw when the daemon answers with this. */
+  async function thrown(reply: (id: string) => BrokerReply): Promise<RequestFailure[]> {
+    const double = await schedulerDaemon((id) => reply(id));
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      const scheduler = lease.scheduler;
+      if (scheduler === null) throw new Error("expected a scheduler leg");
+      return [await rejection(scheduler.enqueue(TASK)), await rejection(scheduler.cancel(TASK.id))].map((err) => {
+        if (!(err instanceof RequestFailure)) throw new Error(`a bare ${String(err)} escaped the leg`);
+        return err;
+      });
+    } finally {
+      await double.stop();
+    }
+  }
+
+  test("a refusal before anything was sent is refused, so it never reads as may-have-landed", async () => {
+    for (const code of ["busy", "shutting_down", "broker_disabled", "invalid_request", "relay_unavailable"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one double each
+      const failures = await thrown((id) => brokerFail(id, code, `${code} detail`));
+      expect(failures.map((failure) => failure.reason)).toEqual(["refused", "refused"]);
+    }
+  });
+
+  test("a code that can follow a send is dropped: enqueue retries it under the same id, cancel words it as may-have-landed", async () => {
+    for (const code of ["stopped_in_flight", "internal_error", "reply_too_large"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one double each
+      const failures = await thrown((id) => brokerFail(id, code, `${code} detail`));
+      expect(failures.map((failure) => failure.reason)).toEqual(["dropped", "dropped"]);
+    }
+  });
+
+  test("a daemon that never answers is dropped at the peer's deadline", async () => {
+    const double = await schedulerDaemon(() => new Promise<BrokerReply>(() => {}));
+    try {
+      // The fleet probe is answered; the scheduler frames are not.
+      const lease = await brokerFleet({ path: double.path, timeoutMs: 150 }).open();
+      const failure = await rejection(lease.scheduler?.queue() ?? Promise.reject(new Error("no leg")));
+      expect(failure).toMatchObject({ reason: "dropped" });
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("the daemon's own relay failure passes through with its reason, as the direct path throws it", async () => {
+    const failures = await thrown((id) => brokerFail(id, "request_failed", "no scheduler is leading", "no_leader"));
+    expect(failures.map((failure) => failure.reason)).toEqual(["no_leader", "no_leader"]);
+    expect(failures[0]?.message).toBe("no scheduler is leading");
+  });
+
+  test("an enqueue answer that is not a TaskCreated is dropped, not trusted", async () => {
+    const failures = await thrown((id) => brokerOk(id, { ok: "maybe" }));
+    expect(failures[0]).toMatchObject({ reason: "dropped" });
+  });
+
+  test("queue and cancel read a lost answer as null and a malformed one as dropped", async () => {
+    const lost = await schedulerDaemon((id) => brokerOk(id, null));
+    try {
+      const lease = await brokerFleet({ path: lost.path }).open();
+      expect(await lease.scheduler?.queue()).toBeNull();
+      expect(await lease.scheduler?.cancel(TASK.id)).toBeNull();
+    } finally {
+      await lost.stop();
+    }
+    const garbled = await schedulerDaemon((id) => brokerOk(id, { at: "later" }));
+    try {
+      const lease = await brokerFleet({ path: garbled.path }).open();
+      expect(await rejection(lease.scheduler?.queue() ?? Promise.reject(new Error("no leg")))).toMatchObject({
+        reason: "dropped",
+      });
+    } finally {
+      await garbled.stop();
+    }
+  });
+
+  test("accounts read null on any failure and on one unreadable record, never an enqueue failure", async () => {
+    const good = [{ accountId: "org-a:me", alias: "personal", version: 1 }];
+    const answers: [unknown, typeof good | null][] = [
+      [good, good],
+      [[...good, { accountId: 3 }], null],
+      ["nope", null],
+      [null, null],
+    ];
+    for (const [data, expected] of answers) {
+      // oxlint-disable-next-line no-await-in-loop -- one double each
+      const double = await schedulerDaemon((id) => brokerOk(id, data));
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        const lease = await brokerFleet({ path: double.path }).open();
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        expect(await lease.scheduler?.accounts()).toEqual(expected);
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        await double.stop();
+      }
+    }
+    const refusing = await schedulerDaemon((id) => brokerFail(id, "busy", "busy"));
+    try {
+      const lease = await brokerFleet({ path: refusing.path }).open();
+      expect(await lease.scheduler?.accounts()).toBeNull();
+    } finally {
+      await refusing.stop();
+    }
   });
 });

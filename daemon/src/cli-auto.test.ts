@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CAPABILITIES,
   RequestFailure,
@@ -10,12 +13,14 @@ import {
   type SchedulerAvailability,
   type TaskSpec,
 } from "@seance/shared";
+import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
-import { autoFleet, KEYLESS_TEXT, spawnAuto } from "./cli-auto.ts";
+import { brokerFail, brokerOk } from "./broker-protocol.ts";
+import { autoFleet, spawnAuto } from "./cli-auto.ts";
 import type { SpawnCliArgs } from "./cli.ts";
 import type { Config } from "./config.ts";
-import { relayFleet } from "./fleet.ts";
+import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
 
 const ORIGIN = "github.com/m/seance";
 const LEADING = { kind: "ready", deviceId: "device-1", term: 3 } as const;
@@ -158,10 +163,45 @@ function config(overrides: Partial<Config>): Config {
 }
 
 describe("autoFleet", () => {
-  test("a shell that can read no key is refused, never brokered", async () => {
-    const built = await autoFleet(config({ psk: "" }), { stores: [] });
-    expect(built).toEqual({ error: KEYLESS_TEXT });
-    expect(KEYLESS_TEXT).toContain("needs this machine's own key");
+  const KEYLESS_ARGS = { repo: "seance", here: false, prompt: "fix it", auto: true } as const;
+
+  test("a shell that can read no key asks the daemon, and with none running says so", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-cliauto-"));
+    try {
+      const built = await autoFleet(config({ psk: "" }), {
+        stores: [],
+        broker: { path: join(dir, "absent.sock") },
+      });
+      const outcome = await spawnAuto(KEYLESS_ARGS, built.fleet, () => {
+        throw new Error("nothing may be audited");
+      });
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toStartWith("auto: not queued — ");
+      expect(outcome.text).toContain("is seanced running?");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a keyless shell whose daemon predates brokered auto is told to update it, and nothing is enqueued", async () => {
+    const double = await startBrokerDouble((raw, id) => {
+      const action = typeof raw === "object" && raw !== null && "action" in raw ? raw.action : undefined;
+      if (action === "machines") return brokerOk(id, [machine()]);
+      return brokerFail(id, "unsupported", "action is not brokered");
+    });
+    try {
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+      const outcome = await spawnAuto(KEYLESS_ARGS, built.fleet, () => {
+        throw new Error("nothing may be audited");
+      });
+      expect(outcome).toEqual({ ok: false, text: `--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}` });
+      const actions = double.frames.map((frame) =>
+        typeof frame === "object" && frame !== null && "action" in frame ? frame.action : null,
+      );
+      expect(actions).toEqual(["fleet", "machines"]);
+    } finally {
+      await double.stop();
+    }
   });
 
   test("an unreachable relay ends in a clear 'not queued' within the connect bound, with nothing audited", async () => {
@@ -174,7 +214,6 @@ describe("autoFleet", () => {
       stores: [],
       connectTimeoutMs: 300,
     });
-    if ("error" in built) throw new Error(built.error);
     const audited: string[] = [];
     try {
       const outcome = await spawnAuto(

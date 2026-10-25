@@ -1,18 +1,31 @@
-import type {
-  AccountRecord,
-  ErrorResponse,
-  Machine,
-  QueueReply,
-  SchedulerAvailability,
-  StoreRefusal,
-  Task,
-  TaskCreated,
-  TaskReply,
+import {
+  parseAccountRecord,
+  parseQueueReply,
+  parseTaskReply,
+  RequestFailure,
+  type AccountRecord,
+  type ErrorResponse,
+  type Machine,
+  type QueueReply,
+  type SchedulerAvailability,
+  type StoreRefusal,
+  type Task,
+  type TaskCreated,
+  type TaskReply,
 } from "@seance/shared";
-import { AccountCache } from "./account-cache.ts";
-import type { AppRelay, LazyRelay } from "./app-relay.ts";
-import { BrokerError, brokerMachines, brokerRequest, type BrokerCallOpts } from "./broker-client.ts";
-import type { BrokerOp } from "./broker-protocol.ts";
+import { accountCaches } from "./account-cache.ts";
+import type { LazyRelay } from "./app-relay.ts";
+import {
+  BrokerError,
+  brokerFleetState,
+  brokerMachines,
+  brokerRequest,
+  brokerSchedulerCall,
+  isUncertainBrokerCode,
+  type BrokerCallOpts,
+  type SchedulerCall,
+} from "./broker-client.ts";
+import { parseTaskCreated, type BrokerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 
 /**
@@ -54,8 +67,9 @@ export interface FleetLease {
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T | ErrorResponse>;
   /**
-   * Null through the broker: its actions are fixed, and a scheduler one would
-   * widen what a same-uid process can make the daemon send (DESIGN.md "Fleet broker").
+   * Null only through the broker of a daemon that predates brokered scheduler
+   * access (DESIGN.md "Fleet broker"): it answered `fleet` with `unsupported`, or
+   * not at all, so there is nothing to send `auto` through.
    */
   readonly scheduler: SchedulerLeg | null;
   /** Ends the call; the direct transport's idle clock starts from here. */
@@ -69,15 +83,7 @@ export interface Fleet {
 }
 
 export function relayFleet(relay: LazyRelay): Fleet {
-  // Per client: an idle hang-up drops the client, and the next one lists afresh.
-  const caches = new WeakMap<AppRelay, AccountCache>();
-  const cacheOf = (client: AppRelay): AccountCache => {
-    const held = caches.get(client);
-    if (held !== undefined) return held;
-    const cache = new AccountCache(client);
-    caches.set(client, cache);
-    return cache;
-  };
+  const cacheOf = accountCaches();
   return {
     open: async (): Promise<FleetLease> => {
       const client = await relay.acquire();
@@ -100,20 +106,84 @@ export function relayFleet(relay: LazyRelay): Fleet {
 }
 
 /**
- * A fresh `machines` per call rather than a cached registry: the daemon's
+ * Why a keyless box has no `auto`, in one place for MCP and the CLI. Not "the
+ * daemon is old": a `daemon_closed` fallback during a daemon restart lands here
+ * too, so the text names both.
+ */
+export const SCHEDULER_NEEDS_NEWER_DAEMON =
+  "this machine's daemon predates brokered auto, or was restarting — try again; if it persists, `seanced update`, then `seanced restart` if it did not restart itself";
+
+/**
+ * The scheduler through the daemon's broker. `availability` is the snapshot the
+ * lease opened on, the same lifetime as its `machines`.
+ *
+ * Every failure leaves as a `RequestFailure`, never a bare `BrokerError`:
+ * `enqueueAuto` retries `dropped` with the same id (an enqueue is idempotent by
+ * id) and treats anything else as final, and `cancel`'s text words `dropped` as
+ * "may have landed". So a code that can follow a request already sent is
+ * `dropped`, and a pre-send refusal (no daemon, busy, stopping, not brokering)
+ * is `refused` — it must not read as "may have landed".
+ */
+export function brokerScheduler(availability: SchedulerAvailability, opts: BrokerCallOpts = {}): SchedulerLeg {
+  /** `read` answers undefined for data that is not a reply to this op. */
+  const send = async <T>(request: SchedulerCall, read: (data: unknown) => T | undefined): Promise<T> => {
+    try {
+      const data = await brokerSchedulerCall(request, opts);
+      const reply = read(data);
+      if (reply === undefined) throw new BrokerError("bad_reply", "the daemon's answer was not readable");
+      return reply;
+    } catch (err) {
+      if (!(err instanceof BrokerError)) throw err;
+      throw new RequestFailure(isUncertainBrokerCode(err.code) ? "dropped" : "refused", brokerFailureText(err));
+    }
+  };
+  return {
+    availability: () => availability,
+    enqueue: (task) => send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated),
+    queue: () =>
+      send({ schedulerOp: "queue" }, (data) => (data === null ? null : (parseQueueReply(data) ?? undefined))),
+    cancel: (taskId) =>
+      send({ schedulerOp: "cancel", taskId }, (data) => (data === null ? null : (parseTaskReply(data) ?? undefined))),
+    accounts: async () => {
+      try {
+        const data = await brokerSchedulerCall({ schedulerOp: "accounts" }, opts);
+        if (!Array.isArray(data)) return null;
+        const records: AccountRecord[] = [];
+        for (const candidate of data) {
+          const record = parseAccountRecord(candidate);
+          // One unreadable record makes the listing untrustworthy: an alias could be missing from it.
+          if (record === null) return null;
+          records.push(record);
+        }
+        return records;
+      } catch {
+        // As the direct cache reads it: aliases unavailable right now, not a failed enqueue.
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * A fresh `fleet` per call rather than a cached registry: the daemon's
  * connection is the one that stays warm, and asking it is a local round trip.
  * It is also what makes an MCP session that outlives a daemon restart recover
- * on its own — there is nothing here to go stale.
+ * on its own — there is nothing here to go stale. One round trip per lease; a
+ * daemon that predates brokered scheduler access answers `unsupported`, and the
+ * lease falls back to `machines` with no scheduler (`SCHEDULER_NEEDS_NEWER_DAEMON`).
  */
 export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
   return {
-    open: async (): Promise<FleetLease> => ({
-      machines: await brokerMachines(opts),
-      request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
-        brokerRequest<T>(deviceId, op, payload, opts),
-      scheduler: null,
-      release: (): void => {},
-    }),
+    open: async (): Promise<FleetLease> => {
+      const state = await brokerFleetState(opts);
+      return {
+        machines: state.machines,
+        request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
+          brokerRequest<T>(deviceId, op, payload, opts),
+        scheduler: state.scheduler === null ? null : brokerScheduler(state.scheduler, opts),
+        release: (): void => {},
+      };
+    },
     stop: (): void => {},
   };
 }

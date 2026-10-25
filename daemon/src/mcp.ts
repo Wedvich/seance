@@ -67,6 +67,7 @@ import {
   brokerFleet,
   FleetUnreachable,
   relayFleet,
+  SCHEDULER_NEEDS_NEWER_DAEMON,
   selectFleet,
   type Fleet,
   type FleetLease,
@@ -178,7 +179,7 @@ function describeMachine(
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
 ): Record<string, unknown> {
-  // Null when this transport has no view of the scheduler at all (the broker path).
+  // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
   const { source, lastUpdate } = machine;
   return {
@@ -311,14 +312,17 @@ function isAutoRef(ref: string): boolean {
 const AUTO_LIMITS =
   "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins and avoided machines are set with spawn_session's after, until, linear, pin and avoid fields and with queue_batch.";
 
-/** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
+/** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
 type SchedulerTool = "auto" | "queue_batch" | SchedulerCall;
 
-/** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
-function keylessText(op: SchedulerTool): string {
-  const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
-  return `${op} needs this machine's own key; unavailable through the broker${instead}`;
+/**
+ * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
+ * lease with no scheduler leg means that daemon predates it, or was restarting.
+ */
+function olderDaemonText(op: SchedulerTool): string {
+  const instead = op === "auto" ? " — or name a machine instead (list_machines)" : "";
+  return `${op} unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}${instead}`;
 }
 
 /**
@@ -671,9 +675,11 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
  *
- * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): an `auto`
- * enqueue reaches no daemon, so this process records it in the audit log itself,
- * as `seanced spawn` does — never on stdout, the JSON-RPC channel.
+ * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): this process
+ * records its own `auto` enqueue in the audit log, as `seanced spawn` does —
+ * never on stdout, the JSON-RPC channel. When the daemon's broker makes the
+ * enqueue for a keyless process, the daemon adds its own `origin=local-broker`
+ * line beside it.
  */
 export function buildMcpServer(
   fleet: Fleet,
@@ -704,7 +710,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any — an auto task's pin.account takes either, or the account's alias; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any — an auto task's pin.account takes either, or the account's alias; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader.",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -773,7 +779,7 @@ export function buildMcpServer(
     },
     async () =>
       withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("get_queue"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("get_queue"));
         let reply: Awaited<ReturnType<SchedulerLeg["queue"]>>;
         try {
           reply = await lease.scheduler.queue();
@@ -806,7 +812,7 @@ export function buildMcpServer(
     },
     async ({ taskId }) =>
       withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("cancel_task"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("cancel_task"));
         let reply: Awaited<ReturnType<SchedulerLeg["cancel"]>>;
         try {
           reply = await lease.scheduler.cancel(taskId);
@@ -837,7 +843,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (under a pin, only what the pin leaves open), and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (under a pin, only what the pin leaves open), and answers with the task id once it is queued — get_queue shows where it lands and why; it goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()
@@ -904,8 +910,8 @@ export function buildMcpServer(
         const invalid = specError(spec);
         if (invalid !== null) return errorResult(`auto refused: ${invalid}${lengthNote(invalid, until)}`);
         return withFleet(async (lease) => {
-          // Never a fallback: through the broker there is no scheduler leg at all.
-          if (lease.scheduler === null) return errorResult(keylessText("auto"));
+          // Never a fallback: a lease with no scheduler leg belongs to a daemon too old to broker one.
+          if (lease.scheduler === null) return errorResult(olderDaemonText("auto"));
           const leg = { machines: lease.machines, scheduler: lease.scheduler };
           if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
           // Before any account listing: a leader that cannot route on them never gets the fields.
@@ -1103,7 +1109,7 @@ export function buildMcpServer(
         planned.push({ id, ref: member.ref, spec, placement: placement.input });
       }
       return withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("queue_batch"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("queue_batch"));
         const leg = { machines: lease.machines, scheduler: lease.scheduler };
         if (planned.some(({ spec }) => usesReported(spec)) && !leaderTakesReported(leg)) {
           return errorResult(reportedGateError(leg));

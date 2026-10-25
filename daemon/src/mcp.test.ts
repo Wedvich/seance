@@ -6,6 +6,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   CAPABILITIES,
+  isRecord,
   RequestFailure,
   SCHEDULER_ID,
   TASK_FAILURE_LIMITS,
@@ -23,12 +24,14 @@ import {
   type Task,
   type TaskSpec,
 } from "@seance/shared";
+import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine, type FakeRelay } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import type { AuditSink } from "./audit.ts";
 import { BrokerError } from "./broker-client.ts";
+import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } from "./auto.ts";
-import { relayFleet, selectFleet, type Fleet } from "./fleet.ts";
+import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
 import type { reportDone } from "./report-done.ts";
 import {
@@ -1034,37 +1037,46 @@ describe("spawn_session on auto", () => {
     expect(fake.creates).toEqual([]);
   });
 
-  test("through the broker auto is refused outright — nothing goes to the broker or any machine", async () => {
-    const sent: string[] = [];
-    const fleet = selectFleet({
-      key: () => Promise.resolve(null),
-      direct: () => {
-        throw new Error("no key, so no direct path");
-      },
-      broker: {
-        open: () =>
-          Promise.resolve({
-            machines: autoMachines(),
-            request: <T>(deviceId: string, op: string): Promise<T> => {
-              sent.push(`${op}@${deviceId}`);
-              return Promise.reject(new Error("must not be sent"));
-            },
-            scheduler: null,
-            release: () => {},
-          }),
-        stop: () => {},
-      },
-    });
-    const client = await connectedClient(fleet, fakeLocal());
-    const spawned = await client.callTool({ name: "spawn_session", arguments: { machine: "auto", repo: "seance" } });
-    expect(spawned.isError).toBe(true);
-    expect(toolText(spawned)).toBe(
-      "auto needs this machine's own key; unavailable through the broker — name a machine instead (list_machines)",
+  test("through a daemon that predates brokered auto, the scheduler tools say to update it — and machines still list", async () => {
+    // What a daemon from before the `fleet` action does: `unsupported`, then `machines` as ever.
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "machines"
+        ? brokerOk(id, autoMachines())
+        : brokerFail(id, "unsupported", "action is not brokered"),
     );
-    const queue = await client.callTool({ name: "get_queue", arguments: {} });
-    expect(queue.isError).toBe(true);
-    expect(toolText(queue)).toBe("get_queue needs this machine's own key; unavailable through the broker");
-    expect(sent).toEqual([]);
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const tasks: Record<string, Record<string, unknown>> = {
+        spawn_session: { machine: "auto", repo: "seance" },
+        queue_batch: { strategy: "auto", tasks: [{ repo: "seance", prompt: "do it" }] },
+        get_queue: {},
+        cancel_task: { taskId: "t-1" },
+      };
+      for (const [name, args] of Object.entries(tasks)) {
+        // oxlint-disable-next-line no-await-in-loop -- one tool at a time keeps the double's frame order readable
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBe(true);
+        expect(toolText(result)).toContain(SCHEDULER_NEEDS_NEWER_DAEMON);
+      }
+      expect(
+        toolText(await client.callTool({ name: "spawn_session", arguments: { machine: "auto", repo: "seance" } })),
+      ).toEndWith("— or name a machine instead (list_machines)");
+      const listed = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(listed.isError).not.toBe(true);
+      expect(toolText(listed)).toContain("Linux Box");
+      // Nothing but the registry probes ever reached the daemon: no enqueue, no queue read, no request.
+      const sent = double.frames.map((frame) => (isRecord(frame) ? frame["action"] : null));
+      expect(sent.every((action) => action === "fleet" || action === "machines")).toBe(true);
+    } finally {
+      await double.stop();
+    }
   });
 
   test("auto beats a local machine named auto, which stays reachable by deviceId", async () => {
