@@ -142,6 +142,13 @@ describe("encryptPayload", () => {
     expect(await decrypt(b, point, d, authBytes)).toEqual(plaintext);
   });
 
+  test("refuses an injected salt that is not 16 bytes", async () => {
+    for (const length of [0, 15, 17]) {
+      // oxlint-disable-next-line no-await-in-loop -- one length per case
+      await expect(encryptPayload(sub, text.encode("x"), { salt: new Uint8Array(length) })).rejects.toThrow("16 bytes");
+    }
+  });
+
   test("refuses a payload past the bound, and accepts one at it", async () => {
     await expect(encryptPayload(sub, new Uint8Array(PUSH_ALERT_MAX_BYTES + 1))).rejects.toThrow("size bound");
     const body = await encryptPayload(sub, new Uint8Array(PUSH_ALERT_MAX_BYTES));

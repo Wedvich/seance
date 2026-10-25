@@ -30,6 +30,9 @@ const utf8 = new TextEncoder();
 /** One 4096-byte record (RFC 8188): the header names it, and a payload this small never needs a second. */
 const RECORD_SIZE = 4096;
 
+/** RFC 8188's salt: the first 16 bytes of the header. */
+const SALT_BYTES = 16;
+
 /** The header's `keyid` is the sender's public key: an uncompressed P-256 point. */
 const POINT_BYTES = 65;
 
@@ -71,7 +74,9 @@ export async function encryptPayload(
   const auth = fromBase64Url(sub.keys.auth);
   const ephemeral =
     opts.ephemeral ?? (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]));
-  const salt = opts.salt ?? crypto.getRandomValues(new Uint8Array(16));
+  const salt = opts.salt ?? crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  // The header holds exactly this many, so a shorter or longer one would frame a body no browser opens.
+  if (salt.length !== SALT_BYTES) throw new Error("the push salt must be 16 bytes");
   const asPublic = new Uint8Array(await crypto.subtle.exportKey("raw", ephemeral.publicKey));
   const uaKey = await crypto.subtle.importKey("raw", uaPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
   const secret = new Uint8Array(
@@ -84,9 +89,9 @@ export async function encryptPayload(
   // 0x02 closes the last (here the only) record.
   const record = concat(plaintext, new Uint8Array([2]));
   const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aes, record));
-  const header = new Uint8Array(16 + 4 + 1);
+  const header = new Uint8Array(SALT_BYTES + 4 + 1);
   header.set(salt);
-  new DataView(header.buffer).setUint32(16, RECORD_SIZE);
+  new DataView(header.buffer).setUint32(SALT_BYTES, RECORD_SIZE);
   header[20] = POINT_BYTES;
   return concat(header, asPublic, cipher);
 }
