@@ -126,16 +126,18 @@ export function schedulerRefusal(scheduler: SchedulerAvailability): RequestFailu
   return null;
 }
 
+/**
+ * What did not answer: a store frame's timeout blames the relay, not a machine.
+ * `daemon` is a keyless peer's own daemon (the fleet broker) failing, before
+ * or after it sent anything on — never a relay's or a machine's doing.
+ */
+export type RequestFailureTarget = "machine" | "relay" | "daemon";
+
 export class RequestFailure extends Error {
   constructor(
     readonly reason: FailureReason,
     message: string,
-    /**
-     * What did not answer: a store frame's timeout blames the relay, not a machine.
-     * `daemon` is a keyless peer's own daemon (the fleet broker) failing, before
-     * or after it sent anything on — never a relay's or a machine's doing.
-     */
-    readonly target: "machine" | "relay" | "daemon" = "machine",
+    readonly target: RequestFailureTarget = "machine",
   ) {
     super(message);
     this.name = "RequestFailure";

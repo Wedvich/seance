@@ -8,6 +8,7 @@ import {
   STORE_TIMEOUT_MS,
   type FailureReason,
   type Machine,
+  type RequestFailureTarget,
   type SchedulerAvailability,
   type StoreRefusal,
   type TaskCreated,
@@ -151,7 +152,7 @@ export type BrokerReply =
     };
 
 /** What a relay-side failure blames; the broker carries it, and a `daemon` target is only ever minted peer-side. */
-export type RelayFailureTarget = "machine" | "relay";
+export type RelayFailureTarget = Exclude<RequestFailureTarget, "daemon">;
 
 function isRelayFailureTarget(value: unknown): value is RelayFailureTarget {
   return value === "machine" || value === "relay";
