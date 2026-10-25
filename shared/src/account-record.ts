@@ -5,6 +5,7 @@ import {
   type AccountRecord,
   type Envelope,
   type RecordUnreadable,
+  type ExclaveInfo,
   type StoreRecord,
 } from "./types.ts";
 import { parseAccountRecord } from "./parse.ts";
@@ -23,16 +24,95 @@ export async function accountStoreKey(accountKey: CryptoKey, accountId: string):
   return `${STORE_PREFIXES.account.prefix}${hex}`;
 }
 
+/** A signed-in account as the registry reports it: what a label is built from, display only. */
+export interface KnownAccount {
+  readonly accountId: string;
+  readonly email: string | undefined;
+}
+
 /**
- * What an account is called to a person: its alias, else its email, else the
- * account half of `organizationUuid:accountUuid` shortened — enough to tell two
- * apart. Every client's one rule. Display only, never a key.
+ * The accounts a client knows: every one some machine's exclave reports signed
+ * in, once each, with the first email any of them reports (one account has one).
+ * `extraIds` are accounts a screen names that no machine reports (a pin, a
+ * hold): kept with no email, so a label rule sees them as twins too; the
+ * registry's entry wins for the email.
  */
-export function accountName(accountId: string, email: string | undefined, alias?: string): string {
-  if (alias !== undefined) return alias;
+export function knownAccounts(
+  machines: readonly { readonly exclaves?: readonly ExclaveInfo[] }[],
+  extraIds: Iterable<string> = [],
+): KnownAccount[] {
+  const known = new Map<string, KnownAccount>();
+  for (const machine of machines) {
+    for (const { accountId, email } of machine.exclaves ?? []) {
+      if (accountId === null) continue;
+      const held = known.get(accountId);
+      if (held === undefined || held.email === undefined) known.set(accountId, { accountId, email });
+    }
+  }
+  for (const accountId of extraIds) {
+    if (!known.has(accountId)) known.set(accountId, { accountId, email: undefined });
+  }
+  return [...known.values()];
+}
+
+function fallbackName(accountId: string, email: string | undefined): string {
   if (email !== undefined) return email;
   const account = accountId.split(":").at(-1) ?? accountId;
   return `acct ${account.slice(0, 8)}`;
+}
+
+// Case-folded: `daemon/src/auto.ts` matches a pin's email case-insensitively, so two emails
+// differing in case are one person's one name here too.
+const nameKey = (accountId: string, email: string | undefined): string => fallbackName(accountId, email).toLowerCase();
+
+const orgHalf = (accountId: string): string => {
+  const colon = accountId.lastIndexOf(":");
+  return colon < 0 ? "" : accountId.slice(0, colon);
+};
+
+/**
+ * The tag that tells an account from its twins (others reading the same): the org
+ * half's first eight characters; the whole org half where a twin's would match;
+ * the whole account id where a twin shares the org half (two accounts of one org
+ * whose account halves share a prefix) or there is no org half to name.
+ */
+function twinTag(accountId: string, twins: readonly KnownAccount[]): string {
+  const org = orgHalf(accountId);
+  if (org === "" || twins.some((twin) => orgHalf(twin.accountId) === org)) return `id ${accountId}`;
+  const short = org.slice(0, 8);
+  return twins.some((twin) => orgHalf(twin.accountId).slice(0, 8) === short) ? `org ${org}` : `org ${short}`;
+}
+
+/**
+ * What an account is called to a person: its alias, else its email, else the
+ * account half of `organizationUuid:accountUuid` shortened. Every client's one
+ * rule. Display only, never a key.
+ *
+ * One person on a personal plan and a Team org has one email and one account
+ * half under two org halves, so where another account in `known` would read
+ * the same (case aside) a tag is appended that tells them apart: the org half's
+ * first eight characters, longer where that would still collide. An alias is per
+ * account and left alone, but `known` carries none, so an aliased account's
+ * unaliased twin is tagged all the same: the label of one account then reads
+ * alike in the PWA and in `seanced mcp`, which shows no alias.
+ */
+export function accountName(
+  accountId: string,
+  email: string | undefined,
+  alias?: string,
+  known: readonly KnownAccount[] = [],
+): string {
+  if (alias !== undefined) return alias;
+  const name = fallbackName(accountId, email);
+  const key = name.toLowerCase();
+  const twins = known.filter((other) => other.accountId !== accountId && nameKey(other.accountId, other.email) === key);
+  return twins.length === 0 ? name : `${name} (${twinTag(accountId, twins)})`;
+}
+
+/** `accountName` for an id alone, its email whatever `known` reports for it. */
+export function accountNameIn(known: readonly KnownAccount[], accountId: string, alias?: string): string {
+  const email = known.find((account) => account.accountId === accountId)?.email;
+  return accountName(accountId, email, alias, known);
 }
 
 /**

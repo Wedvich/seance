@@ -2814,6 +2814,14 @@ alias, and Raycast reads none.
 - **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
   clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
   pause holds: alias, else email, else `acct` and the first eight characters of the account half.
+  One person on a personal plan and a Team org has one email and one account half under two org
+  halves, so where another account the registry reports would read the same, the email or short id
+  gains `(org <first eight of the org half>)` (the whole org half where that still collides, the
+  whole account id where twins share the org half; twins found case-insensitively, and an account
+  a screen names that no machine reports counts as one); an alias is per account and never gains
+  one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
+  same and one account's label reads alike in the PWA and in `seanced mcp`, which shows no alias
+  (`accountName` in `shared/src/account-record.ts`, the rule every client shares).
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -5061,7 +5069,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     bucket is per socket and shared in effect with the PWA. So `AccountCache` (`daemon/src/account-cache.ts`)
     lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
     reopen, and only an account pin asks. `get_queue` and `list_machines` spend no listing: they
-    label an account by the email a registry entry reports, else a short id. A refused or lost
+    label an account by the email a registry entry reports, else a short id (org-tagged as the PWA's
+    where two read the same), never an alias — one would show only while a pin's listing happened
+    to be cached, so a label would flip between calls. `get_queue` names a pin's account and an
+    account pause hold's alike, label beside `accountId`. A refused or lost
     listing is not cached and says aliases are unavailable right now, asking for an email or id —
     never that the account is unknown.
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
