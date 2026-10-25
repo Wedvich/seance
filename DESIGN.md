@@ -2236,11 +2236,18 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     worked it shows off, and the op's answer arrives later as the note (`disablePush` hands it
     back as a promise; a note from an earlier click never overwrites a later one). Only a browser
     that kept its subscription waits for the op, since then the leader dropping the endpoint is
-    what turns it off. A `not_ready` or `conflict` answer is asked again, at most four attempts
-    with a 1 s doubling backoff, so the slot frees now rather than at the next 404/410; a timeout,
-    `invalid_request` or `settings_unavailable` is not (a timed-out op may have landed, and the
-    others will not change). The retry stops once Enable clears the turn-off mark, since a push
-    service that reissued the same endpoint would have the new subscription dropped. A failed
+    what turns it off; there the card can wait through the retries, at worst three `not_ready`
+    round trips, 7 s of backoff and a final op of up to 10 s. Only `not_ready` and `conflict` are
+    asked again, at most four attempts with a 1 s doubling backoff, so the slot frees now rather
+    than at the next 404/410; every other answer is final (`invalid_request`,
+    `settings_unavailable`, `internal_error`, an unknown code, an answer the app cannot read, a
+    timeout or a throw: a timed-out op may have landed, and the others will not change). The
+    retry stops when the card aborts the turn-off (Enable, Try again or a second Turn off), by an
+    in-memory `AbortSignal` checked after each backoff, not by the opt-out mark, which reads
+    false throughout when storage is blocked. Leaving Settings does not abort: freeing the slot is
+    still wanted. An op already sent cannot be recalled, so an attempt in flight when Enable runs
+    can still drop a new subscription if the push service reissued the same endpoint; the
+    re-sync on the next load repairs it. A failed
     op, or a leader that predates it (`invalid_request`, after the same
     `pushEndpoint` pre-check), leaves the browser off and the endpoint in the record until
     the push service answers 404/410 for it, which the sender then prunes; the card says so. An

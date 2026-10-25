@@ -442,7 +442,15 @@ describe("disablePush", () => {
       expect(calls.unsubscribed).toEqual([ENDPOINT]);
       expect(calls.optedOut).toEqual([true]);
       if (outcome.kind !== "disabled") throw new Error(`expected disabled, got ${outcome.kind}`);
-      return (await outcome.note) ?? "";
+      const note = (await outcome.note) ?? "";
+      // Only a not_ready is asked again, up to the bound; every other answer is final.
+      const retryable =
+        unsubscribeReply !== null &&
+        !(unsubscribeReply instanceof Error) &&
+        "code" in unsubscribeReply &&
+        unsubscribeReply.code === "not_ready";
+      expect(calls.unsubscribeSent).toHaveLength(retryable ? 4 : 1);
+      return note;
     };
     const older = await offWith({ ok: false, code: "invalid_request", message: "raw" });
     expect(older).toContain("older version");
@@ -451,6 +459,7 @@ describe("disablePush", () => {
       new RequestFailure("timeout", "no answer"),
       { ok: false, code: "not_ready", message: "raw" },
       { ok: false, code: "settings_unavailable", message: "raw" },
+      { ok: false, code: "internal_error", message: "raw" },
     ] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one harness per case
       const note = await offWith(reply);
@@ -527,6 +536,7 @@ describe("disablePush", () => {
 
   test("the note arrives once the leader answers, after the outcome already said off", async () => {
     const gate = Promise.withResolvers<void>();
+    let opened = false;
     const { client, env } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
       unsubscribeReply: { ok: false, code: "invalid_request", message: "raw" },
@@ -538,8 +548,10 @@ describe("disablePush", () => {
     void outcome.note.then((line) => {
       note = line;
     });
-    await Promise.resolve();
+    // The outcome resolved while the op was still held, so it did not wait for the answer.
+    expect(opened).toBe(false);
     expect(note).toBeUndefined();
+    opened = true;
     gate.resolve();
     expect(await outcome.note).toContain("older version");
     expect(note).toContain("older version");
@@ -571,10 +583,43 @@ describe("disablePush", () => {
     expect(racingClock.waits).toEqual([1_000, 2_000, 4_000]);
   });
 
+  test("a browser that kept its subscription is off after a retry freed the slot, and failed when four conflicts leave it", async () => {
+    const notReady: PushUnsubscribeReply = { ok: false, code: "not_ready", message: "raw" };
+    const retried = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      local: false,
+      unsubscribeReplies: [notReady, { endpoint: ENDPOINT }],
+    });
+    const clock = instantTimer();
+    expect(await settled(disablePush(retried.client, retried.env, { setTimer: clock.setTimer }))).toEqual({
+      kind: "disabled",
+      note: null,
+    });
+    expect(retried.calls.unsubscribeSent).toEqual([ENDPOINT, ENDPOINT]);
+    expect(clock.waits).toEqual([1_000]);
+
+    const racing = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      local: false,
+      optedOut: false,
+      unsubscribeReply: { ok: false, code: "conflict", message: "raw" },
+    });
+    const racingClock = instantTimer();
+    expect(await disablePush(racing.client, racing.env, { setTimer: racingClock.setTimer })).toEqual({
+      kind: "failed",
+      message: "This browser couldn't turn push off. Try again.",
+      retryable: true,
+    });
+    expect(racing.calls.unsubscribeSent).toHaveLength(4);
+    expect(racing.calls.optedOut).toEqual([true, false]);
+    expect(racing.env.optedOut()).toBe(false);
+  });
+
   test("an older leader, unreadable settings or a timeout are not asked again", async () => {
     for (const reply of [
       { ok: false, code: "invalid_request", message: "raw" },
       { ok: false, code: "settings_unavailable", message: "raw" },
+      { ok: false, code: "internal_error", message: "raw" },
       new RequestFailure("timeout", "no answer"),
     ] as const) {
       const { client, env, calls } = harness({
@@ -595,19 +640,39 @@ describe("disablePush", () => {
       unsubscribeReplies: [{ ok: false, code: "not_ready", message: "raw" }, { endpoint: ENDPOINT }],
     });
     const fire = Promise.withResolvers<() => void>();
-    const outcome = await disablePush(client, env, {
-      setTimer: (run) => {
-        fire.resolve(run);
-        return () => {};
+    const controller = new AbortController();
+    const outcome = await disablePush(
+      client,
+      env,
+      {
+        setTimer: (run) => {
+          fire.resolve(run);
+          return () => {};
+        },
       },
-    });
+      controller.signal,
+    );
     if (outcome.kind !== "disabled") throw new Error(`expected disabled, got ${outcome.kind}`);
     const run = await fire.promise;
-    // Enable cleared the turn-off; a push service may hand the new subscription the same endpoint.
+    // Enable aborts the turn-off; a push service may hand the new subscription the same endpoint.
+    controller.abort();
     expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
     run();
     expect(await outcome.note).toContain("Couldn't tell the scheduler leader");
     expect(calls.unsubscribeSent).toEqual([ENDPOINT]);
+  });
+
+  test("the retry still runs when storage is blocked and the opt-out mark never reads true", async () => {
+    const { client, env, calls } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      unsubscribeReplies: [{ ok: false, code: "not_ready", message: "raw" }, { endpoint: ENDPOINT }],
+    });
+    const blocked: PushEnv = { ...env, optedOut: () => false, setOptedOut: () => {} };
+    const clock = instantTimer();
+    expect(
+      await settled(disablePush(client, blocked, { setTimer: clock.setTimer }, new AbortController().signal)),
+    ).toEqual({ kind: "disabled", note: null });
+    expect(calls.unsubscribeSent).toEqual([ENDPOINT, ENDPOINT]);
   });
 
   test("off, inspected and enabled again on one browser: it subscribes anew and the re-sync is back", async () => {

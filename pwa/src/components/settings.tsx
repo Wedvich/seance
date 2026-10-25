@@ -178,6 +178,12 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     setNote(null);
     return noteGeneration.current;
   };
+  // Cancels the slot-freeing retries of the last turn-off. Not aborted on unmount: freeing the slot is still wanted after the person leaves Settings.
+  const turnOff = useRef<AbortController | null>(null);
+  const cancelTurnOff = (): void => {
+    turnOff.current?.abort();
+    turnOff.current = null;
+  };
   const checking = view.kind === "checking";
   // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
   useEffect(() => {
@@ -198,6 +204,7 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const enable = (): void => {
     const ready = prepared.current;
     prepared.current = null;
+    cancelTurnOff();
     clearNote();
     setView({ kind: "working" });
     // `enablePush` never rejects; the catch is for a throw it did not foresee, so the card cannot stick on "Setting up…".
@@ -209,9 +216,12 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   // browser holds no subscription by then (or the op already answered), so the leader's answer changes nothing it reads.
   const disable = (): void => {
     prepared.current = null;
+    cancelTurnOff();
+    const controller = new AbortController();
+    turnOff.current = controller;
     const generation = clearNote();
     setView({ kind: "stopping" });
-    disablePush(push, browserPushEnv)
+    disablePush(push, browserPushEnv, {}, controller.signal)
       .catch((): PushOffOutcome => ({ kind: "failed", message: "Couldn't turn notifications off.", retryable: false }))
       .then((outcome) => {
         if (outcome.kind === "failed") {
@@ -230,6 +240,7 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   };
   const retry = (): void => {
     if (view.kind !== "failed") return;
+    cancelTurnOff();
     clearNote();
     if (view.retry === "inspect") setView({ kind: "checking" });
     else if (view.retry === "disable") disable();

@@ -304,14 +304,15 @@ const FREE_SLOT_BACKOFF_MS = 1_000;
  * The leader's answer to `push-unsubscribe` as the card's note: null when it dropped the endpoint.
  * A refusal that may change (`not_ready`, `conflict`) is asked again after a doubling backoff, so
  * the slot frees now rather than at the push service's next 404/410; a timeout is not, since the
- * op may have landed. Stops once the browser is no longer marked turned off: Enable ran, and a
- * push service that reissued the same endpoint would have the new subscription dropped. Never rejects.
+ * op may have landed. Stops once `signal` aborts (Enable ran, and a push service that reissued the
+ * same endpoint would have the new subscription dropped); an in-memory signal rather than the
+ * opt-out mark, which reads false throughout when storage is blocked. Never rejects.
  */
 async function freeSlot(
   client: PushClient,
-  env: PushEnv,
   endpoint: string,
   tuning: RetryTuning,
+  signal: AbortSignal | undefined,
 ): Promise<string | null> {
   const maxAttempts = tuning.maxAttempts ?? FREE_SLOT_ATTEMPTS;
   const backoffMs = tuning.backoffMs ?? FREE_SLOT_BACKOFF_MS;
@@ -330,7 +331,7 @@ async function freeSlot(
       await new Promise<void>((resolve) => {
         setTimer(resolve, backoffMs * 2 ** (attempt - 1));
       });
-      if (!env.optedOut()) return SLOT_KEPT;
+      if (signal?.aborted === true) return SLOT_KEPT;
     }
   } catch {
     return SLOT_KEPT;
@@ -345,9 +346,15 @@ async function freeSlot(
  * and the op's answer arrives as `note`; only a browser that kept its subscription waits for the
  * op, since then the leader dropping the endpoint is what turns it off. Marks the browser turned
  * off before anything can fail, so a re-sync in flight or on the next load does not subscribe it
- * again, and puts the mark back when the turn-off failed with nothing changed. Never rejects.
+ * again, and puts the mark back when the turn-off failed with nothing changed. `signal` cancels the
+ * slot-freeing retries. Never rejects.
  */
-export async function disablePush(client: PushClient, env: PushEnv, tuning: RetryTuning = {}): Promise<PushOffOutcome> {
+export async function disablePush(
+  client: PushClient,
+  env: PushEnv,
+  tuning: RetryTuning = {},
+  signal?: AbortSignal,
+): Promise<PushOffOutcome> {
   const wasOptedOut = env.optedOut();
   env.setOptedOut(true);
   // The browser still pushes, so the person has not opted out of the re-sync.
@@ -373,7 +380,7 @@ export async function disablePush(client: PushClient, env: PushEnv, tuning: Retr
   if (endpoint === null) {
     return unsubscribed ? { kind: "disabled", note: Promise.resolve(null) } : unchanged(NOT_UNSUBSCRIBED);
   }
-  const note = freeSlot(client, env, endpoint, tuning);
+  const note = freeSlot(client, endpoint, tuning, signal);
   if (unsubscribed) return { kind: "disabled", note };
   // A browser that kept its subscription is still off once the leader dropped the endpoint: nothing sends to it.
   if ((await note) === null) return { kind: "disabled", note };
