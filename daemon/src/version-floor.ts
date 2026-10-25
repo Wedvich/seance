@@ -7,13 +7,14 @@ import { stateDir } from "./paths.ts";
 
 /**
  * The leader's version floor (DESIGN.md, threat model, "Relay compromise"):
- * the highest version this process has seen or written at each `task:` key and
- * at `queue:pause`. Version binding stops a token holder putting an old blob
- * back, because the relay counts versions; it cannot stop the relay itself
+ * the highest version this process has seen or written at each `task:` key, at
+ * `queue:pause` and at `settings:main`. Version binding stops a token holder
+ * putting an old blob back, because the relay counts versions; it cannot stop the relay itself
  * answering a read with an authentic old blob at that blob's own version. Below
  * the floor such a record reads `version_regressed` (`flooredStore` in
  * `queue-store.ts`), so a task rolled back is never admitted or dispatched
- * again, and a pause rolled back holds the whole queue.
+ * again, a pause rolled back holds the whole queue, and a settings record rolled
+ * back reads `version_regressed` (`settings-store.ts`), so push goes off.
  *
  * One per process, like `schedulerGuard` in `run.ts`: the relay chooses which
  * term a read reaches, so a floor per term would let it roll back under the
@@ -259,7 +260,7 @@ export class VersionFloor {
         ? ([id, floor.version, floor.at] as const)
         : ([id, floor.version, floor.at, floor.mark] as const);
     });
-    // Left out at 0, so the file is byte-identical for a daemon that never led.
+    // Left out at 0, so the file is byte-identical for a leader that never saw a settings record.
     const file: FloorFile = {
       v: FLOOR_VERSION,
       pause: this.#pause,
