@@ -221,6 +221,12 @@ describe("filter", () => {
         "(see /ship)",
         "/ship\nmore",
         "a\n/ship.",
+        "/ship: release 1.2",
+        "run `/ship`",
+        '"/ship"',
+        "(/ship)",
+        "[/ship]",
+        "'/ship'",
       ]) {
         expect(reasonsBy(decide([skilled()], { task: task({ spec: spec({ prompt }) }) }))).toEqual({
           main: [],
@@ -247,6 +253,46 @@ describe("filter", () => {
           alt: [],
         });
       }
+    });
+
+    test("a plugin:name token keeps its colon mid-token", () => {
+      const plugin = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["plug:ship"] }), exclave("alt", "org:b")],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)] }),
+      });
+      const decision = decide([plugin], { task: task({ spec: spec({ prompt: "run /plug:ship now" }) }) });
+      expect(reasonsBy(decision)).toEqual({ main: [], alt: ["skill_absent"] });
+    });
+
+    test("every known token is required; skill_absent names the first one missing in prompt order", () => {
+      const fleet = machine("a", {
+        exclaves: [
+          exclave("a", "org:a", { skills: ["ship"] }),
+          exclave("b", "org:b", { skills: ["ship"] }),
+          exclave("c", "org:c"),
+        ],
+        repos: [
+          { ...clone("app-a", "a"), skills: ["deploy"] },
+          clone("app-b", "b"),
+          { ...clone("app-c", "c"), skills: ["deploy"] },
+        ],
+        status: status({ quota: [obs(0), obs(1), obs(2)] }),
+      });
+      const decision = decide([fleet], { task: task({ spec: spec({ prompt: "/ship then /deploy" }) }) });
+      expect(byExclave(decision, "a")?.rejected).toEqual([]);
+      expect(byExclave(decision, "b")?.rejected).toEqual([{ code: "skill_absent", skill: "deploy" }]);
+      expect(byExclave(decision, "c")?.rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    });
+
+    test("the clone with every required skill is chosen over the first match", () => {
+      const project = machine("a", {
+        exclaves: [exclave("main", "org:a", { skills: ["ship"] })],
+        repos: [clone("app", "main"), { ...clone("app-2", "main"), skills: ["deploy"] }],
+        status: status({ quota: [obs(0)] }),
+      });
+      const decision = decide([project], { task: task({ spec: spec({ prompt: "/ship then /deploy" }) }) });
+      expect(decision.chosen?.clone).toBe("app-2");
     });
 
     test("an earlier unknown token does not mask a later known one", () => {
