@@ -1374,15 +1374,19 @@ describe("leader disk alerts", () => {
       version: 1,
       record: { version: 1, vapid: await generateVapidKeys(), subscriptions: [sub] },
     };
+    let gets = 0;
     const store: SettingsStore = {
-      get: async () => held,
+      get: async () => {
+        gets += 1;
+        return held;
+      },
       put: async (at, record) => {
         if (held === null || held.version !== at) return { ok: false, code: "version_conflict" };
         held = { version: at + 1, record: { ...record, version: at + 1 } };
         return { ok: true, version: at + 1 };
       },
     };
-    return { store, diskAlerts: () => held?.record?.diskAlerts };
+    return { store, gets: () => gets, diskAlerts: () => held?.record?.diskAlerts };
   };
 
   test("a nearly full disk is pushed once and recorded; a later term repeats nothing, and recovery re-arms it", async () => {
@@ -1405,6 +1409,8 @@ describe("leader disk alerts", () => {
         leader.lead(2);
         await pollUntil(() => leader.term() === 2, "the second term");
         await leader.settled();
+        // The term's own settings load is what its disk check follows; without it the sleep below proves nothing.
+        await pollUntil(() => settings.gets() >= 2, "the second term's settings load");
         await Bun.sleep(300);
         expect(push.requests()).toHaveLength(1);
 

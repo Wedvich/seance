@@ -2251,11 +2251,18 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     The alert is persisted per device in the settings record (`diskAlerts`, `{deviceId, at}`,
     at most `DISK_ALERTS_MAX` = 64), so a new leader does not repeat it, and it re-arms only
     when the machine reads under 85% used with at least 2 GiB free — a gap that stops a disk
-    hovering at the threshold from alerting each tick. A stale or absent reading neither alerts
-    nor re-arms, and an entry for a machine that left the registry is dropped on the next
-    write. The write goes first, through the holder's serialised `update` (recomputing on a
-    re-read record, so a lost race never double-alerts), and the push is raised only once it
-    landed: a refused write costs a later retry, never a repeat. The watch runs on a registry
+    hovering at the threshold from alerting each tick. A stale or absent reading, or one with
+    neither `disk` nor `free`, neither alerts nor re-arms, and an entry for a machine that left
+    the registry is dropped on the next write. The list is capped at `DISK_ALERTS_MAX` on every
+    write (the oldest entries go), so a big fleet cannot make the record one a reader refuses;
+    a machine pushed out while still full alerts again. The write goes first, through the
+    holder's serialised `update` (recomputing on a re-read record, so a lost race never
+    double-alerts), and the push is raised only once it landed: a refused write costs a later
+    retry, never a repeat. A write whose answer was lost (`indeterminate`) may have committed,
+    and the recompute would then see the machine held and never push: the watch keeps that
+    write's alerts as pending, and its next check writes even a no-op, so a landed write shows
+    as a conflict whose re-read record holds the device at the alert's own `at`, and the alert is
+    raised then; one the record does not hold never landed, and the step raises it afresh. The watch runs on a registry
     change, on the tick timer and once the settings read lands; one log line,
     `scheduler: disk nearly full: device=<id>`.
   - **Not built:** an unsubscribe op or a way to remove one from the PWA (a subscription leaves
@@ -4866,7 +4873,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
   the percent (docs/scheduler.md, Settled defaults 6); the gauge turns red under that same
   floor (`MIN_FREE_MIB`) whatever its percent, so a card never shows amber for a machine
-  routing has dropped. `disk_pct` also feeds M4's health alert. The chart is inline SVG geometry (`chart.ts`), no charting
+  routing has dropped. The leader's disk push (Scheduler, "Web Push", "Disk alerts") reads the same figure from the live `status`, not from this history. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
   missing ink), and a point alone between two breaks is a dot — a laptop in clamshell

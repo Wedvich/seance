@@ -1,10 +1,12 @@
 import {
+  DISK_ALERTS_MAX,
   isStatusStale,
   liveStatus,
   MIN_FREE_MIB,
   type DiskAlerted,
   type Machine,
   type PushAlert,
+  type SettingsRecord,
 } from "@seance/shared";
 import type { TermSettings } from "./settings.ts";
 
@@ -47,6 +49,8 @@ export function diskAlertStep(
     // A stale or absent reading says nothing: neither an alert nor a recovery.
     if (status === undefined || isStatusStale(status, now)) continue;
     const { disk, free } = status;
+    // No figure at all (an older daemon's status) says nothing either: it must not re-arm a held machine.
+    if (disk === undefined && free === undefined) continue;
     const full = (disk !== undefined && disk >= DISK_ALERT_PCT) || (free !== undefined && free < MIN_FREE_MIB);
     if (full && !held.has(machine.deviceId)) {
       held.set(machine.deviceId, { deviceId: machine.deviceId, at: now });
@@ -63,7 +67,10 @@ export function diskAlertStep(
     const recovered = (disk === undefined || disk < DISK_REARM_PCT) && (free === undefined || free >= 2 * MIN_FREE_MIB);
     if (!full && recovered) held.delete(machine.deviceId);
   }
-  const next = [...held.values()];
+  // Past the cap the oldest alerts go (`held` keeps insertion order): the record must stay one a reader
+  // accepts. A machine dropped while still full alerts again at the next check; a fleet that size is no real one.
+  const kept = [...held.values()];
+  const next = kept.length > DISK_ALERTS_MAX ? kept.slice(-DISK_ALERTS_MAX) : kept;
   const unchanged = next.length === alerted.length && next.every((entry, i) => entry === alerted[i]);
   return { alerts, next: unchanged ? null : next };
 }
@@ -93,10 +100,21 @@ export interface DiskWatch {
  * scheduler's own are (a repeat after a lost write would be worse than the
  * next check's recompute); the step is re-applied to whatever record a
  * conflict re-reads, so it never writes over another term's list.
+ *
+ * A write whose answer was lost (`indeterminate`) may have committed, and the
+ * recompute would then find the machine already held and never alert. Its
+ * alerts are kept as `pending`, and the next check settles them: it writes even
+ * a no-op, so the store answers a conflict if the first write did land, and the
+ * record that conflict re-reads is what shows it. A pending alert is raised once
+ * that record holds its device at the alert's own `at`; one it does not hold
+ * never landed, and the step raises it afresh.
  */
 export function createDiskWatch(o: DiskWatchOpts): DiskWatch {
   let busy = false;
   let checkedAt = Number.NEGATIVE_INFINITY;
+  let pending: readonly PushAlert[] = [];
+  const holds = (record: SettingsRecord, alert: PushAlert): boolean =>
+    alert.kind === "disk" && (record.diskAlerts ?? []).some((e) => e.deviceId === alert.deviceId && e.at === alert.at);
   return {
     check: (debounce) => {
       const settings = o.settings();
@@ -105,20 +123,30 @@ export function createDiskWatch(o: DiskWatchOpts): DiskWatch {
       if (debounce && at - checkedAt < o.minGapMs) return;
       checkedAt = at;
       const held = settings.current();
-      if (held === null || diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null) return;
+      if (held === null) return;
+      if (pending.length === 0 && diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null) return;
       busy = true;
+      const unsettled = pending;
       let raised: readonly PushAlert[] = [];
+      // Earlier lost writes' alerts that the record the step last saw holds: they did land.
+      let confirmed: readonly PushAlert[] = [];
       settings
         .update((record) => {
+          confirmed = unsettled.filter((alert) => holds(record, alert));
           const step = diskAlertStep(o.machines(), record.diskAlerts ?? [], at);
           raised = step.alerts;
-          if (step.next === null) return null;
-          const { version: _version, diskAlerts: _held, ...rest } = record;
+          const { version: _version, ...body } = record;
+          // Nothing to change, but an unsettled alert is still to be told from a lost write: write anyway.
+          if (step.next === null) return unsettled.length > 0 && confirmed.length === 0 ? body : null;
+          const { diskAlerts: _held, ...rest } = body;
           return step.next.length === 0 ? rest : { ...rest, diskAlerts: step.next };
         })
         .then(
           (result) => {
             busy = false;
+            const lost = !result.ok && result.code === "indeterminate";
+            pending = lost ? [...unsettled.filter((alert) => !confirmed.includes(alert)), ...raised] : [];
+            for (const alert of confirmed) o.onAlert(alert);
             if (result.ok) for (const alert of raised) o.onAlert(alert);
           },
           (err: unknown) => {

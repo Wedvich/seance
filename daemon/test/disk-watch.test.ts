@@ -19,10 +19,14 @@ const machine = (deviceId: string, disk: number): Machine => ({
   status: { at: NOW / 1000 - 10, scan: NOW, disk },
 });
 
-/** The settings holder over a store with the relay's version rule; `refuse` fails that many puts first. */
-async function setup(refuse = 0) {
+/**
+ * The settings holder over a store with the relay's version rule; `refuse` fails that many puts first.
+ * `lose` loses the answer of that many puts after them (`indeterminate`), committed when `landed`.
+ */
+async function setup(refuse = 0, lose = 0, landed = true) {
   let held: SettingsRecord = { version: 1, vapid: await generateVapidKeys(), subscriptions: [] };
   let refusing = refuse;
+  let losing = lose;
   const puts: (readonly string[])[] = [];
   const store: SettingsStore = {
     get: async () => ({ version: held.version, record: held }),
@@ -33,6 +37,11 @@ async function setup(refuse = 0) {
       }
       if (held.version !== at) return { ok: false, code: "version_conflict" };
       puts.push((record.diskAlerts ?? []).map((e) => e.deviceId));
+      if (losing > 0) {
+        losing -= 1;
+        if (landed) held = { ...record, version: at + 1 };
+        return { ok: false, code: "indeterminate" };
+      }
       held = { ...record, version: at + 1 };
       return { ok: true, version: at + 1 };
     },
@@ -90,6 +99,62 @@ describe("createDiskWatch", () => {
     watch.check(false);
     await pollUntil(() => raised.length === 1, "the retried alert");
     expect(puts).toEqual([["a"]]);
+  });
+
+  test("a write whose answer was lost, but landed, is still pushed once, by the next check", async () => {
+    const { settings, puts, record } = await setup(0, 1, true);
+    const fleet = { current: [machine("a", 95)] };
+    const { watch, raised, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => puts.length === 1, "the write whose answer was lost");
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the alert, once the record shows it landed");
+    expect(raised).toMatchObject([{ kind: "disk", deviceId: "a", at: NOW }]);
+    expect(record().diskAlerts).toEqual([{ deviceId: "a", at: NOW }]);
+
+    clock.now += 1000;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(1);
+  });
+
+  test("a write whose answer was lost and did not land alerts once, when the next check writes it", async () => {
+    const { settings, record } = await setup(0, 1, false);
+    const fleet = { current: [machine("a", 95)] };
+    const { watch, raised, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+    expect(record().diskAlerts).toBeUndefined();
+
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the alert of the write that did land");
+    expect(raised).toMatchObject([{ deviceId: "a", at: NOW + 1000 }]);
+    expect(record().diskAlerts).toEqual([{ deviceId: "a", at: NOW + 1000 }]);
+
+    clock.now += 1000;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(1);
+  });
+
+  test("a lost answer is settled even when the disk has recovered by the next check: told once, then re-armed", async () => {
+    const { settings, record } = await setup(0, 1, true);
+    const fleet = { current: [machine("a", 95)] };
+    const { watch, raised, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => record().diskAlerts !== undefined, "the write that landed");
+    fleet.current = [machine("a", 50)];
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the crossing's alert");
+    expect(raised).toMatchObject([{ deviceId: "a", at: NOW }]);
+    expect(record().diskAlerts ?? []).toEqual([]);
   });
 
   test("a debounced check within the gap is skipped; one past it runs; a forced one always does", async () => {
