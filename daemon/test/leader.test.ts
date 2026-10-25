@@ -1273,10 +1273,13 @@ describe("leader push", () => {
       try {
         leader.lead(1);
         await leader.settled();
+        // Settings load beside takeover, and `not_ready` is neither applied nor audited: the first other answer is the request.
+        let answer: unknown;
         await pollUntil(async () => {
-          const answer = await unsubscribe(leader, replies, { endpoint: sub("two").endpoint });
+          answer = await unsubscribe(leader, replies, { endpoint: sub("two").endpoint });
           return !(isRecord(answer) && answer["code"] === "not_ready");
         }, "the settings to load");
+        expect(answer).toEqual({ endpoint: sub("two").endpoint });
         expect(settings.subscriptions()).toEqual([sub("one"), sub("three")]);
         expect(settings.puts).toHaveLength(1);
       } finally {
@@ -1358,18 +1361,21 @@ describe("leader push", () => {
         try {
           leader.lead(1);
           await leader.settled();
+          // `not_ready` is unaudited, so the first answer past it is the one request whose line is counted below.
+          let answer: unknown;
           await pollUntil(async () => {
-            const answer = await unsubscribe(leader, replies, { endpoint: sub("held").endpoint });
-            return isRecord(answer) && answer["code"] === code;
-          }, `the ${code} answer`);
+            answer = await unsubscribe(leader, replies, { endpoint: sub("held").endpoint });
+            return !(isRecord(answer) && answer["code"] === "not_ready");
+          }, "the settings to load");
+          expect(answer).toMatchObject({ ok: false, code });
         } finally {
           leader.stop();
           relay.stop();
         }
       });
       const audit = lines.filter((line) => line.includes("op=push-unsubscribe"));
-      expect(audit.length).toBeGreaterThan(0);
-      for (const line of audit) expect(line).toEndWith(`refused code=${code}`);
+      expect(audit).toHaveLength(1);
+      expect(audit[0]).toEndWith(`refused code=${code}`);
       expect(lines.some((line) => line.includes("/fcm/send/"))).toBe(false);
     }
 

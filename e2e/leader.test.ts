@@ -542,14 +542,15 @@ describe("settings record: the leader's term creates it, and no later term repla
       expect(await app.client.pushSubscribe(sub("over"))).toMatchObject({ ok: false, code: "subscriptions_full" });
       expect((await readSettings())?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS);
 
-      // push-unsubscribe frees a slot; asking again for the same endpoint writes nothing.
+      // push-unsubscribe frees a slot; asking again for the same endpoint leaves the subscriptions as they were.
+      // The record's version is not compared: the leader also writes disk alerts into it.
       const leaving = sub("fill-1").endpoint;
       expect(await app.client.pushUnsubscribe({ endpoint: leaving })).toEqual({ endpoint: leaving });
       const freed = await readSettings();
       expect(freed?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS - 1);
       expect(freed?.record.subscriptions?.some((s) => s.endpoint === leaving)).toBe(false);
       expect(await app.client.pushUnsubscribe({ endpoint: leaving })).toEqual({ endpoint: leaving });
-      expect((await readSettings())?.version).toBe(freed?.version);
+      expect((await readSettings())?.record.subscriptions).toEqual(freed?.record.subscriptions);
       expect(await app.client.pushSubscribe(sub("over"))).toEqual({ endpoint: sub("over").endpoint });
     } finally {
       app.stop();
