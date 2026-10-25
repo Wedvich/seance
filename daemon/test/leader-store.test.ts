@@ -15,6 +15,7 @@ import {
   toBase64,
   type OpName,
   type Plain,
+  type StoreRequestFrame,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
 import { createBackend } from "../src/backend-default.ts";
@@ -595,8 +596,16 @@ describe("leader in the daemon", () => {
     try {
       relay.lead(deviceId, 1);
       await daemon.leader.settled();
-      // Takeover listed `task:` over the leg, under the term the relay named.
-      expect((await relay.storeFrames.next()).t).toBe("store-list");
+      // The settings record is read and created beside takeover, so its frames and the takeover's
+      // list arrive in no fixed order.
+      await pollUntil(() => relay.storeRecords().has("settings:main"), "the settings record");
+      const frames: StoreRequestFrame[] = [];
+      while (relay.storeFrames.size > 0) frames.push(await relay.storeFrames.next());
+      // Takeover listed `task:` over the leg, and the settings create went under the term the relay named.
+      expect(frames.filter((frame) => frame.t === "store-list")).toMatchObject([{ prefix: "task:" }]);
+      expect(frames.filter((frame) => frame.t === "store-put")).toMatchObject([
+        { key: "settings:main", expect: 0, term: 1 },
+      ]);
       const created = relay.appWrite("task:x", await sealTaskRecord(key, APP_ID, { version: 1, task: task("x") }));
       expect(created).toEqual({ ok: true, version: 1 });
       await pollUntil(() => relay.storeRecords().get("task:x")?.version === 2, "the leader to write the admit");
