@@ -8,6 +8,7 @@ import {
   ENVELOPE_MAX_CT_LENGTH,
   appRelayUrl,
   importPsk,
+  isRecord,
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
@@ -19,6 +20,7 @@ import {
   QUOTA_KEY,
   RelayClient,
   REPLAY_WINDOW_MS,
+  PUSH_MAX_SUBSCRIPTIONS,
   RequestFailure,
   SCHEDULER_ID,
   seal,
@@ -35,6 +37,7 @@ import {
   type Plain,
   type QueueResponse,
   type UnreadableTaskRef,
+  type WebPushSubscription,
   type RegistryView,
   type SessionsResponse,
 } from "@seance/shared";
@@ -45,7 +48,9 @@ import type { LocalOps } from "../src/handlers.ts";
 import { boundedQueue } from "../src/leader-requests.ts";
 import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
 import type { PrPollerOpts } from "../src/pr-status.ts";
+import type { Fetch } from "../src/seams.ts";
 import type { SettingsRead, SettingsStore } from "../src/settings-store.ts";
+import { generateVapidKeys } from "../src/web-push.ts";
 import { startDaemon } from "../src/run.ts";
 import {
   captureLog,
@@ -58,6 +63,7 @@ import {
   type PrivateTmux,
 } from "./fixtures.ts";
 import { AsyncQueue, nextRequest, queuedRequests, startTestRelay, type TestRelay } from "./harness.ts";
+import { startPushEndpoint } from "./push-endpoint.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 const TOKEN = "leader-bearer";
@@ -115,6 +121,7 @@ function leaderOver(
   tickIntervalMs?: number,
   prStatus?: PrPollerOpts,
   settings?: SettingsStore,
+  httpFetch?: Fetch,
   storeTimeoutMs?: number,
 ) {
   const legs: RelayClient[] = [];
@@ -122,6 +129,7 @@ function leaderOver(
   let resigned = 0;
   const leader: Leader = createLeader({
     selfDeviceId: "self",
+    pushSubject: "https://relay.test",
     local: noLocalOps,
     store,
     reply: (to, response) => {
@@ -134,6 +142,7 @@ function leaderOver(
     ...(tickIntervalMs === undefined ? {} : { tickIntervalMs }),
     ...(prStatus === undefined ? {} : { prStatus }),
     ...(settings === undefined ? {} : { settings }),
+    ...(httpFetch === undefined ? {} : { httpFetch }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -1012,6 +1021,258 @@ describe("leader settings", () => {
   });
 });
 
+describe("leader push", () => {
+  const sub = (id: string, host = "fcm.googleapis.com"): WebPushSubscription => ({
+    endpoint: `https://${host}/fcm/send/${id}`,
+    // RFC 8291 Appendix A's user agent: a real P-256 point, so a send can encrypt to it.
+    keys: {
+      p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      auth: "BTBZMqHH6r4Tts7J_aSIgg",
+    },
+  });
+
+  /** A settings store in memory with the relay's version rule, starting from `held`. */
+  const heldSettings = async (subscriptions?: readonly WebPushSubscription[]) => {
+    let held: SettingsRead = {
+      version: 1,
+      record: {
+        version: 1,
+        vapid: await generateVapidKeys(),
+        ...(subscriptions === undefined ? {} : { subscriptions }),
+      },
+    };
+    const puts: number[] = [];
+    const store: SettingsStore = {
+      get: async () => held,
+      put: async (at, record) => {
+        puts.push(at);
+        if (held === null || held.version !== at) return { ok: false, code: "version_conflict" };
+        held = { version: at + 1, record: { ...record, version: at + 1 } };
+        return { ok: true, version: at + 1 };
+      },
+    };
+    return { store, puts, subscriptions: () => held?.record?.subscriptions };
+  };
+
+  /** Runs one request through a leading term and returns the app's answer. */
+  const subscribe = async (
+    leader: Leader,
+    replies: AsyncQueue<{ readonly to: string; readonly response: Plain }>,
+    payload: unknown,
+  ): Promise<unknown> => {
+    leader.deliver(await appRequest("push-subscribe", payload));
+    return (await replies.next()).response.payload;
+  };
+
+  test("push-subscribe adds a subscription, answers its endpoint, and audits the request id only", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings();
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    const fresh = sub("one");
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await pollUntil(() => leader.term() === 1, "the term");
+        // Settings load beside takeover: a request before it is `not_ready`, so wait for the first answer that is not.
+        await pollUntil(async () => {
+          const answer = await subscribe(leader, replies, fresh);
+          return !(isRecord(answer) && answer["code"] === "not_ready");
+        }, "the settings to load");
+        expect(settings.subscriptions()).toEqual([fresh]);
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audit = lines.filter((line) => line.includes("op=push-subscribe"));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatch(/audit queue origin=relay op=push-subscribe id="?[\w-]+"? ok$/u);
+    expect(lines.some((line) => line.includes("fcm.googleapis.com") || line.includes(fresh.keys.auth))).toBe(false);
+  });
+
+  test("the same subscription again answers its endpoint and writes nothing; new keys for it replace the old", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings();
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(() => leader.term() === 1, "the term");
+      const one = sub("one");
+      await pollUntil(async () => {
+        const answer = await subscribe(leader, replies, one);
+        return isRecord(answer) && answer["endpoint"] === one.endpoint;
+      }, "the first subscribe to land");
+      const puts = settings.puts.length;
+      expect(await subscribe(leader, replies, one)).toEqual({ endpoint: one.endpoint });
+      expect(settings.puts).toHaveLength(puts);
+
+      const rekeyed = { ...one, keys: { ...one.keys, auth: Buffer.alloc(16, 3).toString("base64url") } };
+      expect(await subscribe(leader, replies, rekeyed)).toEqual({ endpoint: one.endpoint });
+      expect(settings.subscriptions()).toEqual([rekeyed]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("the seventeenth distinct endpoint is subscriptions_full, and one already held still answers", async () => {
+    const relay = startTestRelay(TOKEN);
+    const held = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => sub(`held-${i}`));
+    const settings = await heldSettings(held);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(async () => {
+        const answer = await subscribe(leader, replies, sub("extra"));
+        return !(isRecord(answer) && answer["code"] === "not_ready");
+      }, "the settings to load");
+      expect(await subscribe(leader, replies, sub("extra"))).toMatchObject({ ok: false, code: "subscriptions_full" });
+      expect(await subscribe(leader, replies, held[3])).toEqual({ endpoint: held[3]?.endpoint });
+      expect(settings.puts).toEqual([]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a malformed request, a host off the allowlist and a daemon's request are not subscriptions", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings();
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      for (const bad of [
+        sub("x", "example.com"),
+        { endpoint: sub("x").endpoint },
+        "https://fcm.googleapis.com/x",
+        null,
+      ]) {
+        // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+        expect(await subscribe(leader, replies, bad)).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+      leader.deliver(await appRequest("push-subscribe", sub("x"), "remote"));
+      await Bun.sleep(100);
+      expect(replies.size).toBe(0);
+      expect(settings.puts).toEqual([]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a term whose settings are unreadable answers settings_unavailable, and one that has not loaded answers not_ready", async () => {
+    const relay = startTestRelay(TOKEN);
+    const unreadable: SettingsStore = {
+      get: () => Promise.resolve({ version: 3, reason: "unopenable" }),
+      put: () => Promise.reject(new Error("must not write")),
+    };
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, unreadable);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(async () => {
+        const answer = await subscribe(leader, replies, sub("x"));
+        return isRecord(answer) && answer["code"] === "settings_unavailable";
+      }, "the term to give up on its settings");
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+    const slowRelay = startTestRelay(TOKEN);
+    const slow = leaderOver(
+      slowRelay,
+      new MemoryQueueStore(),
+      undefined,
+      undefined,
+      // Never answers: the holder stays pending, as the term does until its first read lands.
+      {
+        get: () => Promise.withResolvers<SettingsRead>().promise,
+        put: () => Promise.reject(new Error("must not write")),
+      },
+    );
+    try {
+      slow.leader.lead(1);
+      await slow.leader.settled();
+      expect(await subscribe(slow.leader, slow.replies, sub("x"))).toMatchObject({ ok: false, code: "not_ready" });
+    } finally {
+      slow.leader.stop();
+      slowRelay.stop();
+    }
+  });
+
+  test("an alert raised while the settings are still being read is pushed once they load, not lost", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings([sub("live")]);
+    const gate = Promise.withResolvers<void>();
+    const slow: SettingsStore = {
+      get: async () => {
+        await gate.promise;
+        return settings.store.get();
+      },
+      put: settings.store.put,
+    };
+    const store = new MemoryQueueStore();
+    await store.put("stuck", 0, task("stuck", { state: "needs-input", needsInputSince: 1 }));
+    const { leader } = leaderOver(relay, store, 40, undefined, slow, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1)), init),
+    );
+    try {
+      leader.lead(1);
+      await leader.settled();
+      // The alert is raised once the escalation lands; nothing can be sent yet, and nothing is.
+      await pollUntil(async () => (await store.list()).some((t) => t.body?.escalated === true), "the escalation");
+      expect(push.requests()).toEqual([]);
+      gate.resolve();
+      await push.waitForRequests(1);
+    } finally {
+      gate.resolve();
+      leader.stop();
+      relay.stop();
+      await push.stop();
+    }
+  });
+
+  test("an alert is pushed to every subscription, beside its log line, and a pruned endpoint leaves the record", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const gone = startPushEndpoint();
+    gone.respondWith(410);
+    const live = sub("live");
+    const settings = await heldSettings([sub("gone"), live]);
+    // Stuck for hours under any threshold: the first pass escalates it.
+    const store = new MemoryQueueStore();
+    await store.put("stuck", 0, task("stuck", { state: "needs-input", needsInputSince: 1 }));
+    const { leader } = leaderOver(relay, store, 40, undefined, settings.store, (input, init) => {
+      const id = new URL(String(input)).pathname.split("/").at(-1) ?? "";
+      return fetch((id === "gone" ? gone : push).endpoint(id), init);
+    });
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await push.waitForRequests(1);
+        await gone.waitForRequests(1);
+        await pollUntil(() => settings.subscriptions()?.length === 1, "the 410's prune");
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+        await gone.stop();
+      }
+    });
+    expect(settings.subscriptions()).toEqual([live]);
+    expect(push.requests().map((request) => request.path)).toEqual(["/push/live"]);
+    expect(lines.some((line) => line.includes("needs input: task="))).toBe(true);
+    expect(lines.some((line) => line.includes("pruned a subscription host=fcm.googleapis.com status=410"))).toBe(true);
+    expect(lines.some((line) => line.includes("/fcm/send/") || line.includes("vapid t="))).toBe(false);
+  });
+});
+
 describe("leader lifecycle", () => {
   // Fake timers from before the leader exists, so every timer it or its leg
   // arms is one the clock below can fire and `getTimerCount` can see. Waits
@@ -1648,7 +1909,7 @@ describe("fleet quota record", () => {
     const relay = startTestRelay(TOKEN);
     relay.setRegistry([await routableEntry("b", false)]);
     relay.holdStoreReplies = true;
-    const { leader, legs } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, undefined, 100);
+    const { leader, legs } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, undefined, undefined, 100);
     try {
       leader.lead(1);
       await leader.settled();
