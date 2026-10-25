@@ -641,8 +641,8 @@ export interface StoreChangedFrame {
  *
  * M4's three: `account` (`AccountRecord`, sealed to `"app"` by `sealAccountRecord`,
  * shared/src/account-record.ts), `quota` (`FleetQuotaRecord`, sealed to `"app"` by
- * daemons; shape only, no writer yet) and `settings` (`SettingsRecord`, sealed to
- * SCHEDULER_ID by the leader; shape only, no writer yet).
+ * daemons; shape only, no writer so far) and `settings` (`SettingsRecord`, sealed to
+ * SCHEDULER_ID by the leader; shape only, no writer so far).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",

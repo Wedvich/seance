@@ -400,7 +400,10 @@ Séance's noise is cover for a real intruder.
    keys are deterministic (an HMAC, a singleton), where a tombstone would block the
    one key that names the thing for 30 days, so they are cleared by overwrite. A
    holder can therefore overwrite an alias or the quota record with junk readers
-   skip — never read, forge or roll one back — and, the residual, create junk keys
+   skip — never read or forge one, and never roll one back, provided a key's version history is
+   never reset (an alias's reader binds its sealed version to the relay's, so an old blob put back
+   lands higher and is refused; that needs no delete, purge or store wipe short of a PSK rotation,
+   which is why #22's purge would reopen it) — and, the residual, create junk keys
    under `account:` up to its cap of 64, which nothing in the product removes, since
    deletes are refused. The singleton prefixes take one key (`StorePrefixRule.key`:
    `queue:pause`, `quota:fleet`) and refuse any other `invalid_request`, so a holder
@@ -737,7 +740,10 @@ nothing checked it. The last is the gap they leave.
   token holder, not the relay, which can serve an older version at its own
   version (Threat model, item 4). M4's `account`, `quota` (the fleet quota record) and
   `settings` are `AT_REST_OPS` ops too, each with its own parser, so one cannot stand in
-  for another or for a `task`; no store prefix accepts them yet (store rules v2).
+  for another or for a `task`. An `account` record is sealed to `"app"` and read only through
+  `openAccountRecord` (`shared/src/account-record.ts`): its sealed version must be the relay's and
+  its `accountId`, HMAC'd under the PSK-derived account key, its own key (_Scheduler_, "Account
+  records"); `quota` and `settings` have no writer so far.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -1048,12 +1054,12 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                    | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes                                                              | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                               | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
-| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                   | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (none subscribe yet)                                                                                     |
+| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                   | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                         | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                         | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state") | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
-| records `account` / `quota` / `settings` (at rest)                  | not yet written: each is its M4 item's (account records, fleet quota record, settings)                                                                                                                | `openAtRest` with its op, then `parseAccountRecord` / `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:`, `quota:fleet` and `settings:` (_Scheduler_, "The store")                                                                                                                         |
+| records `account` / `quota` / `settings` (at rest)                  | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `quota` and `settings` unwritten so far (fleet quota record, settings)                               | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `quota`, `settings`: `openAtRest` with its op, then `parseFleetQuotaRecord` / `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:`, `quota:fleet` and `settings:` (_Scheduler_, "The store")                  |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                           | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -1763,8 +1769,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
   reach apps as the leader's `queue-changed`. Only send failures are logged — a line per fan-out
   would be a timeline of edits. The app-client parses it with `parseStoreChanged` (it has no
   `re`, so it is no reply) and hands `key, version` to `onStoreChanged` listeners; a malformed one
-  is `wire dropped reason=frame`. Nothing subscribes yet — the account records item re-reads
-  `account:` on it.
+  is `wire dropped reason=frame`. The PWA's `AccountStore` subscribes and re-reads the `account:` key
+  it names, once the key passes `isStoreKey` and its version is newer than the one held
+  (_Scheduler_, "Account records").
 - **Logging.** One line per refusal — `store refused t=… key=… leg=… code=…`, with no `key=` on
   `version_conflict` (the normal answer to an enqueue retry and to leader races, so a key with a
   time would link task ids to retries) — and none for an accepted read or write: per-write lines would be the queue's activity timeline (Threat model,
@@ -2622,6 +2629,83 @@ reuses the record helpers.
   it (a sealed reply fans out to every app socket), so a reply counts only from that socket.
   A listing is checked too: a key outside `task:`, or listed twice, reads `key_mismatch` for
   every copy (`openTaskListing`).
+
+### Account records — landed 2026-10-25, M4 wave 1
+
+A Claude account is named once, by any PSK holder, and every app client shows the name. The name
+is a sealed `account:<hmac>` record in the relay's store (rules v2); `shared/src/account-record.ts`
+is what a record is and who reads it how, `RelayClient.listAccounts` / `getAccountRecord` /
+`putAccountAlias` the app leg, and `pwa/src/account-store.ts` the PWA's side. The leader and the
+daemons never read one, and `seanced mcp` and Raycast show no alias yet.
+
+- **The key is derived, not the PSK's AES key reused.** `deriveAccountKey` (`shared/src/crypto.ts`)
+  is HKDF-SHA-256 over the 32 raw PSK bytes, salt the UTF-8 `seance hkdf v1` and info
+  `seance account-key v1`, to a 256-bit HMAC-SHA-256 key, non-extractable (it can only sign). The
+  salt is public and only separates this derivation's domain. Both strings are fixed for as long
+  as `account:` has no delete path: changing either moves every account to a new key and orphans
+  the old records into slots nothing can free. A later re-key is a deliberate new label.
+  `importPskBase` is the non-extractable HKDF base every PSK-derived key other than the AES one
+  comes from; `importAccountKey` composes the two for tests and the CLI.
+- **The store key** is `account:` plus the lowercase hex of `HMAC(accountKey, "oauth|" + accountId)`,
+  64 hex characters, which `STORE_KEY_PATTERN` allows. `accountId` is `organizationUuid:accountUuid`.
+  The `oauth|` kind prefix keeps ids of a later kind (an API key, a deployment) disjoint from these.
+  The HMAC is keyed by the PSK, so anyone who knows the UUIDs (Anthropic, another relay the
+  account appears on) cannot compute it, which a plain hash would let them.
+- **The record** is `{ version, accountId, alias }`, `alias` null once cleared (deletes are refused,
+  so a clear is an overwrite), at most `ACCOUNT_ALIAS_MAX_LENGTH` (64) after trimming. `sealAccountRecord`
+  seals it as op `account` to `"app"`, from its writer; `accountRecord` is the one place a writer
+  builds one (trims, blank is a clear, over the bound is `null`, never sent).
+- **The reader's rules are one function**, `openAccountRecord`, each a `RecordUnreadable` reason:
+  `unopenable` for a blob that does not decrypt, is another op or is addressed to anyone but the
+  app; `malformed` for a body `parseAccountRecord` refuses; `version_mismatch` when its sealed
+  `version` is not the relay's; `key_mismatch` when the HMAC of its `accountId` is not its key.
+  `from` is checked nowhere, as with a task: between PSK holders it authenticates nothing. It is
+  the only way into an account record, and `openAccountListing` applies it to a listing, reporting a
+  key outside `account:` or listed twice as `key_mismatch` for every copy. Unreadable is reported,
+  never fatal, never deleted: the listing keeps `{ key, version, reason }` for each.
+- **Rollback.** A token holder can `store-list` or `get` every past ciphertext and put one back by
+  overwrite. The blob is authentic, but the put lands at a higher version than the one sealed in
+  it, so the reader says `version_mismatch` and the card falls back to the email, else the short id,
+  never the old alias. That holds while a key's version history is never reset: the relay refuses
+  deletes under `account:`, and no purge or store wipe exists short of a PSK rotation (a deleted key
+  would restart at version 1, where an old version-1 blob reads as genuine; #22's option (a) would
+  reopen this). It holds against a token holder, not the relay, which can serve a stale blob at the
+  matching version (Threat model, item 4): accepted, since an alias is display-only and never routes,
+  binds or places anything. A blob moved to another account's key reads `key_mismatch`, so a writer
+  without the PSK files no record under any account's key.
+- **A rename is a compare-and-set.** `putAccountAlias(accountId, alias, expect)` seals version
+  `expect + 1` and puts at `expect`, the version the client last read for the key (0: none). A
+  `version_conflict` comes back raw, never as success (a create's retry is a task's story, not this
+  one): the PWA re-reads the key, shows the latest name and says it was renamed elsewhere, and the
+  person renames again to replace it. A put that answers with another version is no answer. A put
+  is size-checked against the create cap at `expect` 0 and the overwrite cap otherwise.
+- **`store-changed` is a hint to re-read.** The relay sends it to every app socket but the writer's
+  after an `account:` write. It is relay plaintext, so the client checks the prefix and
+  `isStoreKey` before using the key, uses the version only to skip a re-read it already holds, and
+  reads through `getAccountRecord`, the same open path as a listing. On open (and on every re-dial,
+  since nudges sent while down are lost) the PWA lists `account:` once; a first listing the relay
+  refused is retried once after a few seconds, since the list bucket is shared by every app. A
+  rename made before a listing landed reads its key first, so it does not report a conflict with
+  a record the client never saw. The PWA keeps the version of every key it has seen, unreadable
+  ones included, so a rename can overwrite a rolled-back record at the relay's version.
+- **The PWA stores the HKDF base, not the HMAC key.** `pwa/src/relay/keys.ts` writes a second
+  IndexedDB entry, `psk-base`, in the same transaction as the AES key, and `main.tsx` derives the
+  account key from it at launch. A later PSK-derived key then needs no second re-entry on every
+  install. An install saved before this has no `psk-base`: it works unchanged, shows no alias, and
+  the accounts section says to re-enter the PSK in Settings to name accounts (saving it there
+  stores both). Rejected: forcing a re-setup, which would lock every install out until the PSK
+  is typed, for a display-only feature; persisting the PSK's base64 to migrate silently, which
+  defeats the non-extractable key.
+- **What the key reveals** to the relay and a token holder: a stable pseudonym per account per PSK,
+  how many accounts are named, when each is renamed (write timing and versions), and an alias's
+  length through its ciphertext length. Not the account id, since the HMAC is PSK-keyed, and not
+  the alias.
+- **Residuals.** Junk keys under `account:` up to its cap of 64, which nothing in the product removes
+  (#22, still open); records sealed under an earlier PSK, which a rotation orphans as unopenable
+  slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or place.
+- **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
+  clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
+  pause holds: alias, else email, else `acct` and the first eight characters of the account half.
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -4288,7 +4372,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   base64 is never persisted. An XSS can then use the key while it runs but
   cannot exfiltrate 32 bytes that would otherwise grant permanent authority
   over every machine, so there is nothing to rotate afterwards. Consequence:
-  the key can never be redisplayed — 1Password stays the source of truth.
+  the key can never be redisplayed — 1Password stays the source of truth. A
+  second non-extractable entry, the HKDF base the account key derives from,
+  sits beside it, written in the same transaction (_Scheduler_, "Account records").
   Bearer token and relay URL remain in `localStorage`; the token has to be
   readable because it goes on the URL.
 - **The form and any in-flight spawn are persisted.** iOS kills backgrounded
@@ -4431,7 +4517,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   separate change if links are wanted.
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions), while connected; quota is a property of an account, not of any
-  machine, so it sits on account cards: one per `accountId` across the fleet, named by the
+  machine, so it sits on account cards: one per `accountId` across the fleet, named by its
+  alias if any client set one (_Scheduler_, "Account records"), else the
   email any of its exclaves reports (the short account id from a daemon that predates it), newest
   observation wins, since every daemon hosting one of its exclaves reports it, each window
   it lacks filled from the next newest that has one (`mergeQuota`) — per-model caps reach
