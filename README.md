@@ -384,6 +384,8 @@ seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
 seanced spawn --auto seance -p "fix the flaky spawn test"
 #   task 3f2a…: queued — the scheduler picks the machine; needs this shell's PSK and the relay
+seanced spawn --auto --account work --not here seance -p "rerun the slow suite"
+#   pinned to an account (alias, email or id) and kept off this machine
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
@@ -445,10 +447,13 @@ config and speaks to the relay exactly like the phone does.
 **auto** does: it answers at once with the task id and "queued", and `get_queue` lists
 the scheduler's recent tasks with where each landed and why, and any pauses in force.
 `repo` is a repo name from `list_machines` (or its origin, when the name means different
-repos on different machines). `pin: { machine?, exclave? }` restricts where it may run — the
+repos on different machines). `pin: { machine?, account? }` restricts where it may run — the
 task waits for a slot there rather than going elsewhere — and `repo` is then the name as the
-pinned machine lists it; an unknown or ambiguous machine, an unknown exclave, or a machine whose
-daemon reports no exclaves is refused. The queue is the relay's, so a task waiting for capacity
+pinned machine (or the account's clones) list it; `account` is an alias, an email or an
+accountId, and the answer names the account it resolved to. `avoid: [machine, …]` (at most 4)
+keeps it off machines. An unknown or ambiguous machine or account, an account no machine reports
+signed in, or a machine whose daemon reports no exclaves is refused; an account pin or `avoid`
+also needs a scheduler leader on a build that routes on them. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
 It needs the key in the MCP process itself: on a box where only the daemon can read
