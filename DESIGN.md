@@ -535,7 +535,15 @@ Séance's noise is cover for a real intruder.
    build opens): every later leader reads it as unusable and never replaces it, and settings
    deletes are refused, so push stays off for good. The remedy above removes the thief but not
    the record, so it does not bring push back; recorded under the Settings record's residual, as
-   a gap with no repair path yet.
+   a gap with no repair path yet. The page's service worker holds no PSK: it opens
+   nothing it receives, and a notification's text is fixed per kind with only a task id (or a
+   device id) from the payload, so a forged push (a thief leader's, with a subscription it
+   read) can make the browser show one of four sentences, a spill's with at worst a known window
+   label (`5h` or `7d`) and a number, and nothing else. A click opens a
+   same-origin path the worker itself built from an id that passed `isTaskId`
+   (`/?task=<id>` or `/?screen=machines`), re-checked when the click lands; the app reads the
+   same two shapes through the same rule, so neither a hostile payload nor a hostile query
+   string can steer the page to another origin or put markup in a notification.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -1481,6 +1489,10 @@ an old peer's frames parse as before. Mixed versions:
   ignores (it settles a PR-less `ended` on the event, as before), and the `session_failed`
   failure code, which an older leader or app reads leniently (`parseTaskRecord` takes any
   bounded code); an older PWA words it as a spawn refusal.
+- `Task.inputAlerted` and `Task.spillAlert` (the persisted alert stamps, acted on since the push
+  alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts`
+  (Scheduler, "Web Push", "Disk alerts"): an older leader's parser drops each at its next write
+  of that record, which costs one repeated alert, never a missed one.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2131,10 +2143,11 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   as AAD"), and the residual cross-daemon duplicate is recorded there.
 - **Alerts are a log line plus a push** (M3 item 5, M4 Web Push). The term's `Scheduler` takes
   `onAlert`, which `startTerm` logs as `warn scheduler: <message>` and hands to the push sender
-  (_Web Push_, below): a dispatch spending credits, and a wait for input past 30 minutes
-  (_The library_, "Credits spill" and "Needs input"). The line names task and account ids, never
-  a prompt or title; the push payload names a task id and state, and no account.
-- **Settings record** (M4, Settings and Web Push). One record, `settings:main` (`SETTINGS_KEY`),
+  (_Web Push_, below): a dispatch spending credits, a wait for input (past 2 minutes, and again
+  past 30) and, from the leader's own watch, a nearly full disk (_The library_, "Credits spill"
+  and "Needs input"; _Disk alerts_, below). The line names task, account and device ids, never
+  a prompt or title; the push payload names a task or device id and state, and no account.
+- **Settings record** (M4). One record, `settings:main` (`SETTINGS_KEY`),
   holds what the leader keeps for the fleet: the VAPID keypair push sends are signed with and,
   as later items write them, the push subscriptions and the Linear key (`SettingsRecord`). The
   leader alone writes it (decided #9), sealed `to` and `from` `"scheduler"` under op `settings`;
@@ -2183,8 +2196,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     silently, and the PWAs subscribe again. Offered as a follow-up, not built.
   - **Residual, a write carries only what this build knows.** The holder rewrites the record
     from its parsed form, so a field a newer build added is dropped by an older leader's
-    subscription write.
-- **Web Push** (M4, Settings and Web Push; `daemon/src/web-push.ts`, `push-sender.ts`). The
+    subscription write. Concretely: a leader from before `diskAlerts` drops that list on its
+    next write, so a later leader may push each still-full disk once more. Accepted.
+- **Web Push** (M4; `daemon/src/web-push.ts`, `push-sender.ts`). The
   leader pushes each alert to every subscription in the settings record, beside its log line.
   - **Subscribing.** The PWA reads the VAPID public key with `store-get` and subscribes the
     browser under it. It checks the endpoint with `pushEndpoint`, the leader's own check, before
@@ -2224,15 +2238,34 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     it does not; with no usable record no push is sent.
   - **The payload** (`PushAlert`, `v: 1`, at most `PUSH_ALERT_MAX_BYTES` = 1024) is a task id (or
     device id for disk) and state, in a record `parsePushAlert` reads strictly: no account id,
-    prompt or title. The leader emits `spill`, and `needs-input` with `escalated: true` (the
-    30-minute escalation, the only needs-input alert it raises). `disk` is a kind the type and
-    the parser already carry, and nothing raises it yet.
+    prompt or title. `needs-input` carries `escalated` (false for the first alert, true for the
+    30-minute one), `spill` the window label and projected percent, `disk` the used percent.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
     VAPID (an ES256 JWT, `aud` the push service's origin, `exp` twelve hours out). `sub` is
     `https://<the relay's host>` from the daemon's config: a contact URI the push service can
     show an operator, and nothing more identifying than the relay URL the daemon already holds.
+  - **Disk alerts** (`daemon/src/disk-alerts.ts`, scheduler-free: not in `LEADER_MODULES`). The
+    leader watches the registry's fresh `status` readings and pushes a machine whose disk is at
+    or past 90% used, or whose free space is under 1 GiB (the same floor the router refuses on).
+    The alert is persisted per device in the settings record (`diskAlerts`, `{deviceId, at}`,
+    at most `DISK_ALERTS_MAX` = 64), so a new leader does not repeat it, and it re-arms only
+    when the machine reads under 85% used with at least 2 GiB free — a gap that stops a disk
+    hovering at the threshold from alerting each tick. A stale or absent reading, or one with
+    neither `disk` nor `free`, neither alerts nor re-arms, and an entry for a machine that left
+    the registry is dropped on the next write. The list is capped at `DISK_ALERTS_MAX` on every
+    write (the oldest entries go), so a big fleet cannot make the record one a reader refuses;
+    a machine pushed out while still full alerts again. The write goes first, through the
+    holder's serialised `update` (recomputing on a re-read record, so a lost race never
+    double-alerts), and the push is raised only once it landed: a refused write costs a later
+    retry, never a repeat. A write whose answer was lost (`indeterminate`) may have committed,
+    and the recompute would then see the machine held and never push: the watch keeps that
+    write's alerts as pending, and its next check writes even a no-op, so a landed write shows
+    as a conflict whose re-read record holds the device at the alert's own `at`, and the alert is
+    raised then; one the record does not hold never landed, and the step raises it afresh. The watch runs on a registry
+    change, on the tick timer and once the settings read lands; one log line,
+    `scheduler: disk nearly full: device=<id>`.
   - **Not built:** an unsubscribe op or a way to remove one from the PWA (a subscription leaves
     the record only when a push service answers 404/410), and a recovery path for an unreadable
     record (above).
@@ -2435,6 +2468,14 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   next pass nor the next leader alerts it again; the task keeps its slot and is never killed.
   A `needs-input` record no leader stamped (one written before this) has its clock started by
   one write. The check is inside the pass, which runs at least every 30s: no timer of its own.
+  **The first alert** comes sooner: a task waiting past `needsInputAlertMs` (2 min) alerts once
+  (`escalated: false`), recorded as `inputAlerted` on the task so the next pass and the next
+  leader stay quiet. Two minutes is the debounce: Claude's auto mode reports needs-input for
+  each call its classifier settles (Session events, below), brief stays that alert nobody. The
+  stamp and the clock leave together (`inputClock`), so a new wait alerts afresh, and a stay
+  that is already past the 30-minute escalation gets only that alert, as the escalation: one
+  push per stay at the first threshold crossed, a second only for a wait that outlives the
+  escalation.
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
   the decision the reservation writes — the PWA's verdict shows it on the chosen line, "would
   spend credits (5h at 93%)" — and alerted through `onAlert` once its spawn is confirmed (a
@@ -2443,8 +2484,24 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reset, and two readings of one reset differ by seconds, so a later reset is a new window only
   by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
   never is one. An `onAlert` that throws goes to `onError`, never into the pass.
-  The de-dupe is in memory (`SpillAlerts`, `alerts.ts`), so a new leader alerts an ongoing
-  spill once more; accepted for a log line, M4's push decides whether it needs more.
+  The de-dupe is `SpillAlerts` (`alerts.ts`), persisted: the alert's window is stamped on the
+  task as `spillAlert` (`{accountId, window, reset, at}`, `reset` and `at` in ms, `reset` 0 when
+  unknown, `at` when it alerted) by a write of its own after the reservation's verdict, and a
+  takeover seeds `SpillAlerts` from every held task's stamp, so a new leader does not alert an
+  ongoing spill again. A stamp that cannot describe a window running now is dropped at the seed
+  instead: its reset passed by more than `resetGraceMs`, or, with no reset, its `at` is older than
+  the window is long (5 h for `5h`, 7 d for `7d` and a per-model `7d <model>`; any other label is
+  held to 5 h). Without that, a stamp left from days back would take the window running now for
+  the one already told of. The same age rule applies to a reset-less alert held in memory when a
+  later reading names a reset. The stamp is its own
+  `#update`, not part of the verdict mutator: a session event can move the task between the
+  spawn's reply and the verdict, which would discard a combined mutator and lose the stamp with
+  it; the stamp applies to a task still placed on the machine it was alerted for. It is written
+  only if `parseSpillStamp`, the reader's own parser, accepts it (an account id or label past its
+  bound would otherwise void the whole task record): the alert still fires, and the window goes
+  unstamped. A refused or skipped stamp write costs one repeated alert after a leader change, never
+  a missed one. **Residual:** the stamp lives on a task, so pruning the stamped task (and its
+  tombstone aging out) loses it; the next leader may alert that window once more.
 - **Reserve, then dispatch** (`scheduler.ts`). Ready tasks are routed oldest first and
   reserved one at a time — each route sees the reservations before it. A reservation is
   one store write carrying the decision; an unplaceable task's decision stays in memory
@@ -4636,9 +4693,33 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`pwa/public/push-sw.js`, joined to the generated worker by `importScripts`, so the precache and
   the `skipWaiting`/`clientsClaim` update path stay the plugin's) shows every push as a generic
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and
-  WebKit revokes a subscription after a few silent pushes; a click focuses an open window or
-  opens `/`. It holds no PSK, so it shows no name or title: the payload's ids are used only
-  as the notification's tag.
+  WebKit revokes a subscription after a few silent pushes. The text is fixed per kind ("A task
+  is waiting for input", "… still waiting for input (30 min)", "A task is spending credits (7d
+  at 105%)", "A machine's disk is nearly full"); the spill's window is shown only when it is one
+  of the scheduler's labels (`5h`, `7d`, or a per-model `7d <model>`, shown as `7d`), never as
+  the payload spells it. The payload's ids are the notification's tag, so a repeat replaces
+  rather than stacks, and every notification sets `renotify` so that replacement is still
+  heard (the 30-minute escalation and a second disk alert reuse their first alert's tag). The
+  id is also the target of a click. It holds no PSK, so it
+  shows no name or title, and a payload it cannot read (an unknown kind or version, an id that
+  fails the `isTaskId` rule it copies) shows the generic text with no target.
+  - **The deep link.** A click opens the app at `/?task=<id>` (a task or spill alert) or
+    `/?screen=machines` (disk). The worker re-checks the target it stored against those two
+    shapes before using it, focuses an open window of its own origin and posts it
+    `{t: "open", url}`, or opens a window at the path when none is. `pwa/src/deep-link.ts`
+    reads the query on launch and the message on a running app (`parseDeepLink`: the id must
+    pass `isTaskId`, anything else opens nothing), strips the query from the URL with
+    `replaceState` keeping the entry's state (so a reload does not reopen the link and the
+    layer history is not clobbered), and opens the Queue with the task `focusedTask`, asking
+    for it by name too (`refreshQueue([id])`: the default listing is the newest tasks, and an
+    older alert's task is merged in by that read). The Queue screen scrolls to that row once it
+    is listed, marks it for three seconds (a steady ring under reduced motion, not a fade) and
+    clears the focus. The focus is the store's state, cleared only by that act or by the screen
+    closing (`#closeTopLayer`, `followUp`): never by the component's own unmount, since a
+    callback that is a new closure each render would run an unmount effect on every re-render
+    and drop the focus before its row is listed. Residual: in the desktop layout the Queue is a
+    column that never closes, so a focus whose task is never listed (pruned since) stays until
+    something lists that id.
 - **Sessions are fanned out, not polled.** The header total spans every online
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
@@ -4804,7 +4885,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
   the percent (docs/scheduler.md, Settled defaults 6); the gauge turns red under that same
   floor (`MIN_FREE_MIB`) whatever its percent, so a card never shows amber for a machine
-  routing has dropped. `disk_pct` also feeds M4's health alert. The chart is inline SVG geometry (`chart.ts`), no charting
+  routing has dropped. The leader's disk push (Scheduler, "Web Push", "Disk alerts") reads the same figure from the live `status`, not from this history. The chart is inline SVG geometry (`chart.ts`), no charting
   dependency; gauges break their line at a missed tick and bridge the break with a faint
   dotted run (nothing was measured there, but a sleep should read as one gap, not as
   missing ink), and a point alone between two breaks is a dot — a laptop in clamshell
@@ -5607,7 +5688,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   reports needs-input then busy for each call its
   classifier settles**: core answers `ask` there too, and no engine event says a dialog
   was shown, nor does `$` read the permission mode. Accepted: the leader escalates only
-  a needs-input that lasts (`escalation`), so the flicker alerts nobody; it costs two
+  a needs-input that lasts (the 2-minute alert debounce, "Needs input"), so the flicker alerts nobody; it costs two
   task-record writes per such call in a task's session. **Not covered**: an MCP server's elicitation, which
   has no engine event (only the skipped `classic.Elicitation`).
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the

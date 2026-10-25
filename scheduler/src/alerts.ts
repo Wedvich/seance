@@ -1,12 +1,12 @@
-import { quote, type FleetQuotaEntry, type Machine } from "@seance/shared";
-import { windowResetOf, type Decision } from "./route.ts";
+import { quote, type FleetQuotaEntry, type Machine, type SpillStamp } from "@seance/shared";
+import { SPAN_MS, windowResetOf, type Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
 /**
  * What the library tells its host as it happens, beside what the record shows:
  * a dispatch spending credits, and a task left waiting for input. The leader
- * logs each line; M4's Web Push sends the same alerts. `message` is a line for
- * a log — ids only, never a prompt or title.
+ * logs each line and pushes the same alerts. `message` is a line for a log —
+ * ids only, never a prompt or title.
  */
 export type SchedulerAlert =
   | {
@@ -22,13 +22,15 @@ export type SchedulerAlert =
       readonly taskId: string;
       /** When it entered `needs-input`, ms. */
       readonly since: number;
+      /** The 30-minute re-alert; false for the first, after `needsInputAlertMs`. */
+      readonly escalated: boolean;
       readonly message: string;
     };
 
 /**
  * The needs-input clock rides the write that moves the state: entering
  * `needs-input` stamps `needsInputSince`, leaving it for any state but `lost`
- * clears it and `escalated`. `lost` keeps both: a machine's absence is not an
+ * clears it, `inputAlerted` and `escalated`. `lost` keeps them: a machine's absence is not an
  * answer, and the wait resumes where it was when the machine returns. On the
  * record, so a new leader does not restart the clock.
  */
@@ -37,9 +39,28 @@ export function inputClock(task: Task, now: number): Task {
     return task.needsInputSince === undefined ? { ...task, needsInputSince: now } : task;
   }
   if (task.state === "lost") return task;
-  if (task.needsInputSince === undefined && task.escalated === undefined) return task;
-  const { needsInputSince: _since, escalated: _escalated, ...rest } = task;
+  if (task.needsInputSince === undefined && task.escalated === undefined && task.inputAlerted === undefined) {
+    return task;
+  }
+  const { needsInputSince: _since, escalated: _escalated, inputAlerted: _alerted, ...rest } = task;
   return rest;
+}
+
+/**
+ * The first alert of a stay: a task still waiting for input `afterMs` after it
+ * began, once per stay. The wait is debounced because auto mode reports
+ * `needs-input` then `busy` around every call its classifier settles (seconds
+ * apart, DESIGN.md, "Session events"), and each of those leaves the state and
+ * clears the clock. A stay already escalated, never stamped (an older leader's
+ * record, whose clock `escalation` starts), or past `escalateAfterMs` (the
+ * escalation is due, and its alert is the one: a stay past both is one push,
+ * not two) is not due. Null when nothing is.
+ */
+export function inputAlert(task: Task, now: number, afterMs: number, escalateAfterMs: number): Task | null {
+  if (task.state !== "needs-input" || task.inputAlerted === true || task.escalated === true) return null;
+  if (task.needsInputSince === undefined) return null;
+  const waited = now - task.needsInputSince;
+  return waited >= afterMs && waited < escalateAfterMs ? { ...task, inputAlerted: true } : null;
 }
 
 /**
@@ -65,24 +86,56 @@ export function escalation(task: Task, now: number, afterMs: number): Task | nul
 export class SpillAlerts {
   readonly #resetGraceMs: number;
   /**
-   * `account window` → the reset (ms) of the window a spill was last alerted
-   * for, 0 when that reading carried none. Memory only, so a new leader alerts
-   * an ongoing spill once more.
+   * `account window` -> the window a spill was last alerted for: its reset (ms), 0
+   * when that reading carried none, and when it alerted. Seeded at takeover from
+   * the stamps dispatches left on their records (`seed`), so a new leader does not
+   * alert an ongoing window once more.
    */
-  readonly #alerted = new Map<string, number>();
+  readonly #alerted = new Map<string, { readonly reset: number; readonly at: number }>();
 
   constructor(resetGraceMs: number) {
     this.#resetGraceMs = resetGraceMs;
   }
 
-  /** The alert a confirmed spawn under `decision` earns, if any — remembered, so its window earns no other. */
+  /**
+   * Learns a window a previous term alerted: the later reset per key wins, and a
+   * reset of 0 (none read) never replaces one that was. A stamp that cannot
+   * describe a window running at `now` is dropped, so the window that is alerts
+   * once more rather than being taken for the old one: its reset passed beyond
+   * the grace, or, with no reset to say, it is older than the window is long.
+   */
+  seed(stamp: SpillStamp, now: number): void {
+    if (this.#stale(stamp.window, stamp.reset, stamp.at, now)) return;
+    const key = `${stamp.accountId} ${stamp.window}`;
+    const held = this.#alerted.get(key);
+    if (held === undefined || stamp.reset > held.reset || (stamp.reset === held.reset && stamp.at > held.at)) {
+      this.#alerted.set(key, { reset: stamp.reset, at: stamp.at });
+    }
+  }
+
+  /**
+   * Whether an alert for `window` with this reset, made at `at`, no longer says
+   * anything about the window running at `now`. The length is the label's: a
+   * per-model weekly is `7d <model>`; a label that is neither is held to the
+   * shorter, so a doubt costs one repeat, never a missed window.
+   */
+  #stale(window: string, reset: number, at: number, now: number): boolean {
+    if (reset > 0) return reset + this.#resetGraceMs < now;
+    return now - at > (window.startsWith("7d") ? SPAN_MS["7d"] : SPAN_MS["5h"]);
+  }
+
+  /**
+   * The alert a confirmed spawn under `decision` earns, if any — remembered, so
+   * its window earns no other — with the stamp the dispatch's record must carry
+   * so a later term holds it too.
+   */
   on(
     taskId: string,
     decision: Decision,
     machines: readonly Machine[],
     now: number,
     fleetQuota: readonly FleetQuotaEntry[] = [],
-  ): SchedulerAlert | null {
+  ): { readonly alert: SchedulerAlert; readonly stamp: SpillStamp } | null {
     const { chosen } = decision;
     if (chosen === null) return null;
     const spill = decision.candidates.find(
@@ -96,26 +149,32 @@ export class SpillAlerts {
     const key = `${accountId} ${spill.window}`;
     const resetS = windowResetOf(accountId, machines, spill.window, fleetQuota);
     const reset = resetS === undefined ? undefined : resetS * 1000;
-    const alerted = this.#alerted.get(key);
+    const held = this.#alerted.get(key);
+    // An alert with no reset that old is of a window long gone: this one is new.
+    const gone = held !== undefined && held.reset === 0 && this.#stale(spill.window, 0, held.at, now);
+    const alerted = gone ? undefined : held?.reset;
     if (alerted !== undefined) {
       if (reset === undefined) return null;
       // An alert stamped with no reset learns it, without alerting again.
       if (alerted === 0) {
-        this.#alerted.set(key, reset);
+        this.#alerted.set(key, { reset, at: now });
         return null;
       }
       const newWindow = reset - alerted > this.#resetGraceMs || (alerted <= now && reset > now);
       if (!newWindow) return null;
     }
-    this.#alerted.set(key, reset ?? 0);
+    this.#alerted.set(key, { reset: reset ?? 0, at: now });
     const pct = Math.round(spill.projectedPct);
     return {
-      kind: "spill",
-      taskId,
-      accountId,
-      window: spill.window,
-      projectedPct: spill.projectedPct,
-      message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
+      alert: {
+        kind: "spill",
+        taskId,
+        accountId,
+        window: spill.window,
+        projectedPct: spill.projectedPct,
+        message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
+      },
+      stamp: { accountId, window: spill.window, reset: reset ?? 0, at: now },
     };
   }
 }

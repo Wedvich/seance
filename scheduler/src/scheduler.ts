@@ -1,6 +1,7 @@
 import {
   CAPABILITIES,
   DECISION_MAX_CANDIDATES,
+  parseSpillStamp,
   quote,
   type BranchState,
   type FleetQuotaEntry,
@@ -9,8 +10,9 @@ import {
   type PauseRequest,
   type ResumeRequest,
   type SessionState,
+  type SpillStamp,
 } from "@seance/shared";
-import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
+import { escalation, inputAlert, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
@@ -221,6 +223,9 @@ export class Scheduler {
     this.#unreadable.clear();
     this.#decisions.clear();
     for (const entry of stored) this.#keep(entry);
+    // Windows an earlier term alerted, so this one does not alert an ongoing spill once more.
+    for (const { task } of this.#held.values())
+      if (task.spillAlert !== undefined) this.#spills.seed(task.spillAlert, this.#now());
     await this.#pause.load();
   }
 
@@ -649,6 +654,7 @@ export class Scheduler {
     await this.#markAbsent();
     this.#checkOut(this.#due());
     await this.#expire();
+    await this.#alertInput();
     await this.#escalate();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
@@ -719,6 +725,33 @@ export class Scheduler {
   }
 
   /**
+   * A task waiting for input past `needsInputAlertMs` is marked `inputAlerted` —
+   * one write per stay — and alerted once that write lands, so a new leader
+   * reading the record never alerts it again. Before `#escalate`: a stay past
+   * both is one alert, the escalation's.
+   */
+  async #alertInput(): Promise<void> {
+    const now = this.#now();
+    const { needsInputAlertMs: after, needsInputEscalateMs: escalateAfter } = this.#config;
+    await Promise.all(
+      this.tasks()
+        .filter((t) => inputAlert(t, now, after, escalateAfter) !== null)
+        .map(async (seen) => {
+          const next = await this.#update(seen.id, (current) => inputAlert(current, now, after, escalateAfter));
+          if (next?.inputAlerted !== true || next.needsInputSince === undefined) return;
+          const minutes = Math.round((now - next.needsInputSince) / 60_000);
+          this.#alert({
+            kind: "needs-input",
+            taskId: next.id,
+            since: next.needsInputSince,
+            escalated: false,
+            message: `needs input: task=${quote(next.id)} waiting ${minutes} min`,
+          });
+        }),
+    );
+  }
+
+  /**
    * A task waiting for input past `needsInputEscalateMs` is marked `escalated`
    * — one write per stay — and alerted once that write lands, so a new leader
    * reading the record never alerts it again.
@@ -737,6 +770,7 @@ export class Scheduler {
             kind: "needs-input",
             taskId: next.id,
             since: next.needsInputSince,
+            escalated: true,
             message: `needs input: task=${quote(next.id)} waiting ${minutes} min — escalated, its slot kept`,
           });
         }),
@@ -789,12 +823,19 @@ export class Scheduler {
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });
+    // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
+    // Before the awaits: `on` remembers the window at once, so two dispatches of one pass cannot both alert.
+    const spill = reply.ok
+      ? this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota())
+      : null;
     // An event may have resolved it while the spawn was out; a verdict answers only its own reservation.
     await this.#update(task.id, (current) => (holds(current, at) ? verdict(current, at, reply) : null));
-    // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.
-    if (!reply.ok) return;
-    const spill = this.#spills.on(task.id, decision, this.#fleet.machines(), this.#now(), this.#fleetQuota());
-    if (spill !== null) this.#alert(spill);
+    if (spill === null) return;
+    // Its own write, not part of the verdict: that one declines when a session event moved the task
+    // first, which is the usual order (the reply waits for the pane's title, a hook need not).
+    // A stamp lost to a refused write costs at most one repeat under a later leader.
+    await this.#update(task.id, (current) => stamped(current, at, spill.stamp));
+    this.#alert(spill.alert);
   }
 
   /**
@@ -1068,6 +1109,23 @@ export class Scheduler {
   #refused(id: string, op: string, write: Extract<StoreWrite, { readonly ok: false }>): void {
     this.#onError(new Error(`store refused ${op} of task ${id}: ${write.code}`));
   }
+}
+
+/**
+ * `task` carrying the spill stamp of the dispatch `at` made, while it is still that dispatch's: still
+ * reserved under it, or placed on its machine (a session event got there before the reply). Null for a
+ * task that has moved on (cancelled, re-dispatched elsewhere), for one already stamped, and for a stamp
+ * the record's reader would refuse (an over-long account id or label): that would void the whole task, so
+ * the window goes unstamped, which costs a later term one repeat.
+ */
+function stamped(task: Task, at: Reservation, stamp: SpillStamp): Task | null {
+  if (parseSpillStamp(stamp) === null) return null;
+  const mine = holds(task, at) || (PLACED.includes(task.state) && task.assignment?.deviceId === at.deviceId);
+  const held = task.spillAlert;
+  if (!mine || (held?.accountId === stamp.accountId && held.window === stamp.window && held.reset === stamp.reset)) {
+    return null;
+  }
+  return { ...task, spillAlert: stamp };
 }
 
 /** At most `DECISION_MAX_CANDIDATES`, cut from the end — the rejected trail — and counted in `trimmed`. */

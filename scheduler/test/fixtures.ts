@@ -8,11 +8,12 @@ import type {
   RepoEntry,
   SessionEntry,
 } from "@seance/shared";
-import { bindTaskRecord, CAPABILITIES, STORE_PREFIXES } from "@seance/shared";
+import { bindTaskRecord, CAPABILITIES, parseTask, STORE_PREFIXES } from "@seance/shared";
 import {
   UNREACHABLE,
   type Fleet,
   type QueueStore,
+  type StoreEntry,
   type Unreachable,
   type TaskSessionsReply,
   type TaskSpawnReply,
@@ -165,12 +166,23 @@ export const unreachable: Unreachable = { ok: false, code: UNREACHABLE, message:
  * relay-backed adapter enforces on read. A test seeds through the raw store,
  * which may hold what no leader writes; only the library's own writes are held
  * to the readers' rules, and a bad one throws here instead of reading back
- * unreadable in production.
+ * unreadable in production. A read goes through `parseTask` too, field by
+ * field as the adapter's does, so a field the parser drops or refuses cannot
+ * survive a takeover in a test that the real reader would not carry.
  */
 export function readerChecked(store: QueueStore, now: () => number): QueueStore {
+  const parsed = (entry: StoreEntry): StoreEntry => {
+    if (entry.body === undefined) return entry;
+    const body = parseTask(entry.body);
+    if (body === null) throw new Error(`the store holds a task no reader parses: ${entry.id} v${entry.version}`);
+    return { ...entry, body };
+  };
   return {
-    list: () => store.list(),
-    get: (id) => store.get(id),
+    list: async () => (await store.list()).map(parsed),
+    get: async (id) => {
+      const entry = await store.get(id);
+      return entry === null ? null : parsed(entry);
+    },
     put: (id, expect, body) => {
       const key = `${STORE_PREFIXES.task.prefix}${id}`;
       const version = expect + 1;

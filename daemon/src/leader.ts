@@ -28,6 +28,7 @@ import {
 import type { AppRelay } from "./app-relay.ts";
 import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
+import { createDiskWatch } from "./disk-alerts.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
@@ -265,8 +266,7 @@ function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
   if (alert.kind === "spill") {
     return { v: 1, kind: "spill", at, taskId: alert.taskId, window: alert.window, projectedPct: alert.projectedPct };
   }
-  // Only the 30-minute escalation alerts a needs-input stay today.
-  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: true };
+  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: alert.escalated };
 }
 
 /** Where admission leaves a `queued` task (`admission` in the library). */
@@ -489,7 +489,10 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         // What the first pass raised while the record was still being read.
         const waiting = parked.splice(0);
         // A term that ended while the read was out sends nothing: its successor owns the alerts now.
-        if (state === "ready" && live) for (const alert of waiting) pushSender?.send(alert);
+        if (state === "ready" && live) {
+          for (const alert of waiting) pushSender?.send(alert);
+          diskWatch.check(false);
+        }
       },
       (err: unknown) => {
         settingsLoading = false;
@@ -523,6 +526,20 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           log,
           onError: fail,
         });
+  // Disk alerts ride the registry, not the scheduler: the record's `diskAlerts` list is what keeps a new
+  // term from repeating one, and an alert is raised only once that write has landed.
+  const diskWatch = createDiskWatch({
+    settings: () => settings,
+    ready: () => settingsState === "ready",
+    machines: () => relay.getState().machines,
+    onAlert: (alert) => {
+      if (alert.kind === "disk") log.warn(`scheduler: disk nearly full: device=${quote(alert.deviceId)}`);
+      pushSender?.send(alert);
+    },
+    onError: fail,
+    now,
+    minGapMs: opts.tickIntervalMs ?? TICK_INTERVAL_MS,
+  });
   const scheduler = new Scheduler({
     store: watched(
       fencedStore(opts.floor === undefined ? store : flooredStore(store, opts.floor), term, isLive),
@@ -580,6 +597,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     if (state.machines !== seen || state.fleetQuota !== seenQuota) {
       seen = state.machines;
       seenQuota = state.fleetQuota;
+      diskWatch.check(true);
       tick();
     }
   });
@@ -645,6 +663,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         if (settingsSkip > 0) settingsSkip -= 1;
         else loadSettings();
       }
+      // Also on the clock: the first check after settings turn ready, and the retry of one a conflict lost.
+      diskWatch.check(false);
       tick();
     }, intervalMs);
     // Only after takeover's load: the poller reads the held tasks and writes through the term's fenced store.

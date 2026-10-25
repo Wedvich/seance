@@ -8,11 +8,14 @@ import {
   type StoredTask,
   type Task,
 } from "../src/index.ts";
-import { escalation, inputClock } from "../src/alerts.ts";
+import { escalation, inputAlert, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
 import { enqueue, exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
 
 const MINUTE = 60_000;
+
+/** The escalation alone: the first alert is debounced past it, so a stay escalates before it would fire. */
+const ESCALATION_ONLY: SchedulerConfig = { ...DEFAULT_CONFIG, needsInputAlertMs: 60 * MINUTE };
 
 function setup(
   fleet = new FakeFleet([machine("a")]),
@@ -49,7 +52,7 @@ async function stored(store: MemoryQueueStore, id: string): Promise<StoredTask> 
 
 describe("needs-input escalation", () => {
   test("the clock rides the state's own write, escalates once after 30 min, and clears on leaving", async () => {
-    const { alerts, clock, fleet, make, scheduler, store } = setup();
+    const { alerts, clock, fleet, make, scheduler, store } = setup(undefined, undefined, ESCALATION_ONLY);
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const pane = scheduler.task(task.id)?.assignment?.pane ?? "";
@@ -71,7 +74,7 @@ describe("needs-input escalation", () => {
       body: { state: "needs-input", needsInputSince: NOW, escalated: true },
     });
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatchObject({ kind: "needs-input", taskId: task.id, since: NOW });
+    expect(alerts[0]).toMatchObject({ kind: "needs-input", taskId: task.id, since: NOW, escalated: true });
 
     // Neither the next pass nor the next leader alerts it again, and the slot is still held.
     clock.now += MINUTE;
@@ -88,10 +91,11 @@ describe("needs-input escalation", () => {
     expect(left.body.state).toBe("running");
     expect(left.body).not.toHaveProperty("needsInputSince");
     expect(left.body).not.toHaveProperty("escalated");
+    expect(left.body).not.toHaveProperty("inputAlerted");
   });
 
   test("lost keeps the clock: the stay resumes where it was, and never alerts twice", async () => {
-    const { alerts, clock, fleet, scheduler, store } = setup();
+    const { alerts, clock, fleet, scheduler, store } = setup(undefined, undefined, ESCALATION_ONLY);
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const from = { deviceId: "a", pane: scheduler.task(task.id)?.assignment?.pane ?? "" };
@@ -118,7 +122,7 @@ describe("needs-input escalation", () => {
   });
 
   test("lost and back through its machine's sessions alone: waiting again on the original clock, escalated once", async () => {
-    const { alerts, clock, fleet, scheduler, store } = setup();
+    const { alerts, clock, fleet, scheduler, store } = setup(undefined, undefined, ESCALATION_ONLY);
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
     const from = { deviceId: "a", pane: scheduler.task(task.id)?.assignment?.pane ?? "" };
@@ -159,9 +163,30 @@ describe("needs-input escalation", () => {
     expect(left).not.toHaveProperty("escalated");
   });
 
+  test("inputAlert: due once per stay after the debounce, never for an escalated or unstamped one", () => {
+    const running: Task = { id: "x", spec: spec(), state: "running", createdAt: NOW };
+    const waiting = inputClock(advance(running, "needs-input"), NOW);
+    const alertDue = (task: Task, at: number): Task | null => inputAlert(task, at, 2 * MINUTE, 30 * MINUTE);
+    expect(alertDue(waiting, NOW + 2 * MINUTE - 1)).toBeNull();
+    const due = alertDue(waiting, NOW + 2 * MINUTE);
+    expect(due).toMatchObject({ inputAlerted: true, needsInputSince: NOW });
+    if (due === null) throw new Error("not due");
+    expect(alertDue(due, NOW + 10 * MINUTE)).toBeNull();
+    expect(alertDue({ ...waiting, escalated: true }, NOW + 10 * MINUTE)).toBeNull();
+    // Past the escalation too: that alert is the one.
+    expect(alertDue(waiting, NOW + 30 * MINUTE)).toBeNull();
+    const { needsInputSince: _since, ...unstamped } = waiting;
+    expect(alertDue(unstamped, NOW + 10 * MINUTE)).toBeNull();
+    expect(alertDue(running, NOW + 10 * MINUTE)).toBeNull();
+    const left = inputClock(advance(due, "running"), NOW + 3 * MINUTE);
+    expect(left).not.toHaveProperty("inputAlerted");
+    const lost = inputClock(advance(due, "lost", { absentSince: NOW }), NOW + 3 * MINUTE);
+    expect(lost).toMatchObject({ inputAlerted: true });
+  });
+
   test("an escalation write that fails alerts nothing; the next pass retries it", async () => {
     // No sweep: its check's own tick would retry the write before the assertion.
-    const config = { ...DEFAULT_CONFIG, sweepIntervalMs: 24 * 60 * MINUTE };
+    const config = { ...ESCALATION_ONLY, sweepIntervalMs: 24 * 60 * MINUTE };
     const { alerts, clock, errors, fleet, scheduler, store } = setup(undefined, undefined, config);
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler, fleet, clock.now);
@@ -191,6 +216,159 @@ describe("needs-input escalation", () => {
     await pass(scheduler, fleet, clock.now);
     expect(await stored(store, "old")).toMatchObject({ version: 2, body: { needsInputSince: NOW } });
     expect(alerts).toEqual([]);
+  });
+});
+
+describe("needs-input first alert", () => {
+  async function waiting(): Promise<
+    ReturnType<typeof setup> & { id: string; from: { deviceId: string; pane: string } }
+  > {
+    const env = setup();
+    const task = await enqueue(env.store, env.scheduler, spec());
+    await pass(env.scheduler, env.fleet, env.clock.now);
+    const from = { deviceId: "a", pane: env.scheduler.task(task.id)?.assignment?.pane ?? "" };
+    await env.scheduler.onSession(task.id, "needs-input", from);
+    return { ...env, id: task.id, from };
+  }
+
+  test("a flicker shorter than the debounce alerts nothing and writes nothing", async () => {
+    const { alerts, clock, fleet, from, id, scheduler, store } = await waiting();
+    const before = (await stored(store, id)).version;
+    clock.now = NOW + MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    await scheduler.onSession(id, "busy", from);
+    // The stay is over: the next one starts its own clock.
+    clock.now = NOW + 10 * MINUTE;
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + 11 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toEqual([]);
+    const body = (await stored(store, id)).body;
+    expect(body).toMatchObject({ state: "needs-input", needsInputSince: NOW + 10 * MINUTE });
+    expect(body).not.toHaveProperty("inputAlerted");
+    // busy, needs-input: two state writes; the passes between wrote nothing else.
+    expect((await stored(store, id)).version).toBe(before + 2);
+  });
+
+  test("past the debounce: one alert, `inputAlerted` on the record, and no repeat from the next pass or leader", async () => {
+    const { alerts, clock, fleet, id, make, scheduler, store } = await waiting();
+    clock.now = NOW + 2 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ kind: "needs-input", taskId: id, since: NOW, escalated: false });
+    expect((await stored(store, id)).body).toMatchObject({ inputAlerted: true });
+    expect((await stored(store, id)).body).not.toHaveProperty("escalated");
+
+    clock.now += MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    const next = make();
+    await next.takeover();
+    clock.now += MINUTE;
+    await pass(next, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("then the escalation at 30 min is the second and last, and leaving and re-entering re-arms both", async () => {
+    const { alerts, clock, fleet, from, id, scheduler, store } = await waiting();
+    clock.now = NOW + 2 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    clock.now = NOW + 30 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    clock.now = NOW + 45 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts.map((a) => (a.kind === "needs-input" ? a.escalated : null))).toEqual([false, true]);
+    expect((await stored(store, id)).body).toMatchObject({ inputAlerted: true, escalated: true });
+
+    await scheduler.onSession(id, "busy", from);
+    expect((await stored(store, id)).body).not.toHaveProperty("inputAlerted");
+    clock.now = NOW + 50 * MINUTE;
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + 52 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(3);
+    expect(alerts[2]).toMatchObject({ escalated: false, since: NOW + 50 * MINUTE });
+  });
+
+  test("a stay that escalates before the debounce alerts once, as the escalation", async () => {
+    const { alerts, clock, fleet, scheduler, store } = setup(undefined, undefined, {
+      ...DEFAULT_CONFIG,
+      needsInputAlertMs: 40 * MINUTE,
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    await scheduler.onSession(task.id, "needs-input", {
+      deviceId: "a",
+      pane: scheduler.task(task.id)?.assignment?.pane ?? "",
+    });
+    clock.now = NOW + 30 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    clock.now = NOW + 41 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ escalated: true });
+  });
+
+  test("a stay already past both thresholds when a leader takes it over is one alert, the escalation's", async () => {
+    const store = new MemoryQueueStore();
+    const at = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" };
+    const body: Task = {
+      id: "old",
+      spec: spec(),
+      state: "needs-input",
+      createdAt: NOW - 7200_000,
+      needsInputSince: NOW - 3600_000,
+      assignment: at,
+    };
+    await store.put("old", 0, body);
+    const { alerts, clock, fleet, scheduler } = setup(new FakeFleet([machine("a")]), store);
+    fleet.running.set("a", [{ id: "%1", window: "w", repo: "app", path: "/wt/old", taskId: "old" }]);
+    await scheduler.takeover();
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts.map((a) => (a.kind === "needs-input" ? a.escalated : null))).toEqual([true]);
+    expect((await stored(store, "old")).body).not.toHaveProperty("inputAlerted");
+  });
+
+  test("lost keeps the flags: the stay that was alerted is not alerted again on return", async () => {
+    const { alerts, clock, fleet, from, id, scheduler, store } = await waiting();
+    clock.now = NOW + 2 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+
+    fleet.fleet = fleet.fleet.map((m) => ({ ...m, connected: false }));
+    clock.now = NOW + 3 * MINUTE;
+    await scheduler.tick();
+    clock.now = NOW + 3 * MINUTE + DEFAULT_CONFIG.lostAfterMs;
+    await scheduler.tick();
+    await scheduler.drain();
+    expect((await stored(store, id)).body).toMatchObject({ state: "lost", inputAlerted: true, needsInputSince: NOW });
+
+    fleet.fleet = fleet.fleet.map((m) => ({ ...m, connected: true }));
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now += MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("an alert write that fails alerts nothing; the next pass retries it", async () => {
+    const config = { ...DEFAULT_CONFIG, sweepIntervalMs: 24 * 60 * MINUTE };
+    const { alerts, clock, errors, fleet, scheduler, store } = setup(undefined, undefined, config);
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    await scheduler.onSession(task.id, "needs-input", {
+      deviceId: "a",
+      pane: scheduler.task(task.id)?.assignment?.pane ?? "",
+    });
+    clock.now = NOW + 2 * MINUTE;
+    store.failNext({ code: "refused" });
+    fleet.beat(clock.now);
+    await scheduler.tick().catch((err: unknown) => errors.push(err));
+    await scheduler.drain();
+    expect(alerts).toEqual([]);
+    expect((await stored(store, task.id)).body.inputAlerted).toBeUndefined();
+
+    clock.now += MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
   });
 });
 
@@ -282,6 +460,143 @@ describe("credits spill", () => {
     await pass(scheduler, fleet, clock.now);
     expect(scheduler.task(task.id)?.state).toBe("running");
     expect(errors).toHaveLength(1);
+  });
+
+  test("the window is stamped on each dispatched record; a new leader alerts no spill for it, and one for a later window", async () => {
+    const { alerts, clock, fleet, make, scheduler, store } = setup(
+      new FakeFleet([spilling(NOW_S + 3600)]),
+      undefined,
+      WIDE,
+    );
+    const first = await enqueue(store, scheduler, spec());
+    const second = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+    // Only the dispatch that alerted carries the stamp; the window is what the next leader needs.
+    const stamps = [first, second].map(async (t) => (await stored(store, t.id)).body.spillAlert);
+    expect((await Promise.all(stamps)).filter((s) => s !== undefined)).toEqual([
+      { accountId: "org:a", window: "5h", reset: (NOW_S + 3600) * 1000, at: NOW },
+    ]);
+
+    const next = make();
+    await next.takeover();
+    await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+
+    // Resets later by more than the grace: the next window, alerted again.
+    fleet.fleet = [spilling(NOW_S + 5 * 3600)];
+    const later = await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
+    expect(alerts.map((a) => a.taskId)).toEqual([first.id, later.id]);
+  });
+
+  test("a session event landing before the spawn reply still leaves the stamp, and a reloaded leader stays quiet", async () => {
+    const { alerts, clock, fleet, make, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
+    // The reply waits for the pane's title; a hook's `busy` need not.
+    fleet.scripts.set("a", async (request) => {
+      const reply = fleet.start("a", request);
+      const pane = reply.ok ? (reply.sessions[0]?.id ?? "") : "";
+      await scheduler.onSession(request.taskId ?? "", "busy", { deviceId: "a", pane });
+      return reply;
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    expect(alerts).toHaveLength(1);
+    expect((await stored(store, task.id)).body.spillAlert).toEqual({
+      accountId: "org:a",
+      window: "5h",
+      reset: (NOW_S + 3600) * 1000,
+      at: NOW,
+    });
+
+    fleet.scripts.delete("a");
+    const next = make();
+    await next.takeover();
+    await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("a stamp that cannot be written costs only a repeat under the next leader; this term still alerts once", async () => {
+    const { alerts, clock, errors, fleet, make, scheduler, store } = setup(new FakeFleet([spilling(NOW_S + 3600)]));
+    fleet.scripts.set("a", async (request) => {
+      const reply = fleet.start("a", request);
+      const pane = reply.ok ? (reply.sessions[0]?.id ?? "") : "";
+      await scheduler.onSession(request.taskId ?? "", "busy", { deviceId: "a", pane });
+      // The event's write has landed and the verdict will decline: the next write is the stamp's.
+      store.failNext({ code: "refused" });
+      return reply;
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    expect((await stored(store, task.id)).body.spillAlert).toBeUndefined();
+
+    fleet.scripts.delete("a");
+    const next = make();
+    await next.takeover();
+    await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
+    expect(alerts).toHaveLength(2);
+  });
+
+  describe("a stamp a later term reads", () => {
+    const HOUR = 60 * MINUTE;
+    /** `spilling`, its quota reading `at` seconds, so an advanced clock does not age it past use. */
+    const fresh = (hr: number | undefined, clock: { now: number }): ReturnType<typeof machine> =>
+      machine("a", {
+        exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
+        status: status({ quota: [obs(0, { h: 95, ...(hr === undefined ? {} : { hr }), at: clock.now / 1000 - 60 })] }),
+      });
+
+    /** A first term alerts a spill whose reading carries `hr`, then `later` ms pass and a second term reads the record. */
+    async function laterTerm(hr: number | undefined, later: number, then: number | undefined) {
+      const env = setup(new FakeFleet([fresh(hr, { now: NOW })]), undefined, WIDE);
+      await enqueue(env.store, env.scheduler, spec());
+      await pass(env.scheduler, env.fleet, env.clock.now);
+      expect(env.alerts).toHaveLength(1);
+      env.clock.now = NOW + later;
+      env.fleet.fleet = [fresh(then, env.clock)];
+      const next = env.make();
+      await next.takeover();
+      await enqueue(env.store, next, spec());
+      await pass(next, env.fleet, env.clock.now);
+      return env.alerts;
+    }
+
+    test("one with no reset, within its window's length, still holds the window: no repeat", async () => {
+      expect(await laterTerm(undefined, HOUR, undefined)).toHaveLength(1);
+      expect(await laterTerm(undefined, 4 * HOUR, NOW_S + 9 * 3600)).toHaveLength(1);
+    });
+
+    test("one with no reset, older than its window is long, is dropped: the window running now alerts", async () => {
+      expect(await laterTerm(undefined, 6 * HOUR, undefined)).toHaveLength(2);
+      // The same reading, with the reset it has since learned: still a window nobody was told of.
+      expect(await laterTerm(undefined, 6 * HOUR, (NOW + 6 * HOUR) / 1000 + 3600)).toHaveLength(2);
+    });
+
+    test("one whose reset passed beyond the grace is dropped; one still within it holds", async () => {
+      const reset = NOW_S + 3600;
+      expect(await laterTerm(reset, 2 * HOUR, undefined)).toHaveLength(2);
+      expect(await laterTerm(reset, HOUR + 5 * MINUTE, undefined)).toHaveLength(1);
+    });
+  });
+
+  test("a stamp the reader would refuse is not written: the record stays readable, and the alert still fires", async () => {
+    const long = machine("a", {
+      exclaves: [exclave("main", "x".repeat(200), { extraUsageEnabled: true })],
+      status: status({ quota: [obs(0, { h: 95, hr: NOW_S + 3600 })] }),
+    });
+    const { alerts, clock, errors, fleet, scheduler, store } = setup(new FakeFleet([long]), undefined, WIDE);
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(errors).toEqual([]);
+    expect(alerts).toHaveLength(1);
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    expect((await stored(store, task.id)).body.spillAlert).toBeUndefined();
   });
 
   test("a dispatch under the line alerts nothing", async () => {

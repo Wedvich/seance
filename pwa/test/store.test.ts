@@ -31,6 +31,7 @@ import {
   type TaskReply,
   type TaskRequest,
 } from "@seance/shared";
+import { openDeepLink } from "../src/deep-link.ts";
 import { DEFAULT_FORM } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
@@ -1108,6 +1109,43 @@ describe("the queue screen", () => {
     fake.settle(store);
     expect(store.getState().queue).toBe(false);
     expect(fake.index()).toBe(0);
+  });
+
+  describe("a notification's link", () => {
+    const outside: Task = { ...QUEUED, id: "old-1", state: "needs-input" };
+
+    test("reads its task by name, so one outside the default listing is listed", async () => {
+      const client = new ScriptedClient();
+      client.onQueue = async (request) =>
+        request.tasks === undefined ? { tasks: [waiting], holds: [], at: 1 } : { tasks: [outside], holds: [], at: 2 };
+      const store = new Store(client);
+      openDeepLink(store, { to: "task", taskId: outside.id });
+      await until(() => {
+        const view = store.getState().queueView;
+        return view?.kind === "ok" && view.tasks.some((t) => t.id === outside.id);
+      }, "the named task listed");
+      expect(client.queueRequests).toEqual([{}, { tasks: [outside.id] }]);
+      expect(store.getState()).toMatchObject({ queue: true, focusedTask: outside.id });
+    });
+
+    test("its focus outlives every read and re-render until the row is acted on, and closing the screen drops it", async () => {
+      const client = new ScriptedClient();
+      const store = new Store(client);
+      // A task nobody lists (pruned since): its row never arrives, so nothing acts on the focus.
+      openDeepLink(store, { to: "task", taskId: "ghost-1" });
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      await drain();
+      // State patches of every other kind, as any App re-render's worth of them: the focus stays.
+      await store.refreshQueue();
+      store.openSettings();
+      store.dismissLayer();
+      fake.settle(store);
+      expect(store.getState()).toMatchObject({ queue: true, focusedTask: "ghost-1" });
+
+      store.dismissLayer();
+      fake.settle(store);
+      expect(store.getState()).toMatchObject({ queue: false, focusedTask: null });
+    });
   });
 
   test("as a desktop column the queue is read without opening, never becomes a layer, and shows its failures", async () => {

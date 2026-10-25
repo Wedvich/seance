@@ -1349,6 +1349,27 @@
   border-radius: 16px;
 }
 
+/* The row a notification named, marked just long enough to find it. */
+.fleet-card-marked {
+  animation: fleet-marked 3s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-card-marked {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--acc);
+  }
+}
+
+@keyframes fleet-marked {
+  from {
+    box-shadow: 0 0 0 2px var(--acc);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
 /* Name and its toggle share one line box, so top-aligning them centres both on the same line. */
 .fleet-card-head {
   --fleet-line: 20px;
