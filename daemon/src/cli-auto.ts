@@ -19,6 +19,7 @@ import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
   brokerFailureText,
   brokerFleet,
+  localOpsNote,
   relayFleet,
   SCHEDULER_NEEDS_NEWER_DAEMON,
   type Fleet,
@@ -112,10 +113,11 @@ export interface SpawnAutoOpts {
 /**
  * The broker is this shell's only way to the relay when it read no key, so its
  * failure is the end of the road for `--auto`: say that first, then why. A plain
- * spawn is relay-free and works without a key.
+ * spawn is relay-free and works without a key, but not without the daemon, so
+ * the closing line follows `cause`.
  */
-function keylessNotQueued(why: string): string {
-  return `auto: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. A spawn without --auto needs no key.`;
+function keylessNotQueued(why: string, cause: unknown): string {
+  return `auto: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. ${localOpsNote(cause)}`;
 }
 
 /**
@@ -147,7 +149,7 @@ export async function spawnAuto(
     lease = await fleet.open();
   } catch (err) {
     const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
-    return failed(opts.keyless === true ? keylessNotQueued(why) : `auto: not queued — ${why}`);
+    return failed(opts.keyless === true ? keylessNotQueued(why, err) : `auto: not queued — ${why}`);
   }
   try {
     if (lease.scheduler === null) return failed(`--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);

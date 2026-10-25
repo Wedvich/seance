@@ -185,8 +185,35 @@ describe("autoFleet", () => {
       // The unreadable key first, then the broker's reason, then what still works.
       expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
       expect(outcome.text.indexOf("could not read the PSK")).toBeLessThan(outcome.text.indexOf("is seanced running?"));
-      expect(outcome.text).toEndWith("A spawn without --auto needs no key.");
+      // No daemon: a plain spawn goes through it too, so it is not promised to work.
+      expect(outcome.text).toEndWith("Ops on this machine go through that same daemon, so they fail too until it is running.");
+      expect(outcome.text).not.toContain("needs no key");
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a keyless shell whose daemon hangs up without answering does not promise a plain spawn works", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-cliauto-"));
+    const silent = Bun.listen<undefined>({
+      unix: join(dir, "silent.sock"),
+      socket: { data: (sock): void => void sock.end() },
+    });
+    try {
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: join(dir, "silent.sock") } });
+      const outcome = await spawnAuto(
+        KEYLESS_ARGS,
+        built.fleet,
+        () => {
+          throw new Error("nothing may be audited");
+        },
+        { keyless: built.keyless },
+      );
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toEndWith("they may fail too — check `seanced status`.");
+      expect(outcome.text).not.toContain("needs no key");
+    } finally {
+      silent.stop(true);
       await rm(dir, { recursive: true, force: true });
     }
   });

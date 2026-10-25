@@ -254,6 +254,23 @@ function localOutlook(cause: unknown): LocalOutlook {
   return "up";
 }
 
+/**
+ * What a plain `seanced spawn` can still do after this broker failure, for a
+ * caller that already said why `--auto` failed. Local ops ride the daemon's op
+ * socket, so a daemon that is gone or silent takes them down too — see
+ * `unreachableAdvice`, which words the same split.
+ */
+export function localOpsNote(cause: unknown): string {
+  switch (localOutlook(cause)) {
+    case "down":
+      return LOCAL_NEEDS_IT_TOO;
+    case "unknown":
+      return "Ops on this machine go through that same daemon, so they may fail too — check `seanced status`.";
+    case "up":
+      return "A spawn without --auto needs no key.";
+  }
+}
+
 /** What the reader can do about this cause — each broker code fails for a different reason. */
 function unreachableAdvice(cause: unknown): string {
   if (!(cause instanceof BrokerError))
