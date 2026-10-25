@@ -320,17 +320,16 @@ checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs 
 ### From the phone
 
 Type what the session should do — or leave the prompt blank to start an empty one —
-then pick where it runs. Four tiles open pickers: **machine**, **repository**,
-**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max). **Fresh
-worktree** is on by default; switching it off runs the session in the repo as it
-stands. Then start it.
+then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
+**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
+authoring ones below. **Fresh worktree** is on by default; switching it off runs the
+session in the repo as it stands. Then queue it.
 
-The verdict names the tmux window it created, and from there you continue the session
-in the Claude app like any other. Two things keep you from spawning duplicates: the
-header counts sessions across every machine (`2 online · 1 asleep · 3 sessions`), and
-the footer counts what is already running on the machine you picked. The repo list
-comes from that daemon's last scan — **↻ Rescan repos** in the repository picker
-refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
+Every spawn from the phone is a queued task: the app never starts a session on a machine
+itself. The verdict names the task and follows it until it is running, then you continue
+the session in the Claude app like any other. The header counts sessions across every
+machine (`2 online · 1 asleep · 3 sessions`), and the footer says who places the task —
+the scheduler, or the machine you pinned.
 
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it
@@ -340,13 +339,17 @@ daemon connects again. `seanced uninstall` deletes it for you on the way out; un
 
 There is no title field: the daemon names the tmux window after the prompt.
 
+The machine's repo list comes from its daemon's last scan. **↻ Rescan** sits on that
+machine's row in the Machine picker (offline machines can't answer it, and one rescan runs
+at a time); it refreshes the list and the row shows when it last scanned.
+
 The **Machine** and **Account** pickers each start on **Auto**, which lets the scheduler
 choose; picking a machine or an account pins the task to it. The repository picker lists
 repos by origin, across every machine that has a clone (narrowed to the picked machine and
 account), and with both pickers on Auto a placement preview under the tiles says where it
 would start and why each other machine lost. **Queue** (or **Queue on <machine>**) puts the
-task in the relay's queue, and the verdict
-follows it until it is running, with the decision behind it. With no scheduler leading
+task in the relay's queue, and the queued verdict
+shows the decision behind it, and why it waits while it does. With no scheduler leading
 (no machine on the relay's `SCHEDULER_LEADERS` is connected — step 4), or one that
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
