@@ -2124,21 +2124,24 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   full Fable week refused Opus work on an account with room. A task whose account's newest
   reading holds only other models' weeklies is `quota_unknown` (`unobserved`), never 0%.
 - **Skills filter** (2026-10-25, docs/scheduler.md M4 _Skills_, decided #19). A task's skill
-  is its declared `TaskRequest.skill` (which wins outright), else the first `/name` token in
-  its prompt that the inventory knows. A token is the PWA picker's: a `/` at the prompt's start
-  or after whitespace, the name running to the next whitespace with no second `/` (so
-  `and/or`, `https://a/b` and `/tmp/x` are none), trailing `.,;!?)` stripped (not `:`, which
-  plugin names use), and passing `isSkillName`. Any token counts, not only a leading one: the
+  is its declared `TaskRequest.skill` (which wins outright: only it is checked), else every
+  `/name` token in its prompt that the inventory knows, each required. A token is the PWA
+  picker's, widened for wrapping: a `/` at the prompt's start, after whitespace or after one of
+  `` ` `` `"` `'` `(` `[`, the name running to the next whitespace with no second `/` (so
+  `and/or`, `https://a/b` and `/tmp/x` are none), closing `` ` `` `"` `'` `)` `]` and trailing
+  `.,;!?:` stripped (a name ending in `:` cannot be a `plugin:name`, which keeps its inner `:`),
+  and passing `isSkillName`. Any token counts, not only a leading one: the
   seed is `${preamble}\n\nTask: ${prompt}` (`daemon/src/spawn.ts`), so a `/name` is never
-  claude's first token and every one is equally actionable. An earlier unknown token (`/tmp
-  then /ship`) does not mask a later known one. Only a
+  claude's first token and every one is equally actionable. An unknown token (`/tmp
+  then /ship`) does not mask a known one. Only a
   name the inventory knows restricts — every machine's `exclaves[].skills`, offline machines
   included as the picker counts them, plus the project skills (`RepoEntry.skills`) of clones
   of _this task's_ repo, since a project skill elsewhere cannot be what this repo's `/name`
   means and counting it would hold back a same-named command here. A known name puts
   `skill_absent { skill }` on every candidate whose exclave's `skills` and whose clone's
   `skills` both lack it (clone × skill: a project skill travels with the clone, whichever
-  exclave holds it). An unknown name — a built-in, a plugin's `plugin:name`, a legacy
+  exclave holds it). With several known tokens (`/ship then /deploy`) a candidate needs all of
+  them and gets one `skill_absent`, naming the first missing in prompt order. An unknown name — a built-in, a plugin's `plugin:name`, a legacy
   `commands/*.md`, a typo — passes everywhere: a typo routes anywhere rather than failing,
   the cost decision #19 accepted, and plugin skills and legacy commands stay out of the
   inventory for now. `route-preview` routes through the same `route()`, so it says the same.
@@ -2147,21 +2150,23 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   update` heals it; so does a machine whose register blob dropped its project skills to fit
   the envelope (Daemon, "Exclaves"). Rejected: treating absent as unknown per clone (it would
   let an older daemon's clone take a task its checkout may not serve). A candidate's `clone`
-  is, where the exclave lacks the skill, the first clone of the repo that has it (an exclave's
-  skill serves any clone, so it leaves the choice at the first match).
+  is the first clone of the repo that, with the exclave, has every required skill (an exclave's
+  skill serves any clone, so it leaves the choice at the first match); none does, the first match.
 
-  Accepted costs, each rare or self-healing:
-  (a) the per-clone cap of 16 cuts by sort order, so clones of one repo on different
-  default-branch states can disagree about which names they advertise;
-  (b) offline and stale registry entries count toward the inventory, as the autocomplete
+  Accepted costs, each rare or self-healing (mixed versions are the paragraph above):
+  (a) clones fetched to different points advertise different sets, so a task may fit one
+  clone of a repo and not another;
+  (b) past 16 skills a clone advertises only the first 16 by sort order, the rest are cut;
+  (c) offline and stale registry entries count toward the inventory, as the autocomplete
   does, so a user skill only a retired machine lists holds `/name` tasks with `skill_absent`
   until that entry goes;
-  (c) a user skill named like a built-in (`review`, `init`) makes that built-in restrict to
+  (d) a user skill named like a built-in (`review`, `init`) makes that built-in restrict to
   the exclaves having the skill;
-  (d) a task pinned to a machine or exclave that lacks a known skill waits, like
+  (e) a task pinned to a machine or exclave that lacks a known skill waits, like
   `repo_absent`, rather than failing;
-  (e) mixed versions: a daemon predating `RepoEntry.skills` reports none, so its clones are
-  rejected for a project-only skill a newer daemon advertises, until `seanced update`.
+  (f) a symlinked skill dir, or a symlinked `SKILL.md`, in the tree is not advertised;
+  (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
+  project skills.
 
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
@@ -3557,7 +3562,11 @@ for the lot with its own `gh`.
   the app has no use for a path it can't open).
   **Project skills** (2026-10-25): each clone's `.claude/skills/<name>/SKILL.md` is read with
   every scan, onto `RepoEntry.skills`, from the tree of `origin/<default>` as last fetched
-  (one `git ls-tree`, argv exec, output capped, no per-entry `stat`) — not the working tree,
+  (two non-recursive `git ls-tree`s, argv exec, output capped, no per-entry `stat`: the dir
+  names under `.claude/skills/`, at most 64 of them sorted, then one read of each one's
+  `SKILL.md` by literal pathspec — cost per skill dir, not per file, so a big skill cannot push
+  later ones past the cap; run with `GIT_NO_LAZY_FETCH=1` in its own process group, so a
+  `--filter=tree:0` clone never fetches a missing tree over the network) — not the working tree,
   because that is what a worktree spawn sees: it branches from `origin/<default>`
   (`prepareWorktree`), so a skill on a feature branch or uncommitted would be advertised and
   absent, and a checkout behind origin would under-advertise. A `--here` spawn's checkout (or a
@@ -3571,7 +3580,7 @@ for the lot with its own `gh`.
   `ENVELOPE_MAX_CT_LENGTH`, sealed again without any clone's project skills, with a warn
   line (`sealMachineInfo`), since the relay would drop the whole registration unseen; a
   blob still over after that logs an error line saying the relay will refuse it. Both log
-  once per blob content, not per register.
+  once per size-deciding content (the repos and exclaves, not the scan time), not per register.
 - **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
   2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
@@ -4660,8 +4669,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   type into, and on a phone the keyboard should go with the text — while UNDO
   focuses it again, caret at the end, so the draft can be picked back up.
 - **A `/name` token in the prompt opens a skill picker** (scheduler M4, _Skills_, 2026-10-17). It
-  lists the union of skill names across every machine and exclave — `MachineInfo.exclaves[].skills`
-  from the register blobs the app already holds, offline machines included — so it needs no
+  lists the union of skill names across every machine, exclave and clone —
+  `MachineInfo.exclaves[].skills` and `RepoEntry.skills` (project skills, which routing honours
+  too, so one must complete) from the register blobs the app already holds, offline machines included — so it needs no
   leader and works on a direct pick as on `auto`. Names only, no descriptions and no
   machine list: the blob carries every name to every app, and descriptions would grow it per
   skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads any `/name`

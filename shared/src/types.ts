@@ -804,7 +804,7 @@ export const REPO_MAX_SKILLS = 16;
 /**
  * A skill name's length at most — Claude Code's own limit on a skill's `name`.
  * What `/name` resolves is the directory, so `isSkillName` holds a name to what a
- * directory entry and a prompt's first token can both be.
+ * directory entry and a prompt's `/name` token can both be.
  */
 export const SKILL_NAME_MAX_LENGTH = 64;
 
@@ -1565,8 +1565,8 @@ export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "tit
   /**
    * A skill the task needs (decided #19), by `isSkillName`: routing restricts
    * to clones and exclaves that have it, when the fleet's inventory knows the
-   * name at all (DESIGN.md, Scheduler, "Skills filter"). Absent, a prompt
-   * starting `/name` is read as the declaration. An older leader's `parseTaskSpec` rebuilds the spec without it,
+   * name at all (DESIGN.md, Scheduler, "Skills filter"). Absent, every
+   * `/name` token in the prompt the inventory knows is read as a declaration. An older leader's `parseTaskSpec` rebuilds the spec without it,
    * and every write that leader makes (reserve, place, settle) seals that spec
    * back, so the field is lost from the record, not just ignored while it leads.
    * The authoring item must not write it until leaders are upgraded.

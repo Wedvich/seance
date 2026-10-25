@@ -614,7 +614,8 @@ of M4 has landed.
 
 - **Skills — Done (2026-10-25).** Hard filter on a declared skill or any `/name` token the
   inventory knows, project skills (`<repo>/.claude/skills/`) on `RepoEntry` checked clone ×
-  skill, unknown names passing (#19); recorded in DESIGN.md, _Scheduler_ "Skills filter" and
+  skill, unknown names passing (#19, revised 2026-10-25: any `/name` token counts, and prompt
+  detection stays beside a declared skill; every known token is required); recorded in DESIGN.md, _Scheduler_ "Skills filter" and
   _Daemon_ "Exclaves". The autocomplete landed first (PR #167; DESIGN.md, PWA). Still out:
   plugin skills (`plugin:name`) and legacy `commands/*.md`, which pass as unknown names.
   _Decided (#20):_ #128 (penalise the default exclave's account) is parked, to be redone as a
