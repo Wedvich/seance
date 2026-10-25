@@ -438,13 +438,15 @@ export class Store {
    * "Follow up" on a queue row: the form takes that task as its one dependency.
    * The queue (and a verdict under it) closes like a machine pick's sheet does,
    * so the form is what shows; in the desktop layout the queue is a column and stays.
+   * Both pickers go back to auto: a follow-up is placed by the scheduler like a fresh
+   * task, not inherited onto the pins of whatever the form held before.
    */
   followUp(taskId: string): void {
     const { form, relay, queue, verdict } = this.#state;
     if (!deriveAutoAvailability(relay).available) return;
     const open = (queue ? 1 : 0) + (verdict === null ? 0 : 1);
     this.#patch({
-      form: { ...form, after: [{ task: taskId, after: "opened" }] },
+      form: { ...form, machine: null, account: null, after: [{ task: taskId, after: "opened" }] },
       queue: false,
       queueNotice: null,
       verdict: null,

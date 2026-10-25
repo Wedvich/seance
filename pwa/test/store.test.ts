@@ -2,6 +2,7 @@ import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
+  accountRecord,
   type BatchStrategy,
   QUEUE_MAX_TASKS,
   RelayClient,
@@ -1670,6 +1671,29 @@ describe("pinning a task", () => {
     expect(firstCreate(both).spec.pin).toEqual({ deviceId: "dev-a", account: "acct-w" });
   });
 
+  test("an account's name and email stay out of the spec: the pin carries the id", async () => {
+    const client = pinning();
+    Object.defineProperty(client, "accountsNamed", { value: true });
+    client.accountStoreKey = async () => "account:k-w";
+    client.getAccountRecord = async (key) => ({ ok: true, key, version: 0, entry: null });
+    client.putAccountAlias = async (accountId, name, expect) => {
+      const record = accountRecord(accountId, name, expect + 1);
+      if (record === null) throw new Error("bad record");
+      return { ok: true, key: "account:k-w", record };
+    };
+    const store = new Store(client, { ...form, account: "acct-w" });
+    expect(await store.renameAccount("acct-w", "Secret Name")).toBe(true);
+    // Both names are display state, so a leak into the spec would be a copy of what the form shows.
+    expect(store.getState().accounts.aliases).toEqual({ "acct-w": "Secret Name" });
+    expect(deriveView(store.getState(), Date.now()).accountTile.value).toBe("Secret Name");
+
+    await store.spawn();
+    const sealed = JSON.stringify(firstCreate(client).spec);
+    expect(sealed).toContain("acct-w");
+    expect(sealed).not.toContain("Secret Name");
+    expect(sealed).not.toContain("work@acme.dev");
+  });
+
   test("an account pin the leader can't take is refused before anything is written", async () => {
     const client = pinning([]);
     const store = new Store(client, { ...form, account: "acct-w" });
@@ -1917,5 +1941,21 @@ describe("authoring a task from the auto form", () => {
     const away = new Store(new ScriptedClient({ status: "retrying" }), DEFAULT_FORM);
     away.followUp("base");
     expect(away.getState().form).toEqual(DEFAULT_FORM);
+  });
+
+  test("a follow-up resets both pickers to auto, and keeps the rest of the form", () => {
+    const store = new Store(new ScriptedClient(), {
+      ...DEFAULT_FORM,
+      prompt: "keep",
+      machine: "dev-b",
+      account: "acct-w",
+    });
+    store.followUp("base");
+    expect(store.getState().form).toMatchObject({
+      machine: null,
+      account: null,
+      prompt: "keep",
+      after: [{ task: "base", after: "opened" }],
+    });
   });
 });

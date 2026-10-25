@@ -4874,7 +4874,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Picking the open strategy again keeps the
   batch, so a tap cannot renumber one in flight. Deps, `until` and the Linear issue belong to one
   task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
-  chain's shortcut: the form with that task as its one `opened` edge. Settling on the report appends the
+  chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
   carries what the session reads), and the bound on the prompt is checked on the combined text; it also needs a prompt, since
   the session is told in it. A leader that does not advertise the capability, a full batch
