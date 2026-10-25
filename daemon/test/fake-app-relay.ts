@@ -136,7 +136,11 @@ export function fakeRelay(
       const { accounts } = fake;
       if (accounts instanceof Error) throw accounts;
       if (accounts === null || "ok" in accounts) return accounts;
-      return { ok: true, accounts: accounts.map((record) => ({ key: `account:${record.accountId}`, record })), unreadable: [] };
+      return {
+        ok: true,
+        accounts: accounts.map((record) => ({ key: `account:${record.accountId}`, record })),
+        unreadable: [],
+      };
     },
     onStoreChanged: (listener) => {
       storeListeners.add(listener);

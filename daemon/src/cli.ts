@@ -106,33 +106,64 @@ export interface SpawnCliArgs {
   readonly prompt?: string;
   /** Queue it for the scheduler instead (`cli-auto.ts`); present only when given. */
   readonly auto?: true;
+  /** `--auto` only: the machine to pin to, by name or deviceId, or `here`. */
+  readonly machine?: string;
+  /** `--auto` only: the account to pin to, by alias, email or accountId. */
+  readonly account?: string;
+  /** `--auto` only: machines to keep it off, each as `machine` takes one; present only when given. */
+  readonly not?: readonly string[];
 }
 
-const SPAWN_USAGE = "usage: seanced spawn [--auto] <repo> [--here] [-t <title>] [[-p] <task>]";
+const SPAWN_USAGE =
+  "usage: seanced spawn [--auto [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
 
-/** Mirrors /spawn: -p is optional, bare words join into the prompt. Exported for tests. */
+/** The flags that take a value, and the field each fills. */
+const SPAWN_VALUE_FLAGS = {
+  "-t": "title",
+  "-p": "prompt",
+  "--machine": "machine",
+  "--account": "account",
+  "--not": "not",
+} as const;
+
+type SpawnValueFlag = keyof typeof SPAWN_VALUE_FLAGS;
+
+function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
+  return Object.hasOwn(SPAWN_VALUE_FLAGS, arg);
+}
+
+/**
+ * Mirrors /spawn: -p is optional, bare words join into the prompt. The
+ * placement flags need `--auto` — a direct spawn runs here, now — and a value
+ * each; `--machine` and `--account` are given at most once. Exported for tests.
+ */
 export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
   let auto = false;
   let title: string | undefined;
+  let machine: string | undefined;
+  let account: string | undefined;
+  const not: string[] = [];
   const promptParts: string[] = [];
-  let expect: "title" | "prompt" | null = null;
+  let expect: (typeof SPAWN_VALUE_FLAGS)[SpawnValueFlag] | null = null;
   for (const arg of argv) {
-    if (expect === "title") {
-      title = arg;
-      expect = null;
-    } else if (expect === "prompt") {
-      promptParts.push(arg);
+    if (expect !== null) {
+      if (expect === "title") title = arg;
+      else if (expect === "prompt") promptParts.push(arg);
+      else if (expect === "not") not.push(arg);
+      else if (expect === "machine") machine = arg;
+      else account = arg;
       expect = null;
     } else if (arg === "--here") {
       here = true;
     } else if (arg === "--auto") {
       auto = true;
-    } else if (arg === "-t") {
-      expect = "title";
-    } else if (arg === "-p") {
-      expect = "prompt";
+    } else if (isSpawnValueFlag(arg)) {
+      expect = SPAWN_VALUE_FLAGS[arg];
+      if ((expect === "machine" && machine !== undefined) || (expect === "account" && account !== undefined)) {
+        throw new Error(SPAWN_USAGE);
+      }
     } else if (arg.startsWith("-")) {
       throw new Error(SPAWN_USAGE);
     } else if (repo === undefined) {
@@ -142,6 +173,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     }
   }
   if (repo === undefined) throw new Error(SPAWN_USAGE);
+  if (expect === "machine" || expect === "account" || expect === "not") throw new Error(SPAWN_USAGE);
+  const placed = machine !== undefined || account !== undefined || not.length > 0;
+  if (placed && !auto) throw new Error(`--machine, --account and --not need --auto\n${SPAWN_USAGE}`);
   const prompt = promptParts.join(" ");
   return {
     repo,
@@ -149,6 +183,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(title !== undefined ? { title } : {}),
     ...(prompt !== "" ? { prompt } : {}),
     ...(auto ? { auto } : {}),
+    ...(machine === undefined ? {} : { machine }),
+    ...(account === undefined ? {} : { account }),
+    ...(not.length === 0 ? {} : { not }),
   };
 }
 
