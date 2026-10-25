@@ -358,9 +358,9 @@ describe("account aliases in the store", () => {
     await pollUntil(() => lists(double) === 1, "the listing to be asked");
 
     // The listing is now a snapshot of version 1 and lacks OTHER; these reads resolve before it does.
-    const key = await planted(double, ACCOUNT, "home", 2);
+    const at = await planted(double, ACCOUNT, "home", 2);
     const fresh = await planted(double, OTHER, "new");
-    nudge(double, key, 2);
+    nudge(double, at, 2);
     nudge(double, fresh, 1);
     await pollUntil(
       () => store.getState().accounts.aliases[ACCOUNT] === "home" && store.getState().accounts.aliases[OTHER] === "new",
@@ -372,17 +372,17 @@ describe("account aliases in the store", () => {
 
     await store.renameAccount(ACCOUNT, "again");
     expect(store.getState().accounts.notice).toBeNull();
-    expect(double.records.get(key)?.version).toBe(3);
+    expect(double.records.get(at)?.version).toBe(3);
   });
 
   test("a nudge no newer than what a rename left held reads nothing, and the name stays", async () => {
     const double = startDouble();
-    const key = await planted(double, ACCOUNT, "work");
+    const at = await planted(double, ACCOUNT, "work");
     const store = await openStore(double);
     await pollUntil(() => store.getState().accounts.aliases[ACCOUNT] === "work", "the listing to land");
     await store.renameAccount(ACCOUNT, "home");
 
-    nudge(double, key, 2);
+    nudge(double, at, 2);
     // A newer one is the proof the first was seen and dropped.
     const fresh = await planted(double, OTHER, "other");
     nudge(double, fresh, 1);
