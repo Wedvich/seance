@@ -184,7 +184,8 @@ describe("update", () => {
   test("a conflict re-reads once and applies the mutation to what it found", async () => {
     const { fake, settings } = await withLoaded();
     // Another writer got in first.
-    fake.held = { ...fake.held!, version: 2, linearKey: "theirs" };
+    if (fake.held === null) throw new Error("the loaded record is held");
+    fake.held = { ...fake.held, version: 2, linearKey: "theirs" };
     const result = await settings.update((r) => ({ ...r, linearKey: `${r.linearKey ?? ""}+ours` }));
     expect(result).toMatchObject({ ok: true, record: { version: 3, linearKey: "theirs+ours" } });
     expect(fake.puts.map((put) => put.expect)).toEqual([1, 2]);
