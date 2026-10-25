@@ -57,6 +57,17 @@ starts and then fails every spawn. Where sudoers refuses `--preserve-env`, the
 `sudo env PATH="$PATH" seanced …` form gets the same result: sudo only has to find
 `env`, which `secure_path` holds, and `env` then finds seanced and bun on your PATH.
 
+A preserved PATH can still arrive holding root's paths. When a version manager's shim
+(mise, asdf) is first on it, the `env bun` shebang runs that shim as root, which resolves
+root's bun and prepends root's own install dir before seanced reads PATH — a unit
+recording it fails 203/EXEC, since the user can't reach `/root`. So the install keeps only
+the PATH entries the unit's user can search, and resolves bun, git, tmux and claude from
+what is left, checked by a probe run as that user (`setpriv`, supplementary groups
+included) rather than by root's `access()`, which says yes to everything. Its result
+names what it left out. Usually your own shim dir is still there and bun resolves to
+the shim; where it isn't, the refusal names `--path`, which takes your dirs explicitly:
+`--path "<dir holding your bun>:$PATH"`.
+
 What it resolves for you, all from the target user (`SUDO_USER`, or `--user <name>`)
 rather than from root: home and uid/gid via `getent`, the state dir
 (`<home>/.local/state/seance`, or an absolute `--state-dir`, which is also written into
