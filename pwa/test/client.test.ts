@@ -35,7 +35,7 @@ import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
-import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
+import { installBrowserGlobals } from "./stubs.ts";
 
 installBrowserGlobals();
 

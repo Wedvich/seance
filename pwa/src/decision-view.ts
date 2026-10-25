@@ -245,20 +245,18 @@ const WAITING_LIMIT = 3;
 
 /**
  * Why a ready task is still waiting, from its decision: each place that took it
- * out and the reasons, the clause `reasonText` words. Places cut only for the
- * pin (`pin_mismatch`, `avoided`) are left out — the pin is the ask, not news.
+ * out and the reasons, the clause `reasonText` words. Places the pin or the
+ * avoid list rules out (`pin_mismatch`, `avoided`) are left out whole — the pin is the ask, not news.
  * Null with no decision yet, or one that chose a place.
  */
 export function waitingText(task: Task): string | null {
   const { decision } = task;
   if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return null;
   const places = decision.candidates
-    .map((candidate) => ({
-      where: where(candidate),
-      why: candidate.rejected
-        .filter((reason) => reason.code !== "pin_mismatch" && reason.code !== "avoided")
-        .map(reasonText),
-    }))
+    // A place the pin or the avoid list rules out is moot whatever else is wrong with it (an offline machine
+    // the task was never going to use is not news).
+    .filter((candidate) => !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided"))
+    .map((candidate) => ({ where: where(candidate), why: candidate.rejected.map(reasonText) }))
     .filter((place) => place.why.length > 0)
     .map((place) => `${place.where}: ${place.why.join(", ")}`);
   if (places.length === 0) return null;

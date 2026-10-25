@@ -370,13 +370,13 @@ describe("waitingText and pinLine", () => {
     ...extra,
   });
 
-  test("names each place that held the task and why, leaving out places cut only for the pin", () => {
+  test("names each place that held the task and why, leaving out places the pin rules out, whatever else is wrong there", () => {
     const task = waiting([
       rejected("full", "FullBox", [over]),
       rejected("other", "Other", [{ code: "pin_mismatch", field: "deviceId" }]),
       rejected("both", "Both", [{ code: "pin_mismatch", field: "account" }, { code: "offline" }]),
     ]);
-    expect(waitingText(task)).toBe(`FullBox · work: ${reasonText(over)}; Both · work: offline`);
+    expect(waitingText(task)).toBe(`FullBox · work: ${reasonText(over)}`);
   });
 
   test("caps the places at three and counts the rest", () => {

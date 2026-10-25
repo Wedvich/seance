@@ -26,6 +26,8 @@ import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
+import { deriveQueue } from "../pwa/src/queue-view.ts";
+import { describeVerdict } from "../pwa/src/verdict-view.ts";
 import { deriveView, type AppState } from "../pwa/src/view.ts";
 import {
   killWindow,
@@ -513,6 +515,139 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await second.stop();
     }
   }, 90_000);
+
+  // M4 PR 2's exit: the PWA's spawn is a task. With both pickers on auto it is the unpinned
+  // task `seanced spawn` writes; a machine pick is a pin, so it lands where the owner said.
+  test("the PWA's default spawn is an unpinned task of the PWA's, placed by the scheduler", async () => {
+    const app = startApp(stack, { prompt: "queue me" });
+    let window: string | null = null;
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      await app.store.spawn();
+      const queued = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
+        "the queued task to run",
+      );
+      if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      taskId = queued.verdict.task.id;
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec).not.toHaveProperty("pin");
+      expect(stored?.spec.client).toBe("pwa");
+      expect(stored?.assignment?.deviceId).toBe(stack.deviceId);
+      window = stored?.assignment?.window ?? null;
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      app.stop();
+    }
+  }, 60_000);
+
+  test("a machine pick pins the task, and it runs on that machine", async () => {
+    const account = { organizationUuid: "e2e-org-pick", accountUuid: "picked", emailAddress: "pick@e2e.test" };
+    const second = await stack.startSecondDaemon({
+      name: "PickBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 60, account }],
+    });
+    const app = startApp(stack, { prompt: "put me there" });
+    let window: string | null = null;
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              (m.exclaves ?? []).length > 0 &&
+              m.status !== undefined,
+          ),
+        "the picked machine live",
+      );
+      // Picked once it is listed, as from the sheet: a pin on a machine the registry lacks is reset.
+      app.store.pickMachine(second.deviceId);
+      await app.store.spawn();
+      const queued = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
+        "the pinned task to run",
+      );
+      if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      taskId = queued.verdict.task.id;
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec.pin).toEqual({ deviceId: second.deviceId });
+      expect(stored?.assignment?.deviceId).toBe(second.deviceId);
+      window = stored?.assignment?.window ?? null;
+      expect(describeVerdict(queued.verdict, queued.relay.machines, {}, Date.now(), null).body).toContain(
+        "Pinned to PickBox",
+      );
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      app.stop();
+      await second.stop();
+    }
+  }, 60_000);
+
+  // The reason a pinned task waits is the news: the only machine it may use is over its line,
+  // and every other machine's rejection is the pin itself, which the owner already knows.
+  test("a task pinned to a machine over its quota line waits, and both surfaces say why", async () => {
+    const account = { organizationUuid: "e2e-org-full", accountUuid: "full", emailAddress: "full@e2e.test" };
+    const full = await stack.startSecondDaemon({
+      name: "FullBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 95, account }],
+    });
+    const app = startApp(stack, { prompt: "wait for me" });
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) => m.deviceId === full.deviceId && m.connected && m.repos.length > 0 && m.status !== undefined,
+          ),
+        "the full machine live",
+      );
+      app.store.pickMachine(full.deviceId);
+      await app.store.spawn();
+      const decided = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.decision !== undefined,
+        "the leader's decision on the task",
+      );
+      if (decided.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      const { task } = decided.verdict;
+      taskId = task.id;
+      expect(task.spec.pin).toEqual({ deviceId: full.deviceId });
+      expect(task.state).toBe("ready");
+      const own = task.decision?.candidates.filter((c) => c.deviceId === full.deviceId) ?? [];
+      expect(own.flatMap((c) => c.rejected.map((r) => r.code))).toEqual(["quota_over_line"]);
+
+      const text = describeVerdict(decided.verdict, decided.relay.machines, {}, Date.now(), null).body;
+      expect(text).toContain("Waiting: FullBox");
+      expect(text).toContain("quota would reach");
+      expect(text).not.toContain("pinned machine");
+      expect(text).not.toContain("offline");
+
+      app.store.openQueue();
+      const withQueue = await app.waitForApp((state) => state.queueView?.kind === "ok", "the queue read");
+      const row = deriveQueue(withQueue, Date.now())
+        .sections.flatMap((section) => section.rows)
+        .find((r) => r.id === task.id);
+      expect(row?.body).toContain("Waiting: FullBox");
+      expect(row?.body).not.toContain("pinned machine");
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      app.stop();
+      await full.stop();
+    }
+  }, 60_000);
 
   // An app's cancel of a task running on another machine: the leader despawns
   // it there through the relay, and that machine's audit trail says who asked —
