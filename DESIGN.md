@@ -2232,7 +2232,23 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     `update` of the settings holder (none for an endpoint it does not hold) and audits
     `op=push-unsubscribe id=<request id> ok`. The op answers within its 10 s timeout at worst,
     so ordering the local unsubscribe after it would keep a device pushed for that long on a
-    slow leader. A failed op, or a leader that predates it (`invalid_request`, after the same
+    slow leader. For the same reason the card does not wait for it: once the local unsubscribe
+    worked it shows off, and the op's answer arrives later as the note (`disablePush` hands it
+    back as a promise; a note from an earlier click never overwrites a later one). Only a browser
+    that kept its subscription waits for the op, since then the leader dropping the endpoint is
+    what turns it off; there the card can wait through the retries, at worst three `not_ready`
+    round trips, 7 s of backoff and a final op of up to 10 s. Only `not_ready` and `conflict` are
+    asked again, at most four attempts with a 1 s doubling backoff, so the slot frees now rather
+    than at the next 404/410; every other answer is final (`invalid_request`,
+    `settings_unavailable`, `internal_error`, an unknown code, an answer the app cannot read, a
+    timeout or a throw: a timed-out op may have landed, and the others will not change). The
+    retry stops when the card aborts the turn-off (Enable, Try again or a second Turn off), by an
+    in-memory `AbortSignal` checked after each backoff, not by the opt-out mark, which reads
+    false throughout when storage is blocked. Leaving Settings does not abort: freeing the slot is
+    still wanted. An op already sent cannot be recalled, so an attempt in flight when Enable runs
+    can still drop a new subscription if the push service reissued the same endpoint; the
+    re-sync on the next load repairs it. A failed
+    op, or a leader that predates it (`invalid_request`, after the same
     `pushEndpoint` pre-check), leaves the browser off and the endpoint in the record until
     the push service answers 404/410 for it, which the sender then prunes; the card says so. An
     answer the app cannot read (or one echoing another endpoint) gets its own note, not the
@@ -4724,9 +4740,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   started over) comes back; an answer that may change (`not_ready`, an unreachable relay or
   leader, no record yet) is tried again on the next ready transition and after a backoff, at
   most five times. When on, the card offers Turn off (`disablePush`): it unsubscribes the
-  browser, then sends `push-unsubscribe` (_Scheduler_, "Web Push", "Unsubscribing"), and when
-  the leader could not be told or predates the op it says the slot stays until the push
-  service reports the endpoint gone. Permission stays granted after a turn-off — no API takes
+  browser, then sends `push-unsubscribe` (_Scheduler_, "Web Push", "Unsubscribing"), retrying
+  a leader still starting or a lost write race a few times. The card shows off as soon as the
+  browser's own unsubscribe worked, without waiting for the op, and when the op answers that
+  the leader could not be told or predates it, a note follows saying the slot stays until the
+  push service reports the endpoint gone. Permission stays granted after a turn-off — no API takes
   it back — so the page keeps `seance:push-off` in localStorage and the silent re-run skips a
   browser that holds it; Enable clears it. Storage a private window blocks forgets the
   turn-off, and the next load subscribes again (the card then reads "On"; accepted). The service worker
