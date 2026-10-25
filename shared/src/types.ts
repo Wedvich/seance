@@ -944,6 +944,10 @@ export interface MachineInfo {
  * leader acts on `TaskSpec.until` and `after: "done"` — what a client checks
  * of the verified leader before writing either, since an older leader strips
  * `until` on its first write and holds a `done` edge unreadable.
+ * `pinAccount`: as a leader, routes on `TaskSpec.pin.account` and
+ * `TaskSpec.avoid` — what a client checks of the verified leader before writing
+ * either. An older leader would rebuild the spec without both; the record's
+ * `PIN_SENTINEL` makes it unreadable to one instead (`TaskSpec.pin`).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -951,6 +955,7 @@ export const CAPABILITIES = {
   baseBranch: "baseBranch",
   exitStatus: "exitStatus",
   reportedDone: "reportedDone",
+  pinAccount: "pinAccount",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1676,7 +1681,24 @@ export const TASK_SPEC_LIMITS = {
   linearIssue: 64,
   placement: ROUTING_ID_MAX_LENGTH,
   batchIndex: MAX_TASKS,
+  /** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
+  account: 128,
+  /**
+   * Machines a task may avoid: a few to steer around, not a fleet to list. Four
+   * keeps the record at every bound, the longest account pin included, under
+   * `STORE_MAX_CT_LENGTH` with ten candidates beside it (measured in parse.test.ts).
+   */
+  avoid: 4,
 } as const;
+
+/**
+ * Sealed into a task record's `pin.exclave` whenever its spec carries
+ * `pin.account` or `avoid` (`sealTaskRecord`). An older leader's parser refuses
+ * an empty exclave, so it holds such a record unreadable — never strips the
+ * restriction by re-sealing what it parsed. This build's parser ignores
+ * `exclave` (exclave pins are gone), so the parsed spec never carries it.
+ */
+export const PIN_SENTINEL = "";
 
 /**
  * What settles a task (M4, #21). `merged`, the default: its merge, as today.
@@ -1689,8 +1711,19 @@ export type TaskUntil = (typeof TASK_UNTIL)[number];
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
-  /** Restrict to a machine, an exclave name, or both; absent fields are free. */
-  readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
+  /**
+   * Restrict to a machine, an account (`ExclaveInfo.accountId`), or both;
+   * absent fields are free. No exclave: an exclave id is machine-local — `abc`
+   * on two machines may be two accounts — so it pins nothing fleet-wide. A
+   * client writes `account` only to a leader advertising `CAPABILITIES.pinAccount`.
+   */
+  readonly pin?: { readonly deviceId?: string; readonly account?: string };
+  /**
+   * Machines (deviceIds) the task must not run on, at most
+   * `TASK_SPEC_LIMITS.avoid`. Avoiding every machine leaves it waiting, as a
+   * pin to an absent machine does. Gated as `pin.account` is.
+   */
+  readonly avoid?: readonly string[];
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
   /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
@@ -1754,7 +1787,9 @@ export type Reason =
   | { readonly code: "exclaves_unknown" }
   | { readonly code: "disk_low"; readonly freeMib: number }
   | { readonly code: "pressure_unknown" }
-  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
+  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "account" }
+  /** The machine is in the task's `avoid` list. */
+  | { readonly code: "avoided" }
   | { readonly code: "repo_absent" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */

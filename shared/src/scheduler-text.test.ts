@@ -20,6 +20,12 @@ describe("reasonText", () => {
     expect(text).toContain("#0");
     expect(text).not.toContain("ended");
   });
+
+  test("a placement restriction says which one turned the candidate away", () => {
+    expect(reasonText({ code: "pin_mismatch", field: "deviceId" })).toBe("not the pinned machine");
+    expect(reasonText({ code: "pin_mismatch", field: "account" })).toBe("not the pinned account");
+    expect(reasonText({ code: "avoided" })).toBe("the task avoids this machine");
+  });
 });
 
 describe("storeErrorText", () => {

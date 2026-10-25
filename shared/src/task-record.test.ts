@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { importPsk, sealAtRest, toBase64 } from "./crypto.ts";
+import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
-import { APP_ID, SCHEDULER_ID, type Task, type TaskRecord } from "./types.ts";
+import { APP_ID, PIN_SENTINEL, SCHEDULER_ID, type Task, type TaskRecord } from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
 const otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
@@ -50,6 +50,38 @@ describe("task records at rest", () => {
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env: running }, NOW)).toBe(
       "created_unqueued",
     );
+  });
+
+  test("an account pin or an avoid list is sealed with the sentinel an older leader refuses; the rest without", async () => {
+    const at = (value: unknown, name: string): unknown =>
+      typeof value === "object" && value !== null ? Object.entries(value).find(([k]) => k === name)?.[1] : undefined;
+    // The pin rule of every leader before `pinAccount`, as it stood: an exclave, if present, non-empty.
+    const olderPinParses = (pin: unknown): boolean => {
+      if (typeof pin !== "object" || pin === null) return false;
+      const exclave = at(pin, "exclave");
+      return exclave === undefined || (typeof exclave === "string" && exclave !== "");
+    };
+    const sealedPin = async (spec: Task["spec"]): Promise<unknown> => {
+      const task = { ...queued(), spec };
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+      // Reopened through this build's reader, the spec is the one sealed: the sentinel never reaches it.
+      expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+      const { payload } = await openAtRest(key, env, "task");
+      return at(at(at(payload, "task"), "spec"), "pin");
+    };
+    const base = queued().spec;
+    for (const spec of [
+      { ...base, pin: { account: "org:acct" } },
+      { ...base, avoid: ["dev-b"] },
+      { ...base, pin: { deviceId: "dev-a" }, avoid: ["dev-b"] },
+    ]) {
+      const pin = await sealedPin(spec);
+      expect(pin).toMatchObject({ exclave: PIN_SENTINEL });
+      expect(olderPinParses(pin)).toBe(false);
+    }
+    // Nothing an older leader can keep is sealed differently than before.
+    expect(await sealedPin(base)).toBeUndefined();
+    expect(await sealedPin({ ...base, pin: { deviceId: "dev-a" } })).toEqual({ deviceId: "dev-a" });
   });
 
   test("a body that opens but is no task record is malformed", async () => {

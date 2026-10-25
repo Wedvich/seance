@@ -1,4 +1,5 @@
 import {
+  accountName,
   CAPABILITIES,
   effectivePct,
   liveStatus,
@@ -130,18 +131,6 @@ export function formatUntil(at: number, now: number): string {
   if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
   if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
   return `resets in ${Math.floor(left / DAY)}d`;
-}
-
-/**
- * What an account is called on screen: its alias, else its email, else the
- * account half of `organizationUuid:accountUuid` shortened — enough to tell two
- * apart.
- */
-function accountName(accountId: string, email: string | undefined, alias?: string): string {
-  if (alias !== undefined) return alias;
-  if (email !== undefined) return email;
-  const account = accountId.split(":").at(-1) ?? accountId;
-  return `acct ${account.slice(0, 8)}`;
 }
 
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
