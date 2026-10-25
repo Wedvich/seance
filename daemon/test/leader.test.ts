@@ -954,6 +954,39 @@ describe("leader settings", () => {
     expect(lines.some((line) => line.includes("took over"))).toBe(true);
   });
 
+  test("a read still pending does not hold up takeover; the create follows once it is answered", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = memorySettings();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending: SettingsStore = {
+      get: async () => {
+        await gate;
+        return settings.store.get();
+      },
+      put: settings.store.put,
+    };
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, pending);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        // `settled` ends with takeover's log line, and it must resolve while the read is unanswered.
+        await leader.settled();
+        expect(settings.calls.puts).toEqual([]);
+        release();
+        await pollUntil(() => settings.calls.puts.length === 1, "the settings create after the answer", 5_000);
+      } finally {
+        release();
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.some((line) => line.includes("took over"))).toBe(true);
+    expect(settings.calls.puts).toEqual([0]);
+  });
+
   test("a record it cannot read is never written over: one warning, no create, and the queue runs", async () => {
     const relay = startTestRelay(TOKEN);
     const settings = memorySettings();

@@ -71,6 +71,9 @@ export {
 /** The library's own cadence for ready tasks (docs/scheduler.md, Routing). */
 const TICK_INTERVAL_MS = 30_000;
 
+/** The longest the settings read waits between tries after repeated failures. */
+const SETTINGS_RETRY_CAP_MS = 300_000;
+
 /**
  * The term's app-role leg: the shared client built with `scheduler: { term }`,
  * so every request is sealed `from: "scheduler"` and carries the term the relay
@@ -433,9 +436,15 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         });
   const settings: TermSettings | null =
     settingsStore === null ? null : createTermSettings({ store: settingsStore, term, log });
-  // Set when a read or an unconfirmed write left the record undecided: the tick tries again.
+  // Set when a read or an unconfirmed write left the record undecided: the tick tries again, backing off.
   let settingsRetry = false;
   let settingsLoading = false;
+  // Ticks to skip before the next try, and the ticks between tries after the next failure. The first
+  // retry is the next tick; each failure doubles the gap up to about SETTINGS_RETRY_CAP_MS, so a relay
+  // that keeps refusing reads is not asked once per tick for the whole term.
+  let settingsSkip = 0;
+  let settingsGap = 1;
+  const settingsGapCap = Math.max(1, Math.floor(SETTINGS_RETRY_CAP_MS / (opts.tickIntervalMs ?? TICK_INTERVAL_MS)));
   const loadSettings = (): void => {
     if (settings === null || settingsLoading || !live) return;
     settingsLoading = true;
@@ -443,16 +452,26 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       () => {
         settingsLoading = false;
         settingsRetry = false;
+        settingsSkip = 0;
+        settingsGap = 1;
       },
       (err: unknown) => {
         settingsLoading = false;
+        // Ended while it ran: the term's own end is not an outage.
+        if (!live) return;
         if (err instanceof StoreRevoked) {
           fail(err);
           return;
         }
-        // Once per outage. The text is the store adapter's own (a frame type and a refusal code), never a record's.
-        if (!settingsRetry) log.warn(`scheduler: term ${term} could not load its settings, retrying: ${String(err)}`);
+        // Once per outage. The name only: the error's text can carry what the relay answered.
+        if (!settingsRetry) {
+          log.warn(
+            `scheduler: term ${term} could not load its settings, retrying: ${err instanceof Error ? err.name : "unknown error"}`,
+          );
+        }
         settingsRetry = true;
+        settingsSkip = settingsGap - 1;
+        settingsGap = Math.min(settingsGap * 2, settingsGapCap);
       },
     );
   };
@@ -568,7 +587,10 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       // its stamp, and no `store-changed` will say so: re-read it on the timer, one get each, and
       // not on every push's tick.
       for (const entry of scheduler.unreadable()) if (entry.reason === "created_ahead") changed.add(entry.id);
-      if (settingsRetry) loadSettings();
+      if (settingsRetry) {
+        if (settingsSkip > 0) settingsSkip -= 1;
+        else loadSettings();
+      }
       tick();
     }, intervalMs);
     // Only after takeover's load: the poller reads the held tasks and writes through the term's fenced store.
