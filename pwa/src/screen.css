@@ -506,17 +506,37 @@
   color: var(--fg2);
 }
 
-/* ---- worktree row ---- */
+/* ---- switch rows ---- */
+
+/* One card for every switch; clipping keeps a row's pressed tint inside its rounded corners. */
+.switches {
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  overflow: hidden;
+}
 
 .worktree {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: 14px;
+  border: 0;
+  background: none;
   text-align: left;
   width: 100%;
+}
+
+/* Inset to the text, as the machine card's rule between resources and accounts. */
+.worktree + .worktree::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 16px;
+  border-top: 1px solid var(--line);
 }
 
 .worktree-title {
@@ -645,17 +665,20 @@
 
 /* Tap acknowledgment: a tint plus a slight press-down on every main target. */
 .tile,
-.worktree,
 .sheet-item,
 .sheet-item-remove,
 .primary {
   transition: transform 0.12s ease;
 }
 
-.tile:active,
-.worktree:active {
+.tile:active {
   background: color-mix(in oklab, var(--sur) 93%, var(--fg));
   transform: scale(0.98);
+}
+
+/* Tint only: a row scaling inside its shared card would pull away from its neighbour's rule. */
+.worktree:enabled:active {
+  background: color-mix(in oklab, var(--sur) 93%, var(--fg));
 }
 
 .sheet-item:enabled:active,
