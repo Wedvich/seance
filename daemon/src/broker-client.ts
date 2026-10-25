@@ -1,9 +1,18 @@
-import { RequestFailure, type ErrorResponse, type Machine } from "@seance/shared";
+import {
+  isRecord,
+  RequestFailure,
+  type ErrorResponse,
+  type Machine,
+  type SchedulerAvailability,
+  type TaskSpec,
+} from "@seance/shared";
 import {
   BROKER_VERSION,
   brokerDeadlineMs,
+  brokerSchedulerDeadlineMs,
   parseBrokerReply,
   parseMachines,
+  parseSchedulerAvailability,
   type BrokerErrorCode,
   type BrokerOp,
   type BrokerRequest,
@@ -52,19 +61,26 @@ const UNCERTAIN: ReadonlySet<BrokerClientCode> = new Set<BrokerClientCode>([
   "internal_error",
   "reply_too_large",
   "bad_reply",
+  // A `request_failed` without a reason this build reads is a newer daemon's: a relay failure, so a write may have gone out.
+  "request_failed",
 ]);
+
+/** Whether a code may follow a request the daemon already sent on — what `RequestFailure("dropped")` means. */
+export function isUncertainBrokerCode(code: BrokerClientCode): boolean {
+  return UNCERTAIN.has(code);
+}
 
 const MAY_HAVE_LANDED = " — the request may have landed anyway; check get_sessions before retrying";
 
 export interface BrokerCallOpts {
   readonly path?: string;
-  /** Defaults to `brokerDeadlineMs` for the op; tests shorten it. */
+  /** Defaults to the op's deadline (`brokerDeadlineMs`, `brokerSchedulerDeadlineMs`); tests shorten it. */
   readonly timeoutMs?: number;
 }
 
 /** Sends one broker frame and returns the reply's data, or throws a `BrokerError` / the `RequestFailure` the direct path would have. */
-async function call(frame: BrokerRequest, op: BrokerOp | null, opts: BrokerCallOpts): Promise<unknown> {
-  const timeoutMs = opts.timeoutMs ?? brokerDeadlineMs(op);
+async function call(frame: BrokerRequest, deadlineMs: number, opts: BrokerCallOpts): Promise<unknown> {
+  const timeoutMs = opts.timeoutMs ?? deadlineMs;
   let raw: unknown;
   try {
     raw = await exchange(frame, {
@@ -88,7 +104,7 @@ async function call(frame: BrokerRequest, op: BrokerOp | null, opts: BrokerCallO
   // Rebuilt rather than wrapped, so a brokered failure renders through
   // `failureReasonText` exactly as the same failure on the direct path does.
   if (reply.code === "request_failed" && reply.reason !== undefined)
-    throw new RequestFailure(reply.reason, reply.message);
+    throw new RequestFailure(reply.reason, reply.message, reply.target);
   throw new BrokerError(reply.code, reply.message);
 }
 
@@ -102,7 +118,7 @@ export async function brokerMachines(opts: BrokerCallOpts = {}): Promise<readonl
   const frame: BrokerRequest = { v: BROKER_VERSION, kind: "broker", id: crypto.randomUUID(), action: "machines" };
   let data: unknown;
   try {
-    data = await call(frame, null, opts);
+    data = await call(frame, brokerDeadlineMs(null), opts);
   } catch (err) {
     if (err instanceof BrokerError && err.code === "daemon_closed") {
       throw new BrokerError(
@@ -115,6 +131,58 @@ export async function brokerMachines(opts: BrokerCallOpts = {}): Promise<readonl
   const machines = parseMachines(data);
   if (machines === null) throw new BrokerError("bad_reply", "the daemon's machine list was not readable");
   return machines;
+}
+
+/**
+ * The registry and the scheduler's availability in one round trip — what a
+ * lease opens on. Falls back to `machines` (no scheduler view) on a daemon that
+ * predates brokered scheduler access: it answers `unsupported` to the unknown
+ * action, and one older still drops the frame and closes. The `daemon_closed`
+ * reading is safe only because `fleet` is side-effect free; a `scheduler` frame
+ * never falls back, since there a close may follow a request already sent.
+ */
+export async function brokerFleetState(
+  opts: BrokerCallOpts = {},
+): Promise<{ readonly machines: readonly Machine[]; readonly scheduler: SchedulerAvailability | null }> {
+  const frame: BrokerRequest = { v: BROKER_VERSION, kind: "broker", id: crypto.randomUUID(), action: "fleet" };
+  let data: unknown;
+  try {
+    data = await call(frame, brokerDeadlineMs(null), opts);
+  } catch (err) {
+    // `fleet` changes nothing, so a daemon that predates it or hung up mid-restart is asked for `machines` instead.
+    // Not `reply_too_large`: the fleet answer is the registry plus a few bytes, so `machines` would be too large as well.
+    if (err instanceof BrokerError && (err.code === "unsupported" || err.code === "daemon_closed")) {
+      return { machines: await brokerMachines(opts), scheduler: null };
+    }
+    throw err;
+  }
+  const machines = isRecord(data) ? parseMachines(data["machines"]) : null;
+  if (!isRecord(data) || machines === null) {
+    throw new BrokerError("bad_reply", "the daemon's fleet state was not readable");
+  }
+  return { machines, scheduler: parseSchedulerAvailability(data["scheduler"]) };
+}
+
+/** What a scheduler frame carries beyond its envelope: the op and only the fields that op takes. */
+export type SchedulerCall =
+  | { readonly schedulerOp: "enqueue"; readonly taskId: string; readonly spec: TaskSpec }
+  | { readonly schedulerOp: "cancel"; readonly taskId: string }
+  | { readonly schedulerOp: "queue" | "accounts" };
+
+/**
+ * One scheduler op, answered with the reply's raw data. Throws a `BrokerError`,
+ * or the `RequestFailure` the direct path would have thrown. Never retried and
+ * never falls back: a lost answer may follow a request already sent.
+ */
+export function brokerSchedulerCall(request: SchedulerCall, opts: BrokerCallOpts = {}): Promise<unknown> {
+  const frame: BrokerRequest = {
+    v: BROKER_VERSION,
+    kind: "broker",
+    id: crypto.randomUUID(),
+    action: "scheduler",
+    ...request,
+  };
+  return call(frame, brokerSchedulerDeadlineMs(request.schedulerOp), opts);
 }
 
 /** One of the three allowlisted ops on one other machine, by exact deviceId. Never retried — not here, not by the caller. */
@@ -136,7 +204,7 @@ export async function brokerRequest<T>(
   try {
     // The reply's data is the target daemon's own response payload, typed by
     // the op exactly as the app-role client's `request<T>` types it.
-    return (await call(frame, op, opts)) as T | ErrorResponse;
+    return (await call(frame, brokerDeadlineMs(op), opts)) as T | ErrorResponse;
   } catch (err) {
     if (op !== "sessions" && err instanceof BrokerError && UNCERTAIN.has(err.code)) {
       throw new BrokerError(err.code, `${err.message}${MAY_HAVE_LANDED}`);

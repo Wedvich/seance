@@ -62,3 +62,19 @@ export class AccountCache {
     return records;
   }
 }
+
+/**
+ * One cache per client, so everything sharing a socket shares its listings:
+ * the relay allows one socket four a minute. Weak, because an idle hang-up
+ * drops the client and the next one lists afresh.
+ */
+export function accountCaches(): (client: AppRelay) => AccountCache {
+  const caches = new WeakMap<AppRelay, AccountCache>();
+  return (client) => {
+    const held = caches.get(client);
+    if (held !== undefined) return held;
+    const cache = new AccountCache(client);
+    caches.set(client, cache);
+    return cache;
+  };
+}

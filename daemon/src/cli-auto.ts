@@ -14,44 +14,53 @@ import {
   type PlacementNames,
 } from "./auto.ts";
 import type { SpawnCliArgs } from "./cli.ts";
+import { BrokerError, type BrokerCallOpts } from "./broker-client.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
-import { relayFleet, type Fleet, type FleetLease } from "./fleet.ts";
+import {
+  brokerFailureText,
+  brokerFleet,
+  localOpsNote,
+  relayFleet,
+  SCHEDULER_NEEDS_NEWER_DAEMON,
+  type Fleet,
+  type FleetLease,
+} from "./fleet.ts";
 import type { PskStore } from "./psk-store.ts";
 import { readState } from "./state.ts";
 
 // `seanced spawn --auto`: queue the spawn for the scheduler as an app-role
 // client, as `seanced mcp`'s `auto` does — a sealed task `store-put` at
-// `expect: 0`, so it queues with no leader up. The one CLI form that dials the
-// relay and needs the PSK; a direct `seanced spawn` stays relay-free.
-
-/**
- * The broker's actions are fixed (DESIGN.md "Fleet broker") and enqueue is not
- * one, so a box whose key only the service can read gets no `--auto` — and no
- * fallback, as MCP's `auto` refuses there.
- */
-export const KEYLESS_TEXT =
-  "--auto needs this machine's own key, and this shell can read none (where only the seanced service can read it, that is by design) — `seanced doctor` says why; a spawn without --auto needs no key";
+// `expect: 0`, so it queues with no leader up. A shell that can read the PSK
+// dials the relay itself; one that cannot (a credential-delivered box, where
+// only the service sees the key) asks the daemon's broker, which seals and
+// sends it. A direct `seanced spawn` stays relay-free.
 
 export interface AutoFleetOpts {
   /** Tests point these at stores that cannot exist. */
   readonly stores?: readonly PskStore[];
   readonly connectTimeoutMs?: number;
+  /** Where the broker's socket is, for a shell with no key; tests point it at a double. */
+  readonly broker?: BrokerCallOpts;
 }
 
-/** The direct app-role fleet over this shell's own key, or why there is none. */
+/**
+ * The direct app-role fleet over this shell's own key, or the daemon's broker
+ * when it has none. `keyless` says which, so a failure can start from the key
+ * this shell could not read rather than from the broker's reason alone.
+ */
 export async function autoFleet(
   config: Config,
   opts: AutoFleetOpts = {},
-): Promise<{ readonly fleet: Fleet } | { readonly error: string }> {
+): Promise<{ readonly fleet: Fleet; readonly keyless: boolean }> {
   const resolved = await loadPsk(config, opts.stores);
-  if (resolved === null) return { error: KEYLESS_TEXT };
+  if (resolved === null) return { fleet: brokerFleet(opts.broker), keyless: true };
   const keys = await importAppKeys(resolved.psk);
   const relay = new LazyRelay({
     // The wire log is the client's per-frame chatter; the outcome line is this command's answer.
     create: () => appRelayClient(config, keys, () => {}),
     ...(opts.connectTimeoutMs === undefined ? {} : { connectTimeoutMs: opts.connectTimeoutMs }),
   });
-  return { fleet: relayFleet(relay) };
+  return { fleet: relayFleet(relay), keyless: false };
 }
 
 const failed = (text: string): AutoEnqueued => ({ ok: false, text });
@@ -97,6 +106,18 @@ async function hereResolved(
 export interface SpawnAutoOpts {
   /** What `here` resolves to; tests stand in for the state file. */
   readonly self?: () => Promise<string | null>;
+  /** This shell read no key, so the fleet is the daemon's broker (`autoFleet`). */
+  readonly keyless?: boolean;
+}
+
+/**
+ * The broker is this shell's only way to the relay when it read no key, so its
+ * failure is the end of the road for `--auto`: say that first, then why. A plain
+ * spawn is relay-free and works without a key, but not without the daemon, so
+ * the closing line follows `cause`.
+ */
+function keylessNotQueued(why: string, cause: unknown): string {
+  return `auto: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. ${localOpsNote(cause)}`;
 }
 
 /**
@@ -127,10 +148,11 @@ export async function spawnAuto(
   try {
     lease = await fleet.open();
   } catch (err) {
-    return failed(`auto: not queued — ${err instanceof Error ? err.message : String(err)}`);
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(opts.keyless === true ? keylessNotQueued(why, err) : `auto: not queued — ${why}`);
   }
   try {
-    if (lease.scheduler === null) return failed(KEYLESS_TEXT);
+    if (lease.scheduler === null) return failed(`--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
     const leg = { machines: lease.machines, scheduler: lease.scheduler };
     // Before any account listing: a leader that cannot route on them never gets the fields.
     if (placementNeedsPinAccount(placement.input)) {
@@ -154,11 +176,9 @@ export async function spawnAuto(
 export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  if ("error" in built) {
-    console.error(built.error);
-    process.exit(1);
-  }
-  const outcome = await spawnAuto(args, built.fleet, cliSink).finally(() => built.fleet.stop());
+  const outcome = await spawnAuto(args, built.fleet, cliSink, { keyless: built.keyless }).finally(() =>
+    built.fleet.stop(),
+  );
   if (!outcome.ok) {
     console.error(outcome.text);
     process.exit(1);

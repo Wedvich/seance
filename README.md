@@ -383,7 +383,7 @@ seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
 
 seanced spawn seance --here   # run in the checkout as it stands, no worktree
 seanced spawn --auto seance -p "fix the flaky spawn test"
-#   task 3f2a…: queued — the scheduler picks the machine; needs this shell's PSK and the relay
+#   task 3f2a…: queued — the scheduler picks the machine; needs the relay, and a PSK this shell or its daemon holds
 seanced spawn --auto --account work --not here seance -p "rerun the slow suite"
 #   pinned to an account (alias, email or id) and kept off this machine
 seanced sessions              # running claude windows: id, window, repo, path
@@ -402,7 +402,8 @@ a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 `--auto` queues the spawn for the scheduler instead of running it here, as the app's and
 MCP's `auto` do: `<repo>` is then a clone name or origin from any machine in the fleet,
 and the task waits in the relay's queue until a leader places it. It is the one form that
-needs the relay and a PSK this shell can read; the app's queue shows where it lands.
+needs the relay: it reads the PSK itself, or on a box where only the daemon can (below) asks the running
+daemon to enqueue for it. The app's queue shows where it lands.
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
@@ -456,13 +457,14 @@ signed in, or a machine whose daemon reports no exclaves is refused; an account 
 also needs a scheduler leader on a build that routes on them. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
-It needs the key in the MCP process itself: on a box where only the daemon can read
-it (below), `auto` is unavailable.
+On a box where only the daemon can read the key (below), `auto` goes through the daemon.
 
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
-for it, over the same local socket, and the key never leaves the daemon. Every tool but
-`auto` and `get_queue` still works for every machine, with the same registration; `seanced doctor` says which
+for it, over the same local socket, and the key never leaves the daemon. Every tool,
+`auto`, `get_queue` and `cancel_task` included, still works for every machine, with the same
+registration; a server that started before the daemon was updated keeps the old "needs this machine's own
+key" answer for `auto` until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
 read the key itself, the daemon runs no broker, so nothing gains fleet reach without
 the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
