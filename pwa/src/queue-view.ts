@@ -116,7 +116,7 @@ function statusLine(state: AppState): { text: string; available: boolean } {
 
 function holdText(hold: PauseHold, state: AppState, now: number): string {
   if (hold.account === undefined) return "The whole queue is paused until resumed";
-  const who = accountDisplayName(state.relay.machines, hold.account);
+  const who = accountDisplayName(state.relay.machines, hold.account, state.accounts.aliases);
   if (hold.until === "resume") return `${who} is paused until resumed`;
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
   const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;

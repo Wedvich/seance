@@ -1,8 +1,15 @@
 import type { JSX } from "preact";
-import { useMemo } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
 import type { AccountCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
-import { HISTORY_RANGES, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
+import {
+  HISTORY_RANGES,
+  type AccountsState,
+  type HistoryRange,
+  type HistoryTarget,
+  type HistoryView,
+} from "../state.ts";
+import { ACCOUNT_ALIAS_MAX_LENGTH } from "@seance/shared";
 import type { ConnectionState } from "../view.ts";
 import { Disclosure } from "./disclosure.tsx";
 import { RelayDot } from "./relay-dot.tsx";
@@ -28,12 +35,28 @@ export function MachinesScreen(props: {
   /** The registry is authoritative (`RelayState.registrySettled`). */
   settled: boolean;
   history: HistoryView | null;
+  accounts: AccountsState;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
+  /** Resolves once the rename has settled, however it ended. */
+  onRename: (accountId: string, text: string) => Promise<void>;
+  onDismissAccountNotice: () => void;
 }): JSX.Element {
-  const { view, relayLine, relayState, settled, history, onDismiss, onShowHistory, onHideHistory } = props;
+  const {
+    view,
+    relayLine,
+    relayState,
+    settled,
+    history,
+    accounts,
+    onDismiss,
+    onShowHistory,
+    onHideHistory,
+    onRename,
+    onDismissAccountNotice,
+  } = props;
 
   return (
     <>
@@ -71,10 +94,27 @@ export function MachinesScreen(props: {
         ))}
 
         {view.accounts.length > 0 && <h2 className="label fleet-heading">Accounts</h2>}
+        {view.accounts.length > 0 && !accounts.nameable && (
+          <p className="fleet-note">Re-enter the pre-shared key in Settings to name accounts</p>
+        )}
+        {accounts.notice !== null && (
+          <div className="banner card banner-err" role="alert">
+            <span className="banner-rule" />
+            <span className="banner-text">
+              <span className="banner-body">{accounts.notice}</span>
+            </span>
+            <button type="button" className="queue-resume" onClick={onDismissAccountNotice}>
+              Dismiss
+            </button>
+          </div>
+        )}
         {view.accounts.map((account) => (
           <AccountCardView
             key={account.accountId}
             account={account}
+            nameable={accounts.nameable}
+            busy={accounts.saving !== null}
+            onRename={onRename}
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
             }
@@ -154,11 +194,17 @@ function MachineCardView(props: {
 
 function AccountCardView(props: {
   account: AccountCard;
+  nameable: boolean;
+  /** Some rename is in flight; one at a time. */
+  busy: boolean;
   history: HistoryView | null;
+  onRename: (accountId: string, text: string) => Promise<void>;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { account, history, onShowHistory, onHideHistory } = props;
+  const { account, nameable, busy, history, onRename, onShowHistory, onHideHistory } = props;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
   const { historyFrom } = account;
   // Pinned to the host it was opened against: a range change re-asks that one,
   // and a host gone since leaves the chart to say so rather than switch sources.
@@ -188,6 +234,43 @@ function AccountCardView(props: {
         </div>
       )}
       <p className="fleet-note">{account.observed}</p>
+      {nameable && !editing && (
+        <button
+          type="button"
+          className="fleet-rename"
+          onClick={() => {
+            setDraft(account.alias ?? "");
+            setEditing(true);
+          }}
+        >
+          Rename
+        </button>
+      )}
+      {nameable && editing && (
+        <form
+          className="fleet-rename-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onRename(account.accountId, draft).then(() => setEditing(false));
+          }}
+        >
+          <input
+            type="text"
+            aria-label="Account name"
+            placeholder="Name this account"
+            maxLength={ACCOUNT_ALIAS_MAX_LENGTH}
+            value={draft}
+            disabled={busy}
+            onInput={(event) => setDraft(event.currentTarget.value)}
+          />
+          <button type="submit" className="queue-resume" disabled={busy}>
+            Save
+          </button>
+          <button type="button" className="queue-resume" disabled={busy} onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </form>
+      )}
       {history !== null && target !== null && (
         <HistoryChart history={history} onPick={(range) => onShowHistory(target, range)} />
       )}

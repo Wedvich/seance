@@ -223,6 +223,18 @@ export type QueueState =
     }
   | { readonly kind: "failed"; readonly message: string };
 
+/** Account aliases: the names every client shows for a Claude account, read from the relay's `account:` records. */
+export interface AccountsState {
+  /** accountId to alias; only readable, non-cleared records. */
+  readonly aliases: Readonly<Record<string, string>>;
+  /** False on an install saved before account records: it has no account key until the PSK is re-entered. */
+  readonly nameable: boolean;
+  /** The accountId a rename is in flight for. */
+  readonly saving: string | null;
+  /** The last rename's refusal or failure, as a sentence; cleared by the next rename or a dismiss. */
+  readonly notice: string | null;
+}
+
 /** A cancel or mark-done on its way to the leader; the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;

@@ -42,6 +42,7 @@ import {
   type SheetKind,
   type Verdict,
 } from "./state.ts";
+import { AccountStore } from "./account-store.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
@@ -138,10 +139,16 @@ export class Store {
   /** Whether the socket was open at the last relay change, so a re-dial reads as one. */
   #wasOpen = false;
   readonly #queue: SchedulerStore;
+  readonly #accounts: AccountStore;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
     this.#client = client;
     this.#queue = new SchedulerStore(
+      client,
+      () => this.#state,
+      (next) => this.#patch(next),
+    );
+    this.#accounts = new AccountStore(
       client,
       () => this.#state,
       (next) => this.#patch(next),
@@ -168,6 +175,7 @@ export class Store {
       queueNotice: null,
       pausing: false,
       discarding: false,
+      accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, notice: null },
     };
   }
 
@@ -189,14 +197,19 @@ export class Store {
     };
     document.addEventListener("visibilitychange", onVisible);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => this.#queue.onQueueChanged(change));
+    const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
+      this.#accounts.onStoreChanged(key, version),
+    );
     this.#skipStaleEntries();
     this.#onRelay();
     return () => {
       unsubscribe();
       unsubscribeQueue();
+      unsubscribeAccounts();
       document.removeEventListener("visibilitychange", onVisible);
       this.#disarmUndo();
       this.#queue.dispose();
+      this.#accounts.dispose();
     };
   }
 
@@ -239,6 +252,7 @@ export class Store {
     // reply is the thing that gets dropped.
     if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
     this.#queue.onOpen(relay, reopened);
+    this.#accounts.onOpen(reopened);
   }
 
   /**
@@ -680,6 +694,15 @@ export class Store {
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });
+  }
+
+  /** Names a Claude account (blank clears it); every client shows it. */
+  renameAccount(accountId: string, text: string): Promise<void> {
+    return this.#accounts.rename(accountId, text);
+  }
+
+  dismissAccountNotice(): void {
+    this.#accounts.dismissNotice();
   }
 
   #showVerdict(verdict: Verdict): void {

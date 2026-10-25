@@ -71,6 +71,7 @@ function state(
     queueNotice: null,
     pausing: false,
     discarding: false,
+    accounts: { aliases: {}, nameable: true, saving: null, notice: null },
     ...overrides,
   };
 }
@@ -325,6 +326,26 @@ describe("deriveQueue", () => {
     expect(view.holds.map((h) => h.account)).toEqual([undefined, "org:acct-1234567890", "org:unknown-account"]);
     const accountOnly = deriveQueue(state(ok([], [{ account: "x", until: "resume", at: NOW }])), NOW);
     expect(accountOnly.paused).toBe(false);
+  });
+
+  test("a held account shows its alias in place of its email", () => {
+    const exclave: ExclaveInfo = {
+      id: "work",
+      authOk: true,
+      accountId: "org:acct-1234567890",
+      email: "me@acme.dev",
+      extraUsageEnabled: null,
+      skills: [],
+    };
+    const view = deriveQueue(
+      state(
+        ok([], [{ account: "org:acct-1234567890", until: "resume", at: NOW }]),
+        { accounts: { aliases: { "org:acct-1234567890": "Acme" }, nameable: true, saving: null, notice: null } },
+        { machines: [machine({ exclaves: [exclave] })] },
+      ),
+      NOW,
+    );
+    expect(view.holds.map((h) => h.text)).toEqual(["Acme is paused until resumed"]);
   });
 
   test("the list stays up while the leader is away, and the empty line says why", () => {

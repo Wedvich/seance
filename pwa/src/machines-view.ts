@@ -69,8 +69,17 @@ export interface QuotaBar extends Gauge {
   readonly note: string | null;
 }
 
+/** accountId to alias, as `AccountsState.aliases` holds it. */
+export type AccountAliases = Readonly<Record<string, string>>;
+
+function aliasOf(aliases: AccountAliases, accountId: string): string | undefined {
+  return Object.hasOwn(aliases, accountId) ? aliases[accountId] : undefined;
+}
+
 export interface AccountCard {
   readonly accountId: string;
+  /** The name set for this account from any client, if one is; `detail` leads with it. */
+  readonly alias: string | null;
   /** The exclave ids that sign in as this account, anywhere in the fleet. */
   readonly title: string;
   readonly detail: string;
@@ -123,28 +132,38 @@ export function formatUntil(at: number, now: number): string {
 }
 
 /**
- * What an account is called on screen: its email, else the account half of
- * `organizationUuid:accountUuid` shortened — enough to tell two apart. M4's
- * alias goes in front of both (docs/scheduler.md, _Account records_).
+ * What an account is called on screen: its alias, else its email, else the
+ * account half of `organizationUuid:accountUuid` shortened — enough to tell two
+ * apart.
  */
-function accountName(accountId: string, email: string | undefined): string {
+function accountName(accountId: string, email: string | undefined, alias?: string): string {
+  if (alias !== undefined) return alias;
   if (email !== undefined) return email;
   const account = accountId.split(":").at(-1) ?? accountId;
   return `acct ${account.slice(0, 8)}`;
 }
 
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
-export function accountDisplayName(machines: readonly Machine[], accountId: string): string {
+export function accountDisplayName(
+  machines: readonly Machine[],
+  accountId: string,
+  aliases: AccountAliases = {},
+): string {
+  const alias = aliasOf(aliases, accountId);
   for (const machine of machines) {
     for (const exclave of machine.exclaves ?? []) {
-      if (exclave.accountId === accountId && exclave.email !== undefined) return exclave.email;
+      if (exclave.accountId === accountId && exclave.email !== undefined) {
+        return accountName(accountId, exclave.email, alias);
+      }
     }
   }
-  return accountName(accountId, undefined);
+  return accountName(accountId, undefined, alias);
 }
 
-function accountLabel(exclave: ExclaveInfo): string {
-  if (exclave.accountId !== null) return accountName(exclave.accountId, exclave.email);
+function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases): string {
+  if (exclave.accountId !== null) {
+    return accountName(exclave.accountId, exclave.email, aliasOf(aliases, exclave.accountId));
+  }
   return exclave.authOk ? "signed in" : "not signed in";
 }
 
@@ -196,7 +215,12 @@ function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailab
   return `scheduler on ${name ?? scheduler.deviceId.slice(0, 8)} · term ${scheduler.term}`;
 }
 
-function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailability): MachineCard {
+function machineCard(
+  machine: Machine,
+  now: number,
+  scheduler: SchedulerAvailability,
+  aliases: AccountAliases,
+): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
   // still counts — an observation carries its own stamp.
@@ -222,7 +246,7 @@ function machineCard(machine: Machine, now: number, scheduler: SchedulerAvailabi
     note: machineNote(machine),
     exclaves: (machine.exclaves ?? []).map((exclave, index) => ({
       id: exclave.id,
-      account: accountLabel(exclave),
+      account: accountLabel(exclave, aliases),
       sessions: status?.sess?.[index] ?? null,
     })),
     charts: servesMetrics(machine),
@@ -307,7 +331,7 @@ function observedLine(quota: NewestQuota | undefined, observer: Machine | undefi
  * but contributes no numbers. Exclaves that
  * aren't signed in have no account to group under and appear only on their card.
  */
-function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[] {
+function deriveAccounts(machines: readonly Machine[], now: number, aliases: AccountAliases): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
     const exclaves = machine.exclaves ?? [];
@@ -332,10 +356,12 @@ function deriveAccounts(machines: readonly Machine[], now: number): AccountCard[
   return [...groups.values()].map((group) => {
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
+    const alias = aliasOf(aliases, group.accountId);
     return {
       accountId: group.accountId,
+      alias: alias ?? null,
       title: [...group.exclaves].join(" · "),
-      detail: `${accountName(group.accountId, group.email)} · on ${[...group.machines].join(", ")}`,
+      detail: `${accountName(group.accountId, group.email, alias)} · on ${[...group.machines].join(", ")}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),
@@ -347,10 +373,11 @@ export function deriveMachines(
   machines: readonly Machine[],
   now: number,
   scheduler: SchedulerAvailability,
+  aliases: AccountAliases = {},
 ): MachinesView {
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler)),
-    accounts: deriveAccounts(machines, now),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases)),
+    accounts: deriveAccounts(machines, now, aliases),
   };
 }

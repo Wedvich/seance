@@ -45,6 +45,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     queueNotice: null,
     pausing: false,
     discarding: false,
+    accounts: { aliases: {}, nameable: true, saving: null, notice: null },
     ...overrides,
   };
 }
