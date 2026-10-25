@@ -71,6 +71,17 @@ describe("unitContent, user scope", () => {
   });
 });
 
+describe("unitContent, both scopes", () => {
+  test("session processes in the unit's cgroup never take the daemon down with them", () => {
+    for (const unit of [userUnit(), systemUnit()]) {
+      // A restart must not kill a tmux server the daemon cold-booted.
+      expect(unit).toContain("KillMode=process");
+      // An OOM kill of a pane's process must not stop the unit.
+      expect(unit).toContain("OOMPolicy=continue");
+    }
+  });
+});
+
 describe("unitContent, system scope", () => {
   test("the three fields a system unit must differ in, and the delivered credential", () => {
     const unit = systemUnit();
