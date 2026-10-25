@@ -55,7 +55,11 @@ function cardOf(state: AppState): ReturnType<typeof deriveMachines>["accounts"][
   );
 }
 
-/** Counts what the app's account store reads off the relay; patched before the socket opens, so the first listing is counted. */
+/**
+ * Counts what the app's account store reads off the relay; patched before the
+ * socket opens, so the first listing is counted. `listed` counts only listings
+ * the relay answered: a refused one (the shared list bucket) is no gate.
+ */
 function countReads(app: AppHandle): { lists: () => number; listed: () => number; gets: () => number } {
   const { client } = app;
   const list = client.listAccounts.bind(client);
@@ -65,11 +69,9 @@ function countReads(app: AppHandle): { lists: () => number; listed: () => number
   let gets = 0;
   client.listAccounts = async () => {
     lists += 1;
-    try {
-      return await list();
-    } finally {
-      listed += 1;
-    }
+    const listing = await list();
+    if (listing?.ok === true) listed += 1;
+    return listing;
   };
   client.getAccountRecord = async (key) => {
     gets += 1;
@@ -124,8 +126,6 @@ describe("account aliases across clients", () => {
     try {
       await pollUntil(() => reads.listed() >= 1, "B's first listing", 10_000);
       await b.waitForApp((state) => cardOf(state) !== undefined, "B's account card");
-      await a.waitForApp((state) => state.accounts.nameable, "A to be able to name accounts");
-      await pollUntil(() => a.store.getState().accounts.saving === null, "A idle");
 
       await a.store.renameAccount(E2E_ACCOUNT_ID, "work");
       expect(a.store.getState().accounts.notice).toBeNull();
