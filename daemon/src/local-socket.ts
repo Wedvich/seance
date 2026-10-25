@@ -390,7 +390,10 @@ export async function localSocketChecks(path: string = socketPath()): Promise<re
   }
   checks.push(
     (await localSocketReachable(path))
-      ? { level: "ok", message: `local op socket at ${path} — MCP get_sessions/despawn_session on this machine skip the relay` }
+      ? {
+          level: "ok",
+          message: `local op socket at ${path} — MCP get_sessions/despawn_session on this machine skip the relay`,
+        }
       : {
           level: "warn",
           message: `no local op socket at ${path} — MCP get_sessions/despawn_session targeting this machine will fail until the daemon is running`,
