@@ -681,7 +681,16 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * The leader answers every one. Enqueue is not among them — an app
  * `store-put`s the task itself.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview", "cancel", "mark-done", "pause", "resume", "discard"] as const;
+export const SCHEDULER_OPS = [
+  "queue",
+  "route-preview",
+  "cancel",
+  "mark-done",
+  "pause",
+  "resume",
+  "discard",
+  "push-subscribe",
+] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -705,6 +714,7 @@ export const OP_TIMEOUT_MS = {
   pause: 10_000,
   resume: 10_000,
   discard: 10_000,
+  "push-subscribe": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -2264,6 +2274,12 @@ export const SCHEDULER_ERROR_CODES = [
   "reset_unknown",
   /** `push-subscribe` (M4): the settings record holds `PUSH_MAX_SUBSCRIPTIONS` already. */
   "subscriptions_full",
+  /**
+   * `push-subscribe`: this term holds no usable settings record (another PSK, a newer
+   * build's shape, a version below the floor), so push is off for it. Not a retry: the
+   * term will not write over a record it cannot read.
+   */
+  "settings_unavailable",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -2388,16 +2404,49 @@ export interface RoutePreviewResponse {
 
 /**
  * `op: "push-subscribe"` (M4, Settings and Web Push), app → leader, sealed
- * `from: "app"`: add this browser's subscription to the settings record. Not in
- * `SCHEDULER_OPS` until its item builds the handler, so today a leader answers
- * it as any op it does not handle (`invalid_request`), never by accepting it.
- * The leader parses it with `parsePushSubscribeRequest`, which holds the
- * endpoint to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request`,
- * `subscriptions_full` and `conflict`.
+ * `from: "app"`: add this browser's subscription to the settings record. The
+ * leader parses it with `parsePushSubscribeRequest`, which holds the endpoint
+ * to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request` (also what a leader
+ * that predates the op answers), `subscriptions_full`, `conflict`, `not_ready`
+ * and `settings_unavailable`.
  */
 export const PUSH_SUBSCRIBE_OP = "push-subscribe";
 
 export type PushSubscribeRequest = WebPushSubscription;
+
+/**
+ * What a push carries (RFC 8291-encrypted to the browser, but minimal anyway): ids and
+ * state, never a prompt, title, account id or name. `v` versions it so a service worker
+ * that predates a kind shows a generic notification instead of misreading one.
+ */
+export type PushAlert =
+  | {
+      readonly v: 1;
+      readonly kind: "spill";
+      readonly at: number;
+      readonly taskId: string;
+      readonly window: string;
+      readonly projectedPct: number;
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "needs-input";
+      readonly at: number;
+      readonly taskId: string;
+      readonly since: number;
+      readonly escalated: boolean;
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "disk";
+      readonly at: number;
+      readonly deviceId: string;
+      readonly diskPct?: number;
+      readonly freeMib?: number;
+    };
+
+/** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */
+export const PUSH_ALERT_MAX_BYTES = 1024;
 
 /** `push-subscribe` → the endpoint now subscribed; subscribing one already held is not a refusal. */
 export interface PushSubscribeResponse {

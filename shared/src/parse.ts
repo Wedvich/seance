@@ -16,6 +16,7 @@ import {
   PAUSE_UNTIL,
   PR_CHECKS,
   PR_STATES,
+  PUSH_ALERT_MAX_BYTES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   PUSH_SERVICE_HOSTS,
@@ -37,6 +38,7 @@ import {
   type BatchStrategy,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
+  type PushAlert,
   type PushSubscribeReply,
   type PushSubscribeRequest,
   type QuotaReading,
@@ -1179,6 +1181,52 @@ export function parsePushSubscribeReply(value: unknown): PushSubscribeReply | nu
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const endpoint = isRecord(value) ? pushEndpoint(value["endpoint"]) : null;
   return endpoint === null ? null : { endpoint };
+}
+
+const PUSH_ALERT_KEYS = {
+  spill: ["v", "kind", "at", "taskId", "window", "projectedPct"],
+  "needs-input": ["v", "kind", "at", "taskId", "since", "escalated"],
+  disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
+} as const;
+
+/**
+ * A push payload as the daemon built it, read back where it is shown or tested: built field
+ * by field and strict — a key it does not name, or a kind this build does not know, reads as
+ * null, so free text can never ride along — and at most `PUSH_ALERT_MAX_BYTES` serialized.
+ */
+export function parsePushAlert(value: unknown): PushAlert | null {
+  if (!isRecord(value) || value["v"] !== 1 || !isFiniteNumber(value["at"])) return null;
+  if (new TextEncoder().encode(JSON.stringify(value)).length > PUSH_ALERT_MAX_BYTES) return null;
+  const { kind, at } = value;
+  const known = (keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
+  if (kind === "spill") {
+    const { taskId, window, projectedPct } = value;
+    if (!known(PUSH_ALERT_KEYS.spill) || !isTaskId(taskId)) return null;
+    if (!isName(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
+    return { v: 1, kind, at, taskId, window, projectedPct };
+  }
+  if (kind === "needs-input") {
+    const { taskId, since, escalated } = value;
+    if (!known(PUSH_ALERT_KEYS["needs-input"]) || !isTaskId(taskId)) return null;
+    if (!isFiniteNumber(since) || typeof escalated !== "boolean") return null;
+    return { v: 1, kind, at, taskId, since, escalated };
+  }
+  if (kind === "disk") {
+    const { deviceId, diskPct, freeMib } = value;
+    if (!known(PUSH_ALERT_KEYS.disk) || !isRoutingId(deviceId)) return null;
+    if ((diskPct !== undefined && !isFiniteNumber(diskPct)) || (freeMib !== undefined && !isFiniteNumber(freeMib))) {
+      return null;
+    }
+    return {
+      v: 1,
+      kind,
+      at,
+      deviceId,
+      ...(diskPct === undefined ? {} : { diskPct }),
+      ...(freeMib === undefined ? {} : { freeMib }),
+    };
+  }
+  return null;
 }
 
 const VAPID_PUBLIC_BYTES = 65;

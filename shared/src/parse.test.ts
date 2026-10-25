@@ -7,6 +7,7 @@ import {
   isSkillName,
   parseAccountRecord,
   parseFleetQuotaRecord,
+  parsePushAlert,
   parsePushSubscribeReply,
   parsePushSubscribeRequest,
   parseSettingsRecord,
@@ -55,6 +56,7 @@ import {
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_ALERT_MAX_BYTES,
   PUSH_MAX_SUBSCRIPTIONS,
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
@@ -1502,5 +1504,40 @@ describe("M4 shapes", () => {
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+});
+
+describe("parsePushAlert", () => {
+  const spill = { v: 1, kind: "spill", at: 5, taskId: "t-1", window: "7d", projectedPct: 91 } as const;
+  const input = { v: 1, kind: "needs-input", at: 5, taskId: "t-1", since: 3, escalated: true } as const;
+  const disk = { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93, freeMib: 400 } as const;
+
+  test("accepts each kind as built, with a disk alert's readings optional", () => {
+    for (const alert of [spill, input, disk, { v: 1, kind: "disk", at: 5, deviceId: "dev-1" }]) {
+      expect(parsePushAlert(alert)).toEqual(alert);
+    }
+  });
+
+  test("refuses an unknown kind or version, a key it does not name, a bad id and non-finite numbers", () => {
+    for (const bad of [
+      { ...spill, kind: "minted-later" },
+      { ...spill, v: 2 },
+      { ...spill, title: "free text" },
+      { ...input, prompt: "free text" },
+      { ...disk, accountId: "acc" },
+      { ...spill, taskId: "../x" },
+      { ...input, escalated: "yes" },
+      { ...spill, projectedPct: Number.NaN },
+      { ...disk, deviceId: "a/b" },
+      { ...disk, freeMib: "400" },
+      null,
+      "spill",
+    ]) {
+      expect(parsePushAlert(bad)).toBeNull();
+    }
+  });
+
+  test("refuses a payload past the byte bound", () => {
+    expect(parsePushAlert({ ...spill, window: "w".repeat(PUSH_ALERT_MAX_BYTES) })).toBeNull();
   });
 });

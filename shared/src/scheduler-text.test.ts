@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { reasonText, storeErrorText, taskFailureText } from "./scheduler-text.ts";
-import { STORE_ERROR_CODES, TASK_FAILURE_CODES } from "./types.ts";
+import { reasonText, schedulerErrorText, storeErrorText, taskFailureText } from "./scheduler-text.ts";
+import { SCHEDULER_ERROR_CODES, STORE_ERROR_CODES, TASK_FAILURE_CODES } from "./types.ts";
 
 describe("taskFailureText", () => {
   test("words every scheduler-set code apart, and leaves a daemon's or a later code to the caller", () => {
@@ -30,5 +30,14 @@ describe("storeErrorText", () => {
     expect(storeErrorText("rate_limited")).toContain("wait a minute");
     expect(storeErrorText("store_full")).toContain("queue is full");
     expect(storeErrorText("minted_later")).toContain("minted_later");
+  });
+});
+
+describe("schedulerErrorText", () => {
+  test("words every scheduler code, push-subscribe's included, and names one it does not know", () => {
+    for (const code of SCHEDULER_ERROR_CODES) expect(schedulerErrorText(code)).not.toContain("does not know");
+    expect(SCHEDULER_ERROR_CODES).toContain("settings_unavailable");
+    expect(schedulerErrorText("settings_unavailable")).toContain("push is off");
+    expect(schedulerErrorText("minted_later")).toContain("minted_later");
   });
 });
