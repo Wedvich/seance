@@ -157,6 +157,7 @@ export function QueueScreen(props: {
                   </div>
                 </div>
                 {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
+                {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
                 {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
                 {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp) && (

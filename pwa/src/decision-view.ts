@@ -264,6 +264,17 @@ export function waitingText(task: Task): string | null {
   return `${places.slice(0, WAITING_LIMIT).join("; ")}${more > 0 ? `; +${more} more` : ""}`;
 }
 
+/** A machine's registry name, else a short id: a forgotten machine still reads as something. */
+function machineLabel(machines: readonly Machine[], deviceId: string): string {
+  return machines.find((m) => m.deviceId === deviceId)?.name ?? deviceId.slice(0, 8);
+}
+
+/** "Avoids <machine>, <machine>" for a task with an avoid list; null otherwise. */
+export function avoidLine(task: Task, machines: readonly Machine[]): string | null {
+  const avoid = task.spec.avoid ?? [];
+  return avoid.length === 0 ? null : `Avoids ${avoid.map((id) => machineLabel(machines, id)).join(", ")}`;
+}
+
 /** "Pinned to <machine> · <account>" for a pinned task; null otherwise. The labels are display text from the registry. */
 export function pinLine(
   task: Task,
@@ -273,9 +284,7 @@ export function pinLine(
   const { pin } = task.spec;
   if (pin === undefined) return null;
   const parts: string[] = [];
-  if (pin.deviceId !== undefined) {
-    parts.push(machines.find((m) => m.deviceId === pin.deviceId)?.name ?? pin.deviceId.slice(0, 8));
-  }
+  if (pin.deviceId !== undefined) parts.push(machineLabel(machines, pin.deviceId));
   if (pin.account !== undefined) {
     const known = knownAccounts(machines, [pin.account]);
     parts.push(

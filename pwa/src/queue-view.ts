@@ -11,7 +11,7 @@ import {
   type PrState,
   type Task,
 } from "@seance/shared";
-import { taskHeadline, waitingText } from "./decision-view.ts";
+import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveReportedAvailability,
@@ -47,6 +47,8 @@ export interface QueueRow {
   readonly canFollowUp: boolean;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
+  /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
+  readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
   readonly batch: string | null;
   readonly busy: boolean;
@@ -225,6 +227,14 @@ function batchLine(task: Task): string | null {
   return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
 }
 
+function placementLine(task: Task, state: AppState): string | null {
+  const { machines } = state.relay;
+  const parts = [pinLine(task, machines, state.accounts.aliases), avoidLine(task, machines)].filter(
+    (part): part is string => part !== null,
+  );
+  return parts.length === 0 ? null : parts.join(" · ");
+}
+
 function rowOf(task: Task, state: AppState, now: number, skew: number, titles: ReadonlyMap<string, string>): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
@@ -241,6 +251,7 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp: phase !== "finished" || task.state === "done",
     deps: depsLine(task, titles),
+    placement: placementLine(task, state),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),

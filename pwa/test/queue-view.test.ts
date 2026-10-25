@@ -535,6 +535,55 @@ describe("authoring on a row", () => {
     expect(rowOf([task("n")], "n")?.batch).toBeNull();
   });
 
+  test("a pin and an avoid list read in the verdict's words on every state, by display label", () => {
+    const account = "org:acct-1234567890";
+    const exclave: ExclaveInfo = {
+      id: "work",
+      authOk: true,
+      accountId: account,
+      email: "me@acme.dev",
+      extraUsageEnabled: null,
+      skills: [],
+    };
+    const machines = [machine({ exclaves: [exclave] }), machine({ deviceId: "dev-b", name: "WSL" })];
+    const placed = (fields: Partial<Task["spec"]>, taskState: Task["state"] = "ready"): string | null | undefined => {
+      const t = task("t", { state: taskState, spec: { repo: ORIGIN, mode: "worktree", ...fields } });
+      const accounts = { aliases: { [account]: "Acme" }, nameable: true, saving: null, notice: null };
+      return deriveQueue(state(ok([t]), { accounts }, { machines }), NOW).sections[0]?.rows[0]?.placement;
+    };
+    expect(placed({ pin: { deviceId: "dev-b" } })).toBe("Pinned to WSL");
+    expect(placed({ pin: { deviceId: "dev-b" } }, "running")).toBe("Pinned to WSL");
+    expect(placed({ pin: { deviceId: "dev-a", account } }, "done")).toBe("Pinned to Mac · Acme");
+    expect(placed({ avoid: ["dev-b", "ffffffff00001111"] }, "queued")).toBe("Avoids WSL, ffffffff");
+    expect(placed({ pin: { deviceId: "dev-a" }, avoid: ["dev-b"] })).toBe("Pinned to Mac · Avoids WSL");
+    expect(placed({ pin: { deviceId: "0123456789abcdef" } })).toBe("Pinned to 01234567");
+    expect(placed({})).toBeNull();
+  });
+
+  test("an account pin reads by its alias, else by the email a machine reports", () => {
+    const account = "org:acct-1234567890";
+    const exclave: ExclaveInfo = {
+      id: "work",
+      authOk: true,
+      accountId: account,
+      email: "me@acme.dev",
+      extraUsageEnabled: null,
+      skills: [],
+    };
+    const pinned = task("t", { spec: { repo: ORIGIN, mode: "worktree", pin: { account } } });
+    const row = (aliases: Readonly<Record<string, string>>): string | null | undefined =>
+      deriveQueue(
+        state(
+          ok([pinned]),
+          { accounts: { aliases, nameable: true, saving: null, notice: null } },
+          { machines: [machine({ exclaves: [exclave] })] },
+        ),
+        NOW,
+      ).sections[0]?.rows[0]?.placement;
+    expect(row({ [account]: "Acme" })).toBe("Pinned to Acme");
+    expect(row({})).toBe("Pinned to me@acme.dev");
+  });
+
   test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {
     const can = (fields: Partial<Task>): boolean | undefined => rowOf([task("t", fields)], "t")?.canFollowUp;
     expect(can({ state: "queued" })).toBe(true);
