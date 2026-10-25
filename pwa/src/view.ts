@@ -182,68 +182,6 @@ export function formatSeen(lastSeen: number, now: number): string {
   return `${Math.floor(elapsed / DAY)}d ago`;
 }
 
-function segments(path: string): string[] {
-  return path.split("/").filter((part) => part !== "");
-}
-
-interface SplitPath {
-  readonly path: string;
-  readonly own: readonly string[];
-}
-
-function splitDistinct(paths: readonly string[]): SplitPath[] {
-  return [...new Set(paths)].map((path) => ({ path, own: segments(path) }));
-}
-
-function sharedPrefix(distinct: readonly SplitPath[]): number {
-  const first = distinct[0];
-  if (first === undefined) return 0;
-
-  let prefix = first.own.length;
-  for (const { own } of distinct) {
-    let shared = 0;
-    while (shared < prefix && own[shared] === first.own[shared]) shared += 1;
-    prefix = shared;
-  }
-  return prefix;
-}
-
-/**
- * Repo paths are absolute and ellipsise to nothing at 13px in a half-width
- * tile, and the tail is the informative end. Trims the directory prefix the
- * machine's repos share, which recovers the configured repo root without
- * needing it on the wire. With one distinct repo there is no prefix to find,
- * so keep the last two segments. Both exported forms label through here — the
- * rule lives only in this pass.
- */
-function labelFor({ path, own }: SplitPath, prefix: number, lone: boolean): string {
-  if (own.length <= 1) return path;
-  if (lone) return own.slice(-2).join("/");
-  // Never consume the final segment: the repo's own directory name always shows.
-  return own.slice(Math.min(prefix, own.length - 1)).join("/");
-}
-
-/**
- * Labels the whole set in one pass rather than a path at a time: the prefix is
- * a property of the set, so labelling per path re-splits every sibling on each
- * call — quadratic across a repo list.
- */
-export function abbreviatePaths(paths: readonly string[]): ReadonlyMap<string, string> {
-  const distinct = splitDistinct(paths);
-  const prefix = sharedPrefix(distinct);
-  const lone = distinct.length === 1;
-  return new Map(distinct.map((entry) => [entry.path, labelFor(entry, prefix, lone)]));
-}
-
-/**
- * One label without the batch form's Map and sibling label strings — deriveView
- * names a single repo tile on every render, keystrokes included.
- */
-export function abbreviatePath(path: string, paths: readonly string[]): string {
-  const distinct = splitDistinct(paths);
-  return labelFor({ path, own: segments(path) }, sharedPrefix(distinct), distinct.length === 1);
-}
-
 function sessionCount(state: AppState, deviceId: string): number | null {
   const entry = state.sessions[deviceId];
   if (entry === undefined || entry === "unknown") return null;
@@ -369,11 +307,6 @@ export function scopedRepos(machines: readonly Machine[], pins: Pins): readonly 
 /** `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked. */
 export function previewAsked(form: Pins): boolean {
   return form.machine === null && form.account === null;
-}
-
-/** Every repo some machine has a clone of — what an unpinned task can be asked to run. */
-export function autoRepos(machines: readonly Machine[]): readonly AutoRepo[] {
-  return scopedRepos(machines, { machine: null, account: null });
 }
 
 /** The remembered origin, else the first of those in scope. */
