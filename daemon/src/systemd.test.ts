@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { logPath } from "./paths.ts";
 import {
   assertUnitFlag,
+  configHoldsPsk,
   conflictingScopeMessage,
   expectedSystemUnit,
   installedUnits,
@@ -289,6 +290,22 @@ describe("systemUnitDeliversPsk", () => {
     expect(installedUnits(user, absent)).toEqual({ user: true, system: false });
     expect(installedUnits(absent, system)).toEqual({ user: false, system: true });
     expect(installedUnits(user, system)).toEqual({ user: true, system: true });
+  });
+
+  // Decides install --system's "clear psk" note: an empty field is already cleared.
+  test("configHoldsPsk: only a non-empty psk string holds the key", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-unit-"));
+    cleanups.push(dir);
+    const config = async (body: string): Promise<string> => {
+      const path = join(dir, `${crypto.randomUUID()}.json`);
+      await writeFile(path, body);
+      return path;
+    };
+    expect(await configHoldsPsk(await config('{"psk":"c2VjcmV0"}'))).toBe(true);
+    expect(await configHoldsPsk(await config('{"psk":""}'))).toBe(false);
+    expect(await configHoldsPsk(await config("{}"))).toBe(false);
+    expect(await configHoldsPsk(await config("not json"))).toBe(false);
+    expect(await configHoldsPsk(join(dir, "absent.json"))).toBe(false);
   });
 });
 

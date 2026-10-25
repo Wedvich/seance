@@ -1,13 +1,16 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
+  asTargetArgv,
   assertUnprivileged,
   missingBinariesMessage,
   missingUnitBinaries,
   mkdirAsTarget,
   parsePasswdLine,
+  reachableAs,
+  reachablePath,
   requireRoot,
   targetUserName,
   whichIn,
@@ -93,12 +96,66 @@ describe("whichIn", () => {
 
 describe("missing binaries", () => {
   test("an empty PATH is missing all four, and the message names the sudo cause", async () => {
-    const missing = await missingUnitBinaries("");
+    const missing = await missingUnitBinaries("", []);
     expect(missing).toEqual(["bun", "git", "tmux", "claude"]);
     const message = missingBinariesMessage(missing, "/usr/sbin:/usr/bin");
     expect(message).toContain("secure_path");
     expect(message).toContain(SUDO_SEANCED);
     expect(message).toContain('sudo env PATH="$PATH" seanced install --system');
+  });
+
+  test("with dirs left out, it names them and --path instead of re-preserving PATH", () => {
+    const message = missingBinariesMessage(["bun"], "/usr/bin", ["/root/.local/share/mise/installs/bun/latest/bin"]);
+    expect(message).toContain("/root/.local/share/mise/installs/bun/latest/bin");
+    expect(message).toContain(`${SUDO_SEANCED} install --system --path`);
+    expect(message).not.toContain("secure_path");
+  });
+});
+
+// The production prefix is `asTargetArgv`, which only root can run; an empty one
+// probes as this process, so a dir locked against us stands in for root's home.
+describe("reaching PATH as the unit's user", () => {
+  test("the prefix drops to the target's uid and gid with its supplementary groups", () => {
+    expect(asTargetArgv({ name: "ada", uid: 1000, gid: 1001, home: "/home/ada" })).toEqual([
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1001",
+      "--init-groups",
+      "--",
+    ]);
+  });
+
+  // Root searches a 0700 dir regardless of its mode.
+  test.if(process.getuid?.() !== 0)("leaves out what the user can't search, and empty entries", async () => {
+    const open = await fixtureDir();
+    const locked = await fixtureDir();
+    const inside = join(locked, "bin");
+    await mkdir(inside);
+    await chmod(locked, 0o000);
+    try {
+      const offered = [inside, open, "", join(open, "absent"), open].join(delimiter);
+      expect(await reachablePath(offered, [])).toEqual({
+        pathEnv: [open, open].join(delimiter),
+        dropped: [inside, join(open, "absent")],
+      });
+    } finally {
+      await chmod(locked, 0o700);
+    }
+  });
+
+  test("a file counts only with the exec bit, whatever its position", async () => {
+    const dir = await fixtureDir();
+    const plain = join(dir, "plain");
+    const runnable = join(dir, "runnable");
+    await writeFile(plain, "", { mode: 0o644 });
+    await writeFile(runnable, "#!/bin/sh\n", { mode: 0o755 });
+    // paths[0] is the one a misread empty line would wrongly vouch for.
+    expect(await reachableAs([], [plain, runnable])).toEqual(new Set([runnable]));
+    expect(await reachableAs([], [])).toEqual(new Set());
+  });
+
+  test("a probe that can't run refuses rather than vouching for nothing or everything", async () => {
+    await expect(reachableAs(["false"], ["/usr/bin"])).rejects.toThrow(/couldn't check PATH as the unit's user/u);
   });
 });
 

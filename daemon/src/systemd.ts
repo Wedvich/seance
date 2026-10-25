@@ -8,10 +8,12 @@ import { exec } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { configDirFor, logPath, logPathIn, pskBlobPathIn, stateDir, stateDirFor } from "./paths.ts";
 import {
+  asTargetArgv,
   lookupUser,
   mkdirAsTarget,
   missingBinariesMessage,
   missingUnitBinaries,
+  reachablePath,
   requireRoot,
   SUDO_SEANCED,
   targetUserName,
@@ -478,13 +480,17 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   const userUnit = join(user.home, ".config", "systemd", "user", UNIT_NAME);
   if (existsSync(userUnit)) throw new Error(conflictingScopeMessage("system", userUnit));
 
-  const pathEnv = opts.pathEnv ?? process.env["PATH"] ?? "";
-  const missing = await missingUnitBinaries(pathEnv);
-  if (missing.length > 0) throw new Error(missingBinariesMessage(missing, pathEnv));
+  const asUser = asTargetArgv(user);
+  const { pathEnv, dropped } = await reachablePath(opts.pathEnv ?? process.env["PATH"] ?? "", asUser);
+  const missing = await missingUnitBinaries(pathEnv, asUser);
+  if (missing.length > 0) throw new Error(missingBinariesMessage(missing, pathEnv, dropped));
   const bunPath = await whichIn("bun", pathEnv);
-  if (bunPath === null) throw new Error(missingBinariesMessage(["bun"], pathEnv));
+  if (bunPath === null) throw new Error(missingBinariesMessage(["bun"], pathEnv, dropped));
 
   const notes: string[] = [];
+  if (dropped.length > 0) {
+    notes.push(`left out of the unit's PATH, since ${user.name} can't reach them: ${dropped.join(", ")}`);
+  }
   const defaultStateDir = stateDirFor(user.home);
   const targetStateDir = opts.stateDir ?? defaultStateDir;
   const logFile = logPathIn(targetStateDir);
@@ -574,11 +580,25 @@ async function credentialBlobFor(blob: string, configFile: string, notes: string
     );
     return undefined;
   }
-  notes.push(
-    `the unit delivers the key from ${blob} — clear "psk" in ${configFile} so nothing on disk holds it in ` +
-      "plaintext, then `sudo systemctl restart seanced`",
-  );
+  if (await configHoldsPsk(configFile)) {
+    notes.push(
+      `the unit delivers the key from ${blob}, but "psk" in ${configFile} is set and wins over it — clear it ` +
+        "so nothing on disk holds the key in plaintext, then `sudo systemctl restart seanced`",
+    );
+  }
   return blob;
+}
+
+/**
+ * Whether the config still carries the key itself. Empty is the cleared state
+ * (`loadPsk` falls through to the stores). Reads the JSON raw: `loadConfig`
+ * imports the psk stores, which import this module.
+ */
+export async function configHoldsPsk(configFile: string): Promise<boolean> {
+  const raw: unknown = await Bun.file(configFile)
+    .json()
+    .catch(() => null);
+  return typeof raw === "object" && raw !== null && "psk" in raw && typeof raw.psk === "string" && raw.psk !== "";
 }
 
 export async function uninstallSystemService(): Promise<readonly string[]> {

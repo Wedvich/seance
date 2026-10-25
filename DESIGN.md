@@ -5736,7 +5736,14 @@ CSP items landed with the app (see the PWA section).
   and resolves the target from `SUDO_USER`, never from root's own
   environment, since `homedir()`, `stateDir()`, `PATH` and `Bun.which` all
   answer for the wrong user there and every one of those values is written
-  into a unit that outlives the install. Also rejected: keeping the runbook as
+  into a unit that outlives the install. A preserved PATH is not the user's
+  either: a mise or asdf shim running the `env bun` shebang under sudo prepends
+  root's install dir, and the unit recorded `/root/…/bun` and failed 203/EXEC
+  (2026-10-25). So PATH entries and the four resolved binaries are kept only
+  when a probe run _as the target user_ (`setpriv --init-groups`) can search or
+  exec them; root's `access()` answers yes to all of it. Rejected: dropping
+  entries under root's home by prefix, which misses every other dir only root
+  reaches and every group grant the user holds. Also rejected: keeping the runbook as
   printed instructions, which is what the docs already were.
   MCP on a credential-delivered box reaches that machine over the local op
   socket, and every other one through the daemon's fleet broker (docs/psk.md,
