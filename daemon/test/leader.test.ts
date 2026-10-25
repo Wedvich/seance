@@ -49,7 +49,7 @@ import { boundedQueue } from "../src/leader-requests.ts";
 import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
 import type { PrPollerOpts } from "../src/pr-status.ts";
 import type { Fetch } from "../src/seams.ts";
-import type { SettingsRead, SettingsStore } from "../src/settings-store.ts";
+import type { SettingsRead, SettingsStore, SettingsWrite } from "../src/settings-store.ts";
 import { generateVapidKeys } from "../src/web-push.ts";
 import { startDaemon } from "../src/run.ts";
 import {
@@ -1164,6 +1164,48 @@ describe("leader push", () => {
     }
   });
 
+  test("a refused push-subscribe is audited under the code its reply carries", async () => {
+    const lost = async (code: "version_conflict" | "store_full"): Promise<SettingsWrite> => ({ ok: false, code });
+    const cases: readonly { readonly code: string; readonly wrap: (base: SettingsStore) => SettingsStore }[] = [
+      { code: "internal_error", wrap: (base) => ({ ...base, put: () => lost("store_full") }) },
+      { code: "conflict", wrap: (base) => ({ ...base, put: () => lost("version_conflict") }) },
+      {
+        // A conflict whose re-read finds the record gone: the holder gives up on it.
+        code: "settings_unavailable",
+        wrap: (base) => {
+          let reads = 0;
+          return {
+            put: () => lost("version_conflict"),
+            get: () => (reads++ === 0 ? base.get() : Promise.resolve(null)),
+          };
+        },
+      },
+    ];
+    for (const { code, wrap } of cases) {
+      const relay = startTestRelay(TOKEN);
+      // oxlint-disable-next-line no-await-in-loop -- one term per case
+      const settings = await heldSettings();
+      const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, wrap(settings.store));
+      // oxlint-disable-next-line no-await-in-loop -- one term per case
+      const lines = await captureLog(async () => {
+        try {
+          leader.lead(1);
+          await leader.settled();
+          await pollUntil(async () => {
+            const answer = await subscribe(leader, replies, sub("x"));
+            return isRecord(answer) && answer["code"] === code;
+          }, `the ${code} answer`);
+        } finally {
+          leader.stop();
+          relay.stop();
+        }
+      });
+      const audit = lines.filter((line) => line.includes("op=push-subscribe"));
+      expect(audit.length).toBeGreaterThan(0);
+      for (const line of audit) expect(line).toEndWith(`refused code=${code}`);
+    }
+  });
+
   test("a term whose settings are unreadable answers settings_unavailable, and one that has not loaded answers not_ready", async () => {
     const relay = startTestRelay(TOKEN);
     const unreadable: SettingsStore = {
@@ -1229,6 +1271,40 @@ describe("leader push", () => {
       expect(push.requests()).toEqual([]);
       gate.resolve();
       await push.waitForRequests(1);
+    } finally {
+      gate.resolve();
+      leader.stop();
+      relay.stop();
+      await push.stop();
+    }
+  });
+
+  test("a term that ends while its settings are still being read pushes nothing once they land", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings([sub("live")]);
+    const gate = Promise.withResolvers<void>();
+    const slow: SettingsStore = {
+      get: async () => {
+        await gate.promise;
+        return settings.store.get();
+      },
+      put: settings.store.put,
+    };
+    const store = new MemoryQueueStore();
+    await store.put("stuck", 0, task("stuck", { state: "needs-input", needsInputSince: 1 }));
+    const { leader } = leaderOver(relay, store, 40, undefined, slow, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1)), init),
+    );
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(async () => (await store.list()).some((t) => t.body?.escalated === true), "the escalation");
+      leader.follow("the relay nominated another daemon");
+      gate.resolve();
+      // A non-event cannot be polled: the parked alert would have been sent as the read landed.
+      await Bun.sleep(150);
+      expect(push.requests()).toEqual([]);
     } finally {
       gate.resolve();
       leader.stop();

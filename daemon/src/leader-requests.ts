@@ -322,15 +322,16 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
         );
       }
       if (!result.ok) {
-        await audit.refused("push-subscribe", id, result.code);
-        if (result.code === "conflict") {
-          return schedulerError("conflict", "the settings record changed while this ran; ask again");
-        }
-        if (result.code === "unavailable") {
-          return schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off");
-        }
-        // Said in fixed words: a settings fault never carries a record's content into a reply.
-        return schedulerError("internal_error", "the subscription could not be stored");
+        // The audit's code is the reply's, so a line and the answer it records never disagree. The
+        // store's own code stays out of both: a settings fault never carries a record's content into a reply.
+        const reply =
+          result.code === "conflict"
+            ? schedulerError("conflict", "the settings record changed while this ran; ask again")
+            : result.code === "unavailable"
+              ? schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off")
+              : schedulerError("internal_error", "the subscription could not be stored");
+        await audit.refused("push-subscribe", id, reply.code);
+        return reply;
       }
       await audit.subscribed(id);
       const reply: PushSubscribeResponse = { endpoint: request.endpoint };

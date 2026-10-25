@@ -488,7 +488,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         settingsState = state;
         // What the first pass raised while the record was still being read.
         const waiting = parked.splice(0);
-        if (state === "ready") for (const alert of waiting) pushSender?.send(alert);
+        // A term that ended while the read was out sends nothing: its successor owns the alerts now.
+        if (state === "ready" && live) for (const alert of waiting) pushSender?.send(alert);
       },
       (err: unknown) => {
         settingsLoading = false;
@@ -679,6 +680,9 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       timer = null;
       prs?.stop();
       prs = null;
+      // Queued pushes are dropped and later alerts ignored: a replaced term must not keep sending.
+      pushSender?.stop();
+      parked.length = 0;
       nudge.stop();
       unsubscribe();
       // Fails whatever the term still had out as "disconnected" → `unreachable`,

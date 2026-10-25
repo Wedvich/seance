@@ -2198,14 +2198,25 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     scheduler op, so a bearer-token holder without the PSK cannot subscribe.
   - **Sending** (`createPushSender`). One send per subscription per alert, never awaited by the
     scheduler pass: push services can take seconds, and a hung one must not hold the queue.
-    - The endpoint is checked again at send time against the allowlist (`pushEndpoint`), so a
-      record that holds a host a later build no longer allows is never sent to.
+    - The endpoint is checked again at send time against the allowlist (`pushEndpoint`). A host a
+      later build no longer allows does not make the record unreadable: `parseSettingsRecord`
+      reads subscriptions leniently, skipping an entry that fails the subscription parser, so the
+      VAPID key, the Linear key and every other browser stay usable. The skipped entries are gone
+      from the record at the leader's next write of it, and never sent to meanwhile. (The cap and
+      one entry per endpoint still refuse the whole record.)
     - `redirect: "manual"` and a 5 s timeout. A redirect, a timeout and any non-2xx answer other
       than 404/410 are a failed send, logged once.
     - At most 8 in flight; the rest wait in a FIFO of 64, and a send past that is dropped with
-      one warning per alert. `TTL` 3600 s and `Urgency: high`.
+      one warning per alert. `TTL` 3600 s and `Urgency: high`. A queued send reads its
+      subscription from the record again when its turn comes, and is skipped if the endpoint has
+      left it (pruned meanwhile), so a gone subscription is not sent to once per queued alert.
     - A 404 or 410 prunes that subscription from the record (one `update`, compare-and-set), and
-      logs the host and status once. A prune the store refuses is a warning, not a retry.
+      logs the host and status once per subscription removed: a prune that finds it already gone
+      logs nothing. A prune the store refuses is a warning, not a retry.
+    - **An ended term stops sending.** The term's end calls the sender's `stop`: queued sends are
+      dropped, a send that was already building its request does not post, a late answer prunes
+      nothing, and `send` is a no-op after. The alerts held for an unloaded record are dropped
+      with it, and flushed only while the term is live.
     - Logs carry the push service's host and status only, never an endpoint, key, JWT or payload.
   - **Alerts before the record has loaded.** The term's first pass can raise an alert (an
     escalation is persisted before it is raised) before the settings read lands. The leader

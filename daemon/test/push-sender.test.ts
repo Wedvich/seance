@@ -138,18 +138,46 @@ describe("a send", () => {
     expect(store.record()).toEqual({ version: 2, vapid });
   });
 
-  test("a 500 or a redirect neither prunes nor follows, and logs the host and status", async () => {
-    for (const status of [500, 302]) {
-      const push = stub();
-      push.respondWith(status);
-      const sub = await subscription("x");
-      const { sender, store, lines } = await rig([sub], () => push);
-      sender.send(alert);
-      await pollUntil(() => lines.length > 0, `the log line for ${status}`);
-      expect(lines).toEqual([`push: send failed host=fcm.googleapis.com status=${status}`]);
-      expect(store.record().version).toBe(1);
-      expect(push.requests()).toHaveLength(1);
-    }
+  test("a 500 neither prunes nor retries, and logs the host and status", async () => {
+    const push = stub();
+    push.respondWith(500);
+    const sub = await subscription("x");
+    const { sender, store, lines } = await rig([sub], () => push);
+    sender.send(alert);
+    await pollUntil(() => lines.length > 0, "the log line for 500");
+    expect(lines).toEqual(["push: send failed host=fcm.googleapis.com status=500"]);
+    expect(store.record().version).toBe(1);
+    expect(push.requests()).toHaveLength(1);
+  });
+
+  test("a redirect is a failed send: its Location is never fetched, and nothing is pruned", async () => {
+    const first = stub();
+    const second = stub();
+    first.redirectTo(second.endpoint("elsewhere"));
+    const { sender, store, lines } = await rig([await subscription("x")], () => first);
+    sender.send(alert);
+    await pollUntil(() => lines.length > 0, "the log line for the redirect");
+    expect(lines).toEqual(["push: send failed host=fcm.googleapis.com status=302"]);
+    expect(first.requests()).toHaveLength(1);
+    // A non-event cannot be polled: a followed redirect would have landed by now.
+    await Bun.sleep(100);
+    expect(second.requests()).toEqual([]);
+    expect(store.record().version).toBe(1);
+  });
+
+  test("two sends that both meet a 410 log one prune: the second finds the endpoint already gone", async () => {
+    const gone = stub();
+    gone.respondWith(410);
+    const release = gone.hold();
+    const { sender, store, lines } = await rig([await subscription("gone")], () => gone);
+    sender.send(alert);
+    sender.send({ ...alert, taskId: "task-2" });
+    await gone.waitForRequests(2);
+    release();
+    await pollUntil(() => store.record().version === 2, "the prune");
+    // The second prune is a no-op write-wise: wait out its turn on the writer before reading the log.
+    await Bun.sleep(100);
+    expect(lines).toEqual(["push: pruned a subscription host=fcm.googleapis.com status=410"]);
   });
 
   test("a push service that never answers times out, while send had already returned", async () => {
@@ -213,6 +241,48 @@ describe("a send", () => {
       onError: () => undefined,
     });
     expect(() => idle.send(alert)).not.toThrow();
+  });
+});
+
+describe("a stopped sender", () => {
+  test("drops what is queued, sends nothing afterwards, and does not prune on an answer that lands late", async () => {
+    const gone = stub();
+    gone.respondWith(410);
+    const release = gone.hold();
+    const subs = await Promise.all(["a", "b", "c"].map((id) => subscription(id)));
+    const { sender, store, lines } = await rig(subs, () => gone, { maxInFlight: 1 });
+    sender.send(alert);
+    await gone.waitForRequests(1);
+    sender.stop();
+    sender.send({ ...alert, taskId: "task-2" });
+    release();
+    // Non-events cannot be polled: the two queued sends, the later alert and the prune would all have landed by now.
+    await Bun.sleep(150);
+    expect(gone.requests()).toHaveLength(1);
+    expect(store.record().version).toBe(1);
+    expect(lines).toEqual([]);
+  });
+});
+
+describe("a queued send", () => {
+  test("is skipped when its subscription has left the record by its turn", async () => {
+    const gone = stub();
+    const live = stub();
+    gone.respondWith(410);
+    const release = gone.hold();
+    const [a, b, c] = await Promise.all(["a", "b", "c"].map((id) => subscription(id)));
+    const { sender, settings, store } = await rig([a, b, c], (id) => (id === "a" ? gone : live), { maxInFlight: 1 });
+    sender.send(alert);
+    await gone.waitForRequests(1);
+    // b leaves the record while it waits behind a.
+    await settings.update(({ version: _version, ...rest }) => ({ ...rest, subscriptions: [a, c] }));
+    release();
+    await live.waitForRequests(1);
+    await pollUntil(() => store.record().subscriptions?.length === 1, "a pruned after its 410");
+    // A non-event cannot be polled: b's send would have started right behind c's.
+    await Bun.sleep(100);
+    expect(live.requests().map((request) => request.path)).toEqual(["/push/c"]);
+    expect(store.record().subscriptions).toEqual([c]);
   });
 });
 

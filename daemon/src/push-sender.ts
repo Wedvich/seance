@@ -16,6 +16,9 @@ import { encryptPayload, vapidAuthorization } from "./web-push.ts";
  * endpoint `pushEndpoint` accepts *now* (the record is re-checked, not trusted),
  * follows no redirect, and gives up after `timeoutMs`.
  *
+ * `stop` ends it with the term: queued sends are dropped and `send` does nothing after, so a
+ * term the relay has already replaced never sends on a record it no longer leads.
+ *
  * Logs only failures, as host and status. Never an endpoint path (the path is the
  * subscription's secret), a key, a JWT or a payload.
  */
@@ -23,6 +26,8 @@ import { encryptPayload, vapidAuthorization } from "./web-push.ts";
 export interface PushSender {
   /** Queues the alert for every subscription; returns at once. */
   readonly send: (alert: PushAlert) => void;
+  /** The term ended: drops what is queued, and every later `send` is a no-op. Sends already in flight finish unobserved. */
+  readonly stop: () => void;
 }
 
 export interface PushSenderOpts {
@@ -65,14 +70,28 @@ export function createPushSender(o: PushSenderOpts): PushSender {
   const utf8 = new TextEncoder();
   // Slots are taken synchronously in `launch`, so a burst in one pass counts against the cap before any request starts.
   let inFlight = 0;
-  const waiting: (() => void)[] = [];
+  // By stored endpoint, not target: what a send goes to is read again when its turn comes.
+  const waiting: { readonly alert: PushAlert; readonly stored: string }[] = [];
+  let stopped = false;
+
+  /** The subscription as the record holds it now, or null once it is gone (pruned, or no longer allowed). */
+  const resolve = (stored: string): Target | null => {
+    const subscription = o.settings.current()?.subscriptions?.find((s) => s.endpoint === stored);
+    if (subscription === undefined) return null;
+    const endpoint = pushEndpoint(subscription.endpoint);
+    return endpoint === null ? null : { subscription, endpoint };
+  };
 
   const prune = async (target: Target, host: string, status: number): Promise<void> => {
     let result;
+    // Set by the mutation that ran last: false when the endpoint was already gone, so nothing landed.
+    let removed = false;
     try {
       result = await o.settings.update((record) => {
+        removed = false;
         const held = record.subscriptions;
         if (held?.some((s) => s.endpoint === target.subscription.endpoint) !== true) return null;
+        removed = true;
         const { version: _version, subscriptions: _held, ...rest } = record;
         const kept = held.filter((s) => s.endpoint !== target.subscription.endpoint);
         return kept.length === 0 ? rest : { ...rest, subscriptions: kept };
@@ -82,8 +101,12 @@ export function createPushSender(o: PushSenderOpts): PushSender {
       o.onError(err);
       return;
     }
-    if (result.ok) o.log.info(`push: pruned a subscription host=${host} status=${status}`);
-    else o.log.warn(`push: could not prune a subscription host=${host} status=${status} code=${result.code}`);
+    if (!result.ok) {
+      o.log.warn(`push: could not prune a subscription host=${host} status=${status} code=${result.code}`);
+      return;
+    }
+    // Another send's 404 may have pruned it first: one line per subscription removed.
+    if (removed) o.log.info(`push: pruned a subscription host=${host} status=${status}`);
   };
 
   const deliver = async (alert: PushAlert, target: Target): Promise<void> => {
@@ -96,6 +119,8 @@ export function createPushSender(o: PushSenderOpts): PushSender {
       // Built when the send starts, not when it was queued, so a long line holds no key material.
       const body = await encryptPayload(target.subscription, utf8.encode(JSON.stringify(alert)));
       const authorization = await vapidAuthorization(target.endpoint, vapid, o.sub, o.now());
+      // The term can end while the key material is built.
+      if (stopped) return;
       const response = await o.httpFetch(target.endpoint, {
         method: "POST",
         // A push service never redirects a live subscription; following one would let it aim the leader elsewhere.
@@ -118,6 +143,7 @@ export function createPushSender(o: PushSenderOpts): PushSender {
       o.log.warn(`push: send failed host=${host} status=${failureOf(err)}`);
       return;
     }
+    if (stopped) return;
     if (status === 404 || status === 410) await prune(target, host, status);
     else o.log.warn(`push: send failed host=${host} status=${status}`);
   };
@@ -128,27 +154,41 @@ export function createPushSender(o: PushSenderOpts): PushSender {
       .catch(() => undefined)
       .finally(() => {
         inFlight -= 1;
-        waiting.shift()?.();
+        pump();
       });
   };
 
+  /** Starts waiting sends while a slot is free, skipping any whose subscription has left the record. */
+  function pump(): void {
+    while (!stopped && inFlight < maxInFlight) {
+      const next = waiting.shift();
+      if (next === undefined) return;
+      const target = resolve(next.stored);
+      if (target !== null) launch(next.alert, target);
+    }
+  }
+
   return {
     send: (alert) => {
+      if (stopped) return;
       try {
         let dropped = 0;
         for (const subscription of o.settings.current()?.subscriptions ?? []) {
           const endpoint = pushEndpoint(subscription.endpoint);
           if (endpoint === null) continue;
-          const target = { subscription, endpoint };
           // Behind anything already waiting, so alerts reach a subscription in the order they were raised.
-          if (inFlight < maxInFlight && waiting.length === 0) launch(alert, target);
-          else if (waiting.length < maxQueued) waiting.push(() => launch(alert, target));
+          if (inFlight < maxInFlight && waiting.length === 0) launch(alert, { subscription, endpoint });
+          else if (waiting.length < maxQueued) waiting.push({ alert, stored: subscription.endpoint });
           else dropped += 1;
         }
         if (dropped > 0) o.log.warn(`push: queue full, dropped ${dropped} send(s)`);
       } catch {
         o.log.warn("push: could not queue an alert");
       }
+    },
+    stop: () => {
+      stopped = true;
+      waiting.length = 0;
     },
   };
 }
