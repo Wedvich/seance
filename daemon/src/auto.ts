@@ -24,7 +24,7 @@ import { originQuery } from "./scan.ts";
 /**
  * Enqueuing on `auto` as an app-role client does it — which origin a repo
  * names, whether a request fits the scheduler's bounds, and the create itself
- * — apart from the MCP SDK and zod, so another client (a CLI `--auto`, Raycast)
+ * — apart from the MCP SDK and zod, so another client (the CLI's spawn, Raycast)
  * can reuse it. `mcp.ts` wraps the answers as tool results.
  */
 
@@ -50,7 +50,7 @@ const failed = (text: string): AutoEnqueued => ({ ok: false, text });
 export function resolveOrigin(
   machines: readonly Machine[],
   repo: string,
-  scope = "auto",
+  scope = "the fleet",
 ): { readonly origin: string } | { readonly error: string } {
   const origins = new Set<string>();
   /** origin → the machines whose clone of it is named `repo` */
@@ -82,16 +82,16 @@ export function resolveOrigin(
   const stale =
     unkeyed.length === 0
       ? ""
-      : ` (${unkeyed.join(", ")} has a clone by that name, but its daemon reports no origin, so auto cannot route to it)`;
+      : ` (${unkeyed.join(", ")} has a clone by that name, but its daemon reports no origin, so the scheduler cannot route to it)`;
   return {
     error: `no repo "${repo}" for ${scope}${stale} — known origins: ${known === "" ? "(none reported)" : known}`,
   };
 }
 
-/** The way past the prompt bound other than shortening: a direct spawn is not bound by the scheduler's. */
-const PROMPT_BOUND_ESCAPE: Readonly<Record<EnqueueSurface, string>> = {
-  mcp: "name a machine",
-  cli: "drop --auto to spawn here directly",
+/** The way past the prompt bound other than shortening: a direct spawn is not bound by the scheduler's. MCP has none. */
+const PROMPT_BOUND_ESCAPE: Readonly<Record<EnqueueSurface, string | null>> = {
+  mcp: null,
+  cli: "pass --now to spawn here directly",
 };
 
 /**
@@ -106,11 +106,12 @@ function overBound(
 ): string | null {
   const limit = TASK_REQUEST_LIMITS[field];
   if (value === undefined || value.length <= limit) return null;
+  const escape = PROMPT_BOUND_ESCAPE[surface];
   const fix =
     field === "prompt"
-      ? ` — shorten it (the session can gather the rest with tools), or ${PROMPT_BOUND_ESCAPE[surface]}`
+      ? ` — shorten it (the session can gather the rest with tools)${escape === null ? "" : `, or ${escape}`}`
       : "";
-  return `the ${field} is ${value.length} characters; auto takes at most ${limit}${fix}`;
+  return `the ${field} is ${value.length} characters; a queued spawn takes at most ${limit}${fix}`;
 }
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
@@ -248,7 +249,7 @@ export function resolveAccount(
     }
     if (!signedIn.has(only)) {
       return {
-        error: `${name}: "${input}" names ${describeAccount(only, signedIn, records)}, which no machine reports signed in, so auto could never place it`,
+        error: `${name}: "${input}" names ${describeAccount(only, signedIn, records)}, which no machine reports signed in, so the scheduler could never place it`,
       };
     }
     return { accountId: only };
@@ -283,7 +284,7 @@ export interface ResolvedPlacement {
   readonly machines: readonly Machine[];
   /** What `resolveOrigin` names the scope by. */
   readonly scope: string;
-  /** The account a pin resolved to, by accountId and email, for the answer; null without one. */
+  /** What the answer adds: the account a pin resolved to (accountId and email), and that a pinned machine is offline so the task waits; one line, null with neither. */
   readonly echo: string | null;
 }
 
@@ -310,13 +311,18 @@ export async function resolvePlacement(
     target = resolved.machine;
     if ((target.exclaves ?? []).length === 0) {
       return {
-        error: `${names.machine}: ${target.name} (${target.deviceId}) reports no exclaves, so auto cannot place there — its daemon needs \`seanced update\``,
+        error: `${names.machine}: ${target.name} (${target.deviceId}) reports no exclaves, so the scheduler cannot place there — its daemon needs \`seanced update\``,
       };
     }
   }
   const scoped = target === undefined ? machines : [target];
   let account: string | undefined;
-  let echo: string | null = null;
+  const notes: string[] = [];
+  if (target !== undefined && !target.connected) {
+    notes.push(
+      `${target.name} is offline (last seen ${new Date(target.lastSeen).toISOString()}); the task waits for it`,
+    );
+  }
   if (input.account !== undefined) {
     const records = await accounts();
     const matched = resolveAccount(machines, records, input.account, names.account);
@@ -329,7 +335,7 @@ export async function resolvePlacement(
       };
     }
     const emails = [...(signedIn.get(account)?.emails ?? [])];
-    echo = `pinned to account ${account} (${emails.length === 0 ? "no email reported" : emails.join(", ")})`;
+    notes.push(`pinned to account ${account} (${emails.length === 0 ? "no email reported" : emails.join(", ")})`);
   }
   const avoid: string[] = [];
   for (const ref of input.avoid ?? []) {
@@ -350,7 +356,7 @@ export async function resolvePlacement(
     const reporting = machines.filter((m) => (m.exclaves ?? []).some((x) => x.accountId === account));
     if (reporting.length > 0 && reporting.every((m) => avoid.includes(m.deviceId))) {
       return {
-        error: `${names.avoid} covers every machine signed in to account ${account} (${reporting.map((m) => m.name).join(", ")}), so auto could never place it`,
+        error: `${names.avoid} covers every machine signed in to account ${account} (${reporting.map((m) => m.name).join(", ")}), so the scheduler could never place it`,
       };
     }
   }
@@ -374,8 +380,8 @@ export async function resolvePlacement(
       ...(avoid.length === 0 ? {} : { avoid }),
     },
     machines: scoped.map(inAccount),
-    scope: where.length === 0 ? "auto" : `auto pinned to ${where.join(", ")}`,
-    echo,
+    scope: where.length === 0 ? "the fleet" : `a task pinned to ${where.join(", ")}`,
+    echo: notes.length === 0 ? null : notes.join("; "),
   };
 }
 
@@ -456,8 +462,8 @@ export function leaderAdvertises(lease: SchedulerLease, capability: Capability):
 export function pinAccountGateError(lease: SchedulerLease, fields: string): string | null {
   if (leaderAdvertises(lease, CAPABILITIES.pinAccount)) return null;
   return lease.scheduler.availability().kind === "ready"
-    ? `auto refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seanced update\``
-    : `auto refused: no verified scheduler is leading, so it cannot be confirmed to route on ${fields} — try again once one leads`;
+    ? `spawn refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seanced update\``
+    : `spawn refused: no verified scheduler is leading, so it cannot be confirmed to route on ${fields} — try again once one leads`;
 }
 
 /** Tries at one create: each re-sends the same task, so a lost reply can never queue it twice. */
@@ -465,16 +471,21 @@ const ENQUEUE_ATTEMPTS = 3;
 const ENQUEUE_RETRY_MS = 1_000;
 
 /** Where each surface's reader looks next: a shell user cannot call MCP's tools, so the CLI names the app's queue. */
-const FOLLOW_UP: Readonly<Record<EnqueueSurface, { readonly placed: string; readonly check: string }>> = {
+const FOLLOW_UP: Readonly<
+  Record<EnqueueSurface, { readonly placed: string; readonly check: string; readonly leaderless: string | null }>
+> = {
   mcp: {
     placed:
       "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
     check: "check get_queue",
+    leaderless: null,
   },
   cli: {
     placed:
       "The scheduler places it as soon as a machine and account can take it; the app's queue shows where it lands and why, and cancels it.",
     check: "check the app's queue",
+    leaderless:
+      "This task runs once a scheduler leads, so `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.",
   },
 };
 
@@ -535,9 +546,9 @@ export async function enqueueAuto(
         // An earlier try may have stored it, so this is no clean failure: audit it as the lost path does.
         // oxlint-disable-next-line no-await-in-loop -- the last thing this try does: it returns
         await audited(task, { kind: "unanswered" });
-        return failed(`auto failed: ${why} — task ${task.id} may have queued; ${followUp.check} before retrying`);
+        return failed(`spawn failed: ${why} — task ${task.id} may have queued; ${followUp.check} before retrying`);
       }
-      return failed(`auto failed: ${why}`);
+      return failed(`spawn failed: ${why}`);
     }
     if (reply === null) {
       sent = true;
@@ -546,7 +557,7 @@ export async function enqueueAuto(
     if (!reply.ok) {
       // oxlint-disable-next-line no-await-in-loop -- the last thing this try does: it returns
       await audited(task, { kind: "refused", code: reply.code });
-      return failed(`auto refused (${reply.code}): ${storeErrorText(reply.code)}`);
+      return failed(`spawn refused (${reply.code}): ${storeErrorText(reply.code)}`);
     }
     // oxlint-disable-next-line no-await-in-loop -- as above
     await audited(task, { kind: "queued", landedEarlier: reply.landedEarlier });
@@ -558,14 +569,15 @@ export async function enqueueAuto(
       lines.push(
         "No scheduler is leading right now (or its leader is unverified); the task waits in the relay's queue until one does.",
       );
+      if (followUp.leaderless !== null) lines.push(followUp.leaderless);
     }
     return done(lines.join("\n"));
   }
   if (!sent) {
-    return failed(`auto: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
+    return failed(`spawn: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
   }
   await audited(task, { kind: "unanswered" });
   return failed(
-    `auto: no answer from ${lastLostTarget === "daemon" ? "this machine's daemon" : "the relay"} after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; ${followUp.check} before retrying`,
+    `spawn: no answer from ${lastLostTarget === "daemon" ? "this machine's daemon" : "the relay"} after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; ${followUp.check} before retrying`,
   );
 }

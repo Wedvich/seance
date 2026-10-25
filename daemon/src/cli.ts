@@ -104,18 +104,18 @@ export interface SpawnCliArgs {
   readonly here: boolean;
   readonly title?: string;
   readonly prompt?: string;
-  /** Queue it for the scheduler instead (`cli-auto.ts`); present only when given. */
-  readonly auto?: true;
-  /** `--auto` only: the machine to pin to, by name or deviceId, or `here`. */
+  /** Spawn here, now, relay-free; present only when given. Otherwise the spawn is queued (`cli-auto.ts`). */
+  readonly now?: true;
+  /** Queued spawn only (refused with `--now`): the machine to pin to, by name or deviceId, or `here`. */
   readonly machine?: string;
-  /** `--auto` only: the account to pin to, by alias, email or accountId. */
+  /** Queued spawn only (refused with `--now`): the account to pin to, by alias, email or accountId. */
   readonly account?: string;
-  /** `--auto` only: machines to keep it off, each as `machine` takes one; present only when given. */
+  /** Queued spawn only (refused with `--now`): machines to keep it off, each as `machine` takes one; present only when given. */
   readonly not?: readonly string[];
 }
 
 const SPAWN_USAGE =
-  "usage: seanced spawn [--auto [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
+  "usage: seanced spawn [--now | [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -134,12 +134,15 @@ function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
 
 /**
  * Mirrors /spawn: -p is optional, bare words join into the prompt. The
- * placement flags need `--auto` — a direct spawn runs here, now — and a value
- * each; `--machine` and `--account` are given at most once. Exported for tests.
+ * placement flags pin a queued spawn, so `--now` — which runs here, right
+ * away — refuses them; each takes a value, and `--machine` and `--account`
+ * are given at most once. `--auto` is a no-op kept for old muscle memory,
+ * refused only beside `--now`. Exported for tests.
  */
 export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
+  let now = false;
   let auto = false;
   let title: string | undefined;
   let machine: string | undefined;
@@ -157,6 +160,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       expect = null;
     } else if (arg === "--here") {
       here = true;
+    } else if (arg === "--now") {
+      now = true;
     } else if (arg === "--auto") {
       auto = true;
     } else if (isSpawnValueFlag(arg)) {
@@ -175,14 +180,21 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   if (repo === undefined) throw new Error(SPAWN_USAGE);
   if (expect === "machine" || expect === "account" || expect === "not") throw new Error(SPAWN_USAGE);
   const placed = machine !== undefined || account !== undefined || not.length > 0;
-  if (placed && !auto) throw new Error(`--machine, --account and --not need --auto\n${SPAWN_USAGE}`);
+  if (now && placed) {
+    throw new Error(
+      `--now spawns on this machine now; --machine, --account and --not pin a queued spawn\n${SPAWN_USAGE}`,
+    );
+  }
+  if (now && auto) {
+    throw new Error(`--now and --auto contradict: --now spawns here directly, a plain spawn queues\n${SPAWN_USAGE}`);
+  }
   const prompt = promptParts.join(" ");
   return {
     repo,
     here,
     ...(title !== undefined ? { title } : {}),
     ...(prompt !== "" ? { prompt } : {}),
-    ...(auto ? { auto } : {}),
+    ...(now ? { now } : {}),
     ...(machine === undefined ? {} : { machine }),
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
@@ -190,14 +202,15 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
 }
 
 /**
- * The relay-free spawn path — same code the app request runs, driven over SSH.
+ * Queues a scheduler task (`cli-auto.ts`); with `--now`, the relay-free spawn
+ * path — same code the app request runs, driven over SSH.
  * Audits to the same log the daemon writes, tagged `origin=cli`: a trail that
  * omitted the locally-reachable path would make it the quieter way in.
  */
 export async function cmdSpawn(argv: readonly string[]): Promise<void> {
   const args = parseSpawnArgs(argv);
-  // The one form that dials the relay; everything below stays relay-free.
-  if (args.auto === true) return cmdSpawnAuto(args);
+  // Queued unless `--now`; everything below is the relay-free direct path, kept for a leaderless fleet, a keyless box and SSH debugging.
+  if (args.now !== true) return cmdSpawnAuto(args);
   const config = await loadConfig();
   const state = await loadOrInitState();
   // Tagged either way, so the spawn pre-trusts the repo in its own exclave's config.

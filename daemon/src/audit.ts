@@ -306,7 +306,7 @@ export type EnqueueOutcome =
 
 /**
  * Who enqueued, as both the line's origin and its client: `seanced mcp`, or
- * `seanced spawn --auto` typed at this machine — the CLI's own origin, since
+ * `seanced spawn` typed at this machine — the CLI's own origin, since
  * `audit enqueue` already tells the act apart from its `audit spawn`.
  */
 export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
@@ -354,7 +354,7 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
 /**
  * Something on this box asked the daemon to reach *another* machine, or the
  * scheduler, for it over the op socket — a keyless `seanced mcp` or `seanced
- * spawn --auto`. Its own origin, never `local`: a
+ * spawn`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches
  * someone else's. The target daemon audits the spawn itself as `origin=relay`.
  */

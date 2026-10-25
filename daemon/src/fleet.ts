@@ -237,7 +237,8 @@ export function brokerFailureText(err: BrokerError): string {
 }
 
 const NO_KEY = "no PSK is readable by this process, so other machines are reached through the seanced daemon";
-const LOCAL_STILL_WORKS = "Spawning on this machine needs neither.";
+const LOCAL_STILL_WORKS =
+  "Listing and ending sessions on this machine needs neither; a spawn queues through the relay, so it does.";
 // Local ops ride the same daemon's op socket, so a daemon that is not there takes them down too.
 const LOCAL_NEEDS_IT_TOO = "Ops on this machine go through that same daemon, so they fail too until it is running.";
 
@@ -252,23 +253,6 @@ function localOutlook(cause: unknown): LocalOutlook {
   if (cause.code === "daemon_unreachable") return "down";
   if (cause.code === "daemon_timeout" || cause.code === "daemon_closed") return "unknown";
   return "up";
-}
-
-/**
- * What a plain `seanced spawn` can still do after this broker failure, for a
- * caller that already said why `--auto` failed. Local ops ride the daemon's op
- * socket, so a daemon that is gone or silent takes them down too — see
- * `unreachableAdvice`, which words the same split.
- */
-export function localOpsNote(cause: unknown): string {
-  switch (localOutlook(cause)) {
-    case "down":
-      return LOCAL_NEEDS_IT_TOO;
-    case "unknown":
-      return "Ops on this machine go through that same daemon, so they may fail too — check `seanced status`.";
-    case "up":
-      return "A spawn without --auto needs no key.";
-  }
 }
 
 /** What the reader can do about this cause — each broker code fails for a different reason. */
@@ -359,7 +343,7 @@ export async function mcpFleetChecks(keyReadable: boolean, opts: BrokerCallOpts 
       return [
         {
           level: "warn",
-          message: `no PSK readable here, and ${NOT_BROKERING} (the key-store lines above say why it cannot); only this machine is reachable until then`,
+          message: `no PSK readable here, and ${NOT_BROKERING} (the key-store lines above say why it cannot); only this machine is reachable until then, and only to list and end its sessions: a spawn queues through the relay`,
         },
       ];
     }

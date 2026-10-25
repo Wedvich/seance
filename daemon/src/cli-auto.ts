@@ -19,7 +19,6 @@ import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
   brokerFailureText,
   brokerFleet,
-  localOpsNote,
   relayFleet,
   SCHEDULER_NEEDS_NEWER_DAEMON,
   type Fleet,
@@ -28,12 +27,12 @@ import {
 import type { PskStore } from "./psk-store.ts";
 import { readState } from "./state.ts";
 
-// `seanced spawn --auto`: queue the spawn for the scheduler as an app-role
-// client, as `seanced mcp`'s `auto` does — a sealed task `store-put` at
+// `seanced spawn`: queue the spawn for the scheduler as an app-role
+// client, as `seanced mcp`'s `spawn_session` does — a sealed task `store-put` at
 // `expect: 0`, so it queues with no leader up. A shell that can read the PSK
 // dials the relay itself; one that cannot (a credential-delivered box, where
 // only the service sees the key) asks the daemon's broker, which seals and
-// sends it. A direct `seanced spawn` stays relay-free.
+// sends it. `seanced spawn --now` stays relay-free.
 
 export interface AutoFleetOpts {
   /** Tests point these at stores that cannot exist. */
@@ -62,6 +61,9 @@ export async function autoFleet(
   });
   return { fleet: relayFleet(relay), keyless: false };
 }
+
+/** Only on failures where nothing was queued: after a "may have queued" one it would run the task twice. */
+const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
 
 const failed = (text: string): AutoEnqueued => ({ ok: false, text });
 
@@ -112,12 +114,11 @@ export interface SpawnAutoOpts {
 
 /**
  * The broker is this shell's only way to the relay when it read no key, so its
- * failure is the end of the road for `--auto`: say that first, then why. A plain
- * spawn is relay-free and works without a key, but not without the daemon, so
- * the closing line follows `cause`.
+ * failure is the end of the road for the queued spawn: say that first, then
+ * why. `--now` needs none of key, relay or daemon, so it closes every case.
  */
-function keylessNotQueued(why: string, cause: unknown): string {
-  return `auto: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. ${localOpsNote(cause)}`;
+function keylessNotQueued(why: string): string {
+  return `spawn: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}. ${NOW_HINT}`;
 }
 
 /**
@@ -139,20 +140,20 @@ export async function spawnAuto(
   };
   // Refused before the relay is dialled: no round trip to learn the prompt is too long.
   const invalid = specError(spec, "cli");
-  if (invalid !== null) return failed(`auto refused: ${invalid}`);
+  if (invalid !== null) return failed(`spawn refused: ${invalid}`);
   const placement = await hereResolved(args, opts.self ?? ownDeviceId);
-  if ("error" in placement) return failed(`auto refused: ${placement.error}`);
+  if ("error" in placement) return failed(`spawn refused: ${placement.error}`);
   const placementInvalid = placementInputError(placement.input, CLI_PLACEMENT_NAMES);
-  if (placementInvalid !== null) return failed(`auto refused: ${placementInvalid}`);
+  if (placementInvalid !== null) return failed(`spawn refused: ${placementInvalid}`);
   let lease: FleetLease;
   try {
     lease = await fleet.open();
   } catch (err) {
     const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
-    return failed(opts.keyless === true ? keylessNotQueued(why, err) : `auto: not queued — ${why}`);
+    return failed(opts.keyless === true ? keylessNotQueued(why) : `spawn: not queued — ${why}. ${NOW_HINT}`);
   }
   try {
-    if (lease.scheduler === null) return failed(`--auto unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
+    if (lease.scheduler === null) return failed(`spawn unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}. ${NOW_HINT}`);
     const leg = { machines: lease.machines, scheduler: lease.scheduler };
     // Before any account listing: a leader that cannot route on them never gets the fields.
     if (placementNeedsPinAccount(placement.input)) {
@@ -160,12 +161,12 @@ export async function spawnAuto(
       if (gate !== null) return failed(gate);
     }
     const placed = await resolvePlacement(leg.machines, leg.scheduler.accounts, placement.input, CLI_PLACEMENT_NAMES);
-    if ("error" in placed) return failed(`auto refused: ${placed.error}`);
+    if ("error" in placed) return failed(`spawn refused: ${placed.error}`);
     const resolved = resolveOrigin(placed.machines, args.repo, placed.scope);
-    if ("error" in resolved) return failed(`auto refused: ${resolved.error}`);
+    if ("error" in resolved) return failed(`spawn refused: ${resolved.error}`);
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin, ...placed.fields };
     const longOrigin = specError(resolvedSpec, "cli");
-    if (longOrigin !== null) return failed(`auto refused: ${longOrigin}`);
+    if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
     const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli");
     return placed.echo === null || !enqueued.ok ? enqueued : { ...enqueued, text: `${enqueued.text}\n${placed.echo}` };
   } finally {

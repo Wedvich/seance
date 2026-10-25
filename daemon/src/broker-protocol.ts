@@ -44,7 +44,7 @@ export function isBrokerOp(value: unknown): value is BrokerOp {
 
 /**
  * The scheduler ops a peer may ask the daemon to make as an app: what `auto`,
- * `queue_batch`, `get_queue`, `cancel_task` and `seanced spawn --auto` need,
+ * `queue_batch`, `get_queue`, `cancel_task` and `seanced spawn` need,
  * and the account read that resolves an alias. `mark-done`, `pause`, `resume`,
  * `discard`, `route-preview` and every `account:` write stay off the list.
  */
