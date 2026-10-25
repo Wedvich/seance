@@ -131,8 +131,8 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
   schema (DESIGN.md _Wire protocol_, Layer 2, `spawn`). Still to build (Stacking, below): the
   base fetched before launch as the default branch is (`base-fetch.ts`), so a stacked task never
   starts from a stale `origin/<b>`, and how the worktree gets made.
-- **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` included (typed,
-  not in `SCHEDULER_OPS` yet). `enqueue` stays a `store-put`, never a leader op.
+- **App → scheduler ops**: DESIGN.md _Wire protocol_, Layer 2, `push-subscribe` and
+  `push-unsubscribe` included. `enqueue` stays a `store-put`, never a leader op.
 
 ## Daemon changes
 

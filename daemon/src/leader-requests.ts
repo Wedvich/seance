@@ -14,6 +14,7 @@ import {
   parseDiscardRequest,
   parsePauseRequest,
   parsePushSubscribeRequest,
+  parsePushUnsubscribeRequest,
   parseQueueRequest,
   parseResumeRequest,
   parseTaskRef,
@@ -30,6 +31,7 @@ import {
   type PauseResponse,
   type Plain,
   type PushSubscribeResponse,
+  type PushUnsubscribeResponse,
   type QueueResponse,
   type RoutePreviewResponse,
   type SchedulerError,
@@ -41,7 +43,7 @@ import {
 } from "@seance/shared";
 import { daemonSink, queueAudit } from "./audit.ts";
 import { log } from "./log.ts";
-import type { SettingsState, TermSettings } from "./settings.ts";
+import type { SettingsState, SettingsUpdate, TermSettings } from "./settings.ts";
 
 /**
  * An app's requests to the scheduler term (DESIGN.md, Scheduler, "The leader"):
@@ -227,6 +229,42 @@ const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code
   ),
 };
 
+type PushOp = "push-subscribe" | "push-unsubscribe";
+
+const SETTINGS_UNAVAILABLE = (): SchedulerError =>
+  schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off");
+
+/** The term's settings holder for a push op, or why not: `not_ready` until the first load decides, then `settings_unavailable` (audited). */
+async function pushSettings(asked: Asked, op: PushOp): Promise<TermSettings | SchedulerError> {
+  const settings = asked.settings();
+  const state = asked.settingsState();
+  if (state === "pending") return schedulerError("not_ready", "this term has not read its settings yet");
+  if (settings !== null && state !== "unavailable") return settings;
+  await audit.refused(op, asked.id, "settings_unavailable");
+  return SETTINGS_UNAVAILABLE();
+}
+
+/**
+ * A settings write the holder refused, answered and audited. The audit's code is the reply's, so a
+ * line and the answer it records never disagree. The store's own code stays out of both: a settings
+ * fault never carries a record's content into a reply.
+ */
+async function settingsRefused(
+  op: PushOp,
+  requestId: string,
+  code: Extract<SettingsUpdate, { readonly ok: false }>["code"],
+  failed: string,
+): Promise<SchedulerError> {
+  const reply =
+    code === "conflict"
+      ? schedulerError("conflict", "the settings record changed while this ran; ask again")
+      : code === "unavailable"
+        ? SETTINGS_UNAVAILABLE()
+        : schedulerError("internal_error", failed);
+  await audit.refused(op, requestId, reply.code);
+  return reply;
+}
+
 /**
  * An app's request to a running term (DESIGN.md, Scheduler, "The leader").
  * The payload is untrusted input to a PSK holder that acts on it, so it is
@@ -291,13 +329,8 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
     case "push-subscribe": {
       const request = parsePushSubscribeRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed push-subscribe request");
-      const settings = asked.settings();
-      const state = asked.settingsState();
-      if (state === "pending") return schedulerError("not_ready", "this term has not read its settings yet");
-      if (settings === null || state === "unavailable") {
-        await audit.refused("push-subscribe", id, "settings_unavailable");
-        return schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off");
-      }
+      const settings = await pushSettings(asked, op);
+      if ("ok" in settings) return settings;
       // An object, not a flag: TS would narrow a `let` to its initial value across the callback.
       const outcome = { full: false };
       const result = await settings.update((record) => {
@@ -321,20 +354,27 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
           `the leader holds ${PUSH_MAX_SUBSCRIPTIONS} push subscriptions already`,
         );
       }
-      if (!result.ok) {
-        // The audit's code is the reply's, so a line and the answer it records never disagree. The
-        // store's own code stays out of both: a settings fault never carries a record's content into a reply.
-        const reply =
-          result.code === "conflict"
-            ? schedulerError("conflict", "the settings record changed while this ran; ask again")
-            : result.code === "unavailable"
-              ? schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off")
-              : schedulerError("internal_error", "the subscription could not be stored");
-        await audit.refused("push-subscribe", id, reply.code);
-        return reply;
-      }
+      if (!result.ok) return settingsRefused(op, id, result.code, "the subscription could not be stored");
       await audit.subscribed(id);
       const reply: PushSubscribeResponse = { endpoint: request.endpoint };
+      return reply;
+    }
+    case "push-unsubscribe": {
+      const request = parsePushUnsubscribeRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed push-unsubscribe request");
+      const settings = await pushSettings(asked, op);
+      if ("ok" in settings) return settings;
+      const result = await settings.update((record) => {
+        const current = record.subscriptions ?? [];
+        const kept = current.filter((sub) => sub.endpoint !== request.endpoint);
+        // Not held: no write and no version bump, so asking twice (or for a pruned one) is harmless.
+        if (kept.length === current.length) return null;
+        const { version: _version, ...rest } = record;
+        return { ...rest, subscriptions: kept };
+      });
+      if (!result.ok) return settingsRefused(op, id, result.code, "the subscription could not be removed");
+      await audit.unsubscribed(id);
+      const reply: PushUnsubscribeResponse = { endpoint: request.endpoint };
       return reply;
     }
     case "discard": {
@@ -367,7 +407,7 @@ export interface TermRequests {
   readonly tick: () => void;
   /** The term's settings holder; null when it has none (a test's term over a bare store). */
   readonly settings: () => TermSettings | null;
-  /** `pending` until the term's first settings load decides: a `push-subscribe` meanwhile is `not_ready`. */
+  /** `pending` until the term's first settings load decides: a push op meanwhile is `not_ready`. */
   readonly settingsState: () => SettingsState;
   /**
    * The term's own fault path: a `StoreRevoked` ends the term (`leader.ts`). It is the

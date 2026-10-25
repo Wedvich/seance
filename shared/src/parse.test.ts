@@ -10,6 +10,8 @@ import {
   parsePushAlert,
   parsePushSubscribeReply,
   parsePushSubscribeRequest,
+  parsePushUnsubscribeReply,
+  parsePushUnsubscribeRequest,
   parseSettingsRecord,
   pushEndpoint,
   isStoreKey,
@@ -1481,6 +1483,33 @@ describe("M4 shapes", () => {
     const full = { ok: false, code: "subscriptions_full", message: "full" } as const;
     expect(parsePushSubscribeReply(full)).toEqual(full);
     expect(parsePushSubscribeReply({ endpoint: "https://example.com/x" })).toBeNull();
+  });
+
+  test("push-unsubscribe carries only a fresh, normalized endpoint the allowlist accepts; its reply is the endpoint, or a refusal", () => {
+    const endpoint = "https://web.push.apple.com/QGh";
+    expect(parsePushUnsubscribeRequest({ endpoint })).toEqual({ endpoint });
+    // Built from the endpoint alone: nothing else the sender put there rides along.
+    const extra = parsePushUnsubscribeRequest({ endpoint, keys: { auth: "x" }, note: "y" });
+    expect(extra).toEqual({ endpoint });
+    expect(Object.keys(extra ?? {})).toEqual(["endpoint"]);
+    expect(parsePushUnsubscribeRequest({ endpoint: "https://FCM.googleapis.com/fcm/send/a" })).toEqual({
+      endpoint: "https://fcm.googleapis.com/fcm/send/a",
+    });
+    for (const bad of [
+      { endpoint: "https://example.com/x" },
+      { endpoint: "https://fcm.googleapis.com:8443/x" },
+      { endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH)}` },
+      { endpoint: 7 },
+      {},
+      endpoint,
+      null,
+    ]) {
+      expect(parsePushUnsubscribeRequest(bad)).toBeNull();
+    }
+    expect(parsePushUnsubscribeReply({ endpoint })).toEqual({ endpoint });
+    const conflict = { ok: false, code: "conflict", message: "again" } as const;
+    expect(parsePushUnsubscribeReply(conflict)).toEqual(conflict);
+    expect(parsePushUnsubscribeReply({ endpoint: "https://example.com/x" })).toBeNull();
   });
 
   test("the settings record is strict: a part dropped on read would be lost on the next write", () => {
