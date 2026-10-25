@@ -279,8 +279,8 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * `/name` tokens as the PWA picker reads them: a `/` at the start, after
- * whitespace or after an opening wrapper (`` ` " ' ( [ ``), the name running to the
+ * `/name` tokens: the PWA picker's rule, widened for wrapping — a `/` at the
+ * start, after whitespace or after an opening wrapper (`` ` " ' ( [ ``), the name running to the
  * next whitespace with no second `/` (`and/or`, `https://a/b`, `/tmp/x` are none).
  * Closing wrappers and trailing sentence punctuation are not part of the name
  * (a token ending in `:` cannot be a `plugin:name`, but `:` stays inside one).
