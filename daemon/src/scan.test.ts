@@ -247,6 +247,23 @@ describe("scanRepos", () => {
       expect((await scanRepos([bare]))[0]).not.toHaveProperty("skills");
     });
 
+    test("a skill dir with many files does not drop skills sorted after it", async () => {
+      const { root, commit, publish } = await skillClone();
+      const bulk = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`.claude/skills/aaa/refs/f${i}.md`, ""]));
+      await commit({ ...skill("aaa"), ...bulk, ...skill("ship") });
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual(["aaa", "ship"]);
+    });
+
+    test("a name with pathspec-looking characters is matched literally", async () => {
+      const { root, commit, publish } = await skillClone();
+      await commit({ ...skill("a:b"), ...skill("x[1]"), ...skill(":(glob)y"), ...skill("xa") });
+      await publish();
+      const [entry] = await scanRepos([root]);
+      expect(entry?.skills).toEqual([":(glob)y", "a:b", "x[1]", "xa"]);
+    });
+
     test("past REPO_MAX_SKILLS the first by sort order are kept, never sent whole", async () => {
       const { root, commit, publish } = await skillClone();
       const names = Array.from({ length: REPO_MAX_SKILLS + 2 }, (_, i) => `s${String(i).padStart(2, "0")}`);
