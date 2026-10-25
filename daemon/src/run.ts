@@ -245,8 +245,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
     const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);
-    // Once per blob content: every reconnect rebuilds the same blob, and a line each would say nothing new.
-    const content = JSON.stringify(info);
+    // Once per size-deciding content: `scannedAt`/`lastUpdate` change every rescan without changing the
+    // size, and a line after each hourly rescan and reconnect would say nothing new.
+    const content = JSON.stringify({ repos: info.repos, exclaves: info.exclaves });
     if (content !== lastSizeReport) {
       lastSizeReport = content;
       if (droppedSkills) log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
