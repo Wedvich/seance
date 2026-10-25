@@ -3,19 +3,26 @@ import {
   pushEndpoint,
   RequestFailure,
   schedulerErrorText,
+  type PushSettingsReading,
   type PushSubscribeReply,
   type PushSubscribeRequest,
+  type StoreRefusal,
 } from "@seance/shared";
 
 /**
  * Subscribing this browser to the leader's Web Push. Logic only, with the browser's
  * Notification and PushManager behind `PushEnv`: pwa/test runs without a DOM lib, and
  * the real binding lives in push-browser.ts, which no test imports.
+ *
+ * Two phases, so the click has little to do: `inspectPush` reads everything slow when the
+ * card mounts (the VAPID key, the service worker, this browser's own subscription), and
+ * `enablePush` then runs only `requestPermission` and `subscribe` back to back. iOS grants
+ * a subscription only close behind its gesture.
  */
 
 /** What a subscription flow needs of the scheduler client: the key and the subscribe op. */
 export interface PushClient {
-  pushSettings(endpoint?: string): Promise<{ readonly publicKey: string; readonly subscribed: boolean } | null>;
+  pushSettings(endpoint?: string): Promise<PushSettingsReading | StoreRefusal | null>;
   pushSubscribe(subscription: PushSubscribeRequest): Promise<PushSubscribeReply | null>;
 }
 
@@ -26,41 +33,106 @@ export interface PushSubscriptionLike {
   unsubscribe(): Promise<boolean>;
 }
 
+export interface PushManagerLike {
+  getSubscription(): Promise<PushSubscriptionLike | null>;
+  subscribe(options: {
+    readonly userVisibleOnly: boolean;
+    readonly applicationServerKey: Uint8Array<ArrayBuffer>;
+  }): Promise<PushSubscriptionLike>;
+}
+
 export interface PushEnv {
   permission(): PushPermission;
   requestPermission(): Promise<PushPermission>;
-  /** The active service worker's push manager. */
-  manager(): Promise<{
-    getSubscription(): Promise<PushSubscriptionLike | null>;
-    subscribe(options: {
-      readonly userVisibleOnly: boolean;
-      readonly applicationServerKey: Uint8Array<ArrayBuffer>;
-    }): Promise<PushSubscriptionLike>;
-  }>;
+  /** The active service worker's push manager. Rejects with `PushTimeout` when none becomes ready. */
+  manager(): Promise<PushManagerLike>;
 }
 
 export type PushPermission = "default" | "denied" | "granted";
 
-export type PushOutcome =
-  | { readonly kind: "enabled" }
-  | { readonly kind: "denied" }
-  | { readonly kind: "failed"; readonly message: string };
+/** A failed flow. `retryable`: asking again later may succeed (nothing answered, or not yet set up); false is a refusal that will not change. */
+export interface PushFailure {
+  readonly kind: "failed";
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+export type PushOutcome = { readonly kind: "enabled" } | { readonly kind: "denied" } | PushFailure;
+
+/** What the card learns before any click. */
+export type PushInspection =
+  | { readonly kind: "on" }
+  | { readonly kind: "off"; readonly prepared: PushPrepared }
+  | PushFailure;
+
+/**
+ * What `inspectPush` read: this browser's push manager and subscription, and the leader's key,
+ * so the click can subscribe at once. Opaque to callers, who only hand it back to `enablePush`.
+ */
+export interface PushPrepared {
+  readonly manager: PushManagerLike;
+  readonly existing: PushSubscriptionLike | null;
+  readonly key: Uint8Array<ArrayBuffer>;
+  /** `existing` was made under `key`, so it can be reused. A subscription under another key can never be sent to with this one. */
+  readonly reusable: boolean;
+  /** The record already holds `existing`, under the current key: nothing is left to do. */
+  readonly held: boolean;
+}
+
+/** A service worker that never became ready: `navigator.serviceWorker.ready` has no failure of its own. */
+export class PushTimeout extends Error {
+  constructor() {
+    super("the service worker did not become ready");
+    this.name = "PushTimeout";
+  }
+}
+
+/** Rejects with `PushTimeout` after `ms`; the work itself is not cancelled, only no longer waited for. */
+export function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PushTimeout()), ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+
+/** How long to wait for the service worker before saying so. */
+export const SERVICE_WORKER_READY_MS = 10_000;
 
 const NO_SETTINGS = "No scheduler leader has set up push yet. Try again once one is running.";
+const STORE_DECLINED = "The relay declined to read the push settings. Try again in a moment.";
 const UNSUPPORTED_SERVICE = "This browser's push service isn't supported.";
 const LEADER_OLDER = "The scheduler leader is on an older version; try again after it updates.";
-const UNREACHABLE = "Couldn't reach the scheduler leader.";
+const RELAY_UNREACHABLE = "Couldn't reach the relay.";
+const LEADER_UNREACHABLE = "Couldn't reach the scheduler leader.";
 const NOT_SUBSCRIBED = "This browser couldn't subscribe to push.";
+const NOT_ALLOWED = "Notifications weren't allowed.";
+const PERMISSION_FAILED = "The browser couldn't ask for notification permission.";
+const WORKER_NOT_READY = "Séance's service worker isn't ready. Reload the app and try again.";
 const UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
-/** What a refusal code reads as here; one without its own line falls back to the shared text. */
-const REFUSAL_TEXT: Readonly<Record<string, string>> = {
-  invalid_request: LEADER_OLDER,
-  subscriptions_full: "Too many browsers are subscribed already.",
-  not_ready: "The scheduler leader is still starting. Try again in a moment.",
-  conflict: "Another change landed first. Try again.",
-  settings_unavailable: "The scheduler leader can't read its push settings, so push is off.",
+/** What a refusal code reads as here, and whether it can change; one without its own line falls back to the shared text. */
+const REFUSALS: Readonly<Record<string, { readonly text: string; readonly retryable: boolean }>> = {
+  invalid_request: { text: LEADER_OLDER, retryable: false },
+  subscriptions_full: { text: "Too many browsers are subscribed already.", retryable: false },
+  not_ready: { text: "The scheduler leader is still starting. Try again in a moment.", retryable: true },
+  conflict: { text: "Another change landed first. Try again.", retryable: true },
+  settings_unavailable: {
+    text: "The scheduler leader can't read its push settings, so push is off.",
+    retryable: false,
+  },
 };
+
+function failure(message: string, retryable = false): PushFailure {
+  return { kind: "failed", message, retryable };
+}
+
+function refusal(code: string): PushFailure {
+  const known = REFUSALS[code];
+  return known === undefined
+    ? failure(`Couldn't store the subscription: ${schedulerErrorText(code)}.`)
+    : failure(known.text, known.retryable);
+}
 
 function sameBytes(a: ArrayBuffer | null, b: Uint8Array): boolean {
   if (a === null) return false;
@@ -68,25 +140,32 @@ function sameBytes(a: ArrayBuffer | null, b: Uint8Array): boolean {
   return left.length === b.length && left.every((byte, i) => byte === b[i]);
 }
 
-function refusalText(code: string): string {
-  return REFUSAL_TEXT[code] ?? `Couldn't store the subscription: ${schedulerErrorText(code)}.`;
+function failureOf(err: unknown): PushFailure {
+  if (err instanceof PushTimeout) return failure(WORKER_NOT_READY);
+  if (err instanceof RequestFailure) {
+    return failure(err.target === "relay" ? RELAY_UNREACHABLE : LEADER_UNREACHABLE, true);
+  }
+  return failure(NOT_SUBSCRIBED);
 }
 
-async function subscribeFlow(client: PushClient, env: PushEnv): Promise<PushOutcome> {
+/** Everything the click would otherwise wait for. A failure here is the card's line, and a reason the button still tries. */
+async function prepare(client: PushClient, env: PushEnv): Promise<PushPrepared | PushFailure> {
   const manager = await env.manager();
   const existing = await manager.getSubscription();
   const settings = await client.pushSettings(
     existing === null ? undefined : (pushEndpoint(existing.endpoint) ?? existing.endpoint),
   );
-  if (settings === null) return { kind: "failed", message: NO_SETTINGS };
-
+  if (settings === null) return failure(NO_SETTINGS, true);
+  if ("ok" in settings) return failure(STORE_DECLINED, true);
   const key = fromBase64Url(settings.publicKey);
-  // A subscription made under another key (a regenerated record) can never be sent to with this one.
   const reusable = existing !== null && sameBytes(existing.options.applicationServerKey, key);
-  if (existing !== null && !reusable) await existing.unsubscribe();
-  if (reusable && settings.subscribed) return { kind: "enabled" };
+  return { manager, existing, key, reusable, held: reusable && settings.subscribed };
+}
 
-  const subscription = await manager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+async function subscribeWith(client: PushClient, prepared: PushPrepared): Promise<PushOutcome> {
+  if (prepared.held) return { kind: "enabled" };
+  if (prepared.existing !== null && !prepared.reusable) await prepared.existing.unsubscribe();
+  const subscription = await prepared.manager.subscribe({ userVisibleOnly: true, applicationServerKey: prepared.key });
   const json = subscription.toJSON();
   const { p256dh, auth } = json.keys ?? {};
   // The leader's parser refuses a host off its allowlist and says only `invalid_request`: check first,
@@ -94,37 +173,66 @@ async function subscribeFlow(client: PushClient, env: PushEnv): Promise<PushOutc
   const endpoint = pushEndpoint(json.endpoint);
   if (endpoint === null) {
     await subscription.unsubscribe();
-    return { kind: "failed", message: UNSUPPORTED_SERVICE };
+    return failure(UNSUPPORTED_SERVICE);
   }
   if (p256dh === undefined || auth === undefined) {
     await subscription.unsubscribe();
-    return { kind: "failed", message: NOT_SUBSCRIBED };
+    return failure(NOT_SUBSCRIBED);
   }
 
   const reply = await client.pushSubscribe({ endpoint, keys: { p256dh, auth } });
-  if (reply === null) return { kind: "failed", message: UNREADABLE };
-  if ("ok" in reply) return { kind: "failed", message: refusalText(reply.code) };
+  if (reply === null) return failure(UNREADABLE);
+  if ("ok" in reply) return refusal(reply.code);
   return { kind: "enabled" };
 }
 
-async function guarded(client: PushClient, env: PushEnv): Promise<PushOutcome> {
+async function guarded(work: () => Promise<PushOutcome>): Promise<PushOutcome> {
   try {
-    return await subscribeFlow(client, env);
+    return await work();
   } catch (err) {
-    if (err instanceof RequestFailure) return { kind: "failed", message: UNREACHABLE };
-    return { kind: "failed", message: NOT_SUBSCRIBED };
+    return failureOf(err);
+  }
+}
+
+/**
+ * What this browser's push state really is, read without a prompt: `on` only when it holds
+ * a subscription under the leader's current key that the record holds too, never because
+ * permission was granted. `off` hands back what the click needs. Never rejects.
+ */
+export async function inspectPush(client: PushClient, env: PushEnv): Promise<PushInspection> {
+  try {
+    const prepared = await prepare(client, env);
+    if ("kind" in prepared) return prepared;
+    return prepared.held && env.permission() === "granted" ? { kind: "on" } : { kind: "off", prepared };
+  } catch (err) {
+    return failureOf(err);
   }
 }
 
 /**
  * The button's flow: ask for permission, then subscribe and hand the subscription to the
- * leader. Called from the click handler itself, since iOS only grants permission to a gesture.
+ * leader. Called from the click handler itself, and with `prepared` from `inspectPush` the
+ * only awaits before `subscribe` are the permission prompt and, for a subscription under
+ * another key, its unsubscribe. Without it (the card could not inspect) the flow reads
+ * what it needs after the prompt, which iOS may no longer honour. Never rejects.
  */
-export async function enablePush(client: PushClient, env: PushEnv): Promise<PushOutcome> {
-  const permission = await env.requestPermission();
+export async function enablePush(
+  client: PushClient,
+  env: PushEnv,
+  prepared: PushPrepared | null = null,
+): Promise<PushOutcome> {
+  let permission: PushPermission;
+  try {
+    permission = await env.requestPermission();
+  } catch {
+    return failure(PERMISSION_FAILED);
+  }
   if (permission === "denied") return { kind: "denied" };
-  if (permission !== "granted") return { kind: "failed", message: "Notifications weren't allowed." };
-  return guarded(client, env);
+  if (permission !== "granted") return failure(NOT_ALLOWED);
+  return guarded(async () => {
+    const ready = prepared ?? (await prepare(client, env));
+    return "kind" in ready ? ready : subscribeWith(client, ready);
+  });
 }
 
 /**
@@ -134,5 +242,99 @@ export async function enablePush(client: PushClient, env: PushEnv): Promise<Push
  */
 export async function resyncPush(client: PushClient, env: PushEnv): Promise<PushOutcome | null> {
   if (env.permission() !== "granted") return null;
-  return guarded(client, env);
+  return guarded(async () => {
+    const prepared = await prepare(client, env);
+    return "kind" in prepared ? prepared : subscribeWith(client, prepared);
+  });
+}
+
+/** What `watchResync` needs of the app: whether a leader is verified now, and a nudge on every change. */
+export interface ResyncSource {
+  readonly ready: () => boolean;
+  readonly subscribe: (listener: () => void) => () => void;
+}
+
+export interface ResyncTuning {
+  /** Attempts in all, the first included. */
+  readonly maxAttempts?: number;
+  /** The wait after a retryable failure, doubled per failure. */
+  readonly backoffMs?: number;
+  readonly setTimer?: (run: () => void, ms: number) => () => void;
+}
+
+const RESYNC_ATTEMPTS = 5;
+const RESYNC_BACKOFF_MS = 5_000;
+
+/**
+ * Runs `run` (the silent re-sync) when a leader is verified, and again after a retryable
+ * failure: on each later not-ready-to-ready transition and after a doubling backoff, up to
+ * `maxAttempts`. A terminal answer, a success or nothing to do ends it. A first attempt that
+ * met a leader still starting (`not_ready`) must not be the only one, or the subscription the
+ * record lost stays lost until the next page load. Returns a stop.
+ */
+export function watchResync(
+  source: ResyncSource,
+  run: () => Promise<PushOutcome | null>,
+  tuning: ResyncTuning = {},
+): () => void {
+  const maxAttempts = tuning.maxAttempts ?? RESYNC_ATTEMPTS;
+  const backoffMs = tuning.backoffMs ?? RESYNC_BACKOFF_MS;
+  const setTimer =
+    tuning.setTimer ??
+    ((fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    });
+  let attempts = 0;
+  let running = false;
+  let finished = false;
+  let wasReady = false;
+  let cancelTimer: (() => void) | null = null;
+
+  const finish = (): void => {
+    finished = true;
+    cancelTimer?.();
+    cancelTimer = null;
+    unsubscribe();
+  };
+
+  const attempt = (): void => {
+    if (finished || running) return;
+    cancelTimer?.();
+    cancelTimer = null;
+    running = true;
+    attempts += 1;
+    void run().then(
+      (outcome) => {
+        running = false;
+        if (outcome?.kind !== "failed" || !outcome.retryable || attempts >= maxAttempts) {
+          finish();
+          return;
+        }
+        // Not while a leader is not verified: the next transition retries then, and counts as this attempt's successor.
+        cancelTimer = setTimer(
+          () => {
+            cancelTimer = null;
+            if (source.ready()) attempt();
+          },
+          backoffMs * 2 ** (attempts - 1),
+        );
+      },
+      () => {
+        running = false;
+        finish();
+      },
+    );
+  };
+
+  const onChange = (): void => {
+    const ready = source.ready();
+    const rose = ready && !wasReady;
+    wasReady = ready;
+    if (rose) attempt();
+  };
+
+  const unsubscribe = source.subscribe(onChange);
+  onChange();
+  return finish;
 }

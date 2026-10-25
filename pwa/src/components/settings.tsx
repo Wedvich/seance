@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
-import { useEffect, useState } from "preact/hooks";
-import { enablePush, type PushClient } from "../push.ts";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { enablePush, inspectPush, type PushClient, type PushOutcome, type PushPrepared } from "../push.ts";
 import { browserPushEnv, pushSupported } from "../push-browser.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
@@ -136,48 +136,81 @@ export function Settings(props: {
 }
 
 type PushView =
-  | { readonly kind: "unsupported" | "denied" | "enabled" | "off" | "working" }
-  | { readonly kind: "failed"; readonly message: string };
+  | { readonly kind: "unsupported" | "denied" | "on" | "off" | "checking" | "working" }
+  /** `retry`: what the button does again. An inspection that failed is read again; a click that failed is run again. */
+  | { readonly kind: "failed"; readonly message: string; readonly retry: "inspect" | "enable" };
 
 function initialPushView(): PushView {
   if (!pushSupported()) return { kind: "unsupported" };
-  const permission = browserPushEnv.permission();
-  if (permission === "denied") return { kind: "denied" };
-  // Granted: the boot re-sync has already put the subscription back if the record lost it.
-  return { kind: permission === "granted" ? "enabled" : "off" };
+  return browserPushEnv.permission() === "denied" ? { kind: "denied" } : { kind: "checking" };
 }
 
 const PUSH_LINES = {
   unsupported:
     "This browser can't do push. On iOS, add Séance to the Home Screen first (Share, then Add to Home Screen), then open it from there.",
   denied: "Notifications are blocked for Séance. Allow them in the browser's site settings, then come back.",
-  enabled: "On for this browser: you'll hear about spill, and about a task that has waited for input.",
+  on: "On for this browser: you'll hear about spill, and about a task that has waited for input.",
   off: "Get a notification when an account is about to spill or a task waits for your input.",
+  checking: "Checking…",
   working: "Setting up…",
 } as const;
 
 function NotificationsCard(props: { push: PushClient }): JSX.Element {
+  const { push } = props;
   const [view, setView] = useState<PushView>(initialPushView);
-  const busy = view.kind === "working";
+  // What `inspectPush` read ahead of the click: the key and the push manager, so the click subscribes at once.
+  const prepared = useRef<PushPrepared | null>(null);
+  const checking = view.kind === "checking";
+  // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
+  useEffect(() => {
+    if (!checking) return;
+    let current = true;
+    void inspectPush(push, browserPushEnv).then((result) => {
+      if (!current) return;
+      prepared.current = result.kind === "off" ? result.prepared : null;
+      if (result.kind === "off" || result.kind === "on") setView({ kind: result.kind });
+      else setView({ kind: "failed", message: result.message, retry: "inspect" });
+    });
+    return () => {
+      current = false;
+    };
+  }, [push, checking]);
+
   // Called from the click itself, with no await before it: iOS grants permission only to a gesture.
   const enable = (): void => {
+    const ready = prepared.current;
+    prepared.current = null;
     setView({ kind: "working" });
-    void enablePush(props.push, browserPushEnv).then((outcome) =>
-      setView(outcome.kind === "enabled" ? { kind: "enabled" } : outcome),
-    );
+    // `enablePush` never rejects; the catch is for a throw it did not foresee, so the card cannot stick on "Setting up…".
+    enablePush(push, browserPushEnv, ready)
+      .catch((): PushOutcome => ({ kind: "failed", message: "Couldn't set up notifications.", retryable: false }))
+      .then((outcome) => setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome)));
   };
+  const retry = (): void => {
+    if (view.kind === "failed" && view.retry === "inspect") {
+      setView({ kind: "checking" });
+      return;
+    }
+    enable();
+  };
+
+  const busy = view.kind === "working";
   const canEnable = view.kind === "off" || view.kind === "failed" || busy;
   return (
     <div className="push-card card">
       <span className="theme-title">Notifications</span>
       <p className="push-line">{view.kind === "failed" ? view.message : PUSH_LINES[view.kind]}</p>
       {canEnable && (
-        <button type="button" className="push-button" disabled={busy} onClick={enable}>
+        <button type="button" className="push-button" disabled={busy} onClick={view.kind === "off" ? enable : retry}>
           {view.kind === "failed" ? "Try again" : "Enable notifications"}
         </button>
       )}
     </div>
   );
+}
+
+function outcomeView(outcome: Exclude<PushOutcome, { readonly kind: "enabled" }>): PushView {
+  return outcome.kind === "denied" ? { kind: "denied" } : { kind: "failed", message: outcome.message, retry: "enable" };
 }
 
 function ThemeSeg(props: { value: ThemePref; onChange: (pref: ThemePref) => void }): JSX.Element {

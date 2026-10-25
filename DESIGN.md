@@ -1094,7 +1094,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                  | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                 |
 | record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                 | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                       |
 | record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record") | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); stored under `settings:main` (_Scheduler_, "The store")                                                   |
-| op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and once per page load when permission is already granted)                                                            | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                  |
+| op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted, retried while the leader starts)           | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                  |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -2223,8 +2223,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     holds up to 32 such alerts and sends them when the holder becomes ready, and drops them if
     it does not; with no usable record no push is sent.
   - **The payload** (`PushAlert`, `v: 1`, at most `PUSH_ALERT_MAX_BYTES` = 1024) is a task id (or
-    device id for disk, a later kind) and state, in a record `parsePushAlert` reads strictly:
-    no account id, prompt or title. PR 2's leader emits `spill` and `needs-input` (as escalated).
+    device id for disk) and state, in a record `parsePushAlert` reads strictly: no account id,
+    prompt or title. The leader emits `spill`, and `needs-input` with `escalated: true` (the
+    30-minute escalation, the only needs-input alert it raises). `disk` is a kind the type and
+    the parser already carry, and nothing raises it yet.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -4618,10 +4620,19 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Screen (the card says so where `PushManager` is missing). The flow reads the VAPID public key
   from the settings record with `store-get` (`RelayClient.pushSettings`: opened at rest, parsed,
   bound to its version, and reduced to the public key and whether this endpoint is held — the
-  private key and the Linear key never leave the method), drops a subscription made under
-  another key, subscribes, and sends `push-subscribe`. With permission already granted the same
-  flow reruns silently once per page load, when a leader is verified, so a subscription the
-  record lost (pruned on a 410, or a record that started over) comes back. The service worker
+  private key and the Linear key never leave the method; an absent record, a store refusal and
+  nothing answering are three different answers, so the card can say "no leader has set up push",
+  "the relay's store declined" and "couldn't reach the relay" apart), drops a subscription made
+  under another key, subscribes, and sends `push-subscribe`. The key, the service worker and
+  this browser's own subscription are read when the card mounts, so the click does only
+  `requestPermission` then `subscribe`, with nothing slow between them (iOS honours a
+  subscription only close behind its gesture). The card says "On" only for a subscription this
+  browser holds under the current key that the record also holds, never for granted permission
+  alone. With permission already granted the same flow reruns silently after a page load, when
+  a leader is verified, so a subscription the record lost (pruned on a 410, or a record that
+  started over) comes back; an answer that may change (`not_ready`, an unreachable relay or
+  leader, no record yet) is tried again on the next ready transition and after a backoff, at
+  most five times. The service worker
   (`pwa/public/push-sw.js`, joined to the generated worker by `importScripts`, so the precache and
   the `skipWaiting`/`clientsClaim` update path stay the plugin's) shows every push as a generic
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and

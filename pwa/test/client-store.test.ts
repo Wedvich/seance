@@ -707,11 +707,11 @@ describe("pushSettings", () => {
     }
   });
 
-  test("is null for a refusal, and fails as a store request does when nothing answers", async () => {
+  test("a refusal is its own answer, not an absent record, and nothing answering fails as a store request does", async () => {
     const double = startDouble();
     const client = await connect(double, 100);
     double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "rate_limited" });
-    expect(await client.pushSettings()).toBeNull();
+    expect(await client.pushSettings()).toEqual({ ok: false, code: "rate_limited" });
     double.answer = () => "silent";
     expect(await failure(client.pushSettings())).toBe("timeout");
   });

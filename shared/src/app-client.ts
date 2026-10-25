@@ -191,6 +191,12 @@ export interface StoreRefusal {
   readonly code: string;
 }
 
+/** What the page needs of the settings record to subscribe: the VAPID public key, and whether an endpoint is held. */
+export interface PushSettingsReading {
+  readonly publicKey: string;
+  readonly subscribed: boolean;
+}
+
 export interface TaskListing {
   readonly ok: true;
   readonly tasks: readonly TaskRecord[];
@@ -1574,12 +1580,14 @@ export class RelayClient {
    * (a browser's `applicationServerKey`) and whether `endpoint` is already held.
    * The record is opened at rest here and dropped: it is never kept, and neither
    * the private key nor the Linear key leaves this method. Null: no record, one
-   * this build cannot open or read, or one without a key, so push is not set up.
+   * this build cannot open or read, or one without a key, so push is not set up. A
+   * `StoreRefusal` is the relay declining the read, which says nothing about push
+   * being set up, and a thrown `RequestFailure` is nothing answering at all.
    * Logs nothing: this runs inside `seanced mcp`, whose stdout is JSON-RPC.
    */
-  async pushSettings(endpoint?: string): Promise<{ readonly publicKey: string; readonly subscribed: boolean } | null> {
+  async pushSettings(endpoint?: string): Promise<PushSettingsReading | StoreRefusal | null> {
     const reply = await this.#store({ t: "store-get", id: crypto.randomUUID(), key: SETTINGS_KEY });
-    if (reply?.t === "store-refused") return null;
+    if (reply?.t === "store-refused") return { ok: false, code: reply.code };
     if (reply?.t !== "store-record") return this.#storeKindMismatch(reply);
     const { record } = reply;
     // Opened only for the key it was asked under, sealed to the one address that holds settings.
