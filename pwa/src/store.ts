@@ -171,6 +171,7 @@ export class Store {
       queue: false,
       wide: false,
       queueView: null,
+      focusedTask: null,
       taskAction: null,
       queueNotice: null,
       pausing: false,
@@ -537,6 +538,15 @@ export class Store {
     if (!this.#state.queue) this.#pushLayer();
     this.#patch({ queue: true });
     void this.refreshQueue();
+  }
+
+  /** Marks a task for the Queue screen to bring into view (a notification's link); `clearFocus` ends it. */
+  focusTask(taskId: string): void {
+    this.#patch({ focusedTask: taskId });
+  }
+
+  clearFocus(): void {
+    if (this.#state.focusedTask !== null) this.#patch({ focusedTask: null });
   }
 
   /** See `SchedulerStore.refreshPreview`. */

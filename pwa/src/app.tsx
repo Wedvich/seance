@@ -77,6 +77,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       notice={state.queueNotice}
       pausing={state.pausing}
       discarding={state.discarding}
+      focusedTask={state.focusedTask}
+      onFocused={() => store.clearFocus()}
       onDismiss={onDismiss}
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}

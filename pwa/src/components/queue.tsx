@@ -7,6 +7,12 @@ import { RelaySettings } from "./relay-dot.tsx";
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
 
+/** How long a notification's row stays marked. */
+const MARK_MS = 3_000;
+
+/** A task id is a routing id: letters, digits and `._-`, so it is a valid element id as it stands. */
+const taskDomId = (taskId: string): string => `task-${taskId}`;
+
 /**
  * Reached from the spawn form's header: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the
@@ -19,6 +25,10 @@ export function QueueScreen(props: {
   notice: string | null;
   pausing: boolean;
   discarding: boolean;
+  /** A notification's task: scrolled to and marked once its row is listed. */
+  focusedTask: string | null;
+  /** The focus was acted on, or the screen closed: the store forgets it. */
+  onFocused: () => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onRefresh: () => void;
@@ -34,6 +44,26 @@ export function QueueScreen(props: {
 }): JSX.Element {
   const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
+  // The row a notification named, marked while it fades; one view, never again on a re-render.
+  const [marked, setMarked] = useState<string | null>(null);
+  const { focusedTask, onFocused } = props;
+  const listed = focusedTask !== null && view.sections.some((s) => s.rows.some((r) => r.id === focusedTask));
+
+  useEffect(() => {
+    if (focusedTask === null || !listed) return;
+    document.querySelector(`[id="${taskDomId(focusedTask)}"]`)?.scrollIntoView({ block: "center" });
+    setMarked(focusedTask);
+    onFocused();
+  }, [focusedTask, listed, onFocused]);
+
+  useEffect(() => {
+    if (marked === null) return;
+    const timer = setTimeout(() => setMarked(null), MARK_MS);
+    return () => clearTimeout(timer);
+  }, [marked]);
+
+  // Leaving with the task never listed (pruned since) must not scroll some later visit.
+  useEffect(() => onFocused, [onFocused]);
 
   useEffect(() => {
     if (armed === null) return;
@@ -132,7 +162,11 @@ export function QueueScreen(props: {
           <section key={section.title} className="queue-section">
             <h2 className="label fleet-heading">{section.title.toUpperCase()}</h2>
             {section.rows.map((row) => (
-              <section key={row.id} className="fleet-card card">
+              <section
+                key={row.id}
+                id={taskDomId(row.id)}
+                className={marked === row.id ? "fleet-card card fleet-card-marked" : "fleet-card card"}
+              >
                 <div className="fleet-card-head">
                   {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
                   <div className="fleet-card-title">

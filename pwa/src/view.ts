@@ -125,6 +125,8 @@ export interface AppState {
   readonly wide: boolean;
   /** What the screen last read; null until it was opened. */
   readonly queueView: QueueState | null;
+  /** A notification's task: the Queue screen scrolls to its row once it is listed, then clears this. */
+  readonly focusedTask: string | null;
   /** The cancel or mark-done in flight, if any. */
   readonly taskAction: TaskAction | null;
   /** The last queue action's refusal or failure, as a sentence; cleared by the next action or refresh. */

@@ -67,6 +67,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     queue: false,
     wide: false,
     queueView: null,
+    focusedTask: null,
     taskAction: null,
     queueNotice: null,
     pausing: false,
