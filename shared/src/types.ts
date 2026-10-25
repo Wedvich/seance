@@ -1911,6 +1911,13 @@ export const PR_STATUS_REFRESH_MS = 5 * 60_000;
 /** A reading older than this is shown as stale (the PWA); twice the refresh, so one missed poll does not grey it. */
 export const PR_STATUS_STALE_MS = 10 * 60_000;
 
+/** The quota window a spill alert fired for (`Task.spillAlert`); `reset` is ms, 0 when the reading carried none. */
+export interface SpillStamp {
+  readonly accountId: string;
+  readonly window: string;
+  readonly reset: number;
+}
+
 export interface Task {
   readonly id: string;
   /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
@@ -1974,6 +1981,17 @@ export interface Task {
   readonly needsInputSince?: number;
   /** The needs-input escalation fired for this stay — once, never a kill. */
   readonly escalated?: true;
+  /**
+   * The initial needs-input alert fired for this stay (`needsInputAlertMs` in): once per stay,
+   * on the record so a new leader does not repeat it. Cleared with `escalated`.
+   */
+  readonly inputAlerted?: true;
+  /**
+   * The credit-spill alert this dispatch earned, stamped by the leader after its spawn is
+   * confirmed: the account's window and the reset (ms, 0 when unknown) it was alerted under.
+   * A new leader seeds its de-dupe from these, so one window alerts once across terms.
+   */
+  readonly spillAlert?: SpillStamp;
   /**
    * When it entered `awaiting-merge`, ms, the leader's clock — what merge expiry
    * (`SchedulerConfig.mergeExpiryMs`) ages from. Kept once it leaves. Absent on a
@@ -2200,6 +2218,21 @@ export interface SettingsRecord extends VersionBound {
   readonly vapid?: VapidKeys;
   readonly linearKey?: string;
   readonly subscriptions?: readonly WebPushSubscription[];
+  /** Machines whose full disk was alerted and has not recovered yet (`daemon/src/disk-alerts.ts`). */
+  readonly diskAlerts?: readonly DiskAlerted[];
+}
+
+/**
+ * Machines held in `SettingsRecord.diskAlerts` at most. The relay's registry holds 32 and a
+ * step drops entries for machines gone from it, so this is headroom: a record over its parser's
+ * bound reads malformed as a whole, which would switch push off.
+ */
+export const DISK_ALERTS_MAX = 64;
+
+/** A machine alerted for a nearly full disk, and when (ms). */
+export interface DiskAlerted {
+  readonly deviceId: string;
+  readonly at: number;
 }
 
 /**

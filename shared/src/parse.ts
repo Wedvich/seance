@@ -19,6 +19,7 @@ import {
   PUSH_ALERT_MAX_BYTES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
+  DISK_ALERTS_MAX,
   PUSH_SERVICE_HOSTS,
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
@@ -43,6 +44,8 @@ import {
   type PushSubscribeRequest,
   type QuotaReading,
   type SettingsRecord,
+  type DiskAlerted,
+  type SpillStamp,
   type VapidKeys,
   type WebPushSubscription,
   type BranchState,
@@ -913,7 +916,8 @@ function isOptionalFinite(value: unknown): value is number | undefined {
 
 /** The PR, branch, done and clock (`needsInputSince`, `endedAt`) fields M3 adds, checked as one group; null when any is malformed. */
 function parseProgressFields(value: Record<string, unknown>): Partial<Task> | null {
-  const { prUrl, branch, pushed, merged, doneBy, needsInputSince, escalated, endedAt } = value;
+  const { prUrl, branch, pushed, merged, doneBy, needsInputSince, escalated, inputAlerted, endedAt, spillAlert } =
+    value;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
   if (url === null) return null;
   if (branch !== undefined && (!isBoundedString(branch, BRANCH_MAX_LENGTH) || branch === "")) return null;
@@ -923,9 +927,12 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
   if (
     !isOptionalFinite(needsInputSince) ||
     !isOptionalFinite(endedAt) ||
-    (escalated !== undefined && escalated !== true)
+    (escalated !== undefined && escalated !== true) ||
+    (inputAlerted !== undefined && inputAlerted !== true)
   )
     return null;
+  const stamp = spillAlert === undefined ? undefined : parseSpillStamp(spillAlert);
+  if (stamp === null) return null;
   return {
     ...(url === undefined ? {} : { prUrl: url }),
     ...(branch === undefined ? {} : { branch }),
@@ -934,8 +941,19 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
     ...(signal === undefined ? {} : { doneBy: signal }),
     ...(needsInputSince === undefined ? {} : { needsInputSince }),
     ...(escalated === undefined ? {} : { escalated }),
+    ...(inputAlerted === undefined ? {} : { inputAlerted }),
     ...(endedAt === undefined ? {} : { endedAt }),
+    ...(stamp === undefined ? {} : { spillAlert: stamp }),
   };
+}
+
+/** The window a spill alert fired for, built field by field. `reset` is ms, 0 when the reading had none. */
+function parseSpillStamp(value: unknown): SpillStamp | null {
+  if (!isRecord(value)) return null;
+  const { accountId, window, reset } = value;
+  if (!isAccountId(accountId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) return null;
+  if (!isFiniteNumber(reset) || reset < 0) return null;
+  return { accountId, window, reset };
 }
 
 /** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */
@@ -1260,7 +1278,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -1272,12 +1290,26 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
     if (new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
     subscribed = parsed;
   }
+  const disk = diskAlerts === undefined ? undefined : parseDiskAlerts(diskAlerts);
+  if (disk === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
     ...(linearKey === undefined ? {} : { linearKey }),
     ...(subscribed === undefined ? {} : { subscriptions: subscribed }),
+    ...(disk === undefined ? {} : { diskAlerts: disk }),
   };
+}
+
+/** One entry per machine, as `subscriptions` has one per endpoint. */
+function parseDiskAlerts(value: unknown): readonly DiskAlerted[] | null {
+  if (!Array.isArray(value) || value.length > DISK_ALERTS_MAX) return null;
+  const parsed = parseList(value, (entry): DiskAlerted | null => {
+    if (!isRecord(entry) || !isRoutingId(entry["deviceId"]) || !isFiniteNumber(entry["at"])) return null;
+    return { deviceId: entry["deviceId"], at: entry["at"] };
+  });
+  if (parsed === null || new Set(parsed.map((e) => e.deviceId)).size !== parsed.length) return null;
+  return parsed;
 }
 
 /** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
