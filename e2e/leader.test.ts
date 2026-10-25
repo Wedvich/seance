@@ -6,6 +6,7 @@ import {
   openAtRest,
   parseSettingsRecord,
   parseStoreReply,
+  PUSH_MAX_SUBSCRIPTIONS,
   SCHEDULER_ID,
   SETTINGS_KEY,
   STORE_TIMEOUT_MS,
@@ -494,4 +495,48 @@ describe("settings record: the leader's term creates it, and no later term repla
       err.mockRestore();
     }
   }, 30_000);
+
+  test("push-subscribe adds a browser's subscription to the record, is idempotent, refuses a host off the allowlist, and stops at the cap", async () => {
+    await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+    await stack.daemon.leader.settled();
+    const app = startApp(stack);
+    // Not a real P-256 point: the leader only stores these, and no push is sent in this test.
+    const keys = {
+      p256dh: Buffer.alloc(65, 1).toString("base64url"),
+      auth: Buffer.alloc(16, 2).toString("base64url"),
+    };
+    const sub = (id: string, host = "fcm.googleapis.com") => ({ endpoint: `https://${host}/fcm/send/${id}`, keys });
+    try {
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      // Settings load beside takeover, so the first answers can be `not_ready`.
+      await pollUntil(
+        async () => {
+          const reply = await app.client.pushSubscribe(sub("first"));
+          return reply !== null && "endpoint" in reply;
+        },
+        "the leader to take a subscription",
+        10_000,
+      );
+      const held = await readSettings();
+      expect(held?.record.subscriptions).toEqual([sub("first")]);
+      const version = held?.version;
+
+      expect(await app.client.pushSubscribe(sub("first"))).toEqual({ endpoint: sub("first").endpoint });
+      expect((await readSettings())?.version).toBe(version);
+
+      expect(await app.client.pushSubscribe(sub("x", "example.com"))).toMatchObject({
+        ok: false,
+        code: "invalid_request",
+      });
+
+      for (let i = 1; i < PUSH_MAX_SUBSCRIPTIONS; i += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- each lands on the version the last wrote
+        expect(await app.client.pushSubscribe(sub(`fill-${i}`))).toEqual({ endpoint: sub(`fill-${i}`).endpoint });
+      }
+      expect(await app.client.pushSubscribe(sub("over"))).toMatchObject({ ok: false, code: "subscriptions_full" });
+      expect((await readSettings())?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS);
+    } finally {
+      app.stop();
+    }
+  }, 60_000);
 });
