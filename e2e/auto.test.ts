@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
+  AT_REST_OPS,
+  openAtRest,
+  parseStoreReply,
+  taskKey,
   DAEMON_ROLES,
   RelayClient,
   SCHEDULER_ID,
@@ -17,7 +21,7 @@ import { relayFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
+import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
 import { deriveView, type AppState } from "../pwa/src/view.ts";
 import {
   killWindow,
@@ -200,6 +204,123 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       lazy.stop();
     }
   }, 60_000);
+
+  // M4's account pin and avoid list, end to end: an alias another client wrote
+  // resolves at submit time to the accountId alone, the real leader rejects the
+  // machine signed in elsewhere, and the record at rest carries the sentinel an
+  // older leader would refuse. Then the CLI's --not keeps a task off the leader.
+  test("an alias-pinned MCP task and a CLI task avoiding the leader both land on the other machine", async () => {
+    const other = { organizationUuid: "e2e-org-b", accountUuid: "pinned", emailAddress: "pin@e2e.test" };
+    const otherId = `${other.organizationUuid}:${other.accountUuid}`;
+    const second = await stack.startSecondDaemon({
+      name: "PinBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
+    });
+    const app = startApp(stack, {}, null, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-pin", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const built = await autoFleet(stack.config, { stores: [] });
+    if ("error" in built) throw new Error(built.error);
+    const raw = await connectApp(stack.relay);
+    const ids: string[] = [];
+    const windows: string[] = [];
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.accountId === otherId) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, signed in as the other account",
+      );
+      const named = await app.client.putAccountAlias(otherId, "elsewhere", 0);
+      expect(named?.ok).toBe(true);
+
+      const placedOn = async (id: string, label: string): Promise<void> => {
+        await pollUntil(
+          async () => (await stack.queue().get(id))?.body?.state === "running",
+          `${label} to run`,
+          20_000,
+        );
+        const running = (await stack.queue().get(id))?.body;
+        expect(running?.assignment?.deviceId).toBe(second.deviceId);
+        const window = running?.assignment?.window;
+        if (window !== undefined) windows.push(window);
+      };
+
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "pinned by alias", pin: { account: "elsewhere" } },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      expect(result.isError).not.toBe(true);
+      expect(text).toContain(`pinned to account ${otherId} (pin@e2e.test)`);
+      const pinnedId = /^task (\S+):/u.exec(text)?.[1];
+      if (pinnedId === undefined) throw new Error(`no task id in: ${text}`);
+      ids.push(pinnedId);
+      await placedOn(pinnedId, "the alias-pinned task");
+      const pinned = (await stack.queue().get(pinnedId))?.body;
+      expect(pinned?.spec.pin).toEqual({ account: otherId });
+      const rejected = pinned?.decision?.candidates.find((c) => c.deviceId === stack.deviceId)?.rejected;
+      expect(rejected).toContainEqual({ code: "pin_mismatch", field: "account" });
+
+      // At rest: the accountId and the sentinel, never the alias or the email.
+      raw.send({ t: "store-get", id: "get-pinned", key: taskKey(pinnedId) });
+      const stored = parseStoreReply(await raw.waitForRe<{ re: string }>("get-pinned", 10_000));
+      if (stored?.t !== "store-record" || stored.record === null) throw new Error("no stored record");
+      const atRest = JSON.stringify((await openAtRest(stack.appKey, stored.record.env, AT_REST_OPS.task)).payload);
+      expect(atRest).toContain(`"pin":{"account":"${otherId}","exclave":""}`);
+      expect(atRest).not.toContain("elsewhere");
+      expect(atRest).not.toContain("pin@e2e.test");
+
+      const outcome = await spawnAuto(
+        { repo: "myrepo", here: false, prompt: "keep off the leader", auto: true, not: [stack.deviceId] },
+        built.fleet,
+        () => {},
+      );
+      expect(outcome.ok).toBe(true);
+      const avoidId = /^task (\S+): queued/u.exec(outcome.text)?.[1];
+      if (avoidId === undefined) throw new Error(`no task id in: ${outcome.text}`);
+      ids.push(avoidId);
+      await placedOn(avoidId, "the task avoiding the leader");
+      const avoided = (await stack.queue().get(avoidId))?.body;
+      expect(avoided?.spec.avoid).toEqual([stack.deviceId]);
+      expect(avoided?.decision?.candidates.find((c) => c.deviceId === stack.deviceId)?.rejected).toContainEqual({
+        code: "avoided",
+      });
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
+      raw.close();
+      built.fleet.stop();
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
 
   // An app's cancel of a task running on another machine: the leader despawns
   // it there through the relay, and that machine's audit trail says who asked —
