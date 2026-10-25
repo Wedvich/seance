@@ -166,15 +166,18 @@ describe("needs-input escalation", () => {
   test("inputAlert: due once per stay after the debounce, never for an escalated or unstamped one", () => {
     const running: Task = { id: "x", spec: spec(), state: "running", createdAt: NOW };
     const waiting = inputClock(advance(running, "needs-input"), NOW);
-    expect(inputAlert(waiting, NOW + 2 * MINUTE - 1, 2 * MINUTE)).toBeNull();
-    const due = inputAlert(waiting, NOW + 2 * MINUTE, 2 * MINUTE);
+    const alertDue = (task: Task, at: number): Task | null => inputAlert(task, at, 2 * MINUTE, 30 * MINUTE);
+    expect(alertDue(waiting, NOW + 2 * MINUTE - 1)).toBeNull();
+    const due = alertDue(waiting, NOW + 2 * MINUTE);
     expect(due).toMatchObject({ inputAlerted: true, needsInputSince: NOW });
     if (due === null) throw new Error("not due");
-    expect(inputAlert(due, NOW + 60 * MINUTE, 2 * MINUTE)).toBeNull();
-    expect(inputAlert({ ...waiting, escalated: true }, NOW + 60 * MINUTE, 2 * MINUTE)).toBeNull();
+    expect(alertDue(due, NOW + 10 * MINUTE)).toBeNull();
+    expect(alertDue({ ...waiting, escalated: true }, NOW + 10 * MINUTE)).toBeNull();
+    // Past the escalation too: that alert is the one.
+    expect(alertDue(waiting, NOW + 30 * MINUTE)).toBeNull();
     const { needsInputSince: _since, ...unstamped } = waiting;
-    expect(inputAlert(unstamped, NOW + 60 * MINUTE, 2 * MINUTE)).toBeNull();
-    expect(inputAlert(running, NOW + 60 * MINUTE, 2 * MINUTE)).toBeNull();
+    expect(alertDue(unstamped, NOW + 10 * MINUTE)).toBeNull();
+    expect(alertDue(running, NOW + 10 * MINUTE)).toBeNull();
     const left = inputClock(advance(due, "running"), NOW + 3 * MINUTE);
     expect(left).not.toHaveProperty("inputAlerted");
     const lost = inputClock(advance(due, "lost", { absentSince: NOW }), NOW + 3 * MINUTE);
@@ -303,6 +306,26 @@ describe("needs-input first alert", () => {
     await pass(scheduler, fleet, clock.now);
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ escalated: true });
+  });
+
+  test("a stay already past both thresholds when a leader takes it over is one alert, the escalation's", async () => {
+    const store = new MemoryQueueStore();
+    const at = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" };
+    const body: Task = {
+      id: "old",
+      spec: spec(),
+      state: "needs-input",
+      createdAt: NOW - 7200_000,
+      needsInputSince: NOW - 3600_000,
+      assignment: at,
+    };
+    await store.put("old", 0, body);
+    const { alerts, clock, fleet, scheduler } = setup(new FakeFleet([machine("a")]), store);
+    fleet.running.set("a", [{ id: "%1", window: "w", repo: "app", path: "/wt/old", taskId: "old" }]);
+    await scheduler.takeover();
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts.map((a) => (a.kind === "needs-input" ? a.escalated : null))).toEqual([true]);
+    expect((await stored(store, "old")).body).not.toHaveProperty("inputAlerted");
   });
 
   test("lost keeps the flags: the stay that was alerted is not alerted again on return", async () => {

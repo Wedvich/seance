@@ -730,12 +730,12 @@ export class Scheduler {
    */
   async #alertInput(): Promise<void> {
     const now = this.#now();
-    const after = this.#config.needsInputAlertMs;
+    const { needsInputAlertMs: after, needsInputEscalateMs: escalateAfter } = this.#config;
     await Promise.all(
       this.tasks()
-        .filter((t) => inputAlert(t, now, after) !== null)
+        .filter((t) => inputAlert(t, now, after, escalateAfter) !== null)
         .map(async (seen) => {
-          const next = await this.#update(seen.id, (current) => inputAlert(current, now, after));
+          const next = await this.#update(seen.id, (current) => inputAlert(current, now, after, escalateAfter));
           if (next?.inputAlerted !== true || next.needsInputSince === undefined) return;
           const minutes = Math.round((now - next.needsInputSince) / 60_000);
           this.#alert({

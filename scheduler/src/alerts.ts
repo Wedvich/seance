@@ -51,14 +51,16 @@ export function inputClock(task: Task, now: number): Task {
  * began, once per stay. The wait is debounced because auto mode reports
  * `needs-input` then `busy` around every call its classifier settles (seconds
  * apart, DESIGN.md, "Session events"), and each of those leaves the state and
- * clears the clock. A stay already escalated, or never stamped (an older
- * leader's record, whose clock `escalation` starts), is not due. Null when
- * nothing is.
+ * clears the clock. A stay already escalated, never stamped (an older leader's
+ * record, whose clock `escalation` starts), or past `escalateAfterMs` (the
+ * escalation is due, and its alert is the one: a stay past both is one push,
+ * not two) is not due. Null when nothing is.
  */
-export function inputAlert(task: Task, now: number, afterMs: number): Task | null {
+export function inputAlert(task: Task, now: number, afterMs: number, escalateAfterMs: number): Task | null {
   if (task.state !== "needs-input" || task.inputAlerted === true || task.escalated === true) return null;
   if (task.needsInputSince === undefined) return null;
-  return now - task.needsInputSince >= afterMs ? { ...task, inputAlerted: true } : null;
+  const waited = now - task.needsInputSince;
+  return waited >= afterMs && waited < escalateAfterMs ? { ...task, inputAlerted: true } : null;
 }
 
 /**
