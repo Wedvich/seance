@@ -125,11 +125,11 @@ green:
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
   requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
-  account list), for a keyless `seanced mcp` or `seanced spawn --auto`, `schedule` for
+  account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
   process and admitting a task, `mcp` for `seanced mcp`'s own `auto` enqueue line, and `cli` for
-  anything typed at this machine's shell, its `spawn --auto` enqueue line included — a new
+  anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
@@ -191,8 +191,9 @@ green:
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
   carries one. Don't let changes drift from them.
-- The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
-  this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
+- The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
+  `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
+  `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
   allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
   tweak (DESIGN.md's "Local op socket" records why `despawn` got in). On a daemon whose key is

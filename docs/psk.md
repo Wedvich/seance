@@ -151,14 +151,15 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is
 delivered and (on systemd ≥ 256) direct unseal is refused — so it cannot hold the key.
-It does not need to. Every tool works, for every machine, and so does `seanced spawn
---auto`: `spawn_session` with `machine: "auto"`, `queue_batch`, `get_queue` and
+It does not need to. Every tool works, for every machine, and so does `seanced spawn`:
+`spawn_session`, `queue_batch`, `get_queue` and
 `cancel_task` talk to the scheduler through the same broker. A `seanced mcp` that started
 before the daemon was updated keeps answering "needs this machine's own key" for those
 until its Claude session restarts. The tools work like this:
 
-- **This machine**: ops aimed at the box the server runs on take the daemon's local op
-  socket, which needs no key — relay up or down.
+- **This machine**: listing and ending sessions on the box the server runs on take the daemon's
+  local op socket, which needs no key — relay up or down. A spawn is a queued task, so it goes
+  through the broker's scheduler enqueue like any other.
 - **Other machines, and the full `list_machines`**: the server asks the running daemon
   over that same socket, and the daemon makes the request as an app-role relay client
   with the key it already holds — the _fleet broker_. The key never leaves the daemon

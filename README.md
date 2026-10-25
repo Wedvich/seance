@@ -379,13 +379,14 @@ doesn't check out with your key.
 
 ```sh
 seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
-#   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
-
-seanced spawn seance --here   # run in the checkout as it stands, no worktree
-seanced spawn --auto seance -p "fix the flaky spawn test"
 #   task 3f2a…: queued — the scheduler picks the machine; needs the relay, and a PSK this shell or its daemon holds
-seanced spawn --auto --account work --not here seance -p "rerun the slow suite"
+seanced spawn --machine here seance -p "fix the flaky spawn test"
+#   pinned to this machine: it waits for a slot here rather than going elsewhere
+seanced spawn --account work --not here seance -p "rerun the slow suite"
 #   pinned to an account (alias, email or id) and kept off this machine
+seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
+#   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
+seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
@@ -399,11 +400,13 @@ a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
 `parent/base` when two collide). Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
-`--auto` queues the spawn for the scheduler instead of running it here, as the app's and
-MCP's `auto` do: `<repo>` is then a clone name or origin from any machine in the fleet,
-and the task waits in the relay's queue until a leader places it. It is the one form that
-needs the relay: it reads the PSK itself, or on a box where only the daemon can (below) asks the running
-daemon to enqueue for it. The app's queue shows where it lands.
+A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
+origin from any machine in the fleet, and the task waits in the relay's queue until a leader
+places it. It needs the relay: it reads the PSK itself, or on a box where only the daemon can
+(below) asks the running daemon to enqueue for it. The app's queue shows where it lands.
+`--now` is the direct path: it spawns on this machine right away, with no relay, key, leader or
+daemon, for a fleet nobody leads, a keyless box or debugging over SSH; it takes no pin flags.
+(`--auto`, the old spelling of the default, is still accepted and does nothing.)
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
@@ -444,11 +447,13 @@ query running sessions, and spawn and end sessions on other machines through the
 `list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `queue_batch` (several tasks with a shared strategy and dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
-`spawn_session` with `machine: "auto"` queues the task in the relay, as the app's
-**auto** does: it answers at once with the task id and "queued", and `get_queue` lists
+`spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
+at once with the task id and "queued", and `get_queue` lists
 the scheduler's recent tasks with where each landed and why, and any pauses in force.
 `repo` is a repo name from `list_machines` (or its origin, when the name means different
-repos on different machines). `pin: { machine?, account? }` restricts where it may run — the
+repos on different machines). `machine` is optional: a machine name or deviceId pins the task
+there (`"auto"`, or leaving it out, pins nothing; it is the same as `pin.machine`, and giving
+both is refused). `pin: { machine?, account? }` restricts where it may run — the
 task waits for a slot there rather than going elsewhere — and `repo` is then the name as the
 pinned machine (or the account's clones) list it; `account` is an alias, an email or an
 accountId, and the answer names the account it resolved to. `avoid: [machine, …]` (at most 4)
@@ -457,21 +462,21 @@ signed in, or a machine whose daemon reports no exclaves is refused; an account 
 also needs a scheduler leader on a build that routes on them. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
-On a box where only the daemon can read the key (below), `auto` goes through the daemon.
+On a box where only the daemon can read the key (below), a spawn goes through the daemon.
 
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool,
-`auto`, `get_queue` and `cancel_task` included, still works for every machine, with the same
+`spawn_session`, `get_queue` and `cancel_task` included, still works for every machine, with the same
 registration; a server that started before the daemon was updated keeps the old "needs this machine's own
-key" answer for `auto` until its Claude session restarts. `seanced doctor` says which
+key" answer for spawns until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
 read the key itself, the daemon runs no broker, so nothing gains fleet reach without
 the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
 
-Naming _this_ machine skips the relay entirely: the request goes straight to the
-local daemon over a unix socket in the state directory, so spawning where you are
-sitting costs no round trip and works with the relay down. It is the same daemon,
+Naming _this_ machine in `get_sessions` or `despawn_session` skips the relay entirely: the request goes straight to the
+local daemon over a unix socket in the state directory, so it costs no round trip and works with the relay down.
+A spawn never takes it, since it is a queued task. It is the same daemon,
 backend and audit trail either way — the log says `origin=local` instead of
 `origin=relay`, and `seanced status` and `doctor` report whether the socket is up.
 If a remote machine shares this one's name, local wins; reach the remote one by its
