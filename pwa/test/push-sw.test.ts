@@ -76,7 +76,10 @@ describe("push-sw.js", () => {
     await worker.push(null);
     await worker.push(JSON.stringify({ kind: "something-newer", taskId: "x" }));
     await worker.push(JSON.stringify(null));
-    expect(worker.shown).toHaveLength(4);
+    // A known kind under a version this worker does not speak is as unreadable as an unknown kind.
+    await worker.push(JSON.stringify({ v: 2, kind: "needs-input", taskId: "t-1" }));
+    await worker.push(JSON.stringify({ kind: "needs-input", taskId: "t-1" }));
+    expect(worker.shown).toHaveLength(6);
     for (const { options } of worker.shown)
       expect(options).toEqual({ body: "Something needs your attention.", tag: "seance" });
   });
