@@ -497,7 +497,7 @@ const PIN_FIELD = z
   .loose()
   .optional()
   .describe(
-    'Restrict where the scheduler may place the task — to one machine, one account, or both; give at least one. An unknown machine, a name two machines share, an account no machine (or not the pinned one) reports signed in, or an alias or email two accounts share is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine (or the account\'s clones) list it, or by origin',
+    "Restrict where the scheduler may place the task — to one machine, one account, or both; give at least one. An unknown machine, a name two machines share, an account no machine (or not the pinned one) reports signed in, or an alias or email two accounts share is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine (or the account's clones) list it, or by origin",
   );
 
 const AVOID_FIELD = z
@@ -809,7 +809,7 @@ export function buildMcpServer(
     {
       title: "Cancel a scheduler task",
       description:
-        'Cancel a scheduler task (one spawn_session or queue_batch queued, or another client\'s) by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.',
+        "Cancel a scheduler task (one spawn_session or queue_batch queued, or another client's) by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.",
       inputSchema: z.object({ taskId: z.string().describe("The task's id from get_queue") }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -885,7 +885,7 @@ export function buildMcpServer(
           .max(TASK_SPEC_LIMITS.deps)
           .optional()
           .describe(
-            'Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents',
+            "Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents",
           ),
         until: UNTIL_FIELD,
         linear: LINEAR_FIELD,
@@ -927,9 +927,7 @@ export function buildMcpServer(
         const leg = { machines: lease.machines, scheduler: lease.scheduler };
         if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
         // Before any account listing: a leader that cannot route on them never gets the fields.
-        const gate = placementNeedsPinAccount(placement.input)
-          ? pinAccountGateError(leg, "pin.account / avoid")
-          : null;
+        const gate = placementNeedsPinAccount(placement.input) ? pinAccountGateError(leg, "pin.account / avoid") : null;
         if (gate !== null) return errorResult(gate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(resolved.error);
