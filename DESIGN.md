@@ -528,8 +528,8 @@ Séance's noise is cover for a real intruder.
    the record), but only one that `pushEndpoint` accepts, so a forged subscription can aim the
    leader's sends only at a push service on the allowlist. `push-unsubscribe` is sealed and
    guarded the same way and removes only the one endpoint it names. That adds nothing a PSK
-   holder could not already do: one who knows an endpoint (the subscription's secret) could
-   silence that browser by re-keying it through `push-subscribe`. Its audit line, like
+   holder could not already do: every PSK holder reads every endpoint from `settings:main`
+   (above), so removing one hands over no new power, and an endpoint is no secret from them. Its audit line, like
    push-subscribe's, carries no endpoint. What such a send carries is encrypted
    to the browser's own key and holds ids and state only; the push service sees its size and
    timing. The send never follows a redirect, and its answer is never read. A thief leader
@@ -2196,8 +2196,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     so the adapter stays out of `LEADER_MODULES`: the term's end is thrown as the caller's
     `revoked`.
   - **Two app-facing ops.** The leader generates the pair itself; `push-subscribe` and
-    `push-unsubscribe` (_Web Push_, below) are the only settings ops from an app, and the Linear key's write, parser and UI belong
-    to the Linear item, which round-trips through the record's `linearKey` untouched.
+    `push-unsubscribe` (_Web Push_, below) are the only settings ops from an app, and the
+    Linear key's write, parser and UI belong to the Linear item, which round-trips through the
+    record's `linearKey` untouched.
   - **Accepted:** the one repair write (a record that parses but has no `vapid`) is rebuilt from
     the parsed record, so a field a newer build added and this build's parser drops is lost with
     it.
@@ -2233,7 +2234,14 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     so ordering the local unsubscribe after it would keep a device pushed for that long on a
     slow leader. A failed op, or a leader that predates it (`invalid_request`, after the same
     `pushEndpoint` pre-check), leaves the browser off and the endpoint in the record until
-    the push service answers 404/410 for it, which the sender then prunes; the card says so.
+    the push service answers 404/410 for it, which the sender then prunes; the card says so. An
+    answer the app cannot read (or one echoing another endpoint) gets its own note, not the
+    "could not tell" one. The page marks the browser turned off (`seance:push-off`) before
+    anything can fail, so a re-sync in flight, which reads the mark again just before it
+    subscribes, cannot undo the turn-off; the mark is put back when the turn-off changed nothing
+    (service worker not ready, unsubscribe failed and the op too), and an inspection that finds
+    the browser on clears it. After a successful turn-off the card lands on off even if its
+    re-inspection fails (Enable then prepares after the prompt).
     Rejected: the op first and the local unsubscribe only on success, which would leave a
     person who asked for silence still pushed whenever the leader is down or old.
   - **Sending** (`createPushSender`). One send per subscription per alert, never awaited by the

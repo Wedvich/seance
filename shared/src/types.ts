@@ -2449,8 +2449,8 @@ export interface RoutePreviewResponse {
  * `from: "app"`: add this browser's subscription to the settings record. The
  * leader parses it with `parsePushSubscribeRequest`, which holds the endpoint
  * to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request` (also what a leader
- * that predates the op answers), `subscriptions_full`, `conflict`, `not_ready`
- * and `settings_unavailable`.
+ * that predates the op answers), `subscriptions_full`, `conflict`, `not_ready`,
+ * `settings_unavailable` and `internal_error` (a write the store refused).
  */
 export const PUSH_SUBSCRIBE_OP = "push-subscribe";
 
@@ -2502,7 +2502,8 @@ export type PushSubscribeReply = PushSubscribeResponse | SchedulerError;
  * endpoint from the settings record, freeing its slot. The leader parses it with
  * `parsePushUnsubscribeRequest`, which holds the endpoint to `pushEndpoint` as
  * push-subscribe's does; refusals are `invalid_request` (also what a leader that
- * predates the op answers), `conflict`, `not_ready` and `settings_unavailable`.
+ * predates the op answers), `conflict`, `not_ready`, `settings_unavailable` and
+ * `internal_error` (a write the store refused).
  */
 export const PUSH_UNSUBSCRIBE_OP = "push-unsubscribe";
 

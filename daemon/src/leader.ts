@@ -462,7 +462,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         });
   const settings: TermSettings | null =
     settingsStore === null ? null : createTermSettings({ store: settingsStore, term, log });
-  // What `push-subscribe` reads: pending until the first load decides, and while a retry is due.
+  // What `push-subscribe` and `push-unsubscribe` read: pending until the first load decides, and while a retry is due.
   let settingsState: SettingsState = "pending";
   // Set when a read or an unconfirmed write left the record undecided: the tick tries again, backing off.
   let settingsRetry = false;
