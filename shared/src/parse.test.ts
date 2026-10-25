@@ -1327,6 +1327,10 @@ describe("M4 shapes", () => {
     for (const bad of [
       { ...record, alias: "a".repeat(ACCOUNT_ALIAS_MAX_LENGTH + 1) },
       { ...record, alias: "" },
+      // Only the writer trims: a record with an untrimmed or blank alias is not one it wrote.
+      { ...record, alias: " Work" },
+      { ...record, alias: "Work\n" },
+      { ...record, alias: "   " },
       { ...record, alias: undefined },
       { ...record, version: 0 },
       { ...record, accountId: "" },

@@ -1092,6 +1092,8 @@ export function parseAccountRecord(value: unknown): AccountRecord | null {
   if (!isRecord(value) || !isVersion(value["version"]) || !isAccountId(value["accountId"])) return null;
   const { alias } = value;
   if (alias !== null && !isName(alias, ACCOUNT_ALIAS_MAX_LENGTH)) return null;
+  // Only the writer trims; a record that is not what it would have written is not one of ours.
+  if (alias !== null && alias !== alias.trim()) return null;
   return { version: value["version"], accountId: value["accountId"], alias };
 }
 
