@@ -231,6 +231,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // keyed by the blob, so two overlapping registers each commit their own.
   let registered: Registered = { scan: 0, exclaves: exclaveScan };
   const candidates = new WeakMap<Envelope, Registered>();
+  let lastSizeReport: string | null = null;
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
       name: config.name,
@@ -243,9 +244,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus, CAPABILITIES.reportedDone],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
-    const { sealed, droppedSkills } = await sealMachineInfo(key, state.deviceId, info);
-    if (droppedSkills) {
-      log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
+    const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);
+    // Once per blob content: every reconnect rebuilds the same blob, and a line each would say nothing new.
+    const content = JSON.stringify(info);
+    if (content !== lastSizeReport) {
+      lastSizeReport = content;
+      if (droppedSkills) log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
+      if (oversized)
+        log.error(
+          `register blob over ${ENVELOPE_MAX_CT_LENGTH} chars with nothing left to drop — the relay will refuse it`,
+        );
     }
     candidates.set(sealed, candidate);
     return sealed;

@@ -4,6 +4,8 @@ export interface SealedInfo {
   readonly sealed: Envelope;
   /** Project skills were stripped to fit the envelope; the caller logs it (this module stays log-free). */
   readonly droppedSkills: boolean;
+  /** Still past the bound as sealed (skills dropped or none to drop): the relay will refuse it, and the caller says so. */
+  readonly oversized: boolean;
 }
 
 /**
@@ -15,12 +17,14 @@ export interface SealedInfo {
  */
 export async function sealMachineInfo(key: CryptoKey, from: string, info: MachineInfo): Promise<SealedInfo> {
   const sealed = await sealInfo(key, from, info);
-  if (sealed.ct.length <= ENVELOPE_MAX_CT_LENGTH || !info.repos.some((r) => r.skills !== undefined)) {
-    return { sealed, droppedSkills: false };
+  const tooBig = sealed.ct.length > ENVELOPE_MAX_CT_LENGTH;
+  if (!tooBig || !info.repos.some((r) => r.skills !== undefined)) {
+    return { sealed, droppedSkills: false, oversized: tooBig };
   }
   // Spread, not rebuilt field by field, so a RepoEntry field added later survives; JSON drops the undefined.
   const repos = info.repos.map((repo): RepoEntry => ({ ...repo, skills: undefined }));
-  return { sealed: await sealInfo(key, from, { ...info, repos }), droppedSkills: true };
+  const trimmed = await sealInfo(key, from, { ...info, repos });
+  return { sealed: trimmed, droppedSkills: true, oversized: trimmed.ct.length > ENVELOPE_MAX_CT_LENGTH };
 }
 
 function sealInfo(key: CryptoKey, from: string, info: MachineInfo): Promise<Envelope> {
