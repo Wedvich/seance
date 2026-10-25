@@ -103,7 +103,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           availability: () => client.getState().scheduler,
           queue: () => client.queue(),
           cancel: (taskId) => client.cancel(taskId),
-          accounts: (options) => cacheOf(client).read({ bypassHold: options?.label !== true }),
+          accounts: (options) => cacheOf(client).read({ hold: options?.label === true }),
         },
         release: (): void => relay.release(),
       };

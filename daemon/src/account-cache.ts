@@ -8,9 +8,10 @@ import type { AppRelay } from "./app-relay.ts";
  * relay is slow; asking again at once from each tool call spends what the PWA needs. 60 s is
  * about 7 refills: by then asking is likely to succeed. Neither a reopen nor a `store-changed`
  * ends the hold, or a flapping socket or an alias-editing PWA would have N processes list
- * again at once; the price is a label that stays on the email for up to a minute. Auto's pin
- * resolution passes `bypassHold`: it needs the real answer and is a person's one-off call. So does
- * the broker, which only a pin asks (keyless labels carry no alias).
+ * again at once; the price is a label that stays on the email for up to a minute. The hold is
+ * opt-in (`read({ hold: true })`, label reads only): a caller that forgets the option must get the
+ * real answer, not a label's stale null. Auto's pin resolution and the broker (which only a pin
+ * asks; keyless labels carry no alias) read plain.
  */
 export const NULL_HOLD_MS = 60_000;
 
@@ -22,7 +23,7 @@ export const NULL_HOLD_MS = 60_000;
  * a reopen (nudges sent while down are lost) and on a `store-changed` for an
  * `account:` key — relay plaintext, only a hint to list again. A refused or
  * lost listing reads as null (aliases unavailable right now) and is held as null
- * for `NULL_HOLD_MS`, for label reads only. Listed only when a caller asks: an
+ * for `NULL_HOLD_MS`, for `hold` reads only. Listed only when a caller asks: an
  * account pin, or `seanced mcp` labelling an account in `list_machines` or `get_queue`.
  */
 export class AccountCache {
@@ -31,7 +32,7 @@ export class AccountCache {
   #pending: Promise<readonly AccountRecord[] | null> | null = null;
   /** Bumped on every drop: a listing sent before one answers for a view since replaced. */
   #generation = 0;
-  /** Label reads answer null without listing until this time; survives `#drop`, see `NULL_HOLD_MS`. */
+  /** `hold` reads answer null without listing until this time; survives `#drop`, see `NULL_HOLD_MS`. */
   #nullUntil = 0;
   /** Listings started; only the latest-started one writes `#nullUntil`, whatever its generation. */
   #listSeq = 0;
@@ -60,11 +61,11 @@ export class AccountCache {
     this.#pending = null;
   }
 
-  read(options: { readonly bypassHold?: boolean } = {}): Promise<readonly AccountRecord[] | null> {
+  read(options: { readonly hold?: boolean } = {}): Promise<readonly AccountRecord[] | null> {
     if (this.#held !== null) return Promise.resolve(this.#held);
-    // Join a listing already in flight (a pin's bypass) before honouring the hold.
+    // Join a listing already in flight (a pin's plain read) before honouring the hold.
     if (this.#pending !== null) return this.#pending;
-    if (options.bypassHold !== true && this.#now() < this.#nullUntil) return Promise.resolve(null);
+    if (options.hold === true && this.#now() < this.#nullUntil) return Promise.resolve(null);
     this.#pending = this.#list();
     return this.#pending;
   }

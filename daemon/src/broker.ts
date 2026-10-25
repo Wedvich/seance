@@ -301,7 +301,7 @@ export function createBroker(opts: BrokerOpts): Broker {
           : request.schedulerOp === "cancel"
             ? await client.cancel(request.taskId)
             : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
-              await cacheOf(client).read({ bypassHold: true });
+              await cacheOf(client).read();
       await audit.ok(id);
       return brokerOk(id, data);
     } catch (err) {
