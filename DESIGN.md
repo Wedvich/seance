@@ -179,7 +179,7 @@ reads as one to any EDR:
 | `caffeinate -is` per spawn + the AC-power hold                                                 | T1653 Power Settings                                        |
 | depth-2 `.git` scan of `repoRoots`                                                             | T1083                                                       |
 | host discovery every 30s: `statfs`, `/proc`, `sysctl` on macOS                                 | T1082                                                       |
-| reading every exclave's `.claude.json` and `skills/` dir                                       | T1083, T1087-adjacent (ids only)                            |
+| reading every exclave's `.claude.json` and `skills/` dir, and each clone's `.claude/skills/`   | T1083, T1087-adjacent (ids only)                            |
 | a local activity history (`metrics.sqlite`, hourly tier kept forever)                          | T1074.001-adjacent                                          |
 | tmux pane enumeration                                                                          | T1057                                                       |
 | a local socket client's pid via `getsockopt`, walked up its parents                            | T1057                                                       |
@@ -588,8 +588,9 @@ Séance's noise is cover for a real intruder.
    holder's `prompt` reaches Claude under the machine's configured permission
    mode, and the spawned agent then reads repo content Séance does not control.
    A spawned session also runs as the daemon's user and can write what telemetry
-   reads — `.claude.json`, `~/.exclaves`, the skills dirs — so it can spoof its
-   own exclave's account and quota view. Through the session-events mod it can
+   reads — `.claude.json`, `~/.exclaves`, the skills dirs (its clone's
+   `.claude/skills/` included) — so it can spoof its own exclave's account and
+   quota view, and which skills route to it. Through the session-events mod it can
    also report its own state and PR. That too is a claim about itself, bound to
    its own pane (Local op socket, "Session events"); its only other effect is
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
@@ -1413,7 +1414,9 @@ an old peer's frames parse as before. Mixed versions:
   under one settles at its merge, and routing ignores its skill. A client therefore writes
   `until` only when the verified leader's own registry entry advertises `reportedDone`
   (the capability the authoring surface added with it; the PWA's `deriveReportedAvailability`, MCP's
-  `leaderTakesReported`), and refuses locally otherwise. `skill` still waits on its item.
+  `leaderTakesReported`), and refuses locally otherwise. Routing honours a declared `skill`
+  since 2026-10-25 (Scheduler, "Skills filter"); no client writes one yet, and the first that
+  does gates it as `until` is.
 - `after: "done"` (#21, released only by a `done` predecessor), `doneBy: "linear"` and, added
   with the authoring surface, `doneBy: "reported"`: an older leader reads a task carrying
   any of them as malformed, and holds it unreadable, never running it, until a leader that
@@ -1424,7 +1427,8 @@ an old peer's frames parse as before. Mixed versions:
   older leader drops it, and does not know `until: "reported"` either, which is why clients write
   that only to a leader advertising `reportedDone`.
 - `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
-  list costs the field, never the entry or the machine. `MachineStatus.ax` (the exclave
+  list costs the field, never the entry or the machine. Scanned and routed on since
+  2026-10-25 (Daemon, "Exclaves"; Scheduler, "Skills filter"). `MachineStatus.ax` (the exclave
   indices whose login has expired) is strict and capped. An old app ignores both.
 - `TaskProgress.exit` (a session's exit status, 0–255), in the `sessions` reply's `progress`
   and the launch ledger: an older leader drops it. Acted on since 2026-10-21 (Daemon, "Exit
@@ -2070,9 +2074,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Routing caps" below; or `scope:
-  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"). M4's
-  `skill_absent` (naming the skill), `base_unpushed` and `auth_expired` are read and worded
-  already; no filter emits them yet. Pressure
+  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below).
+  M4's `base_unpushed` and `auth_expired` are read and worded already; no filter emits them
+  yet. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
   passes it; a kept status never answers pressure. Quota comes from
   every status alike, through `newestQuotaByAccount` and `effectivePct` — the
@@ -2119,6 +2123,26 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   name's first word in the task's model: until 2026-10-18 every window bound every task, so a
   full Fable week refused Opus work on an account with room. A task whose account's newest
   reading holds only other models' weeklies is `quota_unknown` (`unobserved`), never 0%.
+- **Skills filter** (2026-10-25, docs/scheduler.md M4 _Skills_, decided #19). A task's skill
+  is its declared `TaskRequest.skill`, else its prompt's leading `/name` token (the prompt's
+  first character is the `/`, the name runs to the first whitespace and must pass
+  `isSkillName`, so `/tmp/x` is no skill): Claude Code invokes a slash command only as the
+  prompt's first token, so the PWA picker's mid-prompt `/name` is a mention to routing. Only a
+  name the inventory knows restricts — every machine's `exclaves[].skills`, offline machines
+  included as the picker counts them, plus the project skills (`RepoEntry.skills`) of clones
+  of _this task's_ repo, since a project skill elsewhere cannot be what this repo's `/name`
+  means and counting it would hold back a same-named command here. A known name puts
+  `skill_absent { skill }` on every candidate whose exclave's `skills` and whose clone's
+  `skills` both lack it (clone × skill: a project skill travels with the clone, whichever
+  exclave holds it). An unknown name — a built-in, a plugin's `plugin:name`, a legacy
+  `commands/*.md`, a typo — passes everywhere: a typo routes anywhere rather than failing,
+  the cost decision #19 accepted, and plugin skills and legacy commands stay out of the
+  inventory for now. `route-preview` routes through the same `route()`, so it says the same.
+  An absent `RepoEntry.skills` reads as none: a daemon predating project skills therefore
+  rejects a project skill a newer daemon's clone of the same repo advertises, until `seanced
+  update` heals it; so does a machine whose register blob dropped its project skills to fit
+  the envelope (Daemon, "Exclaves"). Rejected: treating absent as unknown per clone (it would
+  let an older daemon's clone take a task its checkout may not serve).
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
@@ -3511,6 +3535,13 @@ for the lot with its own `gh`.
   the cadence everything else in the blob already has, and a sign-in changes
   `.claude.json`, not the list); reporting the config dir path (derivable, and
   the app has no use for a path it can't open).
+  **Project skills** (2026-10-25): each clone's `<clone>/.claude/skills/` is listed by the
+  same rule as an exclave's (`listSkills`), with every scan, onto `RepoEntry.skills` — sorted,
+  cut to the first `REPO_MAX_SKILLS` (a reader drops a longer list whole), absent when empty —
+  so adding or removing one re-registers like a new clone. Only the clone's own checkout is
+  read: linked worktrees are no clones. The register blob is sealed once and, past
+  `ENVELOPE_MAX_CT_LENGTH`, sealed again without any clone's project skills, with a warn
+  line (`sealMachineInfo`), since the relay would drop the whole registration unseen.
 - **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
   2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
@@ -4603,7 +4634,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   from the register blobs the app already holds, offline machines included — so it needs no
   leader and works on a direct pick as on `auto`. Names only, no descriptions and no
   machine list: the blob carries every name to every app, and descriptions would grow it per
-  skill; placement is the M4 routing filter's job, so the list stays a plain union. It
+  skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads only a
+  prompt's leading `/name`), so the list stays a plain union. It
   completes the token ending at the caret (2026-10-20; first token only before): a `/` at the start
   or after whitespace, no whitespace or second `/` up to the caret, and the caret at the token's
   end with no selection — so `… /sh` mid-prompt opens it, a slash in a word, URL or path

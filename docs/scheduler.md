@@ -173,10 +173,9 @@ they now live:
 
 **Routing, ahead.** M4 adds:
 
-- Filters (the per-account cap and the per-batch bound are DESIGN.md "Routing caps" and
-  "Batches"): `skill absent` (M4, _Skills_: a hard filter when declared or the prompt starts with
-  `/name`, and only for a name the fleet's inventory knows); stacked base unpushed and not on
-  this exclave (M4, _Stacking_); auth expired (M4, _Auth health_).
+- Filters (the per-account cap, the per-batch bound and `skill_absent` are DESIGN.md "Routing
+  caps", "Batches" and "Skills filter"): stacked base unpushed and not on this exclave (M4,
+  _Stacking_); auth expired (M4, _Auth health_).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
@@ -404,7 +403,7 @@ of M4 has landed.
 | 1     | Authoring surface (new) — **Done**                                 | —                                                                      | M                        |
 | 1     | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
 | 1     | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
-| 1     | Skills filter                                                      | —                                                                      | S; M with project skills |
+| 1     | Skills filter — **Done**                                           | —                                                                      | S; M with project skills |
 | 1     | Account records                                                    | store rules v2                                                         | M                        |
 | 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
@@ -613,25 +612,13 @@ of M4 has landed.
   a backoff already running: its `retryAt` was set from the old `staleAfter`).
   `session-quota.json` is left on disk unread rather than deleted.
 
-- **Skills** — hard filter on declared or `/name` prompts, PWA autocomplete. Settled 2026-10-17:
-  - _Inventory_: M1's `MachineInfo.exclaves[].skills` is the source, read with the repo scan
-    and served from the blob, never per request. Tightened to directories (or symlinks
-    resolving to one) holding a `SKILL.md`, so a stray dir or a dangling dotfiles link stops
-    advertising a skill — landed with the autocomplete (PR #167).
-  - _Filter_: only a name somewhere in the fleet's inventory restricts — to the exclaves
-    that have it (`skill_absent` on the rest). An unknown name passes, which covers built-ins and
-    anything the inventory skips; cost: a typo routes anywhere rather than failing. _Decided
-    (#19):_ keep "unknown names pass"; detect `/name` only until a client declares a skill.
-  - _Autocomplete_ — **DONE (PR #167)**: union of names across machines and exclaves, from data
-    the PWA already holds — needs no leader, which is why it landed before the filter. Names
-    only, no descriptions (blob size; revisit if wanted).
-  - _Out of scope for now_: plugin skills (`plugin:name`, under `plugins/`) and legacy
-    `commands/*.md` — both pass the filter as unknown names.
-  - _Required, not yet built_: project skills (`<repo>/.claude/skills/`) belong to a clone,
-    not an exclave, so they go on `RepoEntry` and the filter checks clone × skill. Until
-    then a project-only skill is unknown and passes.
-  - _Decided (#20):_ #128 (penalise the default exclave's account) is parked, to be redone as a
-    flag on the account record once those land.
+- **Skills — Done (2026-10-25).** Hard filter on a declared or leading `/name` skill the
+  inventory knows, project skills (`<repo>/.claude/skills/`) on `RepoEntry` checked clone ×
+  skill, unknown names passing (#19); recorded in DESIGN.md, _Scheduler_ "Skills filter" and
+  _Daemon_ "Exclaves". The autocomplete landed first (PR #167; DESIGN.md, PWA). Still out:
+  plugin skills (`plugin:name`) and legacy `commands/*.md`, which pass as unknown names.
+  _Decided (#20):_ #128 (penalise the default exclave's account) is parked, to be redone as a
+  flag on the account record once those land.
 - **LXC pressure view** (was: Proxmox node view; S, was M–L) — read by the LXC daemons, folded
   into their own `status`. An injectable `HostProbe` reaches telemetry through `startDaemon`;
   missing are the cgroup and PSI readers, each one more `TELEMETRY_COLLECTORS` entry.
