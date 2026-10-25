@@ -4111,7 +4111,12 @@ relay state unnecessary).
   **`KillMode=process`**, without which the default control-group kill takes
   down a daemon-cold-booted tmux server and every Claude session in it — the
   one migration that must land before the first automated restart; the first
-  rollout wave is still a manual restart under the old unit. Both systemd
+  rollout wave is still a manual restart under the old unit. It also carries
+  **`OOMPolicy=continue`**: those same panes live in the unit's cgroup (unless a
+  systemd-built tmux with the user bus moves them into scopes of their own), and the
+  default `stop` turns a kernel OOM kill of any one of their processes into a
+  stop-and-restart of the daemon (seen on an LXC box at its memory limit). An
+  OOM-killed daemon still exits, so `Restart=` brings it back. Both systemd
   steps check their exit codes and a failure is reported as `restart_failed`:
   the `ok` is already persisted by then, so a silent failure would leave the
   machine serving old code while every later check reads `current` — stranded

@@ -12,6 +12,27 @@ enabled. If `seanced install`'s preflight says so, run it once and re-run `insta
 sudo loginctl enable-linger <user>
 ```
 
+### Sessions under the user manager
+
+A tmux built with systemd support (Debian's is) moves each pane into a
+`tmux-spawn-*.scope` under the user manager whenever its server can reach the user bus
+(`XDG_RUNTIME_DIR`): always under a user unit, and under a system unit whenever a login
+shell rather than the daemon started the server. `systemctl --user list-units
+'tmux-spawn-*'` shows whether a box does it. Those panes — and, under a user unit, the
+daemon too — die with `user@<uid>.service`, and systemd runs the manager at
+`oom_score_adj` 100, which outranks any process under about a tenth of memory. On a box
+at its memory limit, where each claude is a small slice of it, the manager is the OOM
+killer's pick, and one kill ends every session. Take it out of line with a drop-in; it
+applies from the manager's next start, so set the running one by hand rather than
+restart it (that would end every session too):
+
+```sh
+sudo mkdir -p /etc/systemd/system/user@<uid>.service.d
+printf '[Service]\nOOMScoreAdjust=0\n' | sudo tee /etc/systemd/system/user@<uid>.service.d/oom.conf
+sudo systemctl daemon-reload
+echo 0 | sudo tee /proc/$(systemctl show -p MainPID --value user@<uid>.service)/oom_score_adj
+```
+
 ### System unit with a delivered credential (systemd ≥ 256)
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
@@ -77,8 +98,9 @@ What the user-unit flow still does that this doesn't:
   `doctor` reports the drift by comparing the installed unit against what this checkout
   would write. That replaces the manual `ExecStart=` re-check this section used to ask
   for.
-- Linger is irrelevant — system units outlive sessions by nature — and `doctor` says so
-  instead of probing user scope.
+- Linger is irrelevant to the daemon — system units outlive sessions by nature — and
+  `doctor` says so instead of probing user scope. The sessions it spawns can still
+  depend on the user manager: see "Sessions under the user manager" above.
 
 `seanced restart` works without root here, so `git pull && seanced restart` is the same
 update as on a user unit. It can't ask the system manager to restart the unit, so it
