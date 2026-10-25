@@ -271,8 +271,8 @@ leader change forgot `auto` tasks not yet dispatched. M3 item 3 closed that: the
 relay's and the next leader takes it over; item 6 moved the PWA and MCP onto `store-put`.)
 Deps, batches, caps, `pause` and the escalation and spill alerts have landed (items 4a and 5);
 the PWA hears `queue-changed` and keeps a bounded poll as its fallback (item 6). An account nothing has observed yet is `quota unknown` and
-gets no `auto` work until a direct spawn gives it a reading (M4's `/usage` refresh gives every
-signed-in exclave one).
+gets no `auto` work until a reading lands: M4's `/usage` refresh timer (`daemon/src/usage-refresh.ts`)
+gives every signed-in exclave one once its cache is stale, with no session needed.
 Leader capture was visible, not prevented: a squatter's term held `auto` unavailable until its
 socket went. M3's gate (Risks, _Leader capture_) has since closed it with the relay's
 `SCHEDULER_LEADERS` allowlist.
@@ -977,7 +977,7 @@ same PR, with the reason.
   the dashboard without `wrangler tail`.
 - **Daemons on old versions** report no `exclaves`/`origin`/`taskId`. The scheduler treats
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
-  and can't dedupe a re-dispatch), while direct spawns to it keep working. Self-update makes
+  and can't dedupe a re-dispatch), while `seanced spawn --now`, the only direct path left, keeps working. Self-update makes
   this a short window.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
