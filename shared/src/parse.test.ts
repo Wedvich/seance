@@ -1513,7 +1513,8 @@ describe("parsePushAlert", () => {
   const disk = { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93, freeMib: 400 } as const;
 
   test("accepts each kind as built, with a disk alert's readings optional", () => {
-    for (const alert of [spill, input, disk, { v: 1, kind: "disk", at: 5, deviceId: "dev-1" }]) {
+    const bare = { v: 1, kind: "disk", at: 5, deviceId: "dev-1" } as const;
+    for (const alert of [spill, input, disk, bare]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
