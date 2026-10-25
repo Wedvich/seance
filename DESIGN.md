@@ -753,6 +753,12 @@ nothing checked it. The last is the gap they leave.
   (`shared/src/fleet-quota.ts`): sealed `to: "app"`, its op, its parser, and its sealed
   `version` the store's. Its `from` is not checked — any PSK holder may write it, and it
   carries readings, never authority.
+- **A task record carrying `pin.account` or `avoid` always carries `pin.exclave: ""`.** Every
+  such record is sealed through the one task sealer (`sealTaskRecord`, via `taskRecordAtRest`
+  in `shared/src/task-record.ts`), which emits the sentinel (`PIN_SENTINEL`); an older leader's
+  `parsePin` refuses it, so one taking over holds the record unreadable instead of placing it
+  unrestricted. The parser never nulls a spec over `pin.exclave` (Scheduler, "Rollout: a gate
+  and a sentinel").
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
