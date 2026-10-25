@@ -17,7 +17,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { autoFleet, spawnAuto } from "../daemon/src/cli-auto.ts";
-import { relayFleet } from "../daemon/src/fleet.ts";
+import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
@@ -205,6 +205,96 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // The credential-delivered box: this process holds no key (`key` answers null), so
+  // `auto` reaches the scheduler only through the daemon's broker, over its real op
+  // socket. The daemon seals the task; `avoid` keeps it queued so cancel has one to end.
+  test("a keyless MCP auto spawn queues through the daemon's broker; get_queue shows it and cancel_task cancels it", async () => {
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => {
+        throw new Error("a keyless process must never dial the relay itself");
+      },
+      broker: brokerFleet(),
+    });
+    const surfaceAudit: string[] = [];
+    const client = new Client(
+      { name: "e2e-keyless-auto", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(fleet, null, (line) => void surfaceAudit.push(line)), {
+      transport: serverTransport,
+    });
+    await client.connect(clientTransport);
+    const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return { text: content.map((entry) => entry.text).join("\n"), error: result.isError === true };
+    };
+    // The suite's daemon audits to its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    let id: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+
+      const spawned = await call("spawn_session", {
+        machine: "auto",
+        repo: "myrepo",
+        prompt: "keyless route me",
+        avoid: ["TestMac"],
+      });
+      expect(spawned.error).toBe(false);
+      expect(spawned.text).toMatch(/^task (\S+): queued/u);
+      id = /^task (\S+):/u.exec(spawned.text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${spawned.text}`);
+      const taskId = id;
+
+      type Queue = { tasks: { id: string; state: string }[] };
+      await pollUntil(
+        async () => {
+          const queue = JSON.parse((await call("get_queue", {})).text) as Queue;
+          return queue.tasks.some((t) => t.id === taskId);
+        },
+        "get_queue to show the brokered task",
+        20_000,
+      );
+      // Sealed by the daemon with the app key it holds: the record reads as the MCP's.
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec.client).toBe("mcp");
+      expect(stored?.spec.avoid).toEqual([stack.deviceId]);
+      expect(stored?.state).not.toBe("running");
+
+      const cancelled = await call("cancel_task", { taskId });
+      expect(cancelled.error).toBe(false);
+      expect(cancelled.text).toContain("cancelled");
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "cancelled",
+        "the brokered cancel to land",
+        20_000,
+      );
+
+      // The daemon's own trail names the origin and the peer's claimed client, never the prompt.
+      const lines = audit.mock.calls.map((args) => args.join(" "));
+      expect(lines.some((line) => line.includes('audit broker origin=local-broker action=scheduler op="enqueue"'))).toBe(
+        true,
+      );
+      const enqueued = lines.find((line) => line.includes("audit enqueue origin=local-broker"));
+      expect(enqueued).toContain("claimed_client=mcp");
+      expect(enqueued).toContain(`task=${JSON.stringify(taskId)}`);
+      expect(enqueued).toMatch(/ queued$/u);
+      expect(lines.some((line) => line.includes("keyless route me"))).toBe(false);
+      // The surface's own line is unchanged by the route.
+      expect(surfaceAudit).toEqual([
+        expect.stringMatching(/^audit enqueue origin=mcp client=mcp task="[^"]+" createdAt=\d+ queued$/u),
+      ]);
+    } finally {
+      audit.mockRestore();
+      await client.close();
+      fleet.stop();
+    }
+  }, 60_000);
+
   // M4's account pin and avoid list, end to end: an alias another client wrote
   // resolves at submit time to the accountId alone, the real leader rejects the
   // machine signed in elsewhere, and the record at rest carries the sentinel an
@@ -235,7 +325,6 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
     await client.connect(clientTransport);
     const built = await autoFleet(stack.config, { stores: [] });
-    if ("error" in built) throw new Error(built.error);
     const raw = await connectApp(stack.relay);
     const ids: string[] = [];
     const windows: string[] = [];
@@ -317,6 +406,73 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       built.fleet.stop();
       await client.close();
       lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // `seanced spawn --auto` in a shell with no key: `autoFleet` finds none and takes the
+  // broker. The alias is another client's write, resolved by the CLI from the broker's
+  // accounts read, so the stored record carries the accountId and the CLI's client.
+  test("a keyless CLI auto spawn resolves an account alias through the broker and records the pin", async () => {
+    const other = { organizationUuid: "e2e-org-c", accountUuid: "keyless", emailAddress: "keyless@e2e.test" };
+    const otherId = `${other.organizationUuid}:${other.accountUuid}`;
+    const second = await stack.startSecondDaemon({
+      name: "KeylessBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
+    });
+    const app = startApp(stack, {}, null, { accounts: true });
+    const built = await autoFleet({ ...stack.config, psk: "" }, { stores: [] });
+    const enqueued: string[] = [];
+    let id: string | undefined;
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.accountId === otherId) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, signed in as the other account",
+      );
+      const named = await app.client.putAccountAlias(otherId, "keyless-alias", 0);
+      expect(named?.ok).toBe(true);
+
+      const outcome = await spawnAuto(
+        { repo: "myrepo", here: false, prompt: "keyless by alias", auto: true, account: "keyless-alias" },
+        built.fleet,
+        (line) => {
+          enqueued.push(line);
+        },
+      );
+      expect(outcome.ok).toBe(true);
+      id = /^task (\S+): queued/u.exec(outcome.text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${outcome.text}`);
+      const taskId = id;
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the keyless CLI's task to run",
+        20_000,
+      );
+      const running = (await stack.queue().get(taskId))?.body;
+      expect(running?.assignment?.deviceId).toBe(second.deviceId);
+      window = running?.assignment?.window ?? null;
+      expect(running?.spec.client).toBe("cli");
+      expect(running?.spec.pin).toEqual({ account: otherId });
+      expect(enqueued).toEqual([
+        expect.stringMatching(/^audit enqueue origin=cli client=cli task="[^"]+" createdAt=\d+ queued$/u),
+      ]);
+    } finally {
+      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      built.fleet.stop();
       app.stop();
       await second.stop();
     }
@@ -432,7 +588,6 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("a CLI auto spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
     const app = startApp(stack, { auto: true });
     const built = await autoFleet(stack.config, { stores: [] });
-    if ("error" in built) throw new Error(built.error);
     const enqueued: string[] = [];
     let down = false;
     let id: string | undefined;
