@@ -395,9 +395,10 @@ seanced doctor                # preflight config, binaries, roots, relay, servic
 seanced help                  # every command
 ```
 
-`<repo>` is a _name_, matched exactly against the cached scan set and never joined as
-a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
-`parent/base` when two collide). Bare words after it become the prompt, which makes
+With `--now`, `<repo>` is a _name_, matched exactly against the cached scan set and never
+joined as a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
+`parent/base` when two collide); a queued spawn resolves a clone name or origin across the
+fleet, as below. Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
 A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or

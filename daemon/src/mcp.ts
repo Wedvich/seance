@@ -98,8 +98,10 @@ export interface LocalMachine {
   readonly platform: string;
   /**
    * Re-read per call, not snapshotted: the daemon rewrites state.json on every
-   * rescan and `seanced mcp` outlives many of them. A snapshot rejects a repo
-   * cloned since startup, and rejects every repo if the first scan hadn't landed.
+   * rescan and `seanced mcp` outlives many of them. Its one user is the
+   * list_machines fallback, which lists this machine's repos when the relay is
+   * unreachable; a snapshot would miss a repo cloned since startup, or every repo
+   * if the first scan hadn't landed.
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
   /** Any op may answer with an `ErrorResponse`, as over the relay. */

@@ -5181,9 +5181,10 @@ task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 r
   (friction in the wrong place; the approving human is at the Claude session,
   not the config file), a read-only server (defers the point of the thing).
 - No new key at rest, but a new _process_ holding the imported PSK — on a
-  machine that already runs one (the daemon). Only when an op is aimed at
-  another machine, though: the key is resolved on first use that needs the fleet, so a
-  session that only lists or ends sessions here never imports it; every spawn needs the key or the broker.
+  machine that already runs one (the daemon). Only on first use that needs
+  the fleet, though: a session that only lists or ends sessions on this machine
+  never imports it, while every spawn (a queued task, even one pinned to this
+  box) needs the key or the broker.
 - The group address stays out of reach: the MCP server seals only to specific
   `deviceId`s; `spawn` to `"machines"` remains structurally impossible.
 - **A delivered credential never leaves the daemon process.** `exec.ts` strips
@@ -5238,6 +5239,9 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   queued — check the app's queue") never names it: the task would run twice.
 - _No leader:_ the task still queues (M3) and the answer says it waits, and that
   `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.
+  Only with no nominee at all: an unverified one may be a healthy leader whose lead-proof has not reached this
+  shell yet, so the answer says it waits and names no `--now`. MCP texts never name `--now`: a session with a shell
+  would run it as `origin=cli`, as if a person typed it.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
@@ -6142,7 +6146,7 @@ are tmux-rename's, except where they say mods.
 ## Accepted trade-offs
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
-  its way out: `seanced spawn` now audits like the relay path, so the slash
+  its way out: `seanced spawn --now` audits like the relay path, so the slash
   command can become a thin wrapper over it and the duplication disappears.
 - Key rotation or a new phone touches 4 devices manually, with spawns failing
   closed in between — no `keyId`, no rollover window.

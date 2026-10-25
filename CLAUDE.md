@@ -128,7 +128,7 @@ green:
   account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, `mcp` for `seanced mcp`'s own `auto` enqueue line, and `cli` for
+  process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch` enqueue lines, and `cli` for
   anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
