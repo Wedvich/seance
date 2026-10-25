@@ -203,7 +203,8 @@ green:
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
   `createdAt`, no lineage or base, and a client of `mcp` or `cli` only, audited as `claimed_client`
-  (the peer's unverified word); a `landedEarlier` on it is the peer's claim about its own task id. The socket's third frame
+  (the peer's unverified word); a `landedEarlier` on it is the relay's answer for a peer-chosen id:
+  it may stand for a tombstone or another client's task, never an overwrite. The socket's third frame
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
