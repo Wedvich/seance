@@ -53,9 +53,8 @@ export interface FormValues {
 
 /**
  * What survives between invocations, written after each successful spawn.
- * Mirrors the PWA's `PersistedForm`: the repo is remembered *per machine*, so
- * switching machines restores what you last ran there instead of resetting to
- * that machine's first repo.
+ * The repo is remembered *per machine*, so switching machines restores what
+ * you last ran there instead of resetting to that machine's first repo.
  */
 export interface LastUsed {
   readonly machineId: string | null;
@@ -80,8 +79,7 @@ export interface Reconciliation {
 }
 
 /**
- * First connected machine, else first listed — the same fallback the PWA's
- * `resolveMachine` applies, extended with the preference: a remembered machine
+ * First connected machine, else first listed, extended with the preference: a remembered machine
  * that is gone from the registry falls back to the *named* default before
  * falling back to position.
  */
@@ -132,7 +130,7 @@ export function reconcile(
     return { values: { ...values, machineId: null, repo: null }, note: null };
   }
 
-  // The per-machine memory mirrors the PWA's resolveRepo: the current selection
+  // The per-machine memory: the current selection
   // carries over only while the machine itself is unchanged — on a switch, the
   // target machine's own remembered repo wins, never the previous machine's.
   const remembered = context.lastUsed?.repos[machine.deviceId] ?? null;

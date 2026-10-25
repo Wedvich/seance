@@ -141,7 +141,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
     const predecessor = "e2e-report-pred";
     const dependent = "e2e-report-next";
     const nudge = "e2e-report-nudge";
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let window: string | undefined;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -285,7 +285,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
     const title = "held-dispatch";
     // The suite's daemon audits to its stdout, which in-process is console.log.
     const audit = spyOn(console, "log");
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let second: SecondDaemon | null = null;
     let down = false;
     try {

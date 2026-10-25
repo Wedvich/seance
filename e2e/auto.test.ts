@@ -78,7 +78,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("an auto spawn lands on the machine its decision names, and the record says why the other was rejected", async () => {
     // B is signed out: its only exclave has no account, so it can bill nothing.
     const second = await stack.startSecondDaemon({ name: "AutoBox" });
-    const app = startApp(stack, { auto: true, prompt: "route me" });
+    const app = startApp(stack, { prompt: "route me" });
     let window: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -323,7 +323,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       name: "PinBox",
       exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
     });
-    const app = startApp(stack, {}, null, { accounts: true });
+    const app = startApp(stack, {}, { accounts: true });
     const lazy = new LazyRelay({
       create: () =>
         new RelayClient({
@@ -449,7 +449,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       name: "KeylessBox",
       exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
     });
-    const app = startApp(stack, {}, null, { accounts: true });
+    const app = startApp(stack, {}, { accounts: true });
     const built = await autoFleet({ ...stack.config, psk: "" }, { stores: [] });
     const enqueued: string[] = [];
     let id: string | undefined;
@@ -519,7 +519,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // origin=relay, client=scheduler — which only the target daemon can show.
   test("an app's cancel ends a task's session on another machine, audited there as the scheduler's", async () => {
     const taskId = "e2e-cancel-task";
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let second: SecondDaemon | null = null;
     let window: string | null = null;
     try {
@@ -580,7 +580,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // leader and the next one to lead runs it.
   test("a task enqueued while no daemon leads runs once one does", async () => {
     const id = crypto.randomUUID();
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let down = false;
     let window: string | null = null;
     try {
@@ -622,7 +622,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // `autoFleet` (the config's PSK, its `/daemon` URL turned `/app`) and `spawnAuto`
   // over a real app socket — `cmdSpawnAuto` adds only the process exit.
   test("a CLI spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const built = await autoFleet(stack.config, { stores: [] });
     const enqueued: string[] = [];
     let down = false;
@@ -693,7 +693,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     await mkdir(configDir, { recursive: true });
     await mkdir(stateDir, { recursive: true });
     await Bun.write(join(configDir, "config.json"), JSON.stringify(stack.config));
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let id: string | undefined;
     let window: string | null = null;
     try {
@@ -750,7 +750,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("a task enqueued while a daemon leads is picked up on the store's nudge, not a tick", async () => {
     const id = crypto.randomUUID();
     await stack.restartDaemon({ quiet: true });
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let window: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -790,7 +790,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // scheduler's.
   test("mark-done finishes a running task as manual and ends its session, audited", async () => {
     const id = crypto.randomUUID();
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const audit = spyOn(console, "log");
     let window: string | null = null;
     try {
@@ -844,7 +844,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // Holds live in the relay's store, so a pause outlasts the daemon that took it
   // and `queue` reports it back.
   test("pause and resume show up as holds in the queue", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
@@ -871,7 +871,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // queue is the relay's) and sends it nothing. When it goes, the real daemon
   // leads under a higher term and runs what was queued.
   test("a squatter is never nominated; a stolen listed seed reads as leader unverified, and nothing is sent to either", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const watch = watchLeader(stack.relay);
     const squatterId = await newDeviceId();
     let squatter: Awaited<ReturnType<typeof connectDaemon>> | null = null;
@@ -984,7 +984,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // thief apart: the relay minted a term the machine never heard, and the proof
   // it sealed for an older one, replayed, names the wrong term.
   test("a stolen seed registering the machine's own info blob, and replaying its last proof, reads as leader unverified", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const watch = watchLeader(stack.relay);
     let thief: Awaited<ReturnType<typeof connectDaemon>> | null = null;
     let down = false;

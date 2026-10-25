@@ -1,5 +1,5 @@
-import { CAPABILITIES, isSpawnErrorCode, sentence, taskFailureText } from "@seance/shared";
-import type { BatchStrategy, Machine, RelayState, RepoEntry } from "@seance/shared";
+import { accountNameIn, CAPABILITIES, knownAccounts, sentence, taskFailureText } from "@seance/shared";
+import type { BatchStrategy, KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -50,19 +50,42 @@ export interface PrimaryButton {
   readonly busy: boolean;
 }
 
-/** The machine picker's `auto` row, greyed with the reason whenever nothing could answer it. */
+/** Queuing's availability: needs an open relay, and says when a task will wait for a scheduler. */
 export interface AutoAvailability {
   readonly available: boolean;
-  /** Why it is greyed; null while available. */
+  /** Why it is unavailable; null while available. */
   readonly reason: string | null;
   /** Available but not leaderless-proof: the task waits in the relay's queue until a scheduler leads. */
   readonly note: string | null;
 }
 
-/** A repo as `auto` names it: by origin, labelled by its path on the host. */
+/** A repo by origin, labelled by its path on the host. */
 export interface AutoRepo {
   readonly origin: string;
   readonly label: string;
+}
+
+/** One row of the Machine sheet. */
+export interface MachineChoice {
+  readonly machine: Machine;
+  readonly sub: string;
+  readonly disabled: boolean;
+  readonly selected: boolean;
+}
+
+/** One row of the Account sheet: an account some exclave reports signed in. */
+export interface AccountChoice {
+  readonly accountId: string;
+  readonly label: string;
+  readonly sub: string;
+  readonly disabled: boolean;
+  readonly selected: boolean;
+}
+
+/** Why the form's pins can't be queued, as the button's label and the sentence under it. */
+export interface PinProblem {
+  readonly label: string;
+  readonly text: string;
 }
 
 export interface ViewModel {
@@ -73,10 +96,11 @@ export interface ViewModel {
   readonly relayLine: string;
   readonly banner: Banner | null;
   readonly machineTile: Tile;
+  readonly accountTile: Tile;
   readonly repoTile: Tile;
   readonly modelTile: Tile;
   readonly effortTile: Tile;
-  /** `auto`'s authoring tiles: the tasks this one waits on, and the batch it joins. */
+  /** The authoring tiles: the tasks this one waits on, and the batch it joins. */
   readonly afterTile: Tile;
   readonly batchTile: Tile;
   /** The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities). */
@@ -85,11 +109,19 @@ export interface ViewModel {
   readonly footerStatus: string;
   readonly button: PrimaryButton;
   readonly ignoredNote: string | null;
+  /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
-  readonly repo: RepoEntry | null;
+  /** The pinned accountId; null on auto. Set even when no machine reports it. */
+  readonly account: string | null;
+  /** The repo the task would run, by origin; null when nothing in scope has one. */
+  readonly repo: AutoRepo | null;
+  /** Every repo in scope of the pins. */
+  readonly repos: readonly AutoRepo[];
   readonly autoAvailability: AutoAvailability;
-  /** Non-null while the form is on `auto`. */
-  readonly auto: { readonly repo: AutoRepo | null; readonly repos: readonly AutoRepo[] } | null;
+  readonly machineChoices: readonly MachineChoice[];
+  readonly accountChoices: readonly AccountChoice[];
+  /** The preview asks a leader to route the form, which drops a pin: it is shown with both pickers on auto only. */
+  readonly previewShown: boolean;
   /** A task escalated for input is waiting: the phone's header menu says so. */
   readonly queueAttention: boolean;
 }
@@ -110,12 +142,10 @@ export interface AppState {
   /** The machines screen's open chart; cleared with the screen. */
   readonly history: HistoryView | null;
   readonly spawning: boolean;
-  /** A repo_not_found retry rescans before it spawns; the button names which of the two is running. */
-  readonly rescanning: boolean;
-  /** The repo sheet's rescan row; a failure is cleared once its sheet closes. */
+  /** The Machine sheet's rescan action; a failure is cleared once its sheet closes. */
   readonly rescan: RescanState;
   readonly verdict: Verdict | null;
-  /** The `auto` form's `route-preview`; null while the form is on a machine. */
+  /** The form's `route-preview`; null while either picker is pinned. */
   readonly preview: PreviewState | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
   readonly sessions: Readonly<Record<string, SessionsView | "unknown">>;
@@ -214,56 +244,6 @@ export function abbreviatePath(path: string, paths: readonly string[]): string {
   return labelFor({ path, own: segments(path) }, sharedPrefix(distinct), distinct.length === 1);
 }
 
-/**
- * The designed failure body describes a dead pane, which is wrong for codes
- * where no window ever opened. Its worktree clause is dropped as well: the
- * daemon passes --worktree to claude, so a claude that died on a bad flag
- * created nothing to leave behind.
- *
- * Takes the raw string: `code` arrives from a daemon that may be a version
- * ahead, and an unlisted one used to render a blank card. The guard funnels
- * those to the generic line while the switch stays compiler-checked exhaustive
- * over the codes this build knows — a new SpawnErrorCode is a type error here.
- */
-export function failureBody(code: string, repo: string, machine: string): string {
-  if (!isSpawnErrorCode(code)) {
-    return "The daemon refused the spawn. Check the machine to see whether anything is running.";
-  }
-  switch (code) {
-    case "claude_died":
-      return "The window opened, but claude exited before the session started. Nothing is running.";
-    case "launch_error":
-      return "The daemon couldn't open a window for the session. Nothing is running.";
-    case "repo_not_found":
-      return `${repo} isn't on ${machine} anymore. Rescan its repos and try again.`;
-    case "task_running":
-      // The app sends no taskId, so only a daemon answering someone else's request says this.
-      return `That task is already running on ${machine}. Nothing new was started.`;
-    case "task_launched":
-      // Refused only to the scheduler's own spawns, which the app never sends.
-      return `That task already ran on ${machine}, so it was not started again.`;
-    case "fetch_failed":
-    case "timeout":
-      return "Couldn't reach the git remote in time. Nothing is running.";
-    case "no_default_branch":
-      return `Couldn't work out ${repo}'s default branch, so there was nothing to branch from.`;
-    case "base_not_found":
-      return `The branch to stack on isn't on ${machine}'s remote for ${repo}, so there was nothing to branch from.`;
-    case "internal_error":
-      return "The daemon hit an error before the session started.";
-    case "too_large":
-      // The transport's verdict on the reply, not the spawn: a success embeds the
-      // session list, so this one may well be running.
-      return "The daemon's answer was too large to send back, so the session may be running. Check the machine before trying again.";
-  }
-}
-
-function offlineBody(machine: Machine): string {
-  return machine.platform === "darwin"
-    ? "Séance only holds a Mac awake while it is plugged in. Plug it in, or pick a machine that is online."
-    : "No socket to the relay. Wake the machine, or check its keepalive task.";
-}
-
 function sessionCount(state: AppState, deviceId: string): number | null {
   const entry = state.sessions[deviceId];
   if (entry === undefined || entry === "unknown") return null;
@@ -359,23 +339,165 @@ export function originLabel(origin: string): string {
   return slash === -1 ? origin : origin.slice(slash + 1);
 }
 
-/** Every repo some machine has a clone of, by origin, once each — what `auto` can be asked to run. */
-export function autoRepos(machines: readonly Machine[]): readonly AutoRepo[] {
+type Pins = Pick<PersistedForm, "machine" | "account">;
+
+/**
+ * Every repo the task could run, by origin, once each: the clones of every
+ * machine, narrowed to the pinned machine, and to the exclaves of the pinned
+ * account. Strict, as `inAccount` in `daemon/src/auto.ts` is: a clone from a
+ * daemon predating exclaves is in no account.
+ */
+export function scopedRepos(machines: readonly Machine[], pins: Pins): readonly AutoRepo[] {
   const origins = new Set<string>();
   for (const machine of machines) {
-    for (const repo of machine.repos) if (repo.origin !== undefined) origins.add(repo.origin);
+    if (pins.machine !== null && machine.deviceId !== pins.machine) continue;
+    const homes =
+      pins.account === null
+        ? null
+        : new Set((machine.exclaves ?? []).filter((x) => x.accountId === pins.account).map((x) => x.id));
+    for (const repo of machine.repos) {
+      if (repo.origin === undefined) continue;
+      if (homes !== null && (repo.exclave === undefined || !homes.has(repo.exclave))) continue;
+      origins.add(repo.origin);
+    }
   }
   return [...origins]
     .map((origin) => ({ origin, label: originLabel(origin) }))
     .toSorted((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 }
 
-/** The remembered origin, else the first — as `resolveRepo` falls back for a machine. */
-export function resolveAutoRepo(repos: readonly AutoRepo[], form: PersistedForm): AutoRepo | null {
-  return repos.find((repo) => repo.origin === form.autoRepo) ?? repos[0] ?? null;
+/** `route-preview` drops a pin (`parseTaskRequest`), so a pinned form would be previewed as an unpinned one: it is not asked. */
+export function previewAsked(form: Pins): boolean {
+  return form.machine === null && form.account === null;
 }
 
-function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
+/** Every repo some machine has a clone of — what an unpinned task can be asked to run. */
+export function autoRepos(machines: readonly Machine[]): readonly AutoRepo[] {
+  return scopedRepos(machines, { machine: null, account: null });
+}
+
+/** The remembered origin, else the first of those in scope. */
+export function resolveRepo(repos: readonly AutoRepo[], form: PersistedForm): AutoRepo | null {
+  return repos.find((repo) => repo.origin === form.repo) ?? repos[0] ?? null;
+}
+
+/**
+ * `pin.account` is written only to a verified leader that advertises
+ * `pinAccount`: an older one would drop it from the spec, or hold the task
+ * unreadable. With no verified leader it can't be confirmed either, so nothing
+ * is written — unlike a plain task, which waits in the store.
+ */
+export function derivePinAccountAvailability(relay: RelayState): "available" | "unsupported" | "no-leader" {
+  const { scheduler } = relay;
+  if (relay.status !== "open" || scheduler.kind !== "ready") return "no-leader";
+  const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
+  return leader?.capabilities?.includes(CAPABILITIES.pinAccount) === true ? "available" : "unsupported";
+}
+
+const collator = new Intl.Collator();
+
+function aliasOf(aliases: Readonly<Record<string, string>>, accountId: string): string | undefined {
+  return Object.hasOwn(aliases, accountId) ? aliases[accountId] : undefined;
+}
+
+/** The accounts some exclave reports signed in, plus the form's own pin: one that no machine reports still gets a label. */
+function formAccounts(machines: readonly Machine[], form: PersistedForm): KnownAccount[] {
+  return knownAccounts(machines, form.account === null ? [] : [form.account]);
+}
+
+function hasAccount(machine: Machine, accountId: string): boolean {
+  return (machine.exclaves ?? []).some((x) => x.accountId === accountId);
+}
+
+/**
+ * Why the form's pins can't be queued, mirroring `resolvePlacement` in
+ * `daemon/src/auto.ts`: neither picker resets the other, so a pair that no
+ * longer fits (the registry changed under a persisted pin) is refused here.
+ * One resolver for the button and `Store.spawn`.
+ */
+export function derivePinProblem(
+  relay: RelayState,
+  form: PersistedForm,
+  aliases: Readonly<Record<string, string>>,
+): PinProblem | null {
+  const machine = form.machine === null ? undefined : relay.machines.find((m) => m.deviceId === form.machine);
+  const { account } = form;
+  if (account !== null) {
+    const known = formAccounts(relay.machines, form);
+    const name = accountNameIn(known, account, aliasOf(aliases, account));
+    if (!relay.machines.some((m) => hasAccount(m, account))) {
+      return { label: "Account not signed in", text: `${name} isn't signed in on any machine` };
+    }
+    const gate = derivePinAccountAvailability(relay);
+    if (gate === "unsupported") {
+      return {
+        label: "Can't pin an account",
+        text: "The scheduler's leader can't pin an account yet — update seanced on its machine",
+      };
+    }
+    if (gate === "no-leader") {
+      return {
+        label: "Can't pin an account",
+        text: "No verified scheduler is leading, so an account pin can't be confirmed; try again once one leads",
+      };
+    }
+    if (machine !== undefined && !hasAccount(machine, account)) {
+      return { label: "Account not on that machine", text: `${name} isn't signed in on ${machine.name}` };
+    }
+  }
+  if (machine !== undefined && (machine.exclaves ?? []).length === 0) {
+    return {
+      label: "Machine needs an update",
+      text: `${machine.name} reports no exclaves, so the scheduler can't place there — its daemon needs an update`,
+    };
+  }
+  return null;
+}
+
+function deriveMachineChoices(state: AppState, now: number): readonly MachineChoice[] {
+  const { relay, form } = state;
+  const known = formAccounts(relay.machines, form);
+  return relay.machines
+    .toSorted((a, b) => collator.compare(a.name, b.name))
+    .map((machine) => {
+      const base = machine.connected
+        ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"}`
+        : `offline · last seen ${formatSeen(machine.lastSeen, now)}`;
+      let disabled = false;
+      let sub = base;
+      if ((machine.exclaves ?? []).length === 0) {
+        disabled = true;
+        sub = "its daemon needs an update";
+      } else if (form.account !== null && !hasAccount(machine, form.account)) {
+        disabled = true;
+        sub = `${accountNameIn(known, form.account, aliasOf(state.accounts.aliases, form.account))} isn't signed in here`;
+      }
+      return { machine, sub, disabled, selected: machine.deviceId === form.machine };
+    });
+}
+
+function deriveAccountChoices(state: AppState): readonly AccountChoice[] {
+  const { relay, form } = state;
+  const known = formAccounts(relay.machines, form);
+  const pinned = form.machine === null ? undefined : relay.machines.find((m) => m.deviceId === form.machine);
+  return known
+    .filter(({ accountId }) => relay.machines.some((m) => hasAccount(m, accountId)))
+    .map(({ accountId }) => {
+      const label = accountNameIn(known, accountId, aliasOf(state.accounts.aliases, accountId));
+      const where = relay.machines.filter((m) => hasAccount(m, accountId)).map((m) => m.name);
+      const away = pinned !== undefined && !hasAccount(pinned, accountId);
+      return {
+        accountId,
+        label,
+        sub: away ? `not signed in on ${pinned.name}` : `on ${where.join(", ")}`,
+        disabled: away,
+        selected: accountId === form.account,
+      };
+    })
+    .toSorted((a, b) => collator.compare(a.label, b.label));
+}
+
+function deriveBanner(state: AppState): Banner | null {
   const { relay } = state;
   if (relay.rejection !== null) {
     return {
@@ -440,29 +562,27 @@ function deriveBanner(state: AppState, machine: Machine | null): Banner | null {
       opensSettings: false,
     };
   }
-  if (state.form.auto) return null;
-  if (machine !== null && !machine.connected) {
-    return { title: `${machine.name} is offline`, body: offlineBody(machine), tone: "fg2", opensSettings: false };
-  }
   return null;
 }
 
-function deriveFooterStatus(state: AppState, machine: Machine | null, now: number): string {
-  if (state.form.auto) {
-    const { reason, note } = deriveAutoAvailability(state.relay);
-    return reason ?? note ?? "The scheduler picks the machine";
-  }
-  if (machine === null) return "";
-  if (!machine.connected) return `Last seen ${formatSeen(machine.lastSeen, now)} · sessions unknown`;
-  const count = sessionCount(state, machine.deviceId);
-  if (count === null) return `Checking sessions on ${machine.name}…`;
-  if (count === 0) return `Nothing running on ${machine.name} right now`;
-  return `${count} claude ${count === 1 ? "session" : "sessions"} already on ${machine.name}`;
+/** An offline pin is not a block: the task waits for the machine, as `resolvePlacement` notes. */
+function deriveFooterStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string {
+  const { reason, note } = deriveAutoAvailability(state.relay);
+  if (reason !== null) return reason;
+  if (problem !== null) return problem.text;
+  if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
+  if (note !== null) return note;
+  return machine === null ? "The scheduler picks the machine" : `Pinned to ${machine.name}`;
 }
 
 const blocked = (label: string): PrimaryButton => ({ label, enabled: false, busy: false });
 
-function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
+function deriveButton(
+  state: AppState,
+  machine: Machine | null,
+  repo: AutoRepo | null,
+  problem: PinProblem | null,
+): PrimaryButton {
   const { relay } = state;
 
   if (relay.rejection !== null) return blocked("Bearer token rejected");
@@ -473,22 +593,11 @@ function deriveButton(state: AppState, machine: Machine | null): PrimaryButton {
     if (relay.unbound > 0) return blocked("Registry tampered");
     return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
   }
-  // Ahead of `spawning`, which it precedes: the two are never both set.
-  if (state.rescanning) return { label: "Rescanning…", enabled: false, busy: true };
-  if (state.form.auto) {
-    if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
-    if (!deriveAutoAvailability(relay).available) return blocked("Auto is unavailable");
-    if (resolveAutoRepo(autoRepos(relay.machines), state.form) === null) return blocked("No repo to run");
-    return { label: "Queue on auto", enabled: true, busy: false };
-  }
-  if (state.spawning) return { label: "Starting…", enabled: false, busy: true };
-  if (machine === null) return blocked("Pick a machine");
-  if (!machine.connected) return blocked(`${machine.name} is asleep`);
-  return {
-    label: state.form.prompt.trim() === "" ? "Start empty session" : "Start with this prompt",
-    enabled: true,
-    busy: false,
-  };
+  if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
+  if (!deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
+  if (problem !== null) return blocked(problem.label);
+  if (repo === null) return blocked("No repo to run");
+  return { label: machine === null ? "Queue" : `Queue on ${machine.name}`, enabled: true, busy: false };
 }
 
 /**
@@ -509,90 +618,73 @@ function deriveIgnoredNote(relay: RelayState): string | null {
   return notes.length === 0 ? null : notes.join(" · ");
 }
 
-/** First connected machine, else first listed — the form may hold a machine that has gone. */
-export function resolveMachine(relay: RelayState, machineId: string | null): Machine | null {
-  const chosen = relay.machines.find((machine) => machine.deviceId === machineId);
-  if (chosen !== undefined) return chosen;
-  return relay.machines.find((machine) => machine.connected) ?? relay.machines[0] ?? null;
-}
-
-/** The machine's remembered repo, else its first — the form may name one that has gone. */
-export function resolveRepo(machine: Machine | null, form: PersistedForm): RepoEntry | null {
-  if (machine === null) return null;
-  const remembered = form.repos[machine.deviceId];
-  return machine.repos.find((repo) => repo.name === remembered) ?? machine.repos[0] ?? null;
-}
-
 export function deriveView(state: AppState, now: number): ViewModel {
-  const machine = resolveMachine(state.relay, state.form.machineId);
-  const repo = resolveRepo(machine, state.form);
-  const repoLabel =
-    machine !== null && repo !== null
-      ? abbreviatePath(
-          repo.path,
-          machine.repos.map((entry) => entry.path),
-        )
-      : null;
-
-  const auto = state.form.auto;
-  const repos = auto ? autoRepos(state.relay.machines) : [];
-  const autoRepo = auto ? resolveAutoRepo(repos, state.form) : null;
+  const { relay, form } = state;
+  const { account } = form;
+  const machine = form.machine === null ? null : (relay.machines.find((m) => m.deviceId === form.machine) ?? null);
+  const repos = scopedRepos(relay.machines, form);
+  const repo = resolveRepo(repos, form);
+  const problem = derivePinProblem(relay, form, state.accounts.aliases);
+  const availability = deriveAutoAvailability(relay);
+  const known = formAccounts(relay.machines, form);
+  const signedIn = account !== null && relay.machines.some((m) => hasAccount(m, account));
 
   return {
     meta: deriveMeta(state),
-    relayState: state.relay.status === "open" ? "connected" : state.relay.settling ? "connecting" : "offline",
-    relayLine: deriveRelayLine(state.relay),
-    banner: deriveBanner(state, machine),
-    machineTile: auto
-      ? {
-          label: "MACHINE",
-          value: "Auto",
-          mono: false,
-          dot: deriveAutoAvailability(state.relay).available ? "auto" : "off",
-        }
-      : {
-          label: "MACHINE",
-          value: machine?.name ?? "No machines",
-          mono: false,
-          dot: machine === null ? null : machine.connected ? "ok" : "off",
-        },
-    repoTile: {
-      label: "REPOSITORY",
-      value: (auto ? autoRepo?.label : repoLabel) ?? "No repos",
-      mono: true,
-      dot: null,
-    },
+    relayState: relay.status === "open" ? "connected" : relay.settling ? "connecting" : "offline",
+    relayLine: deriveRelayLine(relay),
+    banner: deriveBanner(state),
+    machineTile:
+      form.machine === null
+        ? { label: "MACHINE", value: "Auto", mono: false, dot: availability.available ? "auto" : "off" }
+        : {
+            label: "MACHINE",
+            value: machine?.name ?? "Unknown machine",
+            mono: false,
+            dot: machine?.connected === true ? "ok" : "off",
+          },
+    accountTile:
+      account === null
+        ? { label: "ACCOUNT", value: "Auto", mono: false, dot: availability.available ? "auto" : "off" }
+        : {
+            label: "ACCOUNT",
+            value: `${accountNameIn(known, account, aliasOf(state.accounts.aliases, account))}${signedIn ? "" : " · signed in nowhere"}`,
+            mono: false,
+            dot: signedIn ? "ok" : "off",
+          },
+    repoTile: { label: "REPOSITORY", value: repo?.label ?? "No repos", mono: true, dot: null },
     modelTile: {
       label: "MODEL",
-      value: MODEL_LABELS[state.form.model],
+      value: MODEL_LABELS[form.model],
       mono: false,
       dot: null,
     },
     effortTile: {
       label: "EFFORT",
-      value: EFFORT_LABELS[state.form.effort],
+      value: EFFORT_LABELS[form.effort],
       mono: false,
       dot: null,
     },
-    afterTile: { label: "AFTER", value: afterValue(state.form.after), mono: false, dot: null },
+    afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     batchTile: {
       label: "BATCH",
-      value:
-        state.form.batch === null
-          ? "Off"
-          : `#${state.form.batch.next} · ${describeStrategy(state.form.batch.strategy)}`,
+      value: form.batch === null ? "Off" : `#${form.batch.next} · ${describeStrategy(form.batch.strategy)}`,
       mono: false,
       dot: null,
     },
-    reportedAvailable: deriveReportedAvailability(state.relay),
-    worktreeHint: state.form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
-    footerStatus: deriveFooterStatus(state, machine, now),
-    button: deriveButton(state, machine),
-    ignoredNote: deriveIgnoredNote(state.relay),
+    reportedAvailable: deriveReportedAvailability(relay),
+    worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
+    footerStatus: deriveFooterStatus(state, machine, problem),
+    button: deriveButton(state, machine, repo, problem),
+    ignoredNote: deriveIgnoredNote(relay),
     machine,
+    account,
     repo,
-    autoAvailability: deriveAutoAvailability(state.relay),
-    auto: auto ? { repo: autoRepo, repos } : null,
+    repos,
+    autoAvailability: availability,
+    machineChoices: deriveMachineChoices(state, now),
+    accountChoices: deriveAccountChoices(state),
+    previewShown: previewAsked(form),
     queueAttention:
       state.queueView?.kind === "ok" &&
       state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),

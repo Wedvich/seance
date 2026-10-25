@@ -19,7 +19,7 @@ import {
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
 import type { AppState } from "./view.ts";
-import { autoRepos, deriveAutoAvailability, resolveAutoRepo } from "./view.ts";
+import { deriveAutoAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
 
 /**
  * The app's side of the scheduler, apart from `Store`'s layers, form and
@@ -174,7 +174,7 @@ export class SchedulerStore {
   /** A relay change with the socket open: `reopened` when it had been closed. */
   onOpen(relay: RelayState, reopened: boolean): void {
     this.#catchUpQueue(relay.scheduler, reopened);
-    if (!this.#state.form.auto) return;
+    if (!previewAsked(this.#state.form)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
   }
@@ -280,8 +280,8 @@ export class SchedulerStore {
     const { form, relay } = this.#state;
     this.#previewedLeader = schedulerKey(relay.scheduler);
     this.#previewedFleet = fleetKey(relay.machines);
-    const repo = resolveAutoRepo(autoRepos(relay.machines), form);
-    if (!form.auto || !deriveAutoAvailability(relay).available || repo === null) {
+    const repo = resolveRepo(scopedRepos(relay.machines, form), form);
+    if (!previewAsked(form) || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
       return;
     }
@@ -429,7 +429,7 @@ export class SchedulerStore {
       this.#patch({ queueView: next, ...(nudged && !this.#noticeFromRead ? {} : { queueNotice: null }) });
       // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
       // compare: the preview was asked under whatever holds stood.
-      if (this.#state.form.auto && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
+      if (previewAsked(this.#state.form) && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
         this.#askPreviewSoon();
       }
       return;
@@ -535,7 +535,7 @@ export class SchedulerStore {
         const view = this.#state.queueView;
         if (view?.kind === "ok") this.#patch({ queueView: { ...view, holds: reply.holds } });
         else void this.refreshQueue();
-        if (this.#state.form.auto) void this.refreshPreview();
+        if (previewAsked(this.#state.form)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);

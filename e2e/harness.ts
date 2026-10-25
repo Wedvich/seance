@@ -25,7 +25,7 @@ import {
   type ClaudeStub,
   type GitFixture,
 } from "../daemon/test/fixtures.ts";
-import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/state.ts";
+import { DEFAULT_FORM, type PersistedForm } from "../pwa/src/state.ts";
 import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
 import type { AppState } from "../pwa/src/view.ts";
@@ -445,7 +445,6 @@ export interface AppHandle {
 export function startApp(
   stack: Stack,
   form: Partial<PersistedForm> = {},
-  pending: PendingSpawn | null = null,
   /**
    * `accounts`: with the PWA's account key, so it lists `account:` on open. Opt-in
    * because the relay's list bucket is shared by every app: a listing per app in
@@ -461,7 +460,7 @@ export function startApp(
     timeouts: { sessions: 4_000, rescan: 5_000, spawn: 15_000 },
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
   });
-  const store = new Store(client, { ...DEFAULT_FORM, ...form }, pending);
+  const store = new Store(client, { ...DEFAULT_FORM, ...form });
   const detach = store.attach();
   client.start();
 

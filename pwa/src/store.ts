@@ -4,12 +4,9 @@ import type {
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
-  RepoEntry,
   RescanResponse,
   SessionsResponse,
   SpawnClient,
-  SpawnRequest,
-  SpawnResponse,
   Task,
   TaskSpec,
   TaskUntil,
@@ -30,6 +27,7 @@ import {
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   RANGE_SPANS,
+  RESCAN_IDLE,
   TARGET_METRICS,
   type Effort,
   type HistoryRange,
@@ -37,7 +35,6 @@ import {
   type HistoryTarget,
   type HistoryView,
   type Model,
-  type PendingSpawn,
   type PersistedForm,
   type SheetKind,
   type Verdict,
@@ -47,12 +44,11 @@ import { accountSeries } from "./chart.ts";
 import { SchedulerStore, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
-  autoRepos,
   deriveAutoAvailability,
+  derivePinProblem,
   deriveReportedAvailability,
-  resolveAutoRepo,
-  resolveMachine,
   resolveRepo,
+  scopedRepos,
 } from "./view.ts";
 
 /**
@@ -125,7 +121,6 @@ export class Store {
    * whenever the socket isn't open, which keeps every re-dial a full refresh.
    */
   #wokenAt = new Map<string, number>();
-  #pending: PendingSpawn | null = null;
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
   #historyRange: HistoryRange = DEFAULT_HISTORY_RANGE;
   /** Tells this document's history entries from ones a previous load left behind. */
@@ -141,7 +136,7 @@ export class Store {
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
 
-  constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, pending: PendingSpawn | null = null) {
+  constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM) {
     this.#client = client;
     this.#queue = new SchedulerStore(
       client,
@@ -153,7 +148,6 @@ export class Store {
       () => this.#state,
       (next) => this.#patch(next),
     );
-    this.#pending = pending;
     this.#state = {
       relay: client.getState(),
       form,
@@ -163,8 +157,7 @@ export class Store {
       machines: false,
       history: null,
       spawning: false,
-      rescanning: false,
-      rescan: "idle",
+      rescan: RESCAN_IDLE,
       verdict: null,
       preview: null,
       sessions: {},
@@ -246,19 +239,16 @@ export class Store {
     const woken = connected.filter((machine) => this.#wokenAt.get(machine.deviceId) !== machine.lastSeen);
     for (const machine of connected) this.#wokenAt.set(machine.deviceId, machine.lastSeen);
     if (woken.length > 0) void this.#fetchSessions(woken.map((machine) => machine.deviceId));
-    // Never while the spawn is still in flight: any relay change (a status beat, a
-    // registry push) lands here, and reconciling then spends the pending record on
-    // a question the reply is about to answer — leaving nothing to reconcile if the
-    // reply is the thing that gets dropped.
-    if (this.#pending !== null && !this.#state.spawning) void this.#reconcile();
     this.#queue.onOpen(relay, reopened);
     this.#accounts.onOpen(reopened);
   }
 
   /**
    * Drops everything keyed by a deviceId the registry no longer lists — the
-   * remembered repo, the selection, the session list and the wake mark. Nothing
-   * brings that id back: a reinstall mints a new one, so all of it is dead state.
+   * machine pick, the session list and the wake mark. Nothing brings that id
+   * back: a reinstall mints a new one, so all of it is dead state. The account
+   * pick stays: an account is no machine's, and one signed in nowhere shows as
+   * that rather than silently turning to auto.
    * Doing it here rather than at the bin is what makes a refused or undelivered
    * forget leave the app untouched.
    */
@@ -267,15 +257,10 @@ export class Store {
     for (const deviceId of [...this.#wokenAt.keys()]) if (!live.has(deviceId)) this.#wokenAt.delete(deviceId);
 
     const { form, sessions } = this.#state;
-    const repos = Object.fromEntries(Object.entries(form.repos).filter(([id]) => live.has(id)));
     const kept = Object.fromEntries(Object.entries(sessions).filter(([id]) => live.has(id)));
-    const machineId = form.machineId !== null && !live.has(form.machineId) ? null : form.machineId;
     // Same objects back when nothing was dropped: #patch bails on identity.
     return {
-      form:
-        machineId === form.machineId && Object.keys(repos).length === Object.keys(form.repos).length
-          ? form
-          : { ...form, machineId, repos },
+      form: form.machine !== null && !live.has(form.machine) ? { ...form, machine: null } : form,
       sessions: Object.keys(kept).length === Object.keys(sessions).length ? sessions : kept,
     };
   }
@@ -300,36 +285,6 @@ export class Store {
         }
       }),
     );
-  }
-
-  /**
-   * A spawn reply is lost if the app is backgrounded while the daemon works, and
-   * a blind relay cannot queue it. The honest recovery is to ask the machine what
-   * is running rather than guess, or claim a failure that may be a live session.
-   */
-  async #reconcile(): Promise<void> {
-    const pending = this.#pending;
-    if (pending === null) return;
-    this.#pending = null;
-    const machine = this.#state.relay.machines.find((entry) => entry.deviceId === pending.machineId);
-    let count: number | null = null;
-    try {
-      const reply = await this.#client.request<SessionsResponse>(pending.machineId, "sessions", {});
-      if ("ok" in reply) throw new Error(reply.code);
-      count = reply.sessions.length;
-      this.#patch({
-        sessions: { ...this.#state.sessions, [pending.machineId]: { sessions: reply.sessions, at: reply.at } },
-      });
-    } catch {
-      count = null;
-    }
-    this.#showVerdict({
-      kind: "unknown",
-      reason: "dropped",
-      machine: machine?.name ?? "that machine",
-      sessionCount: count,
-    });
-    this.#patch({ spawning: false });
   }
 
   /** Typing retires the offer: the stashed text is no longer what the field lost. */
@@ -366,29 +321,32 @@ export class Store {
     this.#undoTimer = null;
   }
 
-  /** Restores that machine's last repo (falling back to its first) and clears any verdict. */
-  selectMachine(machineId: string): void {
+  /** Pins the machine (null is auto) and clears any verdict. The account pick stays: neither picker resets the other. */
+  pickMachine(machine: string | null): void {
+    this.#pick({ machine });
+  }
+
+  /** Pins the account (null is auto); see `pickMachine`. */
+  pickAccount(account: string | null): void {
+    this.#pick({ account });
+  }
+
+  #pick(pins: Partial<Pick<PersistedForm, "machine" | "account">>): void {
     // Counted before the patch: clearing the verdict here would otherwise leave
     // its entry behind once the sheet's back had been spent. Settings is not the
     // sheet's to close.
     const open = this.#sheetAndVerdictOpen();
-    this.#patch({ form: { ...this.#state.form, machineId, auto: false }, verdict: null, preview: null });
+    const { form, relay } = this.#state;
+    const next = { ...form, ...pins };
+    // The repo stays unless the new pins leave it no clone: then the first in scope takes over.
+    const inScope = next.repo === null || scopedRepos(relay.machines, next).some((repo) => repo.origin === next.repo);
+    this.#patch({ form: inScope ? next : { ...next, repo: null }, verdict: null });
     if (open > 0) history.go(-open);
-  }
-
-  /**
-   * The picker's `auto`: the scheduler places the spawn. Refused only while the
-   * relay is unreachable — the row is greyed then, and this is its backstop.
-   */
-  selectAuto(): void {
-    if (!deriveAutoAvailability(this.#state.relay).available) return;
-    const open = this.#sheetAndVerdictOpen();
-    this.#patch({ form: { ...this.#state.form, auto: true }, verdict: null });
-    if (open > 0) history.go(-open);
+    // Clears the preview when either is pinned: route-preview drops a pin.
     void this.refreshPreview();
   }
 
-  /** The history entries a machine pick closes. */
+  /** The history entries a picker's pick closes. */
   #sheetAndVerdictOpen(): number {
     const { sheet, verdict } = this.#state;
     return (sheet === null ? 0 : 1) + (verdict === null ? 0 : 1);
@@ -409,20 +367,11 @@ export class Store {
     this.#client.forget(machineId);
   }
 
-  /** On `auto`, `repo` is an origin, and the choice is the form's, not a machine's. */
+  /** `repo` is an origin: the choice is the form's, not a machine's. */
   selectRepo(repo: string): void {
-    const { form, relay } = this.#state;
-    if (form.auto) {
-      this.#patch({ form: { ...form, autoRepo: repo } });
-      this.dismissLayer();
-      void this.refreshPreview();
-      return;
-    }
-    // Keyed by the resolved machine, not form.machineId, which is null until picked.
-    const machine = resolveMachine(relay, form.machineId);
-    const repos = machine === null ? form.repos : { ...form.repos, [machine.deviceId]: repo };
-    this.#patch({ form: { ...form, repos } });
+    this.#patch({ form: { ...this.#state.form, repo } });
     this.dismissLayer();
+    void this.refreshPreview();
   }
 
   setModel(model: Model): void {
@@ -486,17 +435,16 @@ export class Store {
   }
 
   /**
-   * "Follow up" on a queue row: the form goes to `auto` with that task as its one
-   * dependency. The queue (and a verdict under it) closes like a machine pick's
-   * sheet does, so the form is what shows; in the desktop layout the queue is a
-   * column and stays.
+   * "Follow up" on a queue row: the form takes that task as its one dependency.
+   * The queue (and a verdict under it) closes like a machine pick's sheet does,
+   * so the form is what shows; in the desktop layout the queue is a column and stays.
    */
   followUp(taskId: string): void {
     const { form, relay, queue, verdict } = this.#state;
     if (!deriveAutoAvailability(relay).available) return;
     const open = (queue ? 1 : 0) + (verdict === null ? 0 : 1);
     this.#patch({
-      form: { ...form, auto: true, after: [{ task: taskId, after: "opened" }] },
+      form: { ...form, after: [{ task: taskId, after: "opened" }] },
       queue: false,
       queueNotice: null,
       verdict: null,
@@ -675,7 +623,7 @@ export class Store {
     if (sheet !== null) {
       // Cleared on the way out, not on the next open: a failure that landed while
       // another layer was up would otherwise be reset before it was ever shown.
-      const rescan = sheet === "repo" && this.#state.rescan === "failed" ? "idle" : this.#state.rescan;
+      const rescan = sheet === "machine" && this.#state.rescan.kind === "failed" ? RESCAN_IDLE : this.#state.rescan;
       this.#patch({ sheet: null, rescan });
       return;
     }
@@ -710,16 +658,16 @@ export class Store {
     this.#patch({ verdict });
   }
 
-  async rescan(): Promise<void> {
-    const machine = resolveMachine(this.#state.relay, this.#state.form.machineId);
-    if (machine === null || this.#state.rescan === "scanning") return;
-    this.#patch({ rescan: "scanning" });
+  /** One machine's `rescan`, from its row on the Machine sheet; only that row shows it scanning or failed. */
+  async rescan(deviceId: string): Promise<void> {
+    if (this.#state.rescan.kind === "scanning") return;
+    this.#patch({ rescan: { kind: "scanning", deviceId } });
     try {
-      await this.#rescan(machine.deviceId);
-      this.#patch({ rescan: "idle" });
+      await this.#rescan(deviceId);
+      this.#patch({ rescan: RESCAN_IDLE });
     } catch {
       // The previous list stays in place — the truth we had — with the failure said inline.
-      this.#patch({ rescan: "failed" });
+      this.#patch({ rescan: { kind: "failed", deviceId } });
     }
   }
 
@@ -728,26 +676,30 @@ export class Store {
    * re-registers just when the repo set moved, so waiting for a registry push
    * would leave the row asserting the previous scan's time.
    */
-  async #rescan(deviceId: string): Promise<readonly RepoEntry[]> {
+  async #rescan(deviceId: string): Promise<void> {
     const reply = await this.#client.request<RescanResponse>(deviceId, "rescan", {});
     if ("ok" in reply) throw new Error(reply.code);
-    const parsed = this.#client.applyScan(deviceId, reply);
     // A reply this build can't read is a failed rescan, not a shorter list.
-    if (parsed === null) throw new Error("unreadable rescan reply");
-    return parsed.repos;
+    if (this.#client.applyScan(deviceId, reply) === null) throw new Error("unreadable rescan reply");
   }
 
   /**
-   * `auto` is a task written to the relay's store (`createTask`), which answers
-   * for itself: no leader need be up, and whichever one leads next reads it. A
-   * machine picked directly is the daemon's own spawn below.
+   * Every spawn is a task written to the relay's store (`createTask`), which
+   * answers for itself: no leader need be up, and whichever one leads next reads
+   * it. A picked machine or account is a pin on it, never a direct spawn.
    */
-  async #submitAuto(): Promise<void> {
+  async #submit(): Promise<void> {
     const { relay, form } = this.#state;
-    const repo = resolveAutoRepo(autoRepos(relay.machines), form);
+    const repo = resolveRepo(scopedRepos(relay.machines, form), form);
     if (repo === null || !deriveAutoAvailability(relay).available || this.#state.spawning) return;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
     const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
+    // The button blocks these too; a form that changed since it rendered is stopped here.
+    const problem = derivePinProblem(relay, form, this.#state.accounts.aliases);
+    if (problem !== null) {
+      refusal(`${problem.text}.`);
+      return;
+    }
     const reported = form.until === "reported";
     // An older leader would drop `until` and hold a `done` edge unreadable, so neither is written to one.
     if ((reported || form.after.some((dep) => dep.after === "done")) && !deriveReportedAvailability(relay)) {
@@ -771,14 +723,20 @@ export class Store {
     if (length > TASK_REQUEST_LIMITS.prompt) {
       const instruction = reported ? " (with the instruction to report, which is added)" : "";
       refusal(
-        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine.`,
+        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or use \`seanced spawn --now\` on the machine.`,
       );
       return;
     }
     const issue = form.linearIssue.trim();
+    // Only ids: an alias or email is display text and never goes in a record.
+    const pin = {
+      ...(form.machine === null ? {} : { deviceId: form.machine }),
+      ...(form.account === null ? {} : { account: form.account }),
+    };
     const spec: TaskSpec = {
       ...request,
       ...(prompt === undefined ? {} : { prompt }),
+      ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
       ...(form.after.length === 0 ? {} : { deps: form.after }),
       ...(form.batch === null
@@ -848,68 +806,7 @@ export class Store {
   }
 
   async spawn(): Promise<void> {
-    if (this.#state.form.auto) {
-      await this.#submitAuto();
-      return;
-    }
-    const { relay, form } = this.#state;
-    const machine = resolveMachine(relay, form.machineId);
-    const repo = resolveRepo(machine, form);
-    if (machine === null || repo === null || !machine.connected || this.#state.spawning) return;
-
-    const prompt = form.prompt.trim();
-    // `title` is deliberately absent: the daemon derives the window name from the
-    // prompt slug, which is the shape the design shows.
-    const request: SpawnRequest = {
-      repo: repo.name,
-      mode: form.worktree ? "worktree" : "here",
-      model: form.model,
-      effort: form.effort,
-      client: "pwa" satisfies SpawnClient,
-      ...(prompt === "" ? {} : { prompt }),
-    };
-
-    this.#pending = { machineId: machine.deviceId, repo: repo.name, requestedAt: Date.now() };
-    this.#patch({ spawning: true, verdict: null });
-    try {
-      const reply = await this.#client.request<SpawnResponse>(machine.deviceId, "spawn", request);
-      this.#pending = null;
-      if (reply.ok) {
-        // Cleared now rather than on "Start another": the success verdict never
-        // shows the prompt and that button clears it anyway, so this only stops a
-        // reload hours later from resurrecting a draft already acted on.
-        this.#disarmUndo();
-        this.#patch({
-          form: { ...this.#state.form, prompt: "" },
-          promptUndo: null,
-          sessions: { ...this.#state.sessions, [machine.deviceId]: { sessions: reply.sessions, at: Date.now() } },
-        });
-        this.#showVerdict({
-          kind: "ok",
-          window: reply.window,
-          ...(reply.note === undefined ? {} : { note: reply.note }),
-          ...(reply.pending === true ? { pending: true as const } : {}),
-          ...(prompt === "" ? {} : { prompt }),
-        });
-      } else {
-        this.#showVerdict({ kind: "failed", code: reply.code, message: reply.message, repo: repo.name });
-      }
-    } catch (err) {
-      const reason = err instanceof RequestFailure ? err.reason : "dropped";
-      // "refused" belongs with the undeliverables: the relay answered that the
-      // request did not land, so nothing can be running — and "disconnected"
-      // never left the app at all.
-      if (reason === "offline" || reason === "unknown" || reason === "refused" || reason === "disconnected") {
-        this.#pending = null;
-        this.#showVerdict({ kind: "unknown", reason: "undelivered", machine: machine.name, sessionCount: null });
-      } else {
-        // Left pending on purpose: the daemon may well have started a session, and
-        // #reconcile will ask once there is a socket again.
-        this.#showVerdict({ kind: "unknown", reason: "dropped", machine: machine.name, sessionCount: null });
-      }
-    } finally {
-      this.#patch({ spawning: false });
-    }
+    await this.#submit();
   }
 
   /** Clears the prompt and returns to the form. */
@@ -919,35 +816,19 @@ export class Store {
   }
 
   /**
-   * Restores the spawned prompt to the form and returns to it. Takes the verdict
-   * the view rendered rather than reading state: the rendered one outlives
-   * `state.verdict` by the frame a view transition waits for its capture
-   * (app.tsx), and a keyboard activation inside that window would otherwise
-   * restore nothing.
-   */
-  reusePrompt(verdict: Verdict): void {
-    if (verdict.kind === "ok" && verdict.prompt !== undefined) this.setPrompt(verdict.prompt);
-    this.dismissLayer();
-  }
-
-  /**
-   * A repo_not_found retry rescans first — the button says so — and checks the
-   * fresh list before spawning again, so a repo that is really gone gets a
-   * conclusive verdict instead of the same failure in a loop. Takes the rendered
-   * verdict for the same reason `reusePrompt` does.
+   * Puts an unqueued verdict's task again. Takes the rendered verdict rather
+   * than reading state: the rendered one outlives `state.verdict` by the frame a
+   * view transition waits for its capture (app.tsx). The entry the verdict's
+   * layer holds is kept for whatever layer the retry opens next, and given back
+   * when it ends without one.
    */
   retrySpawn(verdict: Verdict): void {
+    if (verdict.kind !== "unqueued") return;
     if (this.#state.verdict !== null) {
       this.#held = true;
       this.#patch({ verdict: null });
     }
-    const retry =
-      verdict.kind === "unqueued"
-        ? this.retryEnqueue(verdict)
-        : verdict.kind === "failed" && verdict.code === "repo_not_found"
-          ? this.#rescanThenRetry(verdict)
-          : this.spawn();
-    void retry.finally(() => this.#releaseHeld());
+    void this.retryEnqueue(verdict).finally(() => this.#releaseHeld());
   }
 
   /** Puts an unqueued verdict's task again; nothing to put leaves the form as the retry found it. */
@@ -955,37 +836,7 @@ export class Store {
     if (verdict.retry !== undefined) await this.#enqueue(verdict.retry);
   }
 
-  async #rescanThenRetry(verdict: Extract<Verdict, { kind: "failed" }>): Promise<void> {
-    const machine = resolveMachine(this.#state.relay, this.#state.form.machineId);
-    if (machine === null) return;
-    // Not `spawning`: nothing has been sent to the daemon yet, and a rescan can
-    // hold the button for its full timeout — "Starting…" over that is a claim
-    // the app cannot back.
-    this.#patch({ rescanning: true });
-    let repos: readonly RepoEntry[];
-    try {
-      repos = await this.#rescan(machine.deviceId);
-    } catch {
-      // Spawning anyway would ask the daemon to resolve the repo against the very
-      // cache this failed to refresh: a second failure known in advance, and one
-      // that would look identical to the first.
-      this.#patch({ rescanning: false });
-      this.#showVerdict({ ...verdict, rescan: "unreachable" });
-      return;
-    }
-    this.#patch({ rescanning: false });
-    if (!repos.some((repo) => repo.name === verdict.repo)) {
-      this.#showVerdict({ ...verdict, rescan: "missing" });
-      return;
-    }
-    await this.spawn();
-  }
-
   reconnect(): void {
     this.#client.reconnect();
-  }
-
-  get pendingSpawn(): PendingSpawn | null {
-    return this.#pending;
   }
 }

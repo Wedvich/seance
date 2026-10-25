@@ -11,7 +11,7 @@ import {
   type PrState,
   type Task,
 } from "@seance/shared";
-import { taskHeadline } from "./decision-view.ts";
+import { taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveReportedAvailability,
@@ -158,6 +158,8 @@ function dotOf(task: Task): QueueDot | null {
 }
 
 function bodyOf(task: Task, now: number): string | null {
+  const waiting = waitingText(task);
+  if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") return failedBody(task.failure?.code);
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
