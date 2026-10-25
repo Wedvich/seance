@@ -173,8 +173,11 @@ green:
   line per accepted store read or write — nor one per delivered scheduler envelope, `queue-changed`
   or `store-changed` nudge or credited reply, only their failures (DESIGN.md threat model, "Bearer token
   disclosure"), and a task record is read only through `openTaskRecord` then `bindTaskRecord`
-  (`shared/src/task-record.ts`), and no reader deletes a record it cannot read on its own — after
-  a PSK rotation every record reads that way — and a tombstone lives exactly as long as
+  (`shared/src/task-record.ts`), and an account record is read only through `openAccountRecord`
+  (`shared/src/account-record.ts`) — sealed to `"app"` under op `account`, its sealed version the
+  relay's, its `accountId` HMAC'd under the PSK-derived account key to its own key — and an alias
+  is display-only, never used to route, bind or place, and no reader deletes a record it cannot
+  read on its own — after a PSK rotation every record reads that way — and a tombstone lives exactly as long as
   admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
   lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an

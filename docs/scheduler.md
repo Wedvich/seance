@@ -122,7 +122,7 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
 - **Stored blobs are an at-rest format, not live frames.** M4's `account`, `quota` and
   `settings` ops and record types are in `AT_REST_OPS` (DESIGN.md _Security model_). The
   `account` record is sealed to `"app"` and, like `task` and `pause-state`, opened only through
-  `openAtRest`, never on a live routing path.
+  `openAtRest` (`openAccountRecord`, `shared/src/account-record.ts`), never on a live routing path.
 - **Daemon → scheduler** (M2, M3): `session-event` and `branch-state`, and the `sessions`
   reply's `ended` and `progress` that back them up, are DESIGN.md Local op socket ("Session
   events") and _Scheduler_ ("Branch state", "Done detection"). M4's exit status is
@@ -404,7 +404,7 @@ of M4 has landed.
 | 1     | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
 | 1     | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1     | Skills filter — **Done**                                           | —                                                                      | S; M with project skills |
-| 1     | Account records                                                    | store rules v2                                                         | M                        |
+| 1     | Account records — **Done**                                         | store rules v2                                                         | M                        |
 | 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
@@ -439,8 +439,8 @@ of M4 has landed.
   `task:` (#8). Caps: 128 / 1 / 8 / 64 / 1 (`task:`, `queue:`, `settings:`, `account:`,
   `quota:`), 202 of 256. Store frames on `/daemon` before an accepted register are
   `forbidden`, reads included. `store-changed` goes to the leader for any write its term socket
-  did not make, and to other apps for `account:` writes; the app-client drops it until account
-  records handle it. Both list floors are per prefix, and the bucket's refill moved 4 s → 8 s so
+  did not make, and to other apps for `account:` writes, which the PWA's account store re-reads
+  on. Both list floors are per prefix, and the bucket's refill moved 4 s → 8 s so
   every prefix listed full stays about half the free daily reads. The ciphertext caps were
   already measured in bytes on the relay since #29; nothing else enforces them on untrusted
   input. Residual: with deletes refused, a token holder's junk under `account:` or `quota:` holds
@@ -680,21 +680,14 @@ of M4 has landed.
   - The leader reads relations once, at admission, and writes them into `deps`. A relation added
     or removed in Linear afterwards does not move a queued task, which keeps one write path for
     deps.
-- **Account records** — `account:<hmac>` in the store, app-writable (Wire changes, _Store
-  ops_), holding `{ accountId, alias }` sealed to `"app"` under op `account`. The key is
-  HMAC-SHA-256 over the account's id under a key HKDF derives from the PSK with its own label —
-  never the PSK's AES-GCM bytes reused, and never a plain hash, which anyone who knows the
-  UUIDs (Anthropic, another relay the account appears on) could match. Every PSK holder lands
-  on the same key, so two apps naming one account race on its version, not into two records;
-  the relay sees how many accounts are named and when one is renamed, nothing else. Readers
-  check the sealed `accountId` hashes to the key. The HMAC input carries the account's kind
-  (`oauth|<org>:<acct>`), so a later kind — an API key, a Foundry deployment — gets ids
-  disjoint from these; what identifies such an account (the provider's org or workspace, or a
-  fingerprint of the key, which changes on rotation) is decided with that kind. PWA: rename on
-  the account card, which shows the alias, else the email (DESIGN.md _PWA_), else the short
-  account id — clearing an alias falls back to the email. Exit: an alias set in one client shows
-  in another; a record whose `accountId` does not hash to its key is ignored (shared + e2e).
-  Record: DESIGN.md _Threat model_ (the HKDF label, what the key reveals).
+- **Account records — Done (2026-10-25).** `account:<hmac>` in the store, app-writable, holding
+  `{ accountId, alias }` sealed to `"app"` under op `account`; the PWA's account card renames, and
+  every client shows alias, else email, else short id. The key derivation, the reader's rules
+  (version bound to the relay's, `accountId` hashed to the key), the rename's compare-and-set and
+  what the key reveals are DESIGN.md _Scheduler_, "Account records". Exit, met in
+  `e2e/accounts.test.ts`: an alias set in one client shows in another through `store-changed`, a
+  record whose `accountId` does not hash to its key is ignored, and an old blob put back reads
+  unreadable rather than as the old name. `seanced mcp` and Raycast show no alias yet.
   - _Correction (R2), deleting an alias:_ the relay tombstoned every prefix apps could create
     into, and a standing tombstone refuses every put for 30 days. Account keys are a deterministic
     HMAC, so under those rules a token holder's delete would have blocked that alias for 30 days.
@@ -711,16 +704,22 @@ of M4 has landed.
     them, so while they stand the fleet can alias no account it has not named already (DESIGN.md
     _Threat model_, item 3, records it as a residual). `task:` has `discard` for the same junk (M3
     review S2); `queue:` and `quota:` take one key each, so they cannot be squatted. Records
-    sealed under an old PSK are unreadable the same way, and stay for the same reason. Options:
+    sealed under an old PSK are unreadable the same way, and stay for the same reason: a PSK
+    rotation orphans every `account:` record (it no longer opens), each holding a cap slot that
+    deletes cannot free, and the account key derived from the new PSK maps to new keys. Options:
     - **(a) a leader-only purge op** for unreadable `account:` records, shaped like `discard`:
       sealed `from: "app"`, parsed by its own parser, checked against `schedulerGuard`, at the
       version an app listed it under, audited. It refuses every readable record (`conflict` if
       the record changed since) and writes no tombstone. The relay's `account:` rule then allows
       a delete on the leader's term socket only, so this reopens the deterministic-key delete #8
-      avoided. Deleting an _unreadable_ record is still safe: what a token holder can put back
-      on that key is either junk again (the squat it already had) or an old genuine blob, which
-      is readable and which an overwrite already lets it plant. A tombstone would only block the
-      key's real account for 30 days. Cost: one relay rule change, one leader op, a PWA action.
+      avoided. It also reopens rollback: a deleted key restarts at version 1, so an old genuine
+      version-1 blob a token holder kept (each ciphertext is listable while it is current, so a
+      holder can keep every one) then reads as the
+      current record, where today's put-back lands at a higher version and reads
+      `version_mismatch`. The rollback protection holds only while no key's version history is
+      reset. A tombstone would only block the key's real account for 30 days. Cost: one relay
+      rule change, one leader op, a PWA action, and that rollback exposure, which for a
+      display-only alias may be acceptable but is a decision, not a given.
     - **(b) a larger cap.** Raises the cost of the squat without removing it, and every app pays
       for the larger list it reads on open.
     - **(c) accept it and rotate the token.** Rotation stops new junk and clears none, so the
@@ -931,8 +930,12 @@ same PR, with the reason.
   a full `task:` refuses every enqueue until a person clears the unreadable records from the Queue screen (`discard`; DESIGN.md Threat model, item 3, M3 review S2). DESIGN.md's "destroys nothing that exists" paragraph has this caveat since
   M3 item 1 landed (2026-10-17): the token cannot delete a task, only add junk within the caps.
   M4's account records add a smaller one: being app-writable, a token holder can overwrite an
-  alias with junk that readers skip — but not read, forge or roll one back, and not delete it,
-  since `account:` refuses deletes (#8); the next real edit overwrites the junk. It can also create
+  alias with junk that readers skip — but not read or forge one, and not delete it, since
+  `account:` refuses deletes (#8); the next real edit overwrites the junk. Nor can it roll one
+  back (an old blob put back lands at a higher version and reads `version_mismatch`), which
+  holds only while `account:` refuses deletes and no key's version history is reset: an operator
+  reset of `account:` storage with the PSK unchanged (a DO migration, `deleted_classes`, a redeploy
+  to a fresh worker) reopens it, so rotate the PSK or bump `ACCOUNT_KEY_HKDF_INFO` then. It can also create
   junk account keys up to the prefix's cap, which nothing in the product removes (DESIGN.md
   Threat model, item 3). Holding the leader's term would be a larger act — next item.
 - **Leader capture** (decided 2026-10-16, M2 and M3's gate; built). A bearer-token holder could

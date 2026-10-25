@@ -9,7 +9,7 @@ import {
   type SchedulerAvailability,
 } from "@seance/shared";
 import { accountSeries, chartLines } from "../src/chart.ts";
-import { deriveMachines } from "../src/machines-view.ts";
+import { accountDisplayName, deriveMachines } from "../src/machines-view.ts";
 
 const NOW = 1_800_000_000_000;
 const S = NOW / 1000;
@@ -139,6 +139,40 @@ describe("deriveMachines", () => {
     expect(accounts.map((account) => account.detail)).toEqual(["me@example.com · on a, b, c", "acct acct-bbb · on a"]);
     expect(cards[2]?.exclaves[0]?.account).toBe("me@example.com");
     expect(cards[0]?.exclaves[0]?.account).toBe("acct acct-aaa");
+  });
+
+  test("an alias leads the card, the exclave row and the display name; clearing falls back to email, then short id", () => {
+    const named = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [
+        { ...exclave("default", ACCOUNT), email: "me@example.com" },
+        exclave("work", "org-2:acct-bbbbbbbb-2222"),
+      ],
+    });
+    const aliases = { [ACCOUNT]: "personal", "org-2:acct-bbbbbbbb-2222": "client" };
+    const { cards, accounts } = deriveMachines([named], NOW, NO_LEADER, aliases);
+    expect(accounts.map((account) => [account.alias, account.detail])).toEqual([
+      ["personal", "personal · on a"],
+      ["client", "client · on a"],
+    ]);
+    expect(cards[0]?.exclaves.map((row) => row.account)).toEqual(["personal", "client"]);
+    expect(accountDisplayName([named], ACCOUNT, aliases)).toBe("personal");
+    expect(accountDisplayName([named], "org-3:unseen-account", { "org-3:unseen-account": "ghost" })).toBe("ghost");
+
+    const cleared = deriveMachines([named], NOW, NO_LEADER, {});
+    expect(cleared.accounts.map((account) => [account.alias, account.detail])).toEqual([
+      [null, "me@example.com · on a"],
+      [null, "acct acct-bbb · on a"],
+    ]);
+    expect(accountDisplayName([named], ACCOUNT)).toBe("me@example.com");
+    expect(accountDisplayName([named], "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
+  });
+
+  test("an account id that names an inherited property is no alias", () => {
+    const odd = machine({ exclaves: [exclave("default", "constructor")] });
+    expect(deriveMachines([odd], NOW, NO_LEADER, {}).accounts[0]?.alias).toBeNull();
+    expect(accountDisplayName([odd], "toString", {})).toBe("acct toString");
   });
 
   test("a window past its reset reads empty, however full the reading was", () => {

@@ -1397,6 +1397,43 @@
   color: var(--warn);
 }
 
+/* Tap target from padding that negative margins take back, as `.disclosure` does. */
+.fleet-rename {
+  align-self: flex-start;
+  padding: 8px 4px;
+  margin: -8px -4px;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
+@media (hover: hover) {
+  .fleet-rename:hover {
+    color: var(--acc);
+  }
+}
+
+.fleet-rename-form {
+  display: flex;
+  gap: 8px;
+}
+
+.fleet-rename-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 15px;
+  outline: none;
+}
+
+.fleet-rename-form input:focus {
+  border-color: var(--acc);
+}
+
 /* The dot leads the name on the card's own left edge, so every row below starts where it does. */
 .fleet-name-row {
   min-height: var(--fleet-line);

@@ -3,8 +3,8 @@ import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
 import { dropLegacyHidden, readForm, readPending, writeForm, writePending } from "./persist.ts";
-import { RelayClient } from "@seance/shared";
-import { loadPsk, readBearer, readRelayUrl } from "./relay/keys.ts";
+import { deriveAccountKey, RelayClient } from "@seance/shared";
+import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import { Store } from "./store.ts";
 import { registerServiceWorker } from "./sw.ts";
@@ -21,7 +21,7 @@ void navigator.storage?.persist?.();
 const container = document.querySelector("#root");
 if (container === null) throw new Error("#root is missing from index.html");
 
-const key = await loadPsk();
+const [key, base] = await Promise.all([loadPsk(), loadPskBase()]);
 const token = readBearer();
 
 if (key === null || token === null) {
@@ -38,7 +38,10 @@ if (key === null || token === null) {
   );
 } else {
   dropLegacyHidden();
-  const client = new RelayClient({ url: readRelayUrl(), token, key });
+  // No base on an install saved before account records: it works, without aliases, until the PSK is re-entered.
+  // A derivation that throws degrades the same way: naming is an extra, and must not take the app down.
+  const accountKey = base === null ? null : await deriveAccountKey(base).catch(() => null);
+  const client = new RelayClient({ url: readRelayUrl(), token, key, ...(accountKey === null ? {} : { accountKey }) });
   const store = new Store(client, readForm(), readPending());
 
   // Debounced because the store notifies on every keystroke in the prompt.

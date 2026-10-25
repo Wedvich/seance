@@ -106,14 +106,17 @@ export function App(props: { store: Store }): JSX.Element {
   );
   const machines = (onDismiss?: () => void): JSX.Element => (
     <MachinesScreen
-      view={deriveMachines(state.relay.machines, now, state.relay.scheduler)}
+      view={deriveMachines(state.relay.machines, now, state.relay.scheduler, state.accounts.aliases)}
       relayLine={view.relayLine}
       relayState={view.relayState}
       settled={state.relay.registrySettled}
       history={state.history}
+      accounts={state.accounts}
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}
       onHideHistory={() => store.hideHistory()}
+      onRename={(accountId, text) => store.renameAccount(accountId, text)}
+      onDismissAccountNotice={() => store.dismissAccountNotice()}
     />
   );
 

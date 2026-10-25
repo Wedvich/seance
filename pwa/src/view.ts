@@ -3,6 +3,7 @@ import type { BatchStrategy, Machine, RelayState, RepoEntry } from "@seance/shar
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
+  type AccountsState,
   type HistoryView,
   type PersistedForm,
   type PreviewState,
@@ -132,6 +133,7 @@ export interface AppState {
   readonly pausing: boolean;
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
+  readonly accounts: AccountsState;
 }
 
 const MINUTE = 60_000;

@@ -639,10 +639,10 @@ export interface StoreChangedFrame {
  * queue-store adapter (`daemon/src/queue-store.ts`, `putPause`), which the
  * library writes the pause through (`QueueStore.putPause`).
  *
- * M4's three (shapes only; no writer yet, and their store prefixes land with
- * store rules v2): `account` (`AccountRecord`, sealed to `"app"`), `quota`
- * (`FleetQuotaRecord`, sealed to `"app"` by daemons) and `settings`
- * (`SettingsRecord`, sealed to SCHEDULER_ID by the leader).
+ * M4's three: `account` (`AccountRecord`, sealed to `"app"` by `sealAccountRecord`,
+ * shared/src/account-record.ts), `quota` (`FleetQuotaRecord`, sealed to `"app"` by
+ * daemons; shape only, no writer so far) and `settings` (`SettingsRecord`, sealed to
+ * SCHEDULER_ID by the leader; shape only, no writer so far).
  */
 export const AT_REST_OPS = {
   machineInfo: "machine-info",
@@ -2063,8 +2063,8 @@ export interface PauseRecord extends VersionBound {
 export const ACCOUNT_ALIAS_MAX_LENGTH = 64;
 
 /**
- * Payload of an `account:<hmac>` record (`op: "account"`, sealed to `"app"`; M4,
- * Account records). A reader keeps it only when `accountId` hashes to its key,
+ * Payload of an `account:<hmac>` record (`op: "account"`, sealed to `"app"` by
+ * `sealAccountRecord`, read through `openAccountRecord`). A reader keeps it only when `accountId` hashes to its key,
  * so a writer without the PSK can file a record under no account's key.
  */
 export interface AccountRecord extends VersionBound {

@@ -8,10 +8,12 @@ import {
   OP_TIMEOUT_MS,
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
+  STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
   STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
   TOKEN_PARAM,
+  type AccountRecord,
   type AppStoreRequestFrame,
   type AppFrame,
   type DiscardReply,
@@ -51,6 +53,7 @@ import {
 import {
   bindTaskRecord,
   isRecord,
+  isStoreKey,
   isTerm,
   parseDiscardReply,
   parseEnvelope,
@@ -71,6 +74,14 @@ import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } 
 import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
 import { openTaskListing, openTaskRecord, sealTaskRecord, taskKey, type UnreadableRecord } from "./task-record.ts";
+import {
+  accountRecord,
+  accountStoreKey,
+  openAccountListing,
+  openAccountRecord,
+  sealAccountRecord,
+  type AccountEntry,
+} from "./account-record.ts";
 
 export type RelayStatus = "connecting" | "open" | "retrying" | "rejected";
 
@@ -190,6 +201,28 @@ export interface TaskLookup {
 export interface TaskCreated {
   readonly ok: true;
   readonly landedEarlier: boolean;
+}
+
+export interface AccountListing {
+  readonly ok: true;
+  readonly accounts: readonly AccountEntry[];
+  readonly unreadable: readonly UnreadableRecord[];
+}
+
+export interface AccountLookup {
+  readonly ok: true;
+  readonly key: string;
+  /** The relay's version of the key, unreadable record included, so a rename can overwrite it; 0 when absent. */
+  readonly version: number;
+  /** Null: the store holds no record at the key. */
+  readonly entry: AccountRecord | UnreadableRecord | null;
+}
+
+export interface AccountWritten {
+  readonly ok: true;
+  readonly key: string;
+  /** The record as sealed: version `expect + 1`. */
+  readonly record: AccountRecord;
 }
 
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */
@@ -517,6 +550,8 @@ export class RelayClient {
   readonly #url: string;
   readonly #token: string;
   readonly #key: CryptoKey;
+  /** Names `account:` keys; absent on an install that never derived it, and on every non-PWA client. */
+  readonly #accountKey: CryptoKey | null;
   readonly #listeners = new Set<() => void>();
   readonly #queueListeners = new Set<(change: QueueChanged) => void>();
   readonly #storeListeners = new Set<(key: string, version: number) => void>();
@@ -598,6 +633,8 @@ export class RelayClient {
     readonly url: string;
     readonly token: string;
     readonly key: CryptoKey;
+    /** HMAC key of `account:` store keys (`deriveAccountKey`). Without it the account methods throw `unsupported`. */
+    readonly accountKey?: CryptoKey;
     /** Per-op overrides for OP_TIMEOUT_MS; tests use it to avoid real 10s waits. */
     readonly timeouts?: Partial<Record<RequestOp, number>>;
     /** Override for STORE_TIMEOUT_MS and STORE_LIST_TIMEOUT_MS; tests use it to avoid real waits. */
@@ -635,6 +672,7 @@ export class RelayClient {
     this.#url = opts.url;
     this.#token = opts.token;
     this.#key = opts.key;
+    this.#accountKey = opts.accountKey ?? null;
     this.#timeouts = opts.timeouts ?? {};
     this.#storeTimeoutMs = opts.storeTimeoutMs;
     this.#createSocket = opts.createSocket ?? ((url) => new WebSocket(url));
@@ -1462,7 +1500,7 @@ export class RelayClient {
 
   /**
    * Called when the relay says another client wrote an app-writable record
-   * (today `account:`). Only an app's client hears it, as with `onQueueChanged`.
+   * (`account:`: `getAccountRecord` re-reads it). Only an app's client hears it, as with `onQueueChanged`.
    * Relay plaintext, prefix unchecked: a hint to re-read through the store's own
    * open path, never data — trust neither `key` nor `version` past that.
    */
@@ -1569,6 +1607,91 @@ export class RelayClient {
     if (reply?.t === "store-written") return { ok: true, landedEarlier: false };
     if (reply?.t !== "store-refused") return this.#storeKindMismatch(reply);
     return reply.code === "version_conflict" ? { ok: true, landedEarlier: true } : { ok: false, code: reply.code };
+  }
+
+  /** Whether this client can read and write account records. */
+  get accountsNamed(): boolean {
+    return this.#accountKey !== null;
+  }
+
+  #needAccountKey(): CryptoKey {
+    if (this.#accountKey !== null) return this.#accountKey;
+    throw new RequestFailure(
+      "unsupported",
+      "this install has no account key — re-enter the pre-shared key in Settings to name accounts",
+      "relay",
+    );
+  }
+
+  /** The `account:<hmac>` key an account's record lives at. */
+  async accountStoreKey(accountId: string): Promise<string> {
+    return accountStoreKey(this.#needAccountKey(), accountId);
+  }
+
+  /** Every `account:` record, opened and kept as `openAccountRecord` says; the rest are reported with their reasons. */
+  async listAccounts(): Promise<AccountListing | StoreRefusal | null> {
+    const accountKey = this.#needAccountKey();
+    const reply = await this.#store({
+      t: "store-list",
+      id: crypto.randomUUID(),
+      prefix: STORE_PREFIXES.account.prefix,
+    });
+    if (reply?.t === "store-refused") return { ok: false, code: reply.code };
+    if (reply?.t !== "store-listed") return this.#storeKindMismatch(reply);
+    const { accounts, unreadable } = await openAccountListing(this.#key, accountKey, reply.records);
+    if (unreadable.length > 0) this.#wireLog("skipped", `prefix=account count=${unreadable.length}`);
+    return { ok: true, accounts, unreadable };
+  }
+
+  /**
+   * One account record by its store key. The key may come from a `store-changed`
+   * nudge, which is relay plaintext, so anything but an `account:` key is
+   * refused here and never sent.
+   */
+  async getAccountRecord(key: string): Promise<AccountLookup | StoreRefusal | null> {
+    const accountKey = this.#needAccountKey();
+    if (!key.startsWith(STORE_PREFIXES.account.prefix) || !isStoreKey(key)) return null;
+    const reply = await this.#store({ t: "store-get", id: crypto.randomUUID(), key });
+    if (reply?.t === "store-refused") return { ok: false, code: reply.code };
+    if (reply?.t !== "store-record") return this.#storeKindMismatch(reply);
+    if (reply.record === null) return { ok: true, key, version: 0, entry: null };
+    // The binding compares the record's account to the key it came with, so that key must be the one asked for.
+    if (reply.record.key !== key) {
+      this.#wireLog("dropped", `re=${quote(reply.re)} t=${reply.t} reason=store-key`);
+      return null;
+    }
+    const read = await openAccountRecord(this.#key, accountKey, reply.record);
+    const entry = typeof read === "string" ? { key, version: reply.record.version, reason: read } : read;
+    return { ok: true, key, version: reply.record.version, entry };
+  }
+
+  /**
+   * Sets an account's alias (null or blank clears it) as a compare-and-set at
+   * `expect`, the version the caller last read (0: none). A lost race answers
+   * `version_conflict`, never success: the caller re-reads and decides, since a
+   * blind overwrite would drop the other client's name.
+   */
+  async putAccountAlias(
+    accountId: string,
+    alias: string | null,
+    expect: number,
+  ): Promise<AccountWritten | StoreRefusal | null> {
+    const accountKey = this.#needAccountKey();
+    const record = accountRecord(accountId, alias, expect + 1);
+    if (record === null) return { ok: false, code: "invalid_request" };
+    const key = await accountStoreKey(accountKey, accountId);
+    const env = await sealAccountRecord(this.#key, APP_ID, record);
+    if (env.ct.length > (expect === 0 ? STORE_CREATE_MAX_CT_LENGTH : STORE_MAX_CT_LENGTH)) {
+      return { ok: false, code: "too_large" };
+    }
+    const reply = await this.#store({ t: "store-put", id: crypto.randomUUID(), key, expect, env });
+    if (reply?.t === "store-refused") return { ok: false, code: reply.code };
+    if (reply?.t !== "store-written") return this.#storeKindMismatch(reply);
+    if (reply.version !== expect + 1) {
+      this.#wireLog("dropped", `re=${quote(reply.re)} t=${reply.t} reason=store-version`);
+      return null;
+    }
+    return { ok: true, key, record };
   }
 
   /** Same object back when nothing moved: `useState` bails out on reference equality. */
