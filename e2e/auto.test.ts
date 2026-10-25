@@ -693,6 +693,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
       id = /^task (\S+): queued/u.exec(stdout)?.[1];
       if (id === undefined) throw new Error(`no task id in: ${stdout}`);
+      // A verified leader is up, so the leaderless advice (which names --now) has no business here.
+      expect(stdout).not.toContain("--now");
+      expect(stdout).not.toContain("No scheduler is leading");
       const taskId = id;
       await pollUntil(
         async () => (await stack.queue().get(taskId))?.body?.state === "running",

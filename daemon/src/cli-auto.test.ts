@@ -94,6 +94,14 @@ describe("spawnAuto", () => {
     expect(text).toContain("`seanced spawn --now` now would start a second session");
   });
 
+  test("an unverified nominee is not a leaderless fleet: no --now advice, which would double-run on a healthy one", async () => {
+    const fake = scheduledRelay({ kind: "unverified", deviceId: "device-1", term: 3 });
+    const { ok, text } = await run(fake);
+    expect(ok).toBe(true);
+    expect(text).toContain("No scheduler is leading right now");
+    expect(text).not.toContain("--now");
+  });
+
   test("a failure that may have queued the task never offers --now, which would run it twice", async () => {
     const lost = scheduledRelay();
     lost.onCreate = () => new RequestFailure("dropped", "the relay socket closed", "relay");
@@ -108,6 +116,21 @@ describe("spawnAuto", () => {
     expect(outcome.text).toContain("may have queued");
     expect(outcome.text).not.toContain("--now");
   }, 20_000);
+
+  test("a failure that provably queued nothing offers --now on the CLI only", async () => {
+    const unsent = scheduledRelay();
+    unsent.onCreate = () => new RequestFailure("disconnected", "no socket", "relay");
+    const notSent = await run(unsent);
+    expect(notSent.ok).toBe(false);
+    expect(notSent.text).toBe(`spawn: not queued — the relay was unreachable after 3 tries; try again. ${NOW_HINT}`);
+    expect(notSent.audited).toEqual([]);
+    const hard = scheduledRelay();
+    hard.onCreate = () => new Error("boom");
+    const failedFirst = await run(hard);
+    expect(failedFirst.ok).toBe(false);
+    expect(hard.creates).toHaveLength(1);
+    expect(failedFirst.text).toBe(`spawn failed: boom. ${NOW_HINT}`);
+  }, 10_000);
 
   test("a store refusal is worded and audited, and not retried", async () => {
     const fake = scheduledRelay();

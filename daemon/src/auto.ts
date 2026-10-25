@@ -470,15 +470,28 @@ export function pinAccountGateError(lease: SchedulerLease, fields: string): stri
 const ENQUEUE_ATTEMPTS = 3;
 const ENQUEUE_RETRY_MS = 1_000;
 
+/** Only on failures where nothing was queued: after a "may have queued" one it would run the task twice. */
+export const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
+
 /** Where each surface's reader looks next: a shell user cannot call MCP's tools, so the CLI names the app's queue. */
 const FOLLOW_UP: Readonly<
-  Record<EnqueueSurface, { readonly placed: string; readonly check: string; readonly leaderless: string | null }>
+  Record<
+    EnqueueSurface,
+    {
+      readonly placed: string;
+      readonly check: string;
+      readonly leaderless: string | null;
+      /** Appended to a failure that provably left nothing queued; a shell user has the direct path, MCP does not. */
+      readonly cleanFailure: string;
+    }
+  >
 > = {
   mcp: {
     placed:
       "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
     check: "check get_queue",
     leaderless: null,
+    cleanFailure: "",
   },
   cli: {
     placed:
@@ -486,6 +499,7 @@ const FOLLOW_UP: Readonly<
     check: "check the app's queue",
     leaderless:
       "This task runs once a scheduler leads, so `seanced spawn --now` now would start a second session; for a spawn that must not wait, use `--now` instead of queuing.",
+    cleanFailure: `. ${NOW_HINT}`,
   },
 };
 
@@ -548,7 +562,7 @@ export async function enqueueAuto(
         await audited(task, { kind: "unanswered" });
         return failed(`spawn failed: ${why} — task ${task.id} may have queued; ${followUp.check} before retrying`);
       }
-      return failed(`spawn failed: ${why}`);
+      return failed(`spawn failed: ${why}${followUp.cleanFailure}`);
     }
     if (reply === null) {
       sent = true;
@@ -569,12 +583,15 @@ export async function enqueueAuto(
       lines.push(
         "No scheduler is leading right now (or its leader is unverified); the task waits in the relay's queue until one does.",
       );
-      if (followUp.leaderless !== null) lines.push(followUp.leaderless);
+      // Only with no nominee at all: an unverified one may be a healthy leader whose lead-proof has not arrived yet, and --now beside it runs the task twice.
+      if (followUp.leaderless !== null && scheduler.availability().kind === "none") lines.push(followUp.leaderless);
     }
     return done(lines.join("\n"));
   }
   if (!sent) {
-    return failed(`spawn: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again`);
+    return failed(
+      `spawn: not queued — the relay was unreachable after ${ENQUEUE_ATTEMPTS} tries; try again${followUp.cleanFailure}`,
+    );
   }
   await audited(task, { kind: "unanswered" });
   return failed(

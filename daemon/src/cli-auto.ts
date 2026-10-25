@@ -5,6 +5,7 @@ import {
   pinAccountGateError,
   placementInputError,
   placementNeedsPinAccount,
+  NOW_HINT,
   resolveOrigin,
   resolvePlacement,
   specError,
@@ -61,9 +62,6 @@ export async function autoFleet(
   });
   return { fleet: relayFleet(relay), keyless: false };
 }
-
-/** Only on failures where nothing was queued: after a "may have queued" one it would run the task twice. */
-const NOW_HINT = "`seanced spawn --now` spawns on this machine without the relay, the key or the daemon.";
 
 const failed = (text: string): AutoEnqueued => ({ ok: false, text });
 
