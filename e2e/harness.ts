@@ -29,6 +29,7 @@ import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/
 import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
 import type { AppState } from "../pwa/src/view.ts";
+import { pushGuardFetch } from "./push-guard.ts";
 import {
   adoptIdentity,
   connectApp,
@@ -180,6 +181,12 @@ export interface Stack {
    * once B has minted its identity; dispose stops any still running.
    */
   readonly startSecondDaemon: (opts: SecondDaemonOpts) => Promise<SecondDaemon>;
+  /**
+   * The host of every push the suite's daemon tried to POST, each refused by its `httpFetch`
+   * (`push-guard.ts`): nothing in a suite reaches a real push service. A second daemon is a
+   * subprocess with the same guard, and reports nothing.
+   */
+  readonly pushAttempts: () => readonly string[];
   readonly dispose: () => Promise<void>;
 }
 
@@ -265,6 +272,7 @@ export async function startStack(
   const DEFAULT_SPAWN_WAIT_MS = 1_500;
 
   const QUIET_MS = 3_600_000;
+  const pushAttempts: string[] = [];
   const startTestDaemon = (spawnWaitMs = DEFAULT_SPAWN_WAIT_MS, quiet = false): Promise<DaemonHandle> =>
     startDaemon({
       config,
@@ -278,6 +286,7 @@ export async function startStack(
       baseBackoffMs: 20,
       // Written once per boot — the quota fixture never moves, so later cycles skip — and soon after it.
       fleetQuota: { intervalMs: 500 },
+      httpFetch: pushGuardFetch(pushAttempts),
       // A failed takeover still retries promptly: only the regular tick waits the hour.
       ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
     });
@@ -389,6 +398,7 @@ export async function startStack(
       stack.daemon = daemon;
     },
     startSecondDaemon,
+    pushAttempts: () => [...pushAttempts],
     dispose: async (): Promise<void> => {
       daemon.stop();
       for (const proc of secondProcs) proc.kill();

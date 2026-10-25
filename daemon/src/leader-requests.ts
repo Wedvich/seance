@@ -13,10 +13,12 @@ import {
   MAX_PAUSE_HOLDS,
   parseDiscardRequest,
   parsePauseRequest,
+  parsePushSubscribeRequest,
   parseQueueRequest,
   parseResumeRequest,
   parseTaskRef,
   parseTaskRequest,
+  PUSH_MAX_SUBSCRIPTIONS,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
@@ -27,6 +29,7 @@ import {
   type PauseHold,
   type PauseResponse,
   type Plain,
+  type PushSubscribeResponse,
   type QueueResponse,
   type RoutePreviewResponse,
   type SchedulerError,
@@ -38,6 +41,7 @@ import {
 } from "@seance/shared";
 import { daemonSink, queueAudit } from "./audit.ts";
 import { log } from "./log.ts";
+import type { SettingsState, TermSettings } from "./settings.ts";
 
 /**
  * An app's requests to the scheduler term (DESIGN.md, Scheduler, "The leader"):
@@ -167,6 +171,8 @@ interface Asked {
   readonly id: string;
   readonly now: number;
   readonly tick: () => void;
+  readonly settings: () => TermSettings | null;
+  readonly settingsState: () => SettingsState;
 }
 
 const PAUSE_REFUSALS: Record<Exclude<PauseResult, { readonly ok: true }>["code"], SchedulerError> = {
@@ -282,6 +288,55 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const reply: TaskResponse = { task: result.task };
       return reply;
     }
+    case "push-subscribe": {
+      const request = parsePushSubscribeRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed push-subscribe request");
+      const settings = asked.settings();
+      const state = asked.settingsState();
+      if (state === "pending") return schedulerError("not_ready", "this term has not read its settings yet");
+      if (settings === null || state === "unavailable") {
+        await audit.refused("push-subscribe", id, "settings_unavailable");
+        return schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off");
+      }
+      // An object, not a flag: TS would narrow a `let` to its initial value across the callback.
+      const outcome = { full: false };
+      const result = await settings.update((record) => {
+        const current = record.subscriptions ?? [];
+        const same = current.find((sub) => sub.endpoint === request.endpoint);
+        // Already held as it is: no write, and no version bump for a browser that asks at every boot.
+        if (same?.keys.p256dh === request.keys.p256dh && same.keys.auth === request.keys.auth) return null;
+        // A browser can re-key one endpoint: the new keys replace the old.
+        const others = current.filter((sub) => sub.endpoint !== request.endpoint);
+        if (others.length >= PUSH_MAX_SUBSCRIPTIONS) {
+          outcome.full = true;
+          return null;
+        }
+        const { version: _version, ...rest } = record;
+        return { ...rest, subscriptions: [...others, request] };
+      });
+      if (result.ok && outcome.full) {
+        await audit.refused("push-subscribe", id, "subscriptions_full");
+        return schedulerError(
+          "subscriptions_full",
+          `the leader holds ${PUSH_MAX_SUBSCRIPTIONS} push subscriptions already`,
+        );
+      }
+      if (!result.ok) {
+        // The audit's code is the reply's, so a line and the answer it records never disagree. The
+        // store's own code stays out of both: a settings fault never carries a record's content into a reply.
+        const reply =
+          result.code === "conflict"
+            ? schedulerError("conflict", "the settings record changed while this ran; ask again")
+            : result.code === "unavailable"
+              ? schedulerError("settings_unavailable", "this term cannot use its settings record, so push is off")
+              : schedulerError("internal_error", "the subscription could not be stored");
+        await audit.refused("push-subscribe", id, reply.code);
+        return reply;
+      }
+      await audit.subscribed(id);
+      const reply: PushSubscribeResponse = { endpoint: request.endpoint };
+      return reply;
+    }
     case "discard": {
       const request = parseDiscardRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed discard request");
@@ -310,6 +365,10 @@ export interface TermRequests {
   readonly running: () => boolean;
   readonly now: () => number;
   readonly tick: () => void;
+  /** The term's settings holder; null when it has none (a test's term over a bare store). */
+  readonly settings: () => TermSettings | null;
+  /** `pending` until the term's first settings load decides: a `push-subscribe` meanwhile is `not_ready`. */
+  readonly settingsState: () => SettingsState;
   /**
    * The term's own fault path: a `StoreRevoked` ends the term (`leader.ts`). It is the
    * relay's `not_leader` on a store write, or a store write that could not be sent at
@@ -323,7 +382,7 @@ export interface TermRequests {
 
 /** One term's handler for an app's scheduler request, as the leg hands it over. */
 export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerOp, from: string) => Promise<void> {
-  const { term, now, tick } = ctx;
+  const { term, now, tick, settings, settingsState } = ctx;
   // Only an app asks the scheduler anything; a daemon's envelope is an event.
   // Answered `not_ready` until takeover ends: before it the queue is the
   // store's unreconciled view, and a write would race the load.
@@ -336,7 +395,11 @@ export function requestHandler(ctx: TermRequests): (plain: Plain, op: SchedulerO
     let payload: unknown;
     try {
       payload = ctx.running()
-        ? await answer({ scheduler: ctx.scheduler(), id: plain.id, now: now(), tick }, op, plain.payload)
+        ? await answer(
+            { scheduler: ctx.scheduler(), id: plain.id, now: now(), tick, settings, settingsState },
+            op,
+            plain.payload,
+          )
         : schedulerError("not_ready", `term ${term} is still taking over`);
     } catch (err) {
       if (err instanceof StoreRevoked) {

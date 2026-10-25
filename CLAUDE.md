@@ -191,7 +191,10 @@ green:
   bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
   carries one, and the settings record (`settings:main`) is written only by the leader, held to
   the version floor, never regenerated nor written over when it cannot be read or has regressed,
-  and never logged nor put in `queue`, MCP or `status`. Don't let changes drift from them.
+  and never logged nor put in `queue`, MCP or `status`, and a push send goes only to an endpoint
+  `pushEndpoint` accepts at send time (https, a `PUSH_SERVICE_HOSTS` host), redirects refused and
+  timed out, never awaited by the scheduler pass; its payload carries ids and state only, and no
+  endpoint, key, JWT or payload is logged. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
   this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op

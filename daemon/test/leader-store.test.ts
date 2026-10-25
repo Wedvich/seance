@@ -90,6 +90,7 @@ function leaderOver(relay: TestRelay, store: QueueStore, local: LocalOps = noLoc
   const replies: { readonly to: string; readonly response: Plain }[] = [];
   const leader: Leader = createLeader({
     selfDeviceId: "self",
+    pushSubject: "https://relay.test",
     local,
     store,
     reply: (to, response) => {

@@ -5,6 +5,7 @@ import { QueueScreen } from "./components/queue.tsx";
 import { Settings } from "./components/settings.tsx";
 import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
+import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
 import { deriveMachines } from "./machines-view.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
@@ -13,8 +14,8 @@ import type { Store } from "./store.ts";
 import { screenKey, TransitionRunner } from "./transition.ts";
 import { deriveView, type AppState } from "./view.ts";
 
-export function App(props: { store: Store }): JSX.Element {
-  const { store } = props;
+export function App(props: { store: Store; push: PushClient }): JSX.Element {
+  const { store, push } = props;
   const state = useStoreState(store);
   const { layer } = screenKey(state);
   const actions = useSpawnActions(store);
@@ -100,6 +101,7 @@ export function App(props: { store: Store }): JSX.Element {
           closeStyle={wide ? "close" : "back"}
           onDismiss={actions.dismissLayer}
           onReconnect={() => store.reconnect()}
+          push={push}
         />
       </main>
     </SettingsDialog>

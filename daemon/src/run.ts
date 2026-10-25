@@ -403,6 +403,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     ...(opts.leader?.takeoverRetryMs === undefined ? {} : { takeoverRetryMs: opts.leader.takeoverRetryMs }),
     now,
     httpFetch,
+    // The relay's own origin: a contact the push services can show, and no person's address.
+    pushSubject: `https://${new URL(config.relayUrl).host}`,
     prStatus: opts.leader?.prStatus ?? {},
   });
 

@@ -6,6 +6,7 @@ import { dropLegacyHidden, readForm, readPending, writeForm, writePending } from
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
+import { watchPushResync } from "./push-browser.ts";
 import { Store } from "./store.ts";
 import { registerServiceWorker } from "./sw.ts";
 import { watchSystemTheme } from "./theme.ts";
@@ -62,5 +63,6 @@ if (key === null || token === null) {
   });
 
   client.start();
-  render(<App store={store} />, container);
+  watchPushResync(client);
+  render(<App store={store} push={client} />, container);
 }

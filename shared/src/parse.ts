@@ -16,6 +16,7 @@ import {
   PAUSE_UNTIL,
   PR_CHECKS,
   PR_STATES,
+  PUSH_ALERT_MAX_BYTES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   PUSH_SERVICE_HOSTS,
@@ -37,6 +38,7 @@ import {
   type BatchStrategy,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
+  type PushAlert,
   type PushSubscribeReply,
   type PushSubscribeRequest,
   type QuotaReading,
@@ -1133,6 +1135,11 @@ function isBase64UrlBytes(value: unknown, bytes: number): value is string {
   return /^[A-Za-z0-9_-]+$/u.test(value.slice(0, unpadded)) && /^=*$/u.test(value.slice(unpadded));
 }
 
+/** `isBase64UrlBytes` without the padding form: what `generateVapidKeys` writes, so a padded VAPID key is not ours. */
+function isUnpaddedBase64UrlBytes(value: unknown, bytes: number): value is string {
+  return isBase64UrlBytes(value, bytes) && !value.includes("=");
+}
+
 /**
  * A push endpoint a leader may send to: `https:` (`httpsUrl`), on the default
  * port, on a `PUSH_SERVICE_HOSTS` host — for a `*.` entry any subdomain, never
@@ -1181,13 +1188,62 @@ export function parsePushSubscribeReply(value: unknown): PushSubscribeReply | nu
   return endpoint === null ? null : { endpoint };
 }
 
+const PUSH_ALERT_KEYS = {
+  spill: ["v", "kind", "at", "taskId", "window", "projectedPct"],
+  "needs-input": ["v", "kind", "at", "taskId", "since", "escalated"],
+  disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
+} as const;
+
+/**
+ * A push payload as the daemon built it, read back where it is shown or tested: built field
+ * by field and strict — a key it does not name, or a kind this build does not know, reads as
+ * null, so free text can never ride along — and at most `PUSH_ALERT_MAX_BYTES` serialized.
+ */
+export function parsePushAlert(value: unknown): PushAlert | null {
+  if (!isRecord(value) || value["v"] !== 1 || !isFiniteNumber(value["at"])) return null;
+  if (new TextEncoder().encode(JSON.stringify(value)).length > PUSH_ALERT_MAX_BYTES) return null;
+  const { kind, at } = value;
+  const known = (keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
+  if (kind === "spill") {
+    const { taskId, window, projectedPct } = value;
+    if (!known(PUSH_ALERT_KEYS.spill) || !isTaskId(taskId)) return null;
+    if (!isName(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
+    return { v: 1, kind, at, taskId, window, projectedPct };
+  }
+  if (kind === "needs-input") {
+    const { taskId, since, escalated } = value;
+    if (!known(PUSH_ALERT_KEYS["needs-input"]) || !isTaskId(taskId)) return null;
+    if (!isFiniteNumber(since) || typeof escalated !== "boolean") return null;
+    return { v: 1, kind, at, taskId, since, escalated };
+  }
+  if (kind === "disk") {
+    const { deviceId, diskPct, freeMib } = value;
+    if (!known(PUSH_ALERT_KEYS.disk) || !isRoutingId(deviceId)) return null;
+    if ((diskPct !== undefined && !isFiniteNumber(diskPct)) || (freeMib !== undefined && !isFiniteNumber(freeMib))) {
+      return null;
+    }
+    return {
+      v: 1,
+      kind,
+      at,
+      deviceId,
+      ...(diskPct === undefined ? {} : { diskPct }),
+      ...(freeMib === undefined ? {} : { freeMib }),
+    };
+  }
+  return null;
+}
+
 const VAPID_PUBLIC_BYTES = 65;
 const VAPID_PRIVATE_BYTES = 32;
 
 function parseVapidKeys(value: unknown): VapidKeys | null {
   if (!isRecord(value)) return null;
   const { publicKey, privateKey } = value;
-  if (!isBase64UrlBytes(publicKey, VAPID_PUBLIC_BYTES) || !isBase64UrlBytes(privateKey, VAPID_PRIVATE_BYTES)) {
+  if (
+    !isUnpaddedBase64UrlBytes(publicKey, VAPID_PUBLIC_BYTES) ||
+    !isUnpaddedBase64UrlBytes(privateKey, VAPID_PRIVATE_BYTES)
+  ) {
     return null;
   }
   return { publicKey, privateKey };
@@ -1197,6 +1253,10 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  * The opened body of the settings record. Strict, as the pause record is: the
  * leader writes it back whole, so a part dropped here — the VAPID key above
  * all, which every subscription is bound to — would be lost on the next write.
+ * Subscriptions alone are read leniently: one that fails `parseWebPushSubscription`
+ * (a host a later build no longer allows) is dropped and goes with the leader's next
+ * write, rather than making the whole record — the VAPID key, the Linear key, every
+ * other browser — unreadable. The cap and one-per-endpoint still refuse the record.
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
@@ -1207,9 +1267,9 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   let subscribed: readonly WebPushSubscription[] | undefined;
   if (subscriptions !== undefined) {
     if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
-    const parsed = parseList(subscriptions, parseWebPushSubscription);
+    const parsed = subscriptions.flatMap((candidate) => parseWebPushSubscription(candidate) ?? []);
     // One subscription per endpoint, as `parseFleetQuotaRecord` has one entry per account.
-    if (parsed === null || new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
+    if (new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
     subscribed = parsed;
   }
   return {

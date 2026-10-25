@@ -23,6 +23,9 @@ import { generateVapidKeys } from "./web-push.ts";
 
 export type SettingsLoad = "ready" | "unavailable";
 
+/** What a term knows of its settings: `pending` until its first `load` decides. */
+export type SettingsState = "pending" | SettingsLoad;
+
 export type SettingsUpdate =
   | { readonly ok: true; readonly record: SettingsRecord }
   | {

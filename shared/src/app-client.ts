@@ -5,9 +5,12 @@ import {
   HEARTBEAT_PONG_TIMEOUT_MS,
   CLOSE_BAD_REQUEST,
   CLOSE_UNAUTHORIZED,
+  AT_REST_OPS,
   OP_TIMEOUT_MS,
   QUOTA_KEY,
+  PUSH_SUBSCRIBE_OP,
   SCHEDULER_ID,
+  SETTINGS_KEY,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
@@ -30,6 +33,8 @@ import {
   type Plain,
   type PauseReply,
   type PauseRequest,
+  type PushSubscribeReply,
+  type PushSubscribeRequest,
   type QueueChanged,
   type QueueReply,
   type QueueRequest,
@@ -64,10 +69,12 @@ import {
   parseMachineStatus,
   parseMetricsReply,
   parsePauseReply,
+  parsePushSubscribeReply,
   parseQueueChanged,
   parseQueueReply,
   parseRescanResponse,
   parseRoutePreviewReply,
+  parseSettingsRecord,
   parseStoreChanged,
   parseStoreReply,
   parseTaskReply,
@@ -182,6 +189,12 @@ export function failureReasonText(failure: RequestFailure): string {
 export interface StoreRefusal {
   readonly ok: false;
   readonly code: string;
+}
+
+/** What the page needs of the settings record to subscribe: the VAPID public key, and whether an endpoint is held. */
+export interface PushSettingsReading {
+  readonly publicKey: string;
+  readonly subscribed: boolean;
 }
 
 export interface TaskListing {
@@ -1551,6 +1564,46 @@ export class RelayClient {
    */
   discard(request: DiscardRequest): Promise<DiscardReply | null> {
     return this.#schedule("discard", request, parseDiscardReply);
+  }
+
+  /**
+   * Asks the leader to add this browser's subscription to the settings record. A
+   * leader that predates the op answers `invalid_request`, as it does any op it
+   * does not handle.
+   */
+  pushSubscribe(subscription: PushSubscribeRequest): Promise<PushSubscribeReply | null> {
+    return this.#schedule(PUSH_SUBSCRIBE_OP, subscription, parsePushSubscribeReply);
+  }
+
+  /**
+   * What the page needs of the settings record to subscribe: the VAPID public key
+   * (a browser's `applicationServerKey`) and whether `endpoint` is already held.
+   * The record is opened at rest here and dropped: it is never kept, and neither
+   * the private key nor the Linear key leaves this method. Null: no record, one
+   * this build cannot open or read, or one without a key, so push is not set up. A
+   * `StoreRefusal` is the relay declining the read, which says nothing about push
+   * being set up, and a thrown `RequestFailure` is nothing answering at all.
+   * Logs nothing: this runs inside `seanced mcp`, whose stdout is JSON-RPC.
+   */
+  async pushSettings(endpoint?: string): Promise<PushSettingsReading | StoreRefusal | null> {
+    const reply = await this.#store({ t: "store-get", id: crypto.randomUUID(), key: SETTINGS_KEY });
+    if (reply?.t === "store-refused") return { ok: false, code: reply.code };
+    if (reply?.t !== "store-record") return this.#storeKindMismatch(reply);
+    const { record } = reply;
+    // Opened only for the key it was asked under, sealed to the one address that holds settings.
+    if (record === null || record.key !== SETTINGS_KEY || record.env.to !== SCHEDULER_ID) return null;
+    let payload: unknown;
+    try {
+      payload = (await openAtRest(this.#key, record.env, AT_REST_OPS.settings)).payload;
+    } catch {
+      return null;
+    }
+    const settings = parseSettingsRecord(payload);
+    if (settings?.vapid === undefined || settings.version !== record.version) return null;
+    return {
+      publicKey: settings.vapid.publicKey,
+      subscribed: endpoint !== undefined && settings.subscriptions?.some((sub) => sub.endpoint === endpoint) === true,
+    };
   }
 
   /**

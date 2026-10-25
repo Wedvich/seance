@@ -3,6 +3,7 @@ import {
   Scheduler,
   sourceOf,
   type QueueStore,
+  type SchedulerAlert,
   type SchedulerConfig,
   type SessionSource,
   type Task,
@@ -19,6 +20,7 @@ import {
   type BranchState,
   type Envelope,
   type Plain,
+  type PushAlert,
   type QueueChanged,
   type SchedulerEventHandler,
   type SessionState,
@@ -30,9 +32,10 @@ import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
 import { startPrPoller, type PrPollerOpts } from "./pr-status.ts";
+import { createPushSender, type PushSender } from "./push-sender.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
 import type { Fetch } from "./seams.ts";
-import { createTermSettings, type TermSettings } from "./settings.ts";
+import { createTermSettings, type SettingsState, type TermSettings } from "./settings.ts";
 import { createSettingsStore, type SettingsStore } from "./settings-store.ts";
 import type { VersionFloor } from "./version-floor.ts";
 
@@ -146,8 +149,13 @@ export interface LeaderBaseOpts {
   /** The wait before a failed takeover is tried again; defaults to the tick interval. */
   readonly takeoverRetryMs?: number;
   readonly now?: () => number;
-  /** Outbound HTTP for the term (M4's push sends); defaults to the global `fetch`. */
+  /** Outbound HTTP for the term (push sends); defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
+  /**
+   * The VAPID `sub` claim: an `https:` contact URI a push service may show its operator
+   * (`https://<relay host>`; Apple refuses a push with none). Never a person's address.
+   */
+  readonly pushSubject: string;
   /** The PR poller's `gh` and cadence (`pr-status.ts`); absent, it runs on its defaults. */
   readonly prStatus?: PrPollerOpts;
 }
@@ -248,10 +256,26 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
   };
 }
 
+/**
+ * What a push says of a library alert: ids and state only, never the message
+ * (it names an account) or a title. Here, not in `push-sender.ts`, which stays
+ * scheduler-free.
+ */
+function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
+  if (alert.kind === "spill") {
+    return { v: 1, kind: "spill", at, taskId: alert.taskId, window: alert.window, projectedPct: alert.projectedPct };
+  }
+  // Only the 30-minute escalation alerts a needs-input stay today.
+  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: true };
+}
+
 /** Where admission leaves a `queued` task (`admission` in the library). */
 const ADMITTED: ReadonlySet<Task["state"]> = new Set(["ready", "blocked", "failed"]);
 
 const admitted = admitAudit(daemonSink);
+
+/** Alerts held for a settings load still pending; a pass raises few, and a stuck load must not grow without bound. */
+const PARKED_ALERTS_MAX = 32;
 
 /** One nudge per this long, however many writes: an app re-fetches once, not per transition. */
 const NUDGE_COALESCE_MS = 500;
@@ -373,6 +397,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     tick: () => tick(),
     fail,
     reply: opts.reply,
+    settings: () => settings,
+    settingsState: () => (settings === null ? "unavailable" : settingsState),
   });
   // What another daemon or an app sent the scheduler, already opened and
   // replay-checked by the leg. The sealer's id is AAD-bound; an event's fields
@@ -436,6 +462,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         });
   const settings: TermSettings | null =
     settingsStore === null ? null : createTermSettings({ store: settingsStore, term, log });
+  // What `push-subscribe` reads: pending until the first load decides, and while a retry is due.
+  let settingsState: SettingsState = "pending";
   // Set when a read or an unconfirmed write left the record undecided: the tick tries again, backing off.
   let settingsRetry = false;
   let settingsLoading = false;
@@ -445,15 +473,23 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   let settingsSkip = 0;
   let settingsGap = 1;
   const settingsGapCap = Math.max(1, Math.floor(SETTINGS_RETRY_CAP_MS / (opts.tickIntervalMs ?? TICK_INTERVAL_MS)));
+  // Alerts the scheduler raised before the first load decided. The first pass can beat the read, and an
+  // alert is persisted as sent (`escalated`) before it is raised, so one dropped here would never be repeated.
+  const parked: PushAlert[] = [];
   const loadSettings = (): void => {
     if (settings === null || settingsLoading || !live) return;
     settingsLoading = true;
     settings.load().then(
-      () => {
+      (state) => {
         settingsLoading = false;
         settingsRetry = false;
         settingsSkip = 0;
         settingsGap = 1;
+        settingsState = state;
+        // What the first pass raised while the record was still being read.
+        const waiting = parked.splice(0);
+        // A term that ended while the read was out sends nothing: its successor owns the alerts now.
+        if (state === "ready" && live) for (const alert of waiting) pushSender?.send(alert);
       },
       (err: unknown) => {
         settingsLoading = false;
@@ -475,6 +511,18 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       },
     );
   };
+  // Beside the scheduler, never inside its pass: `send` returns at once and throws nothing.
+  const pushSender: PushSender | null =
+    settings === null
+      ? null
+      : createPushSender({
+          settings,
+          httpFetch: opts.httpFetch ?? ((input, init) => fetch(input, init)),
+          sub: opts.pushSubject,
+          now,
+          log,
+          onError: fail,
+        });
   const scheduler = new Scheduler({
     store: watched(
       fencedStore(opts.floor === undefined ? store : flooredStore(store, opts.floor), term, isLive),
@@ -489,7 +537,13 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }),
     now,
     onError: fail,
-    onAlert: (alert) => log.warn(`scheduler: ${alert.message}`),
+    onAlert: (alert) => {
+      log.warn(`scheduler: ${alert.message}`);
+      if (pushSender === null) return;
+      const push = alertToPush(alert, now());
+      if (settingsState !== "pending") pushSender.send(push);
+      else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
+    },
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 
@@ -626,6 +680,9 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       timer = null;
       prs?.stop();
       prs = null;
+      // Queued pushes are dropped and later alerts ignored: a replaced term must not keep sending.
+      pushSender?.stop();
+      parked.length = 0;
       nudge.stop();
       unsubscribe();
       // Fails whatever the term still had out as "disconnected" → `unreachable`,

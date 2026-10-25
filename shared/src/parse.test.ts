@@ -7,6 +7,7 @@ import {
   isSkillName,
   parseAccountRecord,
   parseFleetQuotaRecord,
+  parsePushAlert,
   parsePushSubscribeReply,
   parsePushSubscribeRequest,
   parseSettingsRecord,
@@ -55,6 +56,7 @@ import {
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_ALERT_MAX_BYTES,
   PUSH_MAX_SUBSCRIPTIONS,
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
@@ -1481,13 +1483,37 @@ describe("M4 shapes", () => {
       { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(31) } },
       { ...settings, linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH + 1) },
       { ...settings, linearKey: "" },
-      { ...settings, subscriptions: [subscription, { ...subscription, endpoint: "https://example.com/x" }] },
       { ...settings, subscriptions: many },
+      { ...settings, vapid: { publicKey: b64url(65, true), privateKey: b64url(32) } },
+      { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(32, true) } },
       { ...settings, subscriptions: [subscription, { ...subscription }] },
       { ...settings, version: 0 },
     ]) {
       expect(parseSettingsRecord(bad)).toBeNull();
     }
+  });
+
+  test("a subscription the parser no longer accepts is dropped, and the rest of the record reads", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    const vapid = { publicKey: b64url(65), privateKey: b64url(32) };
+    const offList = { ...subscription, endpoint: "https://push.example.com/x" };
+    const dropped = [offList, { ...subscription, keys: { ...subscription.keys, auth: b64url(17) } }, "junk", null];
+    const read = parseSettingsRecord({
+      version: 2,
+      vapid,
+      linearKey: "k",
+      subscriptions: [offList, subscription, ...dropped.slice(1)],
+    });
+    expect(read).toEqual({ version: 2, vapid, linearKey: "k", subscriptions: [subscription] });
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: dropped })?.subscriptions).toEqual([]);
+    // The cap counts what is stored, so a record of dropped entries past it is still refused.
+    const past = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, () => offList);
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: past })).toBeNull();
+    // A subscription that parses but repeats an endpoint is not a host problem and still refuses.
+    expect(parseSettingsRecord({ version: 2, vapid, subscriptions: [subscription, { ...subscription }] })).toBeNull();
   });
 
   test("a settings record with every field at its bound seals under the store's cap", async () => {
@@ -1502,5 +1528,41 @@ describe("M4 shapes", () => {
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+});
+
+describe("parsePushAlert", () => {
+  const spill = { v: 1, kind: "spill", at: 5, taskId: "t-1", window: "7d", projectedPct: 91 } as const;
+  const input = { v: 1, kind: "needs-input", at: 5, taskId: "t-1", since: 3, escalated: true } as const;
+  const disk = { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93, freeMib: 400 } as const;
+
+  test("accepts each kind as built, with a disk alert's readings optional", () => {
+    const bare = { v: 1, kind: "disk", at: 5, deviceId: "dev-1" } as const;
+    for (const alert of [spill, input, disk, bare]) {
+      expect(parsePushAlert(alert)).toEqual(alert);
+    }
+  });
+
+  test("refuses an unknown kind or version, a key it does not name, a bad id and non-finite numbers", () => {
+    for (const bad of [
+      { ...spill, kind: "minted-later" },
+      { ...spill, v: 2 },
+      { ...spill, title: "free text" },
+      { ...input, prompt: "free text" },
+      { ...disk, accountId: "acc" },
+      { ...spill, taskId: "../x" },
+      { ...input, escalated: "yes" },
+      { ...spill, projectedPct: Number.NaN },
+      { ...disk, deviceId: "a/b" },
+      { ...disk, freeMib: "400" },
+      null,
+      "spill",
+    ]) {
+      expect(parsePushAlert(bad)).toBeNull();
+    }
+  });
+
+  test("refuses a payload past the byte bound", () => {
+    expect(parsePushAlert({ ...spill, window: "w".repeat(PUSH_ALERT_MAX_BYTES) })).toBeNull();
   });
 });

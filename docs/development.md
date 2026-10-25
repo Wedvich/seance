@@ -90,7 +90,11 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   the read instead); `GitFixture.pushBranch` commits on a feature branch and pushes it to
   the fixture's origin, as a session finishing its work would; and `startPushEndpoint`
   (`daemon/test/push-endpoint.ts`) is a Web Push service on 127.0.0.1 that records each
-  push and answers a chosen status, or holds the answer. Each has a self-test beside it.
+  push and answers a chosen status, or holds the answer. Each has a self-test beside it. The
+  leader's tests reach the stub through `createLeader`'s `httpFetch` option (the 6th parameter of
+  `leaderOver` in `daemon/test/leader.test.ts`), which rewrites the subscription's allowlisted
+  host to the stub's `endpoint(id)`: the sender's allowlist re-check still runs on the stored
+  endpoint, and only the transport is redirected.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than
@@ -121,7 +125,10 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   daemons in one process would share a deviceId and an op socket. Every daemon gets a
   fixture home (`home` in its run opts), so its exclaves and account are the test's, never
   the developer's `~/.exclaves` and `~/.claude.json`. The suite's own daemon starts with a
-  credential-sourced `resolvedPsk`, since only such a daemon brokers. Daemons mint
+  credential-sourced `resolvedPsk`, since only such a daemon brokers. Every e2e daemon's
+  `httpFetch` is `pushGuardFetch` (`e2e/push-guard.ts`): a request to an allowlisted push
+  host is refused, and `stack.pushAttempts()` lists the hosts the suite's daemon tried, so a
+  suite that subscribes a browser never POSTs to a real push service. Daemons mint
   their ids at first start, after the relay has booted, so `startStack` mints the
   suite daemon's — and each second daemon named in `secondLeaders` — through the
   daemon's own `loadOrInitState` first and lists them; the daemon then loads that

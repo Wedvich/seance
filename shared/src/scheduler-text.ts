@@ -33,6 +33,8 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   internal_error: "the scheduler hit an error",
   too_large: "the scheduler's answer was too large to send back",
   subscriptions_full: "the scheduler already holds as many push subscriptions as it keeps; remove one first",
+  settings_unavailable:
+    "the scheduler cannot use its settings record, so push is off there (another key, or a newer version wrote it)",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */
